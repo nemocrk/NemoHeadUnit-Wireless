@@ -19,13 +19,33 @@ Module contract (fill this in when implementing):
   Publishes   : <topics this module publishes>
   State       : private
 ---
+
+Path layout (auto-configured below):
+  v2/
+  ├── shared/          ← shared helpers (BusClient, logger)
+  └── modules/
+      └── <module>/    ← THIS file lives here
+          └── main.py
+
+sys.path includes both:
+  - v2/          → enables: from shared.bus_client import BusClient
+  - v2/modules/  → enables: from <module_name>.subfile import Foo
 """
 
 import sys
 from pathlib import Path
 
-# Allow importing shared/ from the v2 root
-sys.path.insert(0, str(Path(__file__).parents[2]))
+_HERE    = Path(__file__).parent        # v2/modules/<module_name>/
+_MODULES = _HERE.parent                 # v2/modules/
+_V2      = _MODULES.parent              # v2/
+
+# v2/ → shared.bus_client, shared.logger
+if str(_V2) not in sys.path:
+    sys.path.insert(0, str(_V2))
+
+# v2/modules/ → <module_name>.subfile (e.g. bluetooth.bluez_adapter)
+if str(_MODULES) not in sys.path:
+    sys.path.insert(0, str(_MODULES))
 
 from shared.bus_client import BusClient   # noqa: E402
 from shared.logger import get_logger      # noqa: E402
