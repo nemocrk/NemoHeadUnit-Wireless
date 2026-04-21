@@ -12,7 +12,7 @@ Usage:
 import logging
 from enum import IntEnum
 
-V2_LOG_FORMAT = "[%(name)s] %(asctime)s %(levelname)s %(message)s"
+V2_LOG_FORMAT = "%(asctime)s [%(levelname)s] {%(name)s} %(message)s"
 V2_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
