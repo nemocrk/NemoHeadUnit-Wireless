@@ -38,16 +38,17 @@ FAILED=0
 
 # Find every .proto file recursively under oaa/
 while IFS= read -r proto_file; do
-  # Relative path from PROTO_SRC (e.g. wifi/WifiInfoResponse.proto)
-  rel_path="${proto_file#${PROTO_SRC}/}"
+  # Relative path from SUBMODULE_ROOT (e.g. oaa/wifi/WifiInfoResponse.proto)
+  # This matches the import paths used inside the .proto files
+  rel_path="${proto_file#${SUBMODULE_ROOT}/}"
   out_dir="${PROTO_OUT}/$(dirname "${rel_path}")"
   mkdir -p "${out_dir}"
 
   echo -n "  Compiling ${rel_path} ... "
 
-  # --proto_path points to oaa/ so imports between proto files resolve correctly
+  # --proto_path = SUBMODULE_ROOT so that "oaa/common/Foo.proto" imports resolve
   if python3 -m grpc_tools.protoc \
-      --proto_path="${PROTO_SRC}" \
+      --proto_path="${SUBMODULE_ROOT}" \
       --python_out="${PROTO_OUT}" \
       "${rel_path}" 2>/tmp/protoc_err; then
     echo "OK"
@@ -70,4 +71,4 @@ done
 
 echo "[INFO] __init__.py created in all output directories."
 echo "[INFO] Import example:"
-echo "         from v2.protos.wifi.WifiInfoResponse_pb2 import WifiInfoResponse"
+echo "         from v2.protos.oaa.wifi.WifiInfoResponse_pb2 import WifiInfoResponse"
