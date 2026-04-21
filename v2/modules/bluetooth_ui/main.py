@@ -25,6 +25,7 @@ Module contract:
 import sys
 import threading
 from pathlib import Path
+import time
 
 _HERE    = Path(__file__).parent
 _MODULES = _HERE.parent
@@ -219,7 +220,7 @@ def _invoke(slot_name: str, *args):
 # Bus handlers (called from ZMQ recv thread — must NOT touch Qt directly)
 # ---------------------------------------------------------------------------
 
-def on_system_readytostart(topic: str, payload: dict) -> None:
+def on_system_readytostart() -> None:
     log.info(f"system.readytostart received — announcing priority {PRIORITY}")
     bus.publish("system.module_ready", {
         "name":     MODULE_NAME,
@@ -300,8 +301,9 @@ def run() -> None:
     bus.subscribe("bluetooth.pairing.failed",      on_pairing_failed)
 
     # Start the ZMQ receive loop in a background thread so Qt owns the main thread
-    bus_thread = threading.Thread(target=lambda: bus.start(blocking=True), daemon=True)
-    bus_thread.start()
+    bus_thread = bus.start(blocking=False)
+    time.sleep(0.05)
+    on_system_readytostart()
 
     _app = QApplication(sys.argv)
     _window = BluetoothPairingWindow()

@@ -31,6 +31,7 @@ Flow:
 import sys
 import threading
 from pathlib import Path
+import time
 
 _HERE    = Path(__file__).parent
 _MODULES = _HERE.parent
@@ -275,7 +276,7 @@ def _invoke(slot: str, *args):
 # Bus handlers
 # ---------------------------------------------------------------------------
 
-def on_system_readytostart(topic: str, payload: dict) -> None:
+def on_system_readytostart() -> None:
     log.info(f"system.readytostart received — announcing priority {PRIORITY}")
     bus.publish("system.module_ready", {
         "name":     MODULE_NAME,
@@ -341,8 +342,10 @@ def run() -> None:
     bus.subscribe("system.modules_response", on_modules_response)
     bus.subscribe("config.response",         on_config_response)
 
-    bus_thread = threading.Thread(target=lambda: bus.start(blocking=True), daemon=True)
-    bus_thread.start()
+
+    bus_thread = bus.start(blocking=False)
+    time.sleep(0.05)
+    on_system_readytostart()
 
     _app = QApplication(sys.argv)
     _window = ConfigWindow()

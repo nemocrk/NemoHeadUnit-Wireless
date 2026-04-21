@@ -1,0 +1,4 @@
+adapter_name: NemoHeadUnit
+discoverable: true
+discoverable_timeout: 0
+discovery_duration_sec: 10

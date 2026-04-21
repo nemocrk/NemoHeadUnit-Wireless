@@ -72,6 +72,7 @@ sys.path includes:
 
 import sys
 from pathlib import Path
+import time
 
 _HERE    = Path(__file__).parent        # v2/modules/<module_name>/
 _MODULES = _HERE.parent                 # v2/modules/
@@ -148,7 +149,7 @@ def _on_config_changed(key: str, value) -> None:
 # STEP 5: Boot protocol handlers
 # ---------------------------------------------------------------------------
 
-def on_system_readytostart(topic: str, payload: dict) -> None:
+def on_system_readytostart() -> None:
     """
     Orchestrator is ready to begin the multi-step boot.
     Announce this module's name and priority so main.py can build
@@ -223,7 +224,13 @@ def run() -> None:
     # bus.subscribe("some.topic", on_some_event)
 
     log.info("Module started, waiting for messages...")
-    bus.start(blocking=True)  # blocks here — receive loop
+    bus_thread = bus.start(blocking=False)
+    time.sleep(0.05)
+    on_system_readytostart()
+    try:
+        bus_thread.join()
+    except KeyboardInterrupt:
+        pass  # gestito dal main via system.stop
 
 
 if __name__ == "__main__":

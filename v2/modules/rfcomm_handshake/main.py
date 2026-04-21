@@ -41,6 +41,7 @@ import sys
 import socket
 import threading
 from pathlib import Path
+import time
 from typing import Optional
 
 _HERE    = Path(__file__).parent
@@ -80,7 +81,7 @@ RFCOMM_CHANNEL = 8
 # Boot protocol handlers
 # ---------------------------------------------------------------------------
 
-def on_system_readytostart(topic: str, payload: dict) -> None:
+def on_system_readytostart() -> None:
     log.info(f"system.readytostart received — announcing priority {PRIORITY}")
     bus.publish("system.module_ready", {
         "name":     MODULE_NAME,
@@ -227,7 +228,13 @@ def run() -> None:
     bus.subscribe("hostapd.ready",              on_hostapd_ready)
 
     log.info("Module started, waiting for messages...")
-    bus.start(blocking=True)
+    bus_thread = bus.start(blocking=False)
+    time.sleep(0.05)
+    on_system_readytostart()
+    try:
+        bus_thread.join()
+    except KeyboardInterrupt:
+        pass  # gestito dal main via system.stop
 
 
 if __name__ == "__main__":

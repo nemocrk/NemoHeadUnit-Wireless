@@ -50,7 +50,7 @@ BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
 BROKER_STARTUP_DELAY  = 0.5   # s — wait for broker to bind
 MODULE_STARTUP_DELAY  = 0.2   # s — between module launches
 GRACE_PERIOD          = 1.0   # s — wait for self-exit before SIGTERM
-READYTOSTART_WINDOW   = 3.0   # s — collect system.module_ready replies
+READYTOSTART_WINDOW   = 10.0   # s — collect system.module_ready replies
 MODULE_READY_TIMEOUT  = 5.0   # s — per-module timeout for system.ready
 
 log = get_logger("main")
@@ -113,30 +113,30 @@ def _collect_module_ready(
     sub.setsockopt_string(zmq.SUBSCRIBE, "system.module_ready")
     time.sleep(0.1)  # allow SUB to connect before publishing
 
-    _publish(pub, "system.readytostart", {})
-
     priority_map: dict[int, list[str]] = defaultdict(list)
     replied: set[str] = set()
     deadline = time.monotonic() + window
+    ready = 0
 
-    while time.monotonic() < deadline:
+    while time.monotonic() < deadline and ready < len(module_names):
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
             break
         if not sub.poll(timeout=min(remaining_ms, 200)):
             continue
         try:
-            frames = sub.recv_multipart(nowait=True)
+            frames = sub.recv_multipart(flags=zmq.NOBLOCK)
             if len(frames) < 2:
                 continue
             payload = json.loads(frames[1].decode())
             name     = payload.get("name")
             priority = payload.get("priority", 1)
             if name and name not in replied:
+                ready += 1
                 priority_map[priority].append(name)
                 replied.add(name)
                 log.info(f"  module_ready: '{name}' priority={priority}")
-        except (zmq.ZMQError, json.JSONDecodeError):
+        except (zmq.ZMQError, json.JSONDecodeError, zmq.Again):
             continue
 
     sub.close(linger=0)
@@ -186,7 +186,7 @@ def _wait_for_level_ready(
         if not sub.poll(timeout=min(remaining_ms, 200)):
             continue
         try:
-            frames = sub.recv_multipart(nowait=True)
+            frames = sub.recv_multipart(flags=zmq.NOBLOCK)
             if len(frames) < 2:
                 continue
             payload  = json.loads(frames[1].decode())
@@ -195,7 +195,7 @@ def _wait_for_level_ready(
             if name in pending and p_level == priority:
                 pending.discard(name)
                 log.info(f"  system.ready: '{name}' priority={priority}")
-        except (zmq.ZMQError, json.JSONDecodeError):
+        except (zmq.ZMQError, json.JSONDecodeError, zmq.Again):
             continue
 
     for name in pending:
@@ -346,7 +346,6 @@ def run() -> None:
         label = module_script.parent.name
         proc  = _start_process(module_script, label)
         processes.append((label, proc))
-        time.sleep(MODULE_STARTUP_DELAY)
 
     # 5. Multi-step boot
     #    a. Collect priorities via system.readytostart / system.module_ready

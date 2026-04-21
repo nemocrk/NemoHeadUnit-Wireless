@@ -1,0 +1,9 @@
+ap_password: 02532378
+channel: 6
+dhcp_range_end: 192.168.50.50
+dhcp_range_start: 192.168.50.10
+gateway_ip: 192.168.50.1
+interface: wlan0
+monitor_timeout: 30
+ssid: AndroidAutoAP
+subnet: 192.168.50

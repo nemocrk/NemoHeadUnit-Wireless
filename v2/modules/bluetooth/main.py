@@ -37,6 +37,7 @@ Internal helpers (no ZMQ dependency):
 
 import sys
 from pathlib import Path
+import time
 
 _HERE    = Path(__file__).parent   # v2/modules/bluetooth/
 _MODULES = _HERE.parent            # v2/modules/
@@ -129,7 +130,7 @@ def _apply_config() -> None:
 # Boot protocol handlers
 # ---------------------------------------------------------------------------
 
-def on_system_readytostart(topic: str, payload: dict) -> None:
+def on_system_readytostart() -> None:
     log.info(f"system.readytostart received — announcing priority {PRIORITY}")
     bus.publish("system.module_ready", {
         "name":     MODULE_NAME,
@@ -287,7 +288,13 @@ def run() -> None:
     bus.subscribe("bluetooth.confirm_pairing", on_confirm_pairing)
 
     log.info("Module started, waiting for messages...")
-    bus.start(blocking=True)
+    bus_thread = bus.start(blocking=False)
+    time.sleep(0.05)
+    on_system_readytostart()
+    try:
+        bus_thread.join()
+    except KeyboardInterrupt:
+        pass  # gestito dal main via system.stop
 
 
 if __name__ == "__main__":

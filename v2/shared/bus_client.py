@@ -65,6 +65,7 @@ class BusClient:
         else:
             t = threading.Thread(target=self._receive_loop, daemon=True)
             t.start()
+            return t
 
     def stop(self):
         """Stop the receive loop and close sockets."""
