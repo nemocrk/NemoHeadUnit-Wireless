@@ -1,109 +1,137 @@
 """
 Main entry point for NemoHeadUnit-Wireless
-Registers all components through the ComponentRegistry pattern.
+
+Startup order:
+    1. bus_broker.py        — central ZMQ broker (subprocess)
+    2. wireless_daemon.py   — wireless/media standalone process (subprocess)
+    3. BusClient            — connect GUI process to broker
+    4. Qt event loop        — runs in main thread
 """
 
 import sys
 import os
-import threading
+import subprocess
+import time
 import logging
 
-# Ensure the app directory is in the Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt6.QtWidgets import QApplication
-from app.message_bus import MessageBus
+from app.bus_client import BusClient
 from app.connection import ConnectionManager
-from app.wireless.wireless_service import WirelessService
 from app.gui.component import GUIComponent
+from app.gui.qt_bridge import install as install_qt_bridge
 from app.logger import LoggerManager
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class Application:
     """
     Application orchestrator.
-    
-    Registers all components with the message bus and manages startup/shutdown.
+    Starts infrastructure subprocesses, connects to bus, registers components.
     """
-    
+
     def __init__(self):
-        self._bus = MessageBus()
         self._logger = LoggerManager.get_logger('app.main')
-        
-        # Instantiate all components
-        self._connection = ConnectionManager()
-        self._wireless = WirelessService()
-        self._gui = GUIComponent()
-        
-        self._logger.info("Application initialized")
-    
+        self._subprocesses = []
+        self._bus: BusClient = None
+        self._connection: ConnectionManager = None
+        self._gui: GUIComponent = None
+
+    def _start_subprocesses(self) -> bool:
+        """Start broker and wireless daemon as independent subprocesses."""
+        procs = [
+            ("bus_broker",      [sys.executable, os.path.join(ROOT, "bus_broker.py")]),
+            ("wireless_daemon", [sys.executable, os.path.join(ROOT, "services", "wireless_daemon.py")]),
+        ]
+        for name, cmd in procs:
+            try:
+                p = subprocess.Popen(cmd)
+                self._subprocesses.append(p)
+                self._logger.info(f"Started subprocess: {name} (pid={p.pid})")
+            except FileNotFoundError:
+                # wireless_daemon may not exist yet — non-blocking during migration
+                self._logger.warning(f"Subprocess not found, skipping: {name}")
+            except Exception as e:
+                self._logger.error(f"Failed to start subprocess {name}: {e}")
+                return False
+
+        # Give broker time to bind sockets before clients connect
+        time.sleep(0.2)
+        return True
+
+    def _stop_subprocesses(self) -> None:
+        """Terminate all managed subprocesses on shutdown."""
+        for p in self._subprocesses:
+            try:
+                p.terminate()
+                p.wait(timeout=3)
+            except Exception:
+                p.kill()
+
     def register_components(self) -> bool:
-        """Register all components with the bus."""
+        """Instantiate and register all in-process components."""
         try:
-            self._logger.info("Registering components")
-            
-            # Register in dependency order with thread declarations
+            self._connection = ConnectionManager()
+            self._gui = GUIComponent()
+
             self._logger.info("Registering ConnectionManager")
-            self._connection.declare_thread(self._bus, "connection_thread")
             if not self._connection.register(self._bus):
                 self._logger.error("Failed to register ConnectionManager")
                 return False
-            
-            self._logger.info("Registering WirelessService")
-            self._wireless.declare_thread(self._bus, "wireless_thread")
-            if not self._wireless.register(self._bus):
-                self._logger.error("Failed to register WirelessApp")
-                return False
-            
+
             self._logger.info("Registering GUIComponent")
-            self._gui.declare_thread(self._bus, "MAIN")
             if not self._gui.register(self._bus, self._connection):
                 self._logger.error("Failed to register GUIComponent")
                 return False
-            
-            self._logger.info("All components registered successfully")
+
+            self._logger.info("All components registered")
             return True
         except Exception as e:
             self._logger.error(f"Error registering components: {e}")
             return False
-    
+
     def run(self) -> int:
         """Run the application."""
         try:
-            # Register all components
+            # 1. Start Qt application first (needed before any QObject/signal)
+            app = QApplication.instance() or QApplication(sys.argv)
+
+            # 2. Start infrastructure subprocesses
+            if not self._start_subprocesses():
+                return 1
+
+            # 3. Connect to broker
+            self._bus = BusClient(name="gui")
+
+            # 4. Wire Qt bridge so thread='main' subscriptions work
+            install_qt_bridge(self._bus)
+
+            # 5. Register in-process components
             if not self.register_components():
                 return 1
-            
-            # Start the message bus with main thread
-            self._logger.info("Starting message bus with main thread")
-            self._bus.start(threading.current_thread())
-            
-            # Request GUI startup
-            self._logger.info("Requesting GUI startup")
+
+            # 6. Request GUI startup
             self._bus.publish('gui.startup.requested', 'app.main', {})
-            
-            # Start Qt event loop (runs in main thread)
-            # This will process GUI events and shutdown signals
+
+            # 7. Run Qt event loop (blocks until window closed)
             self._logger.info("Starting Qt event loop")
-            app = QApplication.instance()
-            if app:
-                # Run the event loop - will block until application quits
-                exit_code = app.exec()
-                self._logger.info("Qt event loop ended")
-            else:
-                # Fallback: wait for shutdown from bus
-                self._logger.info("No Qt application, waiting for shutdown")
-                self._bus.wait_for_shutdown()
-                exit_code = 0
-            
+            exit_code = app.exec()
+
+            # 8. Teardown
+            self._bus.publish('app.shutdown', 'app.main', {})
+            self._bus.stop()
+            self._stop_subprocesses()
+
             self._logger.info("Application shutdown complete")
             return exit_code
+
         except Exception as e:
             self._logger.error(f"Application error: {e}")
             return 1
 
 
 if __name__ == "__main__":
-    app = Application()
-    exit_code = app.run()
-    sys.exit(exit_code)
+    application = Application()
+    sys.exit(application.run())
