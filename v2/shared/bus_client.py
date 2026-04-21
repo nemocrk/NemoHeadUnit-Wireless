@@ -19,9 +19,9 @@ Message format (multipart ZMQ frames):
 """
 
 import json
-import logging
 import threading
 import zmq
+from shared.logger import get_logger
 
 BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
 BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
@@ -30,7 +30,7 @@ BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
 class BusClient:
     def __init__(self, module_name: str):
         self.module_name = module_name
-        self.log = logging.getLogger(module_name)
+        self.log = get_logger(module_name)
         self._context = zmq.Context()
         self._subscriptions: dict[str, callable] = {}
         self._running = False
@@ -75,7 +75,7 @@ class BusClient:
         self.log.info("BusClient stopped.")
 
     def _receive_loop(self):
-        self.log.info(f"[{self.module_name}] Bus receive loop started.")
+        self.log.info("Bus receive loop started.")
         while self._running:
             try:
                 if self._sub.poll(timeout=500):  # ms
@@ -88,11 +88,10 @@ class BusClient:
                     if handler:
                         handler(topic, payload)
             except KeyboardInterrupt:
-                # Module received Ctrl+C directly — exit cleanly without traceback
                 self.log.info("KeyboardInterrupt received — stopping.")
                 break
             except zmq.ZMQError as e:
                 if self._running:
                     self.log.error(f"ZMQ error: {e}")
                 break
-        self.log.info(f"[{self.module_name}] Bus receive loop stopped.")
+        self.log.info("Bus receive loop stopped.")
