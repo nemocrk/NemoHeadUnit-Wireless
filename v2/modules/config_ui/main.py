@@ -8,15 +8,18 @@ Module contract:
   Subscribes  : system.start
                 system.stop
                 system.modules_response  {modules: [{name, pid, status}, ...]}
-                config.response          {module, config: {key: value, ...}}
+                config.response          {module, config: {key: value, ...},
+                                          requester: str}  ← only processed when
+                                                              requester == "config_ui"
   Publishes   : system.get_modules       {}
-                config.get               {module: str}
+                config.get               {module: str, requester: "config_ui"}
                 config.set               {module: str, key: str, value: any}
 
 Flow:
   1. system.start  → publish system.get_modules
-  2. system.modules_response → build one tab per module, publish config.get for each
-  3. config.response  → populate the tab with editable key/value rows
+  2. system.modules_response → build one tab per module,
+                               publish config.get {module, requester} for each
+  3. config.response (requester=="config_ui") → populate the tab
   4. User edits + clicks Save → publish config.set for each changed key
 """
 
@@ -51,6 +54,12 @@ MODULE_NAME = "config_ui"
 log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
 
+
+def _request_config(module: str):
+    """Publish config.get with requester tag so we only handle our own responses."""
+    bus.publish("config.get", {"module": module, "requester": MODULE_NAME})
+
+
 # ---------------------------------------------------------------------------
 # Per-module tab widget
 # ---------------------------------------------------------------------------
@@ -71,7 +80,7 @@ class ModuleConfigTab(QWidget):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
-        # — metadata bar ————————————————————————————————————————
+        # — metadata bar
         meta = QHBoxLayout()
         meta.addWidget(QLabel(f"<b>Modulo:</b> {module_name}"))
         meta.addSpacing(24)
@@ -94,7 +103,7 @@ class ModuleConfigTab(QWidget):
         line.setFrameShadow(QFrame.Shadow.Sunken)
         root.addWidget(line)
 
-        # — scrollable form area ————————————————————————————————
+        # — scrollable form area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self._form_container = QWidget()
@@ -104,12 +113,11 @@ class ModuleConfigTab(QWidget):
         scroll.setWidget(self._form_container)
         root.addWidget(scroll, stretch=1)
 
-        # placeholder shown while waiting for config.response
         self._placeholder = QLabel("In attesa dei dati di configurazione…")
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._form.addRow(self._placeholder)
 
-        # — save button ———————————————————————————————————————
+        # — save button
         self._btn_save = QPushButton("💾  Salva modifiche")
         self._btn_save.setMinimumHeight(36)
         self._btn_save.setEnabled(False)
@@ -122,7 +130,6 @@ class ModuleConfigTab(QWidget):
 
     def populate(self, config: dict):
         """Replace the form with editable rows from the received config dict."""
-        # clear existing rows
         while self._form.rowCount():
             self._form.removeRow(0)
         self._fields.clear()
@@ -150,7 +157,7 @@ class ModuleConfigTab(QWidget):
     # -----------------------------------------------------------------------
 
     def _on_refresh(self):
-        bus.publish("config.get", {"module": self._module_name})
+        _request_config(self._module_name)
 
     def _on_save(self):
         changed = {
@@ -167,7 +174,6 @@ class ModuleConfigTab(QWidget):
                 "value":  value,
             })
         log.info(f"Saved {len(changed)} key(s) for '{self._module_name}'")
-        # optimistically update originals so a second Save is a no-op
         self._original.update(changed)
 
 
@@ -191,7 +197,6 @@ class ConfigWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
 
-        # toolbar
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(8, 6, 8, 0)
         self._btn_refresh_all = QPushButton("↻ Aggiorna lista moduli")
@@ -223,8 +228,7 @@ class ConfigWindow(QMainWindow):
         tab = ModuleConfigTab(name, pid, status)
         self._tabs[name] = tab
         self._tab_widget.addTab(tab, name)
-        # immediately request config for this module
-        bus.publish("config.get", {"module": name})
+        _request_config(name)
 
     @pyqtSlot(str, str)
     def populate_module_config(self, module: str, config_json: str):
@@ -292,6 +296,9 @@ def on_modules_response(topic: str, payload: dict) -> None:
 
 def on_config_response(topic: str, payload: dict) -> None:
     import json
+    # Ignore responses not directed at this module
+    if payload.get("requester", "") != MODULE_NAME:
+        return
     module = payload.get("module", "")
     config = payload.get("config", {})
     log.info(f"config.response for '{module}': {len(config)} chiavi")
