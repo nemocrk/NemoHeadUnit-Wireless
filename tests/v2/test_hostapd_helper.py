@@ -17,7 +17,7 @@ Tested behaviours:
 import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -107,14 +107,9 @@ def _make_manager(start_ok=True):
     m = MagicMock()
     m.start.return_value = start_ok
     m._cfg = _FakeAPConfig(
-        ssid="AndroidAutoAP",
-        interface="wlan0",
-        key="",
-        channel=6,
-        subnet="192.168.50",
-        gateway_ip="192.168.50.1",
-        dhcp_range_start="192.168.50.10",
-        dhcp_range_end="192.168.50.50",
+        ssid="AndroidAutoAP", interface="wlan0", key="",
+        channel=6, subnet="192.168.50", gateway_ip="192.168.50.1",
+        dhcp_range_start="192.168.50.10", dhcp_range_end="192.168.50.50",
     )
     return m
 
@@ -133,13 +128,10 @@ def _published(topic):
 
 class TestRfcommConnected:
     def test_publishes_hostapd_starting_before_start(self):
-        manager = _make_manager()
-        _MockAPManager.return_value = manager
+        _MockAPManager.return_value = _make_manager()
         _MockAPMonitor.return_value = MagicMock()
-
         hh.on_rfcomm_connected("bluetooth.rfcomm.connected",
                                 {"device_address": "AA:BB:CC:DD:EE:FF"})
-
         starting = _published("hostapd.starting")
         assert len(starting) == 1
         assert starting[0]["ssid"] == hh._DEFAULTS["ssid"]
@@ -149,32 +141,24 @@ class TestRfcommConnected:
         monitor = MagicMock()
         _MockAPManager.return_value = manager
         _MockAPMonitor.return_value = monitor
-
         hh.on_rfcomm_connected("bluetooth.rfcomm.connected",
                                 {"device_address": "AA:BB:CC:DD:EE:FF"})
-
         manager.start.assert_called_once()
         monitor.start.assert_called_once()
 
     def test_manager_start_failure_publishes_failed(self):
         _MockAPManager.return_value = _make_manager(start_ok=False)
-
         hh.on_rfcomm_connected("bluetooth.rfcomm.connected",
                                 {"device_address": "AA:BB:CC:DD:EE:FF"})
-
         assert len(_published("hostapd.failed")) == 1
-        # monitor must NOT be started
         _MockAPMonitor.return_value.start.assert_not_called()
 
     def test_monitor_created_with_configured_timeout(self):
-        manager = _make_manager()
-        _MockAPManager.return_value = manager
+        _MockAPManager.return_value = _make_manager()
         _MockAPMonitor.return_value = MagicMock()
         hh._config["monitor_timeout"] = 45
-
         hh.on_rfcomm_connected("bluetooth.rfcomm.connected",
                                 {"device_address": "AA:BB:CC:DD:EE:FF"})
-
         _, kwargs = _MockAPMonitor.call_args
         assert kwargs["timeout"] == 45.0
 
@@ -185,18 +169,20 @@ class TestRfcommConnected:
 
 class TestSystemStop:
     def test_teardown_stops_monitor_and_manager(self):
-        hh._ap_manager = MagicMock()
-        hh._ap_monitor = MagicMock()
+        # Save refs BEFORE the call: _teardown() sets hh._ap_* to None
+        monitor = MagicMock()
+        manager = MagicMock()
+        hh._ap_monitor = monitor
+        hh._ap_manager = manager
 
         hh.on_system_stop("system.stop", {})
 
-        hh._ap_monitor.stop.assert_called_once()
-        hh._ap_manager.stop.assert_called_once()
+        monitor.stop.assert_called_once()
+        manager.stop.assert_called_once()
         assert len(_published("hostapd.stopped")) == 1
         hh.bus.stop.assert_called_once()
 
     def test_teardown_safe_when_no_manager_or_monitor(self):
-        # Must not raise when both are None
         hh.on_system_stop("system.stop", {})
         assert len(_published("hostapd.stopped")) == 1
 
@@ -216,15 +202,19 @@ class TestMonitorCallbacks:
         assert ready[0] == params
 
     def test_on_ap_failed_publishes_hostapd_failed_and_tears_down(self):
-        hh._ap_manager = MagicMock()
-        hh._ap_monitor = MagicMock()
+        # Save refs BEFORE the call: _teardown() sets hh._ap_* to None
+        manager = MagicMock()
+        monitor = MagicMock()
+        hh._ap_manager = manager
+        hh._ap_monitor = monitor
 
         hh._on_ap_failed("AP did not become active within 30s")
 
         failed = _published("hostapd.failed")
         assert len(failed) == 1
         assert "error" in failed[0]
-        hh._ap_manager.stop.assert_called_once()
+        manager.stop.assert_called_once()
+        monitor.stop.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
