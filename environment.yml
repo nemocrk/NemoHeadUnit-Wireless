@@ -35,10 +35,15 @@ dependencies:
   # -----------------------------------------------------------------------
   # Media (optional — GStreamer Python bindings)
   # Install system GStreamer plugins separately:
-  #   sudo apt install gstreamer1.0-plugins-{base,good,bad,ugly} \
+  #   sudo apt install gstreamer1.0-plugins-{base,good,bad,ugly} \\
   #                    gstreamer1.0-libav gstreamer1.0-tools
   # -----------------------------------------------------------------------
   - gst-python            # gi.repository.Gst bindings (conda-forge)
+
+  # -----------------------------------------------------------------------
+  # Configuration persistence
+  # -----------------------------------------------------------------------
+  - pyyaml>=6.0           # YAML read/write for config_manager module
 
   # -----------------------------------------------------------------------
   # Utilities
