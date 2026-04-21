@@ -10,6 +10,7 @@ Module contract:
                 bluetooth.discover          {duration_sec: int}
                 bluetooth.pair              {device_address: str}
                 bluetooth.confirm_pairing   {device_address: str, pin: str}
+                bluetooth.reject_pairing    {device_address: str}
                 config.response             (filtered by module=bluetooth)
                 config.changed              (filtered by module=bluetooth)
   Publishes   : system.module_ready         {name, priority}
@@ -33,9 +34,16 @@ Internal helpers (no ZMQ dependency):
   discovery.py      — timed device discovery
   pairing.py        — agent, PIN, confirm
   rfcomm.py         — RFCOMM channel 8 accept loop
+
+GLib mainloop note:
+  BlueZ agent callbacks (RequestConfirmation, RequestPinCode …) are
+  dispatched by the GLib event loop.  We run GLib.MainLoop in a dedicated
+  daemon thread started in on_system_start() so the ZMQ receive loop and
+  the D-Bus dispatch loop can coexist.
 """
 
 import sys
+import threading
 from pathlib import Path
 import time
 
@@ -89,6 +97,38 @@ _adapter:   BluezAdapter     | None = None
 _discovery: DiscoverySession | None = None
 _pairing:   PairingAgent     | None = None
 _rfcomm:    RfcommListener   | None = None
+_glib_loop  = None   # gi.repository.GLib.MainLoop instance
+
+# ---------------------------------------------------------------------------
+# GLib mainloop — required for D-Bus agent callback dispatch
+# ---------------------------------------------------------------------------
+
+def _start_glib_mainloop() -> None:
+    """
+    Run GLib.MainLoop in a daemon thread.
+
+    This is mandatory: without an active GLib event loop, BlueZ never
+    delivers RequestConfirmation / RequestPinCode to our agent object,
+    even though DBusGMainLoop is set as the default mainloop.
+    """
+    global _glib_loop
+    try:
+        from gi.repository import GLib
+        _glib_loop = GLib.MainLoop()
+        t = threading.Thread(target=_glib_loop.run, daemon=True, name="glib-dbus")
+        t.start()
+        log.info("GLib mainloop started (thread: glib-dbus)")
+    except Exception as e:
+        log.error(f"Failed to start GLib mainloop — agent callbacks will not work: {e}")
+
+
+def _stop_glib_mainloop() -> None:
+    global _glib_loop
+    if _glib_loop and _glib_loop.is_running():
+        _glib_loop.quit()
+        log.info("GLib mainloop stopped")
+    _glib_loop = None
+
 
 # ---------------------------------------------------------------------------
 # ConfigClient callbacks
@@ -146,11 +186,13 @@ def on_system_start(topic: str, payload: dict) -> None:
 
     log.info(f"system.start priority={PRIORITY} — initialising Bluetooth subsystem")
 
+    # Start GLib mainloop first so D-Bus agent callbacks are dispatched
+    _start_glib_mainloop()
+
     _adapter = BluezAdapter()
     if not _adapter.init():
         log.error("D-Bus init failed — Bluetooth unavailable")
         bus.publish("bluetooth.error", {"error": "D-Bus init failed"})
-        # Publish system.ready anyway so the boot sequence is not blocked
         bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
         return
 
@@ -160,8 +202,6 @@ def on_system_start(topic: str, payload: dict) -> None:
         bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
         return
 
-    # config_manager is guaranteed online (priority 0 completed).
-    # Pass defaults so config_manager seeds the YAML on first boot.
     cfg.get(defaults=_DEFAULTS)
 
     _pairing = PairingAgent(
@@ -192,6 +232,7 @@ def on_system_stop(topic: str, payload: dict) -> None:
     if _adapter:
         _adapter.set_discoverable(False)
         _adapter.shutdown()
+    _stop_glib_mainloop()
     bus.stop()
 
 
@@ -248,6 +289,18 @@ def on_confirm_pairing(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# bluetooth.reject_pairing
+# ---------------------------------------------------------------------------
+
+def on_reject_pairing(topic: str, payload: dict) -> None:
+    if _pairing is None:
+        return
+    address = payload.get("device_address", "")
+    if address:
+        _pairing.reject(address)
+
+
+# ---------------------------------------------------------------------------
 # Internal callbacks → bus events
 # ---------------------------------------------------------------------------
 
@@ -280,12 +333,13 @@ def run() -> None:
     cfg.on_config_changed = _on_config_changed
     cfg.register()
 
-    bus.subscribe("system.readytostart",       on_system_readytostart)
-    bus.subscribe("system.start",              on_system_start)
-    bus.subscribe("system.stop",               on_system_stop)
-    bus.subscribe("bluetooth.discover",        on_discover)
-    bus.subscribe("bluetooth.pair",            on_pair)
-    bus.subscribe("bluetooth.confirm_pairing", on_confirm_pairing)
+    bus.subscribe("system.readytostart",        on_system_readytostart)
+    bus.subscribe("system.start",               on_system_start)
+    bus.subscribe("system.stop",                on_system_stop)
+    bus.subscribe("bluetooth.discover",         on_discover)
+    bus.subscribe("bluetooth.pair",             on_pair)
+    bus.subscribe("bluetooth.confirm_pairing",  on_confirm_pairing)
+    bus.subscribe("bluetooth.reject_pairing",   on_reject_pairing)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
