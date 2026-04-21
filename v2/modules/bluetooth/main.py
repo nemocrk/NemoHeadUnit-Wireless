@@ -26,7 +26,14 @@ Internal helpers (no ZMQ dependency):
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parents[2]))
+_HERE    = Path(__file__).parent   # v2/modules/bluetooth/
+_MODULES = _HERE.parent            # v2/modules/
+_V2      = _MODULES.parent         # v2/
+
+if str(_V2) not in sys.path:
+    sys.path.insert(0, str(_V2))
+if str(_MODULES) not in sys.path:
+    sys.path.insert(0, str(_MODULES))
 
 from shared.bus_client import BusClient  # noqa: E402
 from shared.logger import get_logger     # noqa: E402
@@ -74,7 +81,6 @@ def on_system_start(topic: str, payload: dict) -> None:
 
     _adapter.set_discoverable(True)
 
-    # Pairing agent
     _pairing = PairingAgent(
         adapter=_adapter,
         on_pin_requested=_on_pin_requested,
@@ -83,7 +89,6 @@ def on_system_start(topic: str, payload: dict) -> None:
     )
     _pairing.register()
 
-    # RFCOMM listener
     _rfcomm = RfcommListener(on_connected_cb=_on_rfcomm_connected)
     if not _rfcomm.start():
         bus.publish("bluetooth.error", {"error": "RFCOMM listener failed to start"})
@@ -112,10 +117,8 @@ def on_discover(topic: str, payload: dict) -> None:
     if _adapter is None:
         bus.publish("bluetooth.error", {"error": "Adapter not ready"})
         return
-
     duration = int(payload.get("duration_sec", 10))
     log.info(f"Discovery requested for {duration}s")
-
     _discovery = DiscoverySession(
         adapter=_adapter,
         on_device_cb=_on_device_found,
@@ -159,44 +162,22 @@ def on_confirm_pairing(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _on_device_found(address: str, name: str, rssi: int) -> None:
-    bus.publish("bluetooth.device.found", {
-        "address": address,
-        "name": name,
-        "rssi": rssi,
-    })
-
+    bus.publish("bluetooth.device.found", {"address": address, "name": name, "rssi": rssi})
 
 def _on_discovery_done(devices: list) -> None:
     bus.publish("bluetooth.discovery.completed", {"devices": devices})
 
-
 def _on_pin_requested(device_address: str, pin: str) -> None:
-    bus.publish("bluetooth.pairing.pin", {
-        "device_address": device_address,
-        "pin": pin,
-    })
-
+    bus.publish("bluetooth.pairing.pin", {"device_address": device_address, "pin": pin})
 
 def _on_pairing_completed(device_address: str) -> None:
     bus.publish("bluetooth.pairing.completed", {"device_address": device_address})
 
-
 def _on_pairing_failed(device_address: str, error: str) -> None:
-    bus.publish("bluetooth.pairing.failed", {
-        "device_address": device_address,
-        "error": error,
-    })
-
+    bus.publish("bluetooth.pairing.failed", {"device_address": device_address, "error": error})
 
 def _on_rfcomm_connected(sock, address: str) -> None:
-    """
-    Called by RfcommListener when a phone opens the RFCOMM channel.
-    The socket lives in this process — we store it and signal the bus.
-    """
     log.info(f"RFCOMM connected from {address}")
-    # Store socket globally so rfcomm_handshake can be triggered
-    # NOTE: actual byte relay to rfcomm_handshake module happens via bus event;
-    # the handshake module operates on a NEW TCP connection after hostapd is ready.
     bus.publish("bluetooth.rfcomm.connected", {"device_address": address})
 
 # ---------------------------------------------------------------------------
@@ -204,10 +185,10 @@ def _on_rfcomm_connected(sock, address: str) -> None:
 # ---------------------------------------------------------------------------
 
 def run() -> None:
-    bus.subscribe("system.start",            on_system_start)
-    bus.subscribe("system.stop",             on_system_stop)
-    bus.subscribe("bluetooth.discover",      on_discover)
-    bus.subscribe("bluetooth.pair",          on_pair)
+    bus.subscribe("system.start",              on_system_start)
+    bus.subscribe("system.stop",               on_system_stop)
+    bus.subscribe("bluetooth.discover",        on_discover)
+    bus.subscribe("bluetooth.pair",            on_pair)
     bus.subscribe("bluetooth.confirm_pairing", on_confirm_pairing)
 
     log.info("Module started, waiting for messages...")
