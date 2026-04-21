@@ -22,13 +22,8 @@ Completed
 
 **Verification commands/results:**
 ```bash
-# Build verification
 python -c "from app.main import Application; print('Python build OK')"
-# Output: Python build OK
-
-# Test suite
 python -m pytest tests/ --cov=app --cov-report=term-missing --cov-fail-under=80 -v
-# Output: Tests running...
 ```
 
 **Run Application Command**
@@ -52,40 +47,18 @@ Creati 4 moduli standalone sotto `v2/modules/` seguendo l'architettura v2
 | `rfcomm_handshake` | `packet.py`, `handshake.py`, `main.py` | 5-stage AA wireless handshake, encode/decode pacchetti |
 | `tcp_server` | `server.py`, `frame_relay.py`, `main.py` | TCP listen :5288, SSL interno, relay frame AA sul bus |
 
-Fixato anche il pattern `sys.path` nel template `_template/main.py`:
-aggiunta di `v2/modules/` al path oltre a `v2/`, necessario per
-risolvere import locali del tipo `from bluetooth.bluez_adapter import`.
-
-**Why:**
-- Refactoring da architettura monolitica v1 (`app/wireless/`) a moduli
-  isolati v2 senza accoppiamento diretto tra componenti
-- Ogni modulo è avviabile e testabile in isolamento
-- Il flusso completo è guidato da eventi bus:
-  `system.start` → `bluetooth.rfcomm.connected` → `hostapd.ready`
-  → `rfcomm.handshake.completed` → `aa.frame.received`
-
-**Status:**
-Completed
+**Status:** Completed
 
 **Next 1-3 steps:**
-1. Aggiungere test unitari per ogni modulo (`tests/v2/test_bluetooth.py`, ecc.)
-2. Implementare protobuf reali a partire da `mrmees/open-android-auto`
-   per sostituire l'encoding manuale in `rfcomm_handshake/handshake.py`
-3. Testare il flusso end-to-end su hardware (wlan0 + BlueZ reale)
+1. Aggiungere test unitari per ogni modulo
+2. Implementare protobuf reali da `mrmees/open-android-auto`
+3. Testare flusso end-to-end su hardware
 
 **Verification commands:**
 ```bash
-# Avviare il broker v2
 python v2/bus_broker.py
-
-# Verificare autodiscovery moduli
 python v2/main.py
-
-# Avviare singolo modulo in isolamento
 python v2/modules/bluetooth/main.py
-python v2/modules/hostapd_helper/main.py
-python v2/modules/rfcomm_handshake/main.py
-python v2/modules/tcp_server/main.py
 ```
 
 ---
@@ -93,14 +66,8 @@ python v2/modules/tcp_server/main.py
 ## 2026-04-21 - v2 config_manager Module
 
 **What changed:**
-
 Creato `v2/modules/config_manager/main.py` — servizio centralizzato di configurazione
 con persistenza YAML per modulo.
-
-**Why:**
-- Ogni modulo ha bisogno di leggere/scrivere configurazioni persistenti
-- Il modulo non conosce i valori a priori: li memorizza così come arrivano
-- Pattern: richiesta/risposta su bus ZMQ + notifica broadcast `config.changed`
 
 **Contract:**
 
@@ -113,24 +80,66 @@ con persistenza YAML per modulo.
 
 **YAML layout:** `v2/config/<module_name>.yaml` — un file per modulo.
 
-**Status:**
-Completed
+**Status:** Completed
+
+---
+
+## 2026-04-21 - config_manager full integration
+
+**What changed:**
+
+1. **`tests/v2/test_config_manager.py`** — 12 test unitari con mock del bus ZMQ:
+   - `TestConfigGet`: missing field, unknown module, existing config, YAML corrotto
+   - `TestConfigSet`: missing fields, persist YAML, publish config.changed, accumulo chiavi, overwrite, roundtrip
+   - `TestLifecycle`: system.start crea config dir, system.stop chiama bus.stop
+
+2. **`v2/shared/config_client.py`** — helper riutilizzabile per qualsiasi modulo:
+   - `cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)`
+   - `cfg.register()` → subscribe a `config.response` + `config.changed`
+   - `cfg.get()` → pubblica `config.get`, risposta via `on_config_loaded`
+   - `cfg.set(key, value)` → pubblica `config.set`
+   - Filtra automaticamente per `module_name` — sicuro con più moduli attivi
+
+3. **`v2/modules/bluetooth/`** — integrazione ConfigClient:
+   - `bluez_adapter.py`: aggiunto `set_name(name)` per impostare l'alias BT
+   - `main.py`: carica config su `system.start`, applica su `config.changed`
+   - Chiavi: `discoverable`, `discoverable_timeout`, `discovery_duration_sec`, `adapter_name`
+
+4. **`v2/modules/hostapd_helper/`** — integrazione ConfigClient:
+   - `ap_manager.py`: tutti i parametri di rete spostati in `APConfig` (no più costanti globali)
+   - `main.py`: carica config, costruisce `APConfig` dinamicamente da `_config`
+   - Chiavi: `interface`, `ssid`, `channel`, `ap_password`, `subnet`, `gateway_ip`, `dhcp_range_start`, `dhcp_range_end`, `monitor_timeout`
+
+5. **`environment.yml`** — aggiunto `pyyaml>=6.0` (mancava, causava `ModuleNotFoundError`)
+
+6. **`v2/modules/_template/main.py`** — riscritto con:
+   - `ConfigClient` integrato e commentato step-by-step
+   - Pattern `_DEFAULTS` + `_config` + `_on_config_loaded` + `_on_config_changed`
+   - Istruzioni numerate STEP 1–5 inline nel codice
+   - Sezione bus.publish con esempio
+
+**Why:**
+- I moduli devono poter leggere/scrivere config persistente senza accoppiamento diretto
+- `ConfigClient` elimina boilerplate ripetuto in ogni modulo
+- Il template aggiornato rende il pattern immediatamente chiaro ai nuovi sviluppatori
+
+**Status:** Completed
 
 **Next 1-3 steps:**
-1. Aggiungere test unitari in `tests/v2/test_config_manager.py`
-2. Aggiungere helper in `v2/shared/` per `config.get`/`config.set` lato client
-3. Integrare nei moduli esistenti (`bluetooth`, `hostapd_helper`, ecc.)
+1. Aggiornare l'ambiente conda: `conda env update -f environment.yml --prune`
+2. Aggiungere test unitari per `bluetooth` e `hostapd_helper` con mock ConfigClient
+3. Integrare `ConfigClient` anche in `rfcomm_handshake` e `tcp_server`
 
 **Verification commands:**
 ```bash
-# Avvio standalone
-python v2/modules/config_manager/main.py
+# Fix dipendenza mancante
+conda env update -f environment.yml --prune
 
-# Verificare autodiscovery
-python v2/main.py
+# Test config_manager
+python -m pytest tests/v2/test_config_manager.py -v
 
-# Test manuale via bus (dopo aver avviato broker + modulo):
-# Publish config.set {"module": "bluetooth", "key": "pin", "value": "1234"}
-# Publish config.get {"module": "bluetooth"}
-# Expect config.response {"module": "bluetooth", "config": {"pin": "1234"}}
+# Avvio stack completo
+python v2/bus_broker.py &
+python v2/modules/config_manager/main.py &
+python v2/modules/bluetooth/main.py
 ```
