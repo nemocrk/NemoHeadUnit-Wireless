@@ -11,6 +11,7 @@ Module autodiscovery:
   Any subfolder inside v2/modules/ that contains a main.py is treated as a module
   and started automatically. No manual registration needed.
 
+  Folders whose name starts with '_' are excluded (e.g. _template).
   To disable a module temporarily, rename its main.py to main.py.disabled.
 """
 
@@ -53,9 +54,12 @@ log = logging.getLogger("main")
 def discover_modules() -> list[Path]:
     """
     Scan modules/ and return sorted list of main.py paths.
-    A folder is a valid module if it contains exactly a 'main.py' file.
+    Folders starting with '_' are excluded (reserved for templates/internals).
     """
-    found = sorted(MODULES_DIR.glob("*/main.py"))
+    found = sorted(
+        m for m in MODULES_DIR.glob("*/main.py")
+        if not m.parent.name.startswith("_")
+    )
     if not found:
         log.warning(f"No modules found in {MODULES_DIR}")
     for m in found:
