@@ -9,8 +9,11 @@ from unittest.mock import patch, MagicMock, mock_open
 import pytest
 
 from hostapd_helper.ap_manager import (
-    APManager, APConfig, GATEWAY_IP, WPA2_SECURITY_MODE, AP_TYPE_DYNAMIC
+    APManager, APConfig, WPA2_SECURITY_MODE, AP_TYPE_DYNAMIC
 )
+
+# GATEWAY_IP is no longer a module constant; it is a field on APConfig
+_DEFAULT_GATEWAY_IP = APConfig().gateway_ip
 
 
 # ---------------------------------------------------------------------------
@@ -63,9 +66,13 @@ class TestGetParams:
         mgr = _make_manager()
         assert mgr.get_params()["ap_type"] == AP_TYPE_DYNAMIC
 
-    def test_gateway_ip(self):
+    def test_gateway_ip_matches_config(self):
         mgr = _make_manager()
-        assert mgr.get_params()["gateway_ip"] == GATEWAY_IP
+        assert mgr.get_params()["gateway_ip"] == mgr._cfg.gateway_ip
+
+    def test_default_gateway_ip_value(self):
+        mgr = _make_manager()
+        assert mgr.get_params()["gateway_ip"] == _DEFAULT_GATEWAY_IP
 
 
 # ---------------------------------------------------------------------------
