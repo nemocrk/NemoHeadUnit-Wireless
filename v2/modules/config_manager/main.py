@@ -10,9 +10,10 @@ Module contract:
   Name        : config_manager
   Subscribes  : system.start
                 system.stop
-                config.get      → {"module": "<name>"}
+                config.get      → {"module": "<name>", "requester": "<who>" (optional)}
                 config.set      → {"module": "<name>", "key": "<k>", "value": <v>}
-  Publishes   : config.response → {"module": "<name>", "config": {<key>: <value>, ...}}
+  Publishes   : config.response → {"module": "<name>", "config": {<key>: <value>, ...},
+                                    "requester": "<who>" (echoed, empty string if absent)}
                 config.changed  → {"module": "<name>", "key": "<k>", "value": <v>}
 
   State       : private — YAML files under CONFIG_DIR (one file per module)
@@ -29,8 +30,8 @@ Rules:
   - config.set only persists and notifies — it does NOT validate the value.
   - config.get always returns the full config dict for the requested module
     (empty dict if no config exists yet).
-  - Both config.response and config.changed carry a "sender" field so
-    modules can ignore messages not directed at them.
+  - The optional "requester" field in config.get is echoed verbatim in
+    config.response so subscribers can filter responses meant for them.
 """
 
 import sys
@@ -106,20 +107,24 @@ def on_config_get(topic: str, payload: dict):
     """
     Handles config.get requests.
 
-    Expected payload: {"module": "<module_name>"}
-    Responds on config.response with the full config dict.
+    Expected payload: {"module": "<module_name>", "requester": "<who>" (optional)}
+    Responds on config.response echoing the requester field so subscribers
+    can filter responses meant for them.
     """
-    module = payload.get("module")
+    module    = payload.get("module")
+    requester = payload.get("requester", "")  # echo back to allow filtering
+
     if not module:
         log.warning("config.get received without 'module' field — ignoring.")
         return
 
     config = _load_config(module)
-    log.info(f"config.get for '{module}' → {len(config)} keys")
+    log.info(f"config.get for '{module}' (requester='{requester}') → {len(config)} keys")
 
     bus.publish("config.response", {
-        "module": module,
-        "config": config,
+        "module":    module,
+        "config":    config,
+        "requester": requester,
     })
 
 
