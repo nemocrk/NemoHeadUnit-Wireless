@@ -3,9 +3,14 @@ NemoHeadUnit-Wireless v2 — tcp_server module
 
 Module contract:
   Name        : tcp_server
-  Subscribes  : system.stop
+  Priority    : 1  (service level)
+  Subscribes  : system.readytostart
+                system.start
+                system.stop
                 rfcomm.handshake.completed  {device_address, phone_ip}
-  Publishes   : tcp.server.started          {host, port}
+  Publishes   : system.module_ready          {name, priority}
+                system.ready                 {name, priority}
+                tcp.server.started          {host, port}
                 tcp.session.connected       {address}
                 aa.frame.received           {channel_id, flags, payload_hex}
                 tcp.session.closed          {}
@@ -48,6 +53,7 @@ from tcp_server.frame_relay import FrameRelay     # noqa: E402
 # ---------------------------------------------------------------------------
 
 MODULE_NAME = "tcp_server"
+PRIORITY    = 1  # service level
 
 log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
@@ -58,6 +64,39 @@ bus = BusClient(module_name=MODULE_NAME)
 
 _server: Optional[TCPServer] = None
 _relay:  Optional[FrameRelay] = None
+
+# ---------------------------------------------------------------------------
+# Boot protocol handlers
+# ---------------------------------------------------------------------------
+
+def on_system_readytostart(topic: str, payload: dict) -> None:
+    log.info(f"system.readytostart received — announcing priority {PRIORITY}")
+    bus.publish("system.module_ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+
+
+def on_system_start(topic: str, payload: dict) -> None:
+    if payload.get("priority") != PRIORITY:
+        return
+
+    log.info(f"system.start priority={PRIORITY} — tcp_server ready")
+
+    # No blocking init — this module is fully event-driven.
+    # The TCP server starts only when rfcomm.handshake.completed arrives.
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info("system.ready published — tcp_server online")
+
+
+def on_system_stop(topic: str, payload: dict) -> None:
+    log.info("system.stop received — shutting down TCP server")
+    _teardown()
+    bus.stop()
+
 
 # ---------------------------------------------------------------------------
 # Handlers
@@ -74,11 +113,6 @@ def on_handshake_completed(topic: str, payload: dict) -> None:
     t = threading.Thread(target=_start_server, daemon=True)
     t.start()
 
-
-def on_system_stop(topic: str, payload: dict) -> None:
-    log.info("system.stop received — shutting down TCP server")
-    _teardown()
-    bus.stop()
 
 # ---------------------------------------------------------------------------
 # Server lifecycle
@@ -124,6 +158,7 @@ def _teardown() -> None:
         _server.stop()
         _server = None
 
+
 # ---------------------------------------------------------------------------
 # FrameRelay callbacks → bus events
 # ---------------------------------------------------------------------------
@@ -145,13 +180,16 @@ def _on_session_closed() -> None:
     bus.publish("tcp.session.closed", {})
     _teardown()
 
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def run() -> None:
+    bus.subscribe("system.readytostart",        on_system_readytostart)
+    bus.subscribe("system.start",               on_system_start)
+    bus.subscribe("system.stop",                on_system_stop)
     bus.subscribe("rfcomm.handshake.completed", on_handshake_completed)
-    bus.subscribe("system.stop",               on_system_stop)
 
     log.info("Module started, waiting for messages...")
     bus.start(blocking=True)
