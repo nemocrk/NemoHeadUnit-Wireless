@@ -20,11 +20,14 @@ import socket
 from pathlib import Path
 from typing import Callable, Optional
 
-# Ensure repo root (NemoHeadUnit-Wireless/) is on sys.path
-# so that "v2.protos.*" imports resolve correctly.
-_REPO_ROOT = Path(__file__).parent.parent.parent.parent  # .../NemoHeadUnit-Wireless
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+# Repo root  → enables "v2.protos.*" imports
+_REPO_ROOT  = Path(__file__).parent.parent.parent.parent  # NemoHeadUnit-Wireless/
+# v2/protos  → enables "oaa.*" imports inside the compiled proto files
+_PROTO_ROOT = _REPO_ROOT / "v2" / "protos"
+
+for _p in (_REPO_ROOT, _PROTO_ROOT):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from rfcomm_handshake.packet import (
     MSG_WIFI_START_REQUEST,
