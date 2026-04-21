@@ -97,15 +97,13 @@ def _start_process(script: Path, label: str) -> subprocess.Popen:
 
 
 def _terminate_all(processes: list[tuple[str, subprocess.Popen]]):
-    # Phase 1: give processes that handle SIGINT on their own a grace period
-    # to self-exit (e.g. broker already received Ctrl+C alongside main).
-    # Using proc.wait() with a short timeout refreshes proc.returncode.
+    # Phase 1: grace period — collect processes that self-exited on Ctrl+C
     for label, proc in processes:
         try:
             proc.wait(timeout=GRACE_PERIOD)
             log.info(f"{label} exited on its own (code {proc.returncode})")
         except subprocess.TimeoutExpired:
-            pass  # still running — will be terminated below
+            pass
 
     # Phase 2: SIGTERM anything still alive
     for label, proc in reversed(processes):
@@ -141,6 +139,7 @@ def run():
                 time.sleep(0.2)  # allow subscribers to receive stop
             except Exception:
                 pass
+            pub.close(linger=0)  # close before ctx.term() to avoid blocking
         _terminate_all(processes)
         if ctx is not None:
             ctx.term()
