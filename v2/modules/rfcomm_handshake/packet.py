@@ -34,8 +34,9 @@ MSG_WIFI_CONNECT_STATUS = 6
 MSG_WIFI_START_RESPONSE = 7
 
 # Security / AP type constants
-WPA2_PERSONAL = 8
-AP_DYNAMIC    = 1
+# Names match WifiSecurityModeEnum and WifiAccessPointTypeEnum proto values
+WPA2_SECURITY_MODE = 8   # WifiSecurityMode.WPA2
+AP_TYPE_DYNAMIC    = 1   # WifiAccessPointType.DYNAMIC
 
 HEADER_SIZE = 4  # 2 bytes length + 2 bytes msg_id
 
