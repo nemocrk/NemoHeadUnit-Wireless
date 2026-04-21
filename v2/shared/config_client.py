@@ -8,22 +8,20 @@ Usage inside a module:
 
     from shared.config_client import ConfigClient
 
-    # Pass your module's BusClient instance and module name.
     cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
+    cfg.register()                     # before bus.start()
+    cfg.get()                          # async → on_config_loaded(config)
+    cfg.set("pin", "1234")             # async → on_config_changed(key, value)
 
-    # Register the response/changed handlers BEFORE calling bus.start():
-    cfg.register()
+    cfg.on_config_loaded  = lambda config: ...
+    cfg.on_config_changed = lambda key, value: ...
 
-    # At any point after the bus is running:
-    cfg.get()                          # async — triggers on_config_loaded cb
-    cfg.set("pin", "1234")             # async — triggers on_config_changed cb
+The helper subscribes to config.response and config.changed and filters
+by module_name so multiple modules can coexist safely on the same bus.
 
-    # Provide callbacks to react to responses:
-    cfg.on_config_loaded  = lambda config: ...   # dict of all keys for this module
-    cfg.on_config_changed = lambda key, value: ...  # single key that changed
-
-The helper only listens to config.response / config.changed messages that
-belong to its own module_name, so multiple modules can coexist safely.
+config.get is published with a "requester" field set to module_name.
+config_manager echoes this field back in config.response, allowing UI
+modules (e.g. config_ui) to ignore responses not directed at them.
 """
 
 from __future__ import annotations
@@ -47,7 +45,7 @@ class ConfigClient:
         self._module_name = module_name
 
         # Overridable callbacks
-        self.on_config_loaded:  Callable[[dict], None]       | None = None
+        self.on_config_loaded:  Callable[[dict], None]        | None = None
         self.on_config_changed: Callable[[str, object], None] | None = None
 
     # ------------------------------------------------------------------
@@ -67,8 +65,15 @@ class ConfigClient:
         """
         Request the full config for this module.
         The result is delivered asynchronously via on_config_loaded.
+
+        The "requester" field is set to module_name so that observer
+        modules (e.g. config_ui) can distinguish responses by origin
+        and ignore ones not directed at them.
         """
-        self._bus.publish("config.get", {"module": self._module_name})
+        self._bus.publish("config.get", {
+            "module":    self._module_name,
+            "requester": self._module_name,
+        })
 
     def set(self, key: str, value) -> None:
         """
