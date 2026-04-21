@@ -2,18 +2,25 @@
 NemoHeadUnit-Wireless — BusClient
 Drop-in replacement for MessageBus using ZeroMQ XPUB/XSUB.
 
-Public API is intentionally identical to the old MessageBus:
+Public API:
     bus.subscribe(topic, callback)
     bus.subscribe(topic, callback, thread="main")  # Qt-safe dispatch
     bus.on(topic, callback)                         # alias
     bus.publish(topic, sender, payload)
     bus.publish(topic, sender, payload, binary=b"")  # with raw bytes
     bus.wait_for_shutdown()
+    bus.stop()                                       # graceful shutdown
 
 Message format (ZMQ multipart, 3 frames):
     [0] topic   bytes          routing key
     [1] header  msgpack dict   {sender, ts, priority, ...}
     [2] payload bytes          msgpack-encoded dict OR raw binary
+
+Shutdown design:
+    stop() sends a KILL frame through an inproc PAIR socket so that
+    _recv_loop wakes immediately from poller.poll() without waiting
+    for the next timeout. Both threads are then joined with a timeout
+    before the ZMQ context is terminated.
 """
 
 import threading
@@ -24,9 +31,11 @@ from typing import Any, Callable, Dict, List, Optional
 import msgpack
 import zmq
 
-BROKER_PUB_ADDR = "ipc:///tmp/nemobus.pub"  # client publishes here
-BROKER_SUB_ADDR = "ipc:///tmp/nemobus.sub"  # client subscribes here
-HEARTBEAT_INTERVAL = 0.5                    # seconds — keeps socket warm
+BROKER_PUB_ADDR = "ipc:///tmp/nemobus.pub"
+BROKER_SUB_ADDR = "ipc:///tmp/nemobus.sub"
+CTRL_ADDR       = "inproc://bus_client_ctrl"  # inproc PAIR for stop signal
+HEARTBEAT_INTERVAL = 0.5
+JOIN_TIMEOUT = 2.0  # seconds to wait for threads on stop()
 
 log = logging.getLogger("app.bus_client")
 
@@ -35,9 +44,11 @@ class BusClient:
     """
     ZeroMQ-backed IPC bus client.
 
-    Thread-safe. A background daemon thread handles all incoming messages
-    and dispatches callbacks. Callbacks marked thread='main' are routed
-    through QtBusBridge when available.
+    A background daemon thread handles all incoming messages and dispatches
+    callbacks. Callbacks marked thread='main' are routed through QtBusBridge.
+
+    Shutdown is reliable: stop() wakes the recv thread via an inproc PAIR
+    socket and joins both threads before terminating the ZMQ context.
     """
 
     def __init__(
@@ -51,17 +62,29 @@ class BusClient:
         self._sub_addr = sub_addr
 
         self._context = zmq.Context()
-        self._pub_sock: zmq.Socket = self._context.socket(zmq.PUB)
-        self._sub_sock: zmq.Socket = self._context.socket(zmq.SUB)
 
+        # Publisher socket
+        self._pub_sock: zmq.Socket = self._context.socket(zmq.PUB)
+        self._pub_sock.setsockopt(zmq.LINGER, 100)
         self._pub_sock.connect(pub_addr)
+
+        # Subscriber socket
+        self._sub_sock: zmq.Socket = self._context.socket(zmq.SUB)
+        self._sub_sock.setsockopt(zmq.LINGER, 0)
         self._sub_sock.connect(sub_addr)
+
+        # Inproc PAIR: writer side (stop signal sender)
+        self._ctrl_send: zmq.Socket = self._context.socket(zmq.PAIR)
+        self._ctrl_send.bind(CTRL_ADDR)
+
+        # Inproc PAIR: reader side (recv thread listens here)
+        self._ctrl_recv: zmq.Socket = self._context.socket(zmq.PAIR)
+        self._ctrl_recv.connect(CTRL_ADDR)
 
         # topic -> list of (callback, thread_affinity)
         self._handlers: Dict[str, List[tuple]] = {}
         self._handlers_lock = threading.Lock()
 
-        # Optional QtBusBridge factory — injected by gui/qt_bridge.py
         self._qt_bridge_factory: Optional[Callable] = None
         self._qt_bridges: Dict[str, Any] = {}
 
@@ -78,7 +101,6 @@ class BusClient:
     # ------------------------------------------------------------------
 
     def subscribe(self, topic: str, callback: Callable, thread: str = "") -> None:
-        """Subscribe callback to topic. Use thread='main' for Qt-safe dispatch."""
         with self._handlers_lock:
             if topic not in self._handlers:
                 self._handlers[topic] = []
@@ -87,7 +109,6 @@ class BusClient:
             self._handlers[topic].append((callback, thread))
 
     def on(self, topic: str, callback: Callable, thread: str = "") -> None:
-        """Alias for subscribe."""
         self.subscribe(topic, callback, thread)
 
     def publish(
@@ -98,48 +119,66 @@ class BusClient:
         priority: int = 0,
         binary: bytes = b"",
     ) -> None:
-        """
-        Publish a message to the bus.
-
-        Args:
-            topic:    routing key string
-            sender:   identifier of the publishing component
-            payload:  dict (will be msgpack-encoded) or ignored if binary set
-            priority: optional priority hint stored in header
-            binary:   raw bytes payload (e.g. AAC/H.264 frame); if provided,
-                      frame[2] contains this instead of msgpack(payload)
-        """
-        header = msgpack.packb({
-            "sender": sender,
-            "ts": time.time(),
-            "priority": priority,
-        })
+        if not self._running:
+            return
+        header = msgpack.packb({"sender": sender, "ts": time.time(), "priority": priority})
         body = binary if binary else msgpack.packb(payload, use_bin_type=True)
-        self._pub_sock.send_multipart([
-            topic.encode(),
-            header,
-            body,
-        ])
+        try:
+            self._pub_sock.send_multipart([topic.encode(), header, body])
+        except zmq.ZMQError as e:
+            log.warning(f"publish failed [{topic}]: {e}")
 
     def wait_for_shutdown(self) -> None:
-        """Block until app.shutdown is published (mirrors old MessageBus API)."""
+        """Block until stop() is called or app.shutdown is received."""
         self._shutdown_event.wait()
 
     def stop(self) -> None:
-        """Disconnect from broker and stop background threads."""
-        self._announce("bye")
+        """
+        Graceful shutdown:
+        1. Mark as not running so publish() is a no-op
+        2. Send KILL frame to wake _recv_loop from poller.poll()
+        3. Set shutdown event to unblock wait_for_shutdown()
+        4. Join threads (with timeout)
+        5. Close sockets and terminate context
+        """
+        if not self._running:
+            return
+        log.info(f"BusClient '{self._name}' stopping...")
         self._running = False
+
+        # Wake recv thread immediately
+        try:
+            self._ctrl_send.send(b"KILL", zmq.NOBLOCK)
+        except zmq.ZMQError:
+            pass
+
         self._shutdown_event.set()
-        self._pub_sock.close(linger=100)
-        self._sub_sock.close(linger=100)
-        self._context.term()
+
+        # Wait for heartbeat thread
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            self._heartbeat_thread.join(timeout=JOIN_TIMEOUT)
+
+        # Wait for recv thread
+        if self._recv_thread and self._recv_thread.is_alive():
+            self._recv_thread.join(timeout=JOIN_TIMEOUT)
+
+        # Close all sockets
+        for sock in (self._ctrl_recv, self._ctrl_send,
+                     self._sub_sock, self._pub_sock):
+            try:
+                sock.close(linger=0)
+            except Exception:
+                pass
+
+        # Terminate context (blocks until all sockets are closed)
+        try:
+            self._context.term()
+        except Exception:
+            pass
+
+        log.info(f"BusClient '{self._name}' stopped.")
 
     def set_qt_bridge_factory(self, factory: Callable) -> None:
-        """
-        Inject Qt bridge factory.
-        Called by qt_bridge.py after QApplication is ready.
-        factory(callback) -> object with .dispatch(payload) method
-        """
         self._qt_bridge_factory = factory
 
     # ------------------------------------------------------------------
@@ -149,44 +188,57 @@ class BusClient:
     def _start(self) -> None:
         self._running = True
         self._recv_thread = threading.Thread(
-            target=self._recv_loop, daemon=True, name="bus_recv"
+            target=self._recv_loop, daemon=True, name=f"bus_recv_{self._name}"
         )
         self._recv_thread.start()
         self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop, daemon=True, name="bus_heartbeat"
+            target=self._heartbeat_loop, daemon=True, name=f"bus_hb_{self._name}"
         )
         self._heartbeat_thread.start()
 
     def _recv_loop(self) -> None:
         """Background thread: receive and dispatch messages."""
-        # Subscribe to heartbeat topic so the socket stays warm
         self._sub_sock.setsockopt_string(zmq.SUBSCRIBE, "_bus.")
         poller = zmq.Poller()
         poller.register(self._sub_sock, zmq.POLLIN)
+        poller.register(self._ctrl_recv, zmq.POLLIN)  # wakeup pipe
 
         while self._running:
             try:
-                events = poller.poll(timeout=500)  # ms
-                if not events:
-                    continue
-                frames = self._sub_sock.recv_multipart()
-                if len(frames) < 3:
-                    continue
-                topic = frames[0].decode(errors="replace")
-                # header = frames[1]  — available if needed
-                body = frames[2]
-
-                if topic == "app.shutdown":
-                    self._shutdown_event.set()
-
-                self._dispatch(topic, body)
+                events = dict(poller.poll(timeout=1000))  # ms
             except zmq.ZMQError:
                 break
-            except Exception as e:
-                log.error(f"recv_loop error: {e}")
+
+            # Control message — stop() sent KILL
+            if self._ctrl_recv in events:
+                try:
+                    self._ctrl_recv.recv(zmq.NOBLOCK)
+                except zmq.ZMQError:
+                    pass
+                break  # exit loop immediately
+
+            if self._sub_sock not in events:
+                continue
+
+            try:
+                frames = self._sub_sock.recv_multipart(zmq.NOBLOCK)
+            except zmq.ZMQError:
+                continue
+
+            if len(frames) < 3:
+                continue
+
+            topic = frames[0].decode(errors="replace")
+            body  = frames[2]
+
+            if topic == "app.shutdown":
+                self._shutdown_event.set()
+
+            self._dispatch(topic, body)
+
+        log.debug(f"_recv_loop '{self._name}' exited")
 
     def _dispatch(self, topic: str, body: bytes) -> None:
-        """Decode payload and call registered handlers."""
         try:
             payload = msgpack.unpackb(body, raw=False)
         except Exception:
@@ -208,20 +260,25 @@ class BusClient:
                 log.error(f"handler error [{topic}] {callback}: {e}")
 
     def _heartbeat_loop(self) -> None:
-        """Send periodic ping to keep ZMQ socket warm and avoid idle gap latency."""
+        """Send periodic ping to keep ZMQ socket warm."""
         while self._running:
             try:
                 self._pub_sock.send_multipart([
                     b"_bus.ping",
                     msgpack.packb({"sender": self._name, "ts": time.time()}),
                     b"",
-                ])
+                ], zmq.NOBLOCK)
             except zmq.ZMQError:
                 break
-            time.sleep(HEARTBEAT_INTERVAL)
+            # Sleep in small increments so _running is checked frequently
+            for _ in range(int(HEARTBEAT_INTERVAL / 0.05)):
+                if not self._running:
+                    break
+                time.sleep(0.05)
+
+        log.debug(f"_heartbeat_loop '{self._name}' exited")
 
     def _announce(self, event: str) -> None:
-        """Publish hello/bye lifecycle event."""
         try:
             topic = f"_bus.{event}.{self._name}"
             self._pub_sock.send_multipart([
@@ -233,7 +290,7 @@ class BusClient:
             pass
 
     # ------------------------------------------------------------------
-    # Stats (mirrors old MessageBus.get_stats)
+    # Stats
     # ------------------------------------------------------------------
 
     def get_stats(self) -> dict:
