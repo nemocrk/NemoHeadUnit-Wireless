@@ -1,0 +1,52 @@
+# NemoHeadUnit-Wireless — Conda environment
+#
+# Create:  conda env create -f environment.yml
+# Update:  conda env update -f environment.yml --prune
+# Activate: conda activate py314
+
+name: py314
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  # -----------------------------------------------------------------------
+  # Python runtime
+  # -----------------------------------------------------------------------
+  - python=3.14
+
+  # -----------------------------------------------------------------------
+  # IPC / Message bus
+  # -----------------------------------------------------------------------
+  - pyzmq>=26.0          # ZeroMQ bindings (bus_broker + BusClient)
+  - msgpack-python>=1.0  # Frame serialisation (conda-forge package name)
+
+  # -----------------------------------------------------------------------
+  # GUI
+  # -----------------------------------------------------------------------
+  - pyqt6>=6.7           # Qt6 bindings + QtBusBridge
+
+  # -----------------------------------------------------------------------
+  # Bluetooth / DBus (system packages preferred; pip fallback below)
+  # -----------------------------------------------------------------------
+  - dbus-python           # Python DBus bindings for BluetoothManager
+
+  # -----------------------------------------------------------------------
+  # Media (optional — GStreamer Python bindings)
+  # Install system GStreamer plugins separately:
+  #   sudo apt install gstreamer1.0-plugins-{base,good,bad,ugly} \
+  #                    gstreamer1.0-libav gstreamer1.0-tools
+  # -----------------------------------------------------------------------
+  - gst-python            # gi.repository.Gst bindings (conda-forge)
+
+  # -----------------------------------------------------------------------
+  # Utilities
+  # -----------------------------------------------------------------------
+  - pip
+
+  - pip:
+    # msgpack is also available via pip if conda-forge version lags
+    - msgpack>=1.0.8
+    # GStreamer Python overrides fallback (if gst-python not in conda)
+    # - PyGObject>=3.46
