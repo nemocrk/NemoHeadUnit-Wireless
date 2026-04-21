@@ -30,7 +30,8 @@ class BluezAdapter:
         adapter = BluezAdapter()
         ok = adapter.init()          # connect D-Bus
         ok = adapter.register_profiles()
-        adapter.set_discoverable(True)
+        adapter.set_name("NemoHeadUnit")
+        adapter.set_discoverable(True, timeout=0)
         adapter.shutdown()
     """
 
@@ -114,7 +115,7 @@ class BluezAdapter:
     # ------------------------------------------------------------------
 
     def set_discoverable(self, enabled: bool, timeout: int = 0) -> None:
-        """Make adapter discoverable (timeout=0 → permanent)."""
+        """Make adapter discoverable. timeout=0 → permanent."""
         if not self._initialized:
             return
         try:
@@ -128,6 +129,22 @@ class BluezAdapter:
             log.info(f"Adapter discoverable={enabled} timeout={timeout}")
         except Exception as e:
             log.error(f"set_discoverable failed: {e}")
+
+    def set_name(self, name: str) -> None:
+        """Set the Bluetooth adapter alias (visible name during discovery)."""
+        if not self._initialized:
+            log.warning("set_name called before init()")
+            return
+        try:
+            import dbus
+            props = dbus.Interface(
+                self._bus.get_object("org.bluez", self._adapter.object_path),
+                "org.freedesktop.DBus.Properties",
+            )
+            props.Set("org.bluez.Adapter1", "Alias", dbus.String(name))
+            log.info(f"Adapter name set to '{name}'")
+        except Exception as e:
+            log.error(f"set_name failed: {e}")
 
     def get_adapter_address(self) -> str:
         """Return the local adapter MAC address."""
