@@ -6,11 +6,10 @@ Copy this folder to create a new module:
 
 Then:
   1. Rename the module in MODULE_NAME below
-  2. Define subscribed topics in SUBSCRIPTIONS
+  2. Fill in the contract docstring (subscribes / publishes)
   3. Implement handler functions for each topic
-  4. Define published topics in the docstring contract below
-  5. Implement your business logic inside this file (or split into subfiles
-     inside this folder — never import from sibling modules)
+  4. Add subscriptions in run()
+  5. Keep all internal logic inside this folder
 
 ---
 Module contract (fill this in when implementing):
@@ -22,14 +21,14 @@ Module contract (fill this in when implementing):
 ---
 """
 
-import logging
 import sys
 from pathlib import Path
 
 # Allow importing shared/ from the v2 root
 sys.path.insert(0, str(Path(__file__).parents[2]))
 
-from shared.bus_client import BusClient  # noqa: E402
+from shared.bus_client import BusClient   # noqa: E402
+from shared.logger import get_logger      # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -37,11 +36,7 @@ from shared.bus_client import BusClient  # noqa: E402
 
 MODULE_NAME = "_template"  # ← change this to your module name
 
-logging.basicConfig(
-    level=logging.INFO,
-    format=f"[{MODULE_NAME}] %(asctime)s %(levelname)s %(message)s",
-)
-log = logging.getLogger(MODULE_NAME)
+log = get_logger(MODULE_NAME)
 
 # ---------------------------------------------------------------------------
 # Handlers
