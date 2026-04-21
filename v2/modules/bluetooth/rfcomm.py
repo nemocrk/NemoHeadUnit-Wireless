@@ -1,15 +1,17 @@
 """
 rfcomm.py — RFCOMM channel 8 socket listener.
 
-Uses Python's built-in socket module with AF_BLUETOOTH / BTPROTO_RFCOMM.
-When socket.AF_BLUETOOTH is not exposed (some minimal Python builds),
-falls back to the stable Linux kernel constants (AF_BLUETOOTH=31,
-BTPROTO_RFCOMM=3) which are valid on every Linux kernel with BT support.
+Usa socket nativo AF_BLUETOOTH/BTPROTO_RFCOMM.
+Il bind richiede l'indirizzo reale dell'adapter (non 00:00:00:00:00:00)
+quando il modulo rfcomm del kernel non è caricato come modulo separato.
+L'indirizzo viene letto via `hciconfig hci0` al momento dell'avvio.
 
 No ZMQ dependency — caller (main.py) handles publishing.
 """
 
 import socket
+import subprocess
+import re
 import threading
 from typing import Callable
 
@@ -23,11 +25,21 @@ from shared.logger import get_logger  # noqa: E402
 
 log = get_logger("bluetooth.rfcomm")
 
-RFCOMM_CHANNEL = 8
-
-# Linux kernel constants — stable across all distributions
+RFCOMM_CHANNEL  = 8
 _AF_BLUETOOTH   = getattr(socket, "AF_BLUETOOTH",  31)
 _BTPROTO_RFCOMM = getattr(socket, "BTPROTO_RFCOMM",  3)
+
+
+def _get_adapter_address(iface: str = "hci0") -> str:
+    """Return the BD address of the local adapter, e.g. '73:4E:4B:7F:EB:FF'."""
+    try:
+        out = subprocess.check_output(["hciconfig", iface], text=True, stderr=subprocess.DEVNULL)
+        match = re.search(r"BD Address:\s*([0-9A-Fa-f:]{17})", out)
+        if match:
+            return match.group(1)
+    except Exception as e:
+        log.warning(f"hciconfig failed: {e}")
+    return "00:00:00:00:00:00"
 
 
 class RfcommListener:
@@ -39,9 +51,11 @@ class RfcommListener:
 
     def start(self) -> bool:
         try:
+            local_addr = _get_adapter_address()
+            log.info(f"Binding RFCOMM to {local_addr} ch.{RFCOMM_CHANNEL}")
             self._server_sock = socket.socket(_AF_BLUETOOTH, socket.SOCK_STREAM, _BTPROTO_RFCOMM)
             self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._server_sock.bind(("00:00:00:00:00:00", RFCOMM_CHANNEL))
+            self._server_sock.bind((local_addr, RFCOMM_CHANNEL))
             self._server_sock.listen(1)
             self._running = True
             self._thread = threading.Thread(target=self._accept_loop, daemon=True, name="rfcomm-accept")
