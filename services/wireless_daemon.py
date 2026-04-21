@@ -6,20 +6,27 @@ and media frame publishing.
 Run independently:
     python services/wireless_daemon.py
 
+Startup sequence:
+    1. _wait_for_broker()   — poll until IPC socket file exists
+    2. BusClient()          — connect to ZMQ broker
+    3. bluetooth.set_bus()  — inject shared bus into BluetoothManager
+    4. daemon.start()       — init hardware, subscribe to topics
+    5. daemon.run()         — accept loop (blocks)
+
 Bus topics published:
     wireless.app.ready              {status, method}
     wireless.app.startup.failed     {component}
     wireless.connection.established {address, method}
     wireless.connection.failed      {error, method}
-    media.audio.frame               header={seq, pts}, binary=<AAC bytes>
-    media.video.frame               header={seq, pts, keyframe}, binary=<H.264 bytes>
+    media.audio.frame               binary=<AAC bytes>
+    media.video.frame               binary=<H.264 bytes>
 
 Bus topics subscribed:
-    connection.ready
     connection.pairing.requested
     wireless.bluetooth.discovery.completed
     wireless.rfcomm.handshake.completed
     wireless.tcp.connection.accepted
+    app.shutdown
 """
 
 import sys
@@ -27,8 +34,8 @@ import os
 import signal
 import socket
 import threading
+import time
 
-# Allow imports from project root
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.bus_client import BusClient
@@ -37,18 +44,37 @@ from app.wireless.rfcomm_handler import RfcommHandler
 from app.wireless.tcp_server import TcpServer
 from app.logger import LoggerManager
 
+BROKER_PUB_ADDR    = "ipc:///tmp/nemobus.pub"
+BROKER_WAIT_TIMEOUT  = 15.0
+BROKER_POLL_INTERVAL = 0.05
+
+
+def _wait_for_broker(logger, timeout: float = BROKER_WAIT_TIMEOUT) -> bool:
+    """Poll until the broker IPC socket file appears on disk."""
+    sock_path = BROKER_PUB_ADDR.replace("ipc://", "")
+    logger.info("Waiting for broker socket...")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(sock_path):
+            logger.info("Broker ready")
+            return True
+        time.sleep(BROKER_POLL_INTERVAL)
+    logger.error(f"Broker not ready after {timeout}s")
+    return False
+
 
 class WirelessDaemon:
     """
     Wireless service running as an independent process.
-    Connects to the ZMQ broker as a BusClient.
-    Does NOT call bus.stop() on shutdown — the broker is managed separately.
+    BusClient is created only after the broker is confirmed ready.
+    BluetoothManager receives the bus via set_bus() — no autonomous ZMQ.
     """
 
-    def __init__(self):
+    def __init__(self, bus: BusClient):
         self._logger = LoggerManager.get_logger('services.wireless_daemon')
-        self._bus = BusClient(name="wireless_daemon")
+        self._bus = bus
         self._bluetooth = BluetoothManager()
+        self._bluetooth.set_bus(bus)   # inject — no autonomous BusClient
         self._tcp_server = TcpServer()
         self._running = False
         self._seq_audio = 0
@@ -62,7 +88,7 @@ class WirelessDaemon:
     # ------------------------------------------------------------------
 
     def start(self) -> bool:
-        """Initialize hardware and start listening."""
+        """Initialize hardware and subscribe to bus topics."""
         self._logger.info("Wireless daemon starting")
 
         if not self._bluetooth.init_dbus():
@@ -85,17 +111,15 @@ class WirelessDaemon:
         self._running = True
         self._subscribe()
 
-        # Publish ready — serializable payload only, no object references
         self._publish("wireless.app.ready", {"status": "ready", "method": "bluetooth"})
         self._logger.info("Wireless daemon ready")
         return True
 
     def stop(self) -> None:
-        """Graceful shutdown — does NOT stop the broker."""
         self._logger.info("Wireless daemon stopping")
         self._running = False
         self._tcp_server.stop()
-        self._bus.stop()  # disconnects this client only
+        self._bus.stop()
 
     def run(self) -> None:
         """Main accept loop — blocks until stopped."""
@@ -144,13 +168,10 @@ class WirelessDaemon:
 
     def _media_loop(self, client: socket.socket) -> None:
         """
-        Read AAC/H.264 frames from the smartphone and publish them
-        on the bus as binary payloads (zero-copy).
-
-        Frame wire format (simplified Android Auto / CarPlay-like):
-            [4 bytes] frame_type  0x01=audio_AAC  0x02=video_H264
-            [4 bytes] payload_len
-            [N bytes] payload
+        Read AAC/H.264 frames and publish as binary bus messages.
+        Wire format: [4B frame_type][4B payload_len][N bytes payload]
+            0x01 = AAC audio
+            0x02 = H.264 video
         """
         import struct
         self._logger.info("Media loop started")
@@ -163,22 +184,18 @@ class WirelessDaemon:
                 data = self._recv_exact(client, payload_len)
                 if not data:
                     break
-
-                if frame_type == 0x01:  # AAC audio
+                if frame_type == 0x01:
                     self._seq_audio += 1
                     self._bus.publish(
-                        "media.audio.frame",
-                        "wireless_daemon",
+                        "media.audio.frame", "wireless_daemon",
                         {"seq": self._seq_audio, "pts": 0},
                         binary=data,
                     )
-                elif frame_type == 0x02:  # H.264 video
+                elif frame_type == 0x02:
                     self._seq_video += 1
-                    # IDR keyframe detection: H.264 NAL unit type 5
                     is_idr = len(data) > 4 and (data[4] & 0x1F) == 5
                     self._bus.publish(
-                        "media.video.frame",
-                        "wireless_daemon",
+                        "media.video.frame", "wireless_daemon",
                         {"seq": self._seq_video, "pts": 0, "keyframe": is_idr},
                         binary=data,
                     )
@@ -190,7 +207,6 @@ class WirelessDaemon:
 
     @staticmethod
     def _recv_exact(sock: socket.socket, n: int) -> bytes:
-        """Read exactly n bytes from socket, return None on disconnect."""
         buf = b""
         while len(buf) < n:
             try:
@@ -207,47 +223,65 @@ class WirelessDaemon:
     # ------------------------------------------------------------------
 
     def _subscribe(self) -> None:
-        self._bus.on("connection.ready",                          self._on_connection_ready)
-        self._bus.on("connection.pairing.requested",              self._on_pairing_requested)
-        self._bus.on("wireless.bluetooth.discovery.completed",    self._on_discovery_completed)
-        self._bus.on("wireless.rfcomm.handshake.completed",       self._on_handshake_completed)
-        self._bus.on("wireless.tcp.connection.accepted",          self._on_connection_accepted)
+        self._bus.on("connection.pairing.requested",           self._on_pairing_requested)
+        self._bus.on("wireless.bluetooth.discovery.completed", self._on_discovery_completed)
+        self._bus.on("wireless.rfcomm.handshake.completed",    self._on_handshake_completed)
+        self._bus.on("wireless.tcp.connection.accepted",       self._on_connection_accepted)
+        self._bus.on("app.shutdown",                           self._on_shutdown)
 
-    def _on_connection_ready(self, payload: dict) -> None:
-        self._logger.info("ConnectionManager ready — starting wireless")
-        if not self._running:
-            self.start()
-
-    def _on_pairing_requested(self, payload: dict) -> None:
+    def _on_pairing_requested(self, payload) -> None:
         self._logger.info(f"Pairing requested: {payload}")
         self._bluetooth.discover_devices()
 
-    def _on_discovery_completed(self, payload: dict) -> None:
+    def _on_discovery_completed(self, payload) -> None:
         self._logger.info("Bluetooth discovery completed")
 
-    def _on_handshake_completed(self, payload: dict) -> None:
+    def _on_handshake_completed(self, payload) -> None:
         self._logger.info("RFCOMM handshake completed")
 
-    def _on_connection_accepted(self, payload: dict) -> None:
-        self._logger.info(f"TCP connection accepted from {payload.get('address', 'unknown')}")
+    def _on_connection_accepted(self, payload) -> None:
+        self._logger.info(f"TCP connection accepted from {payload.get('address', 'unknown') if isinstance(payload, dict) else payload}")
+
+    def _on_shutdown(self, payload) -> None:
+        self._logger.info("Shutdown received")
+        self.stop()
+        sys.exit(0)
 
 
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Entry point
-# ----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def main():
     logger = LoggerManager.get_logger('services.wireless_daemon')
-    daemon = WirelessDaemon()
 
+    # 1. Wait for broker
+    if not _wait_for_broker(logger):
+        logger.error("Broker unavailable — wireless daemon exiting")
+        sys.exit(1)
+
+    # 2. Connect to broker
+    bus = BusClient(name="wireless_daemon")
+
+    # 3. Build daemon (bus injected into BluetoothManager inside __init__)
+    daemon = WirelessDaemon(bus)
+
+    # 4. Signal handlers
     def _shutdown(signum, frame):
-        logger.info("Shutdown signal received")
+        logger.info("Signal received, stopping wireless daemon")
         daemon.stop()
         sys.exit(0)
 
     signal.signal(signal.SIGINT,  _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
+    # 5. Start hardware + subscriptions
+    if not daemon.start():
+        logger.error("Wireless daemon failed to start")
+        bus.stop()
+        sys.exit(1)
+
+    # 6. Block in accept loop
     daemon.run()
 
 
