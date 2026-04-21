@@ -15,20 +15,20 @@ Shutdown strategy:
 """
 
 import signal
+import sys
 import threading
-import logging
 import zmq
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from shared.logger import get_logger  # noqa: E402
 
 BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
 BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
 
 HWM = 200
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="[bus_broker] %(asctime)s %(levelname)s %(message)s",
-)
-log = logging.getLogger("bus_broker")
+log = get_logger("bus_broker")
 
 
 def run():
@@ -51,7 +51,7 @@ def run():
         try:
             zmq.proxy(xsub, xpub)
         except zmq.ZMQError:
-            pass  # expected when context is terminated
+            pass
 
     t = threading.Thread(target=_proxy_thread, daemon=True)
     t.start()
@@ -63,13 +63,12 @@ def run():
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # Block main thread until stop is requested
     stop_event.wait()
 
     log.info("Broker shutting down...")
     xsub.close()
     xpub.close()
-    context.term()   # unblocks the proxy thread
+    context.term()
     t.join(timeout=2)
     log.info("Broker stopped.")
 
