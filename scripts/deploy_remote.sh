@@ -75,7 +75,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # Step 1: Crea directory remota
 # ---------------------------------------------------------------------------
-echo "[1/4] Preparing remote directory..."
+echo "[1/5] Preparing remote directory..."
 ssh "$REMOTE" "mkdir -p /home/$REMOTE_USER/$REMOTE_DIR/v2"
 echo "[OK] Remote directory ready."
 echo ""
@@ -83,14 +83,14 @@ echo ""
 # ---------------------------------------------------------------------------
 # Step 2: Sync v2/ + environment.yml
 # ---------------------------------------------------------------------------
-echo "[2/4] Syncing v2/ to remote..."
+echo "[2/5] Syncing v2/ to remote..."
 rsync -avz --delete \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
   -e ssh \
   "$REPO_ROOT/v2/" "$REMOTE:/home/$REMOTE_USER/$REMOTE_DIR/v2/"
 
-echo "[2/4] Syncing environment.yml to remote..."
+echo "[2/5] Syncing environment.yml to remote..."
 rsync -avz \
   -e ssh \
   "$REPO_ROOT/environment.yml" "$REMOTE:/home/$REMOTE_USER/$REMOTE_DIR/environment.yml"
@@ -99,7 +99,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # Step 3: Miniconda (no root)
 # ---------------------------------------------------------------------------
-echo "[3/4] Checking Miniconda on remote..."
+echo "[3/5] Checking Miniconda on remote..."
 ssh "$REMOTE" bash <<'ENDSSH'
 set -euo pipefail
 if command -v conda &>/dev/null || [ -x "$HOME/miniconda3/bin/conda" ]; then
@@ -120,21 +120,21 @@ echo ""
 # ---------------------------------------------------------------------------
 # Step 4: Conda environment + avvio
 # ---------------------------------------------------------------------------
-echo "[4/4] Creating/updating Conda environment (py314)..."
-ssh "$REMOTE" bash <<'ENDSSH'
-set -euo pipefail
-eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
-cd ~/NemoHeadUnit-Wireless
-if conda env list | grep -q '^py314'; then
-  echo "[INFO] Environment exists, updating..."
-  conda env update -f environment.yml --prune
-else
-  echo "[INFO] Creating environment..."
-  conda env create -f environment.yml
-fi
-echo "[OK] Conda environment ready."
-ENDSSH
-echo ""
+#echo "[4/5] Creating/updating Conda environment (py314)..."
+#ssh "$REMOTE" bash <<'ENDSSH'
+#set -euo pipefail
+#eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
+#cd ~/NemoHeadUnit-Wireless
+#if conda env list | grep -q '^py314'; then
+#  echo "[INFO] Environment exists, updating..."
+#  conda env update -f environment.yml --prune
+#else
+#  echo "[INFO] Creating environment..."
+#  conda env create -f environment.yml
+#fi
+#echo "[OK] Conda environment ready."
+#ENDSSH
+#echo ""
 
 # ---------------------------------------------------------------------------
 # Step 5: Avvio automatico main.py (output live + tee log remoto)
@@ -146,4 +146,4 @@ exec ssh -t "$REMOTE" \
   "source ~/miniconda3/etc/profile.d/conda.sh && \
    conda activate py314 && \
    cd ~/NemoHeadUnit-Wireless/v2 && \
-   DISPLAY=:0 python -m main"
+   DISPLAY=:0 DBUS_SYSTEM_BUS_ADDRESS=\"unix:path=/run/dbus/system_bus_socket\" python -m main"

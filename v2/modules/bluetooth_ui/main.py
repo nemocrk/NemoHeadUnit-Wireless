@@ -72,19 +72,12 @@ class PinDialog(QDialog):
         layout.addRow("Dispositivo:", QLabel(device_address))
         layout.addRow("PIN:", QLabel(f"<b>{pin}</b>"))
 
-        self._pin_input = QLineEdit()
-        self._pin_input.setPlaceholderText("Reinserisci il PIN per confermare")
-        layout.addRow("Conferma PIN:", self._pin_input)
-
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
-
-    def confirmed_pin(self) -> str:
-        return self._pin_input.text().strip()
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +152,9 @@ class BluetoothPairingWindow(QMainWindow):
         self.set_status(f"PIN richiesto per {address}: {pin}")
         dlg = PinDialog(address, pin, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            confirmed = dlg.confirmed_pin()
             bus.publish("bluetooth.confirm_pairing", {
                 "device_address": address,
-                "pin": confirmed,
+                "pin": pin,
             })
             self.set_status(f"PIN confermato per {address}")
         else:
