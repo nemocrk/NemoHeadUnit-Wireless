@@ -5,22 +5,27 @@ Standalone PyQt6 window to browse and edit per-module configuration.
 
 Module contract:
   Name        : config_ui
-  Subscribes  : system.start
+  Priority    : 2  (UI level)
+  Subscribes  : system.readytostart
+                system.start
                 system.stop
                 system.modules_response  {modules: [{name, pid, status}, ...]}
                 config.response          {module, config: {key: value, ...},
                                           requester: str}  ← only processed when
                                                               requester == "config_ui"
-  Publishes   : system.get_modules       {}
+  Publishes   : system.module_ready       {name, priority}
+                system.ready              {name, priority}
+                system.get_modules       {}
                 config.get               {module: str, requester: "config_ui"}
                 config.set               {module: str, key: str, value: any}
 
 Flow:
-  1. system.start  → publish system.get_modules
-  2. system.modules_response → build one tab per module,
+  1. system.readytostart → publish system.module_ready
+  2. system.start (priority==2) → publish system.ready + system.get_modules
+  3. system.modules_response → build one tab per module,
                                publish config.get {module, requester} for each
-  3. config.response (requester=="config_ui") → populate the tab
-  4. User edits + clicks Save → publish config.set for each changed key
+  4. config.response (requester=="config_ui") → populate the tab
+  5. User edits + clicks Save → publish config.set for each changed key
 """
 
 import sys
@@ -50,6 +55,7 @@ from shared.logger import get_logger      # noqa: E402
 # ---------------------------------------------------------------------------
 
 MODULE_NAME = "config_ui"
+PRIORITY    = 2  # UI level
 
 log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
@@ -269,10 +275,27 @@ def _invoke(slot: str, *args):
 # Bus handlers
 # ---------------------------------------------------------------------------
 
+def on_system_readytostart(topic: str, payload: dict) -> None:
+    log.info(f"system.readytostart received — announcing priority {PRIORITY}")
+    bus.publish("system.module_ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+
+
 def on_system_start(topic: str, payload: dict) -> None:
-    log.info("system.start received — requesting module list")
+    if payload.get("priority") != PRIORITY:
+        return
+
+    log.info(f"system.start priority={PRIORITY} — requesting module list")
     _invoke("set_status", "Sistema pronto. Recupero lista moduli…")
     bus.publish("system.get_modules", {})
+
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info("system.ready published — config_ui online")
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
@@ -312,6 +335,7 @@ def on_config_response(topic: str, payload: dict) -> None:
 def run() -> None:
     global _app, _window
 
+    bus.subscribe("system.readytostart",     on_system_readytostart)
     bus.subscribe("system.start",            on_system_start)
     bus.subscribe("system.stop",             on_system_stop)
     bus.subscribe("system.modules_response", on_modules_response)
