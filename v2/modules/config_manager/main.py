@@ -8,15 +8,19 @@ and notifies subscribers when a value changes.
 Module contract:
 
   Name        : config_manager
-  Subscribes  : system.start
+  Priority    : 0  (infrastructure — must be ready before all other modules)
+  Subscribes  : system.readytostart
+                system.start
                 system.stop
                 config.get      → {"module": "<name>",
                                     "requester": "<who>" (optional),
                                     "defaults": {<key>: <value>, ...} (optional)}
                 config.set      → {"module": "<name>", "key": "<k>", "value": <v>}
-  Publishes   : config.response → {"module": "<name>", "config": {<key>: <value>, ...},
-                                    "requester": "<who>" (echoed, empty string if absent)}
-                config.changed  → {"module": "<name>", "key": "<k>", "value": <v>}
+  Publishes   : system.module_ready → {name, priority}
+                system.ready      → {name, priority}
+                config.response   → {"module": "<name>", "config": {<key>: <value>, ...},
+                                      "requester": "<who>" (echoed, empty string if absent)}
+                config.changed    → {"module": "<name>", "key": "<k>", "value": <v>}
 
   State       : private — YAML files under CONFIG_DIR (one file per module)
 ---
@@ -50,7 +54,7 @@ if str(_V2) not in sys.path:
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
-import yaml  # noqa: E402  (PyYAML — available in conda py314 env)
+import yaml  # noqa: E402
 
 from shared.bus_client import BusClient  # noqa: E402
 from shared.logger import get_logger     # noqa: E402
@@ -60,10 +64,10 @@ from shared.logger import get_logger     # noqa: E402
 # ---------------------------------------------------------------------------
 
 MODULE_NAME = "config_manager"
+PRIORITY    = 0  # infrastructure — first to initialise
 
 log = get_logger(MODULE_NAME)
 
-# Config files are stored relative to the v2/ root so they survive restarts.
 CONFIG_DIR = _V2 / "config"
 
 
@@ -72,12 +76,10 @@ CONFIG_DIR = _V2 / "config"
 # ---------------------------------------------------------------------------
 
 def _config_path(module: str) -> Path:
-    """Return the YAML path for a given module name."""
     return CONFIG_DIR / f"{module}.yaml"
 
 
 def _load_config(module: str) -> dict:
-    """Load and return the full config dict for *module*. Returns {} on miss."""
     path = _config_path(module)
     if not path.exists():
         return {}
@@ -91,7 +93,6 @@ def _load_config(module: str) -> dict:
 
 
 def _save_config(module: str, data: dict) -> bool:
-    """Persist *data* as YAML for *module*. Returns True on success."""
     path = _config_path(module)
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -108,19 +109,9 @@ def _save_config(module: str, data: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def on_config_get(topic: str, payload: dict):
-    """
-    Handles config.get requests.
-
-    Payload fields:
-      module    : (required) module name
-      requester : (optional) echoed back in config.response for filtering
-      defaults  : (optional) dict of default values — if the YAML does not
-                  exist yet, these are persisted atomically and returned in
-                  the same response (first-boot seeding).
-    """
     module    = payload.get("module")
     requester = payload.get("requester", "")
-    defaults  = payload.get("defaults")   # dict | None
+    defaults  = payload.get("defaults")
 
     if not module:
         log.warning("config.get received without 'module' field — ignoring.")
@@ -128,10 +119,6 @@ def on_config_get(topic: str, payload: dict):
 
     config = _load_config(module)
 
-    # First-boot seeding: if no YAML exists yet and the caller supplied
-    # defaults, persist them NOW so the response already carries the keys.
-    # This avoids an async cfg.set() storm that would trigger config.changed
-    # on a module that may not be fully initialised yet.
     if not config and isinstance(defaults, dict) and defaults:
         if _save_config(module, defaults):
             config = dict(defaults)
@@ -157,12 +144,6 @@ def on_config_get(topic: str, payload: dict):
 
 
 def on_config_set(topic: str, payload: dict):
-    """
-    Handles config.set requests.
-
-    Expected payload: {"module": "<module_name>", "key": "<k>", "value": <v>}
-    Persists the new value and broadcasts config.changed.
-    """
     module = payload.get("module")
     key    = payload.get("key")
     value  = payload.get("value")
@@ -175,7 +156,7 @@ def on_config_set(topic: str, payload: dict):
     data[key] = value
 
     if not _save_config(module, data):
-        return  # error already logged in _save_config
+        return
 
     log.info(f"config.set '{module}'.{key} = {value!r}")
 
@@ -186,13 +167,35 @@ def on_config_set(topic: str, payload: dict):
     })
 
 
-def on_system_start(topic: str, payload: dict):
-    log.info(f"System started — config dir: {CONFIG_DIR}")
+# ---------------------------------------------------------------------------
+# Boot protocol handlers
+# ---------------------------------------------------------------------------
+
+def on_system_readytostart(topic: str, payload: dict) -> None:
+    log.info(f"system.readytostart received — announcing priority {PRIORITY}")
+    bus.publish("system.module_ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+
+
+def on_system_start(topic: str, payload: dict) -> None:
+    if payload.get("priority") != PRIORITY:
+        return
+
+    log.info(f"system.start priority={PRIORITY} — initialising config_manager")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    log.info(f"Config dir ready: {CONFIG_DIR}")
+
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info("system.ready published — config_manager online")
 
 
-def on_system_stop(topic: str, payload: dict):
-    log.info("System stop received — shutting down config_manager.")
+def on_system_stop(topic: str, payload: dict) -> None:
+    log.info("system.stop — shutting down config_manager.")
     bus.stop()
 
 
@@ -203,11 +206,12 @@ def on_system_stop(topic: str, payload: dict):
 bus = BusClient(module_name=MODULE_NAME)
 
 
-def run():
-    bus.subscribe("system.start",  on_system_start)
-    bus.subscribe("system.stop",   on_system_stop)
-    bus.subscribe("config.get",    on_config_get)
-    bus.subscribe("config.set",    on_config_set)
+def run() -> None:
+    bus.subscribe("system.readytostart", on_system_readytostart)
+    bus.subscribe("system.start",        on_system_start)
+    bus.subscribe("system.stop",         on_system_stop)
+    bus.subscribe("config.get",          on_config_get)
+    bus.subscribe("config.set",          on_config_set)
 
     log.info("config_manager ready — waiting for messages...")
     bus.start(blocking=True)
