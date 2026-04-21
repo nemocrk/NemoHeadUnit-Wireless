@@ -20,9 +20,11 @@ import subprocess
 import sys
 import time
 import json
-import logging
 import zmq
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from shared.logger import get_logger  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Config
@@ -37,15 +39,7 @@ BROKER_STARTUP_DELAY = 0.5   # seconds to wait for broker to bind
 MODULE_STARTUP_DELAY = 0.2   # seconds between module launches
 GRACE_PERIOD = 1.0            # seconds to wait for self-exit before SIGTERM
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="[main] %(asctime)s %(levelname)s %(message)s",
-)
-log = logging.getLogger("main")
+log = get_logger("main")
 
 # ---------------------------------------------------------------------------
 # Module autodiscovery
@@ -143,7 +137,7 @@ def run():
                 time.sleep(0.2)  # allow subscribers to receive stop
             except Exception:
                 pass
-            pub.close(linger=0)  # close before ctx.term() to avoid blocking
+            pub.close(linger=0)
         _terminate_all(processes)
         if ctx is not None:
             ctx.term()
