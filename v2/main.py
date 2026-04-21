@@ -96,11 +96,18 @@ def _start_process(script: Path, label: str) -> subprocess.Popen:
 
 
 def _terminate_all(processes: list[tuple[str, subprocess.Popen]]):
+    # Send SIGTERM only to processes still running
     for label, proc in reversed(processes):
         if proc.poll() is None:
             log.info(f"Terminating {label} (PID {proc.pid})...")
             proc.terminate()
+
+    # Wait only for processes that were actually running
     for label, proc in processes:
+        if proc.returncode is not None:
+            # Already exited on its own (e.g. broker self-terminated on SIGINT)
+            log.info(f"{label} already exited (code {proc.returncode})")
+            continue
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
