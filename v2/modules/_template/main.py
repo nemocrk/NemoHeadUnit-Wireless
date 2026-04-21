@@ -5,25 +5,54 @@ Copy this folder to start a new module:
     cp -r v2/modules/_template v2/modules/<your_module_name>
 
 Then follow these steps:
-  1. Set MODULE_NAME below to your module name (must match the folder name)
-  2. Fill in the contract docstring (Subscribes / Publishes / Config keys)
-  3. Declare your config keys and defaults in _DEFAULTS (if needed)
-  4. Implement on_system_start, on_system_stop and your topic handlers
-  5. Add subscriptions in run()
-  6. Keep ALL internal logic inside this folder
-  7. Verify standalone: python v2/modules/<your_module_name>/main.py
-  8. Verify autodiscovery: python v2/main.py
+  1. Set MODULE_NAME to your module name (must match the folder name)
+  2. Set PRIORITY (see Boot Protocol below)
+  3. Fill in the contract docstring
+  4. Declare config keys in _DEFAULTS (remove if no config needed)
+  5. Implement on_system_start, on_system_stop and your topic handlers
+  6. Add subscriptions in run()
+  7. Keep ALL internal logic inside this folder
+  8. Verify standalone: python v2/modules/<your_module_name>/main.py
+  9. Verify autodiscovery: python v2/main.py
 
 ---
+Boot Protocol (multi-step priority):
+
+  main → system.readytostart           (broadcast, no payload)
+  module → system.module_ready          {name, priority}
+  main → system.start {priority: 0}     (level 0 modules init)
+  module → system.ready {name, priority: 0}
+  main → system.start {priority: 1}     (level 1 modules init)
+  module → system.ready {name, priority: 1}
+  ...
+  main → system.stop                    (broadcast, graceful shutdown)
+
+Priority levels (convention):
+  0  — infrastructure   (config_manager, bus utilities)
+  1  — services         (bluetooth, hostapd_helper, tcp_server, ...)
+  2  — UI               (bluetooth_ui, config_ui, ...)
+
+A module MUST:
+  - respond to system.readytostart with system.module_ready
+  - respond to system.start only when payload["priority"] == PRIORITY
+  - publish system.ready after completing its own init
+  - tolerate receiving system.start messages for other priority levels
+    (simply ignore them)
+---
+
 Module contract (fill this in):
 
   Name        : <module_name>
-  Subscribes  : system.start
+  Priority    : 1
+  Subscribes  : system.readytostart
+                system.start
                 system.stop
                 config.response   (auto-handled by ConfigClient)
                 config.changed    (auto-handled by ConfigClient)
                 <other.topics>    → {payload description}
-  Publishes   : <topic.name>      → {payload description}
+  Publishes   : system.module_ready → {name, priority}
+                system.ready      → {name, priority}
+                <topic.name>      → {payload description}
   Config keys : <key>             type    default   description
   State       : private
 ---
@@ -61,20 +90,24 @@ from shared.logger import get_logger           # noqa: E402
 # Module identity
 # ---------------------------------------------------------------------------
 
-MODULE_NAME = "_template"  # ← STEP 1: change this to your module name
+MODULE_NAME = "_template"  # ← STEP 1: change to your module name
+
+# Boot priority (see Boot Protocol in the docstring above).
+# 0 = infrastructure, 1 = services, 2 = UI
+PRIORITY: int = 1          # ← STEP 2: set your priority level
 
 log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
 cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 
 # ---------------------------------------------------------------------------
-# STEP 2: Config defaults
+# STEP 3: Config defaults
 # ---------------------------------------------------------------------------
 # Declare every key your module reads from config_manager.
 # These values are used immediately at startup; config_manager will override
-# them asynchronously once it responds to the config.get request.
+# them once it responds to the config.get request.
 #
-# Remove _DEFAULTS and cfg entirely if your module has no configuration.
+# Remove _DEFAULTS and all cfg references if your module has no configuration.
 
 _DEFAULTS = {
     # "my_key": "default_value",
@@ -85,15 +118,16 @@ _DEFAULTS = {
 _config: dict = dict(_DEFAULTS)
 
 # ---------------------------------------------------------------------------
-# STEP 3: ConfigClient callbacks
+# STEP 4: ConfigClient callbacks
 # ---------------------------------------------------------------------------
-# _on_config_loaded  → called once with the full persisted config dict
-# _on_config_changed → called each time a single key is updated at runtime
-#
-# Both are no-ops if _DEFAULTS is empty — safe to leave as-is.
 
 def _on_config_loaded(config: dict) -> None:
     global _config
+    if not config:
+        # First boot: no YAML yet. config_manager already seeded the defaults
+        # (passed via cfg.get(defaults=_DEFAULTS)) — nothing more to do here.
+        log.info("No persisted config found — defaults seeded by config_manager.")
+        return
     merged = dict(_DEFAULTS)
     merged.update({k: v for k, v in config.items() if k in _DEFAULTS})
     _config = merged
@@ -111,26 +145,57 @@ def _on_config_changed(key: str, value) -> None:
 
 
 # ---------------------------------------------------------------------------
-# STEP 4: system lifecycle handlers
+# STEP 5: Boot protocol handlers
 # ---------------------------------------------------------------------------
 
+def on_system_readytostart(topic: str, payload: dict) -> None:
+    """
+    Orchestrator is ready to begin the multi-step boot.
+    Announce this module's name and priority so main.py can build
+    the startup plan before issuing system.start messages.
+    """
+    log.info(f"system.readytostart received — announcing priority {PRIORITY}")
+    bus.publish("system.module_ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+
+
 def on_system_start(topic: str, payload: dict) -> None:
-    """Called when the orchestrator signals the whole system is up."""
-    log.info(f"System started. Active modules: {payload.get('modules', [])}")
+    """
+    Orchestrator fires system.start for each priority level in order.
+    Only act when payload["priority"] matches this module's PRIORITY.
+    After completing init, publish system.ready so main.py can advance
+    to the next priority level.
+    """
+    if payload.get("priority") != PRIORITY:
+        return  # not our turn yet (or already past)
+
+    log.info(f"system.start priority={PRIORITY} received — initialising...")
+
     # TODO: initialise resources, start background threads, etc.
+    # Call cfg.get(defaults=_DEFAULTS) here if config is needed before
+    # signalling ready (config_manager is guaranteed online at priority >= 1).
+
+    # Signal that this module is fully initialised.
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info(f"system.ready published (priority={PRIORITY})")
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
-    """Called when the orchestrator signals a graceful shutdown."""
-    log.info("System stop — cleaning up...")
-    # TODO: flush state, close resources, etc.
+    """Graceful shutdown — called for all modules simultaneously."""
+    log.info("system.stop — cleaning up...")
+    # TODO: flush state, close resources, stop background threads
     bus.stop()
 
 
 # ---------------------------------------------------------------------------
-# STEP 4 (continued): topic handlers
+# STEP 5 (continued): topic handlers
 # ---------------------------------------------------------------------------
-# One function per subscribed topic. Naming convention: on_<snake_case_topic>
+# One function per subscribed topic. Naming: on_<snake_case_topic>
 #
 # Example:
 #
@@ -140,41 +205,22 @@ def on_system_stop(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# STEP 5: publishing helper (optional)
-# ---------------------------------------------------------------------------
-# Use bus.publish() anywhere inside the module to emit events.
-#
-# Example:
-#
-# def _emit_ready() -> None:
-#     bus.publish("<module_name>.ready", {"status": "ok"})
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-bus = BusClient(module_name=MODULE_NAME)
-
-
 def run() -> None:
-    # Register ConfigClient callbacks and subscribe config.response/changed
-    # Remove these two lines if your module has no configuration.
+    # Config callbacks — remove if no configuration needed
     cfg.on_config_loaded  = _on_config_loaded
     cfg.on_config_changed = _on_config_changed
     cfg.register()
 
-    # Core lifecycle
-    bus.subscribe("system.start", on_system_start)
-    bus.subscribe("system.stop",  on_system_stop)
+    # Boot protocol
+    bus.subscribe("system.readytostart", on_system_readytostart)
+    bus.subscribe("system.start",        on_system_start)
+    bus.subscribe("system.stop",         on_system_stop)
 
-    # STEP 5: add your topic subscriptions here
+    # STEP 6: add your topic subscriptions here
     # bus.subscribe("some.topic", on_some_event)
-
-    # Request persisted config from config_manager.
-    # _DEFAULTS are active until config.response arrives.
-    # Remove this line if your module has no configuration.
-    cfg.get()
 
     log.info("Module started, waiting for messages...")
     bus.start(blocking=True)  # blocks here — receive loop
