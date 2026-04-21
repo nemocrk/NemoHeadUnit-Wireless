@@ -10,16 +10,21 @@ Responsibilities:
 No ZMQ dependency — callbacks notify main.py which publishes on the bus.
 
 Pairing flow (SSP — used by Android/modern devices):
-  1. pair(address) is called → spawns thread calling Device1.Pair()
+  1. pair(address) is called → calls Device1.Pair() ASYNC (no timeout)
   2. BlueZ calls RequestConfirmation(device, passkey) on the agent
   3. Agent stores passkey, fires on_pin_requested, blocks on _confirm_event
   4. User sees passkey on both phone and host UI, calls confirm(address, pin)
   5. confirm() sets _confirm_event → RequestConfirmation returns → Pair() completes
-  6. on_pairing_completed fired; device is trusted
+  6. _pair_reply_handler fires → device is trusted → on_pairing_completed called
 
 Legacy PIN flow (older headsets that call RequestPinCode):
-  1. BlueZ calls RequestPinCode → agent returns a fixed/generated PIN
+  1. BlueZ calls RequestPinCode → agent returns a generated PIN
   2. User types PIN on the remote device
+
+Key design note:
+  Device1.Pair() is called with async reply_handler/error_handler so that
+  dbus-python never applies its ~25 s timeout while we are waiting for the
+  user to confirm the passkey on screen.
 """
 
 import sys
@@ -27,8 +32,6 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-# pairing.py lives at v2/modules/bluetooth/pairing.py
-# shared/ is at v2/shared/ → two levels up
 _V2 = Path(__file__).parent.parent.parent
 if str(_V2) not in sys.path:
     sys.path.insert(0, str(_V2))
@@ -38,7 +41,6 @@ from shared.logger import get_logger  # noqa: E402
 log = get_logger("bluetooth.pairing")
 
 AGENT_PATH = "/org/nemo/agent"
-# DisplayYesNo: host shows passkey + Yes/No buttons (SSP Numeric Comparison)
 PAIRING_CAPABILITY = "DisplayYesNo"
 
 
@@ -48,16 +50,13 @@ class PairingAgent:
 
     Callbacks (all optional, set before registering):
         on_pin_requested(device_address: str, pin: str)
-            → called when BlueZ asks us to display the passkey/PIN to the user
         on_pairing_completed(device_address: str)
-            → called after successful pair + trust
         on_pairing_failed(device_address: str, error: str)
-            → called on any pairing error
     """
 
     def __init__(
         self,
-        adapter,  # BluezAdapter
+        adapter,
         on_pin_requested: Callable[[str, str], None] | None = None,
         on_pairing_completed: Callable[[str], None] | None = None,
         on_pairing_failed: Callable[[str, str], None] | None = None,
@@ -71,7 +70,6 @@ class PairingAgent:
         self._pending_address: str = ""
         self._registered = False
 
-        # SSP flow: RequestConfirmation blocks until the user confirms/rejects
         self._confirm_event = threading.Event()
         self._confirm_accepted = False
 
@@ -80,9 +78,7 @@ class PairingAgent:
     # ------------------------------------------------------------------
 
     def register(self) -> bool:
-        """Register this agent with BlueZ AgentManager1."""
         try:
-            import dbus
             import dbus.service
 
             self._dbus_agent = _DBusAgent(
@@ -91,6 +87,7 @@ class PairingAgent:
                 on_confirm=self._handle_confirm_request,
                 on_cancel=self._handle_cancel,
             )
+            import dbus
             mgr = dbus.Interface(
                 self._adapter._bus.get_object("org.bluez", "/org/bluez"),
                 "org.bluez.AgentManager1",
@@ -120,13 +117,14 @@ class PairingAgent:
             log.warning(f"Agent unregister failed: {e}")
 
     # ------------------------------------------------------------------
-    # Initiate pairing
+    # Initiate pairing — async Pair() call
     # ------------------------------------------------------------------
 
     def pair(self, device_address: str) -> None:
         """
-        Initiate pairing with device_address asynchronously.
-        Result is delivered via on_pairing_completed / on_pairing_failed.
+        Initiate pairing asynchronously.
+        Device1.Pair() is called with reply_handler/error_handler so
+        dbus-python never times out while waiting for user confirmation.
         """
         self._pending_address = device_address
         self._pending_pin = ""
@@ -142,22 +140,44 @@ class PairingAgent:
                 self._adapter._bus.get_object("org.bluez", device_path),
                 "org.bluez.Device1",
             )
-            t = threading.Thread(
-                target=self._do_pair, args=(device_iface, device_address), daemon=True
+            # Async call: no blocking, no timeout on our side.
+            # reply_handler is called by GLib mainloop when Pair() succeeds.
+            device_iface.Pair(
+                reply_handler=lambda: self._pair_reply_handler(device_address),
+                error_handler=lambda e: self._pair_error_handler(device_address, e),
             )
-            t.start()
+            log.debug(f"Pair() async call dispatched for {device_address}")
         except Exception as e:
             log.error(f"pair() setup failed: {e}")
             if self.on_pairing_failed:
                 self.on_pairing_failed(device_address, str(e))
 
-    def confirm(self, device_address: str, pin: str) -> bool:
-        """
-        Called by main.py when the user confirms the passkey shown on screen.
+    def _pair_reply_handler(self, device_address: str) -> None:
+        """Called by GLib mainloop when Device1.Pair() completes successfully."""
+        log.info(f"D-Bus Pair() completed for {device_address}")
+        self._trust_device(device_address)
+        if self.on_pairing_completed:
+            self.on_pairing_completed(device_address)
 
-        In SSP flow, the passkey comes from BlueZ (not generated locally).
-        This method unblocks RequestConfirmation in the agent.
-        """
+    def _pair_error_handler(self, device_address: str, error) -> None:
+        """Called by GLib mainloop when Device1.Pair() fails."""
+        # AlreadyExists means the device was already paired — treat as success
+        err_str = str(error)
+        if "AlreadyExists" in err_str:
+            log.info(f"Device {device_address} already paired — treating as success")
+            self._trust_device(device_address)
+            if self.on_pairing_completed:
+                self.on_pairing_completed(device_address)
+            return
+        log.error(f"D-Bus Pair() failed for {device_address}: {error}")
+        if self.on_pairing_failed:
+            self.on_pairing_failed(device_address, err_str)
+
+    # ------------------------------------------------------------------
+    # User confirmation
+    # ------------------------------------------------------------------
+
+    def confirm(self, device_address: str, pin: str) -> bool:
         if device_address != self._pending_address:
             log.warning(f"confirm() address mismatch: got {device_address}, expected {self._pending_address}")
             return False
@@ -172,29 +192,16 @@ class PairingAgent:
         return True
 
     def reject(self, device_address: str) -> None:
-        """Called by main.py when the user rejects the pairing."""
         log.info(f"User rejected pairing for {device_address}")
         self._confirm_accepted = False
         self._confirm_event.set()
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Agent callbacks
     # ------------------------------------------------------------------
 
-    def _do_pair(self, device_iface, device_address: str) -> None:
-        try:
-            device_iface.Pair()
-            log.info(f"D-Bus Pair() completed for {device_address}")
-            self._trust_device(device_address)
-            if self.on_pairing_completed:
-                self.on_pairing_completed(device_address)
-        except Exception as e:
-            log.error(f"D-Bus Pair() failed for {device_address}: {e}")
-            if self.on_pairing_failed:
-                self.on_pairing_failed(device_address, str(e))
-
     def _handle_pin_code_request(self, device_path: str) -> str:
-        """Legacy PIN flow: BlueZ calls RequestPinCode (older devices)."""
+        """Legacy PIN flow (older devices)."""
         import random
         import string
         addr = self._path_to_address(device_path)
@@ -208,11 +215,8 @@ class PairingAgent:
 
     def _handle_confirm_request(self, device_path: str, passkey: int) -> bool:
         """
-        SSP flow: BlueZ calls RequestConfirmation(device, passkey).
-
-        Stores the BlueZ-generated passkey, notifies the UI, then blocks
-        until confirm() or reject() is called by the user.
-        Returns True to accept, raises DBusException to reject.
+        SSP flow: called by GLib mainloop when BlueZ invokes RequestConfirmation.
+        Blocks (in GLib thread) until user calls confirm() or reject().
         """
         import dbus.exceptions
         addr = self._path_to_address(device_path)
@@ -223,7 +227,6 @@ class PairingAgent:
         if self.on_pin_requested:
             self.on_pin_requested(addr, pin)
 
-        # Block until user calls confirm() or reject() (timeout: 60 s)
         confirmed = self._confirm_event.wait(timeout=60)
         if not confirmed or not self._confirm_accepted:
             log.warning(f"Pairing rejected or timed out for {addr}")
@@ -235,10 +238,13 @@ class PairingAgent:
         return True
 
     def _handle_cancel(self) -> None:
-        """BlueZ cancelled the pairing request."""
         log.info("Agent Cancel — aborting pending confirmation")
         self._confirm_accepted = False
         self._confirm_event.set()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     def _resolve_device_path(self, address: str) -> str | None:
         try:
@@ -256,7 +262,6 @@ class PairingAgent:
         return None
 
     def _path_to_address(self, device_path: str) -> str:
-        """Convert /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF → AA:BB:CC:DD:EE:FF."""
         part = device_path.split("/")[-1]
         return part.replace("dev_", "").replace("_", ":")
 
@@ -277,15 +282,10 @@ class PairingAgent:
 
 
 # ---------------------------------------------------------------------------
-# D-Bus Agent object (exposed on the system bus)
+# D-Bus Agent object
 # ---------------------------------------------------------------------------
 
 class _DBusAgent:
-    """
-    BlueZ Agent1 D-Bus object.
-    Exposes RequestPinCode, RequestConfirmation, Release, Cancel.
-    """
-
     IFACE = "org.bluez.Agent1"
 
     def __init__(
@@ -296,6 +296,7 @@ class _DBusAgent:
         on_cancel: Callable[[], None],
     ):
         try:
+            import dbus
             import dbus.service
 
             class _Agent(dbus.service.Object):
@@ -311,7 +312,6 @@ class _DBusAgent:
 
                 @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
                 def RequestConfirmation(self_, device, passkey):
-                    # _handle_confirm_request blocks until user acts
                     self_._on_confirm(str(device), int(passkey))
 
                 @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
