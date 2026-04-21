@@ -22,11 +22,20 @@ Legacy PIN flow (older headsets that call RequestPinCode):
   2. User types PIN on the remote device
 """
 
-import logging
+import sys
 import threading
+from pathlib import Path
 from typing import Callable
 
-log = logging.getLogger("bluetooth.pairing")
+# pairing.py lives at v2/modules/bluetooth/pairing.py
+# shared/ is at v2/shared/ → two levels up
+_V2 = Path(__file__).parent.parent.parent
+if str(_V2) not in sys.path:
+    sys.path.insert(0, str(_V2))
+
+from shared.logger import get_logger  # noqa: E402
+
+log = get_logger("bluetooth.pairing")
 
 AGENT_PATH = "/org/nemo/agent"
 # DisplayYesNo: host shows passkey + Yes/No buttons (SSP Numeric Comparison)
@@ -186,7 +195,8 @@ class PairingAgent:
 
     def _handle_pin_code_request(self, device_path: str) -> str:
         """Legacy PIN flow: BlueZ calls RequestPinCode (older devices)."""
-        import random, string
+        import random
+        import string
         addr = self._path_to_address(device_path)
         pin = "".join(random.choices(string.digits, k=4))
         self._pending_pin = pin
@@ -306,7 +316,6 @@ class _DBusAgent:
 
                 @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
                 def RequestPasskey(self_, device):
-                    # Numeric passkey entry (rare): return 0 to let BlueZ decide
                     log.warning("RequestPasskey called — not supported, returning 0")
                     return dbus.UInt32(0)
 
