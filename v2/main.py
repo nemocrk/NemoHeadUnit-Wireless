@@ -3,12 +3,15 @@ NemoHeadUnit-Wireless v2 — Main Orchestrator
 
 Responsibilities:
   1. Start the bus broker (bus_broker.py) as an independent subprocess
-  2. Start each module as an independent subprocess
+  2. Discover and start all modules found in modules/*/main.py
   3. Publish system.start after all processes are up
   4. On SIGINT (Ctrl+C): publish system.stop, then terminate all subprocesses
 
-Modules are defined in MODULES list as paths to their own main.py.
-Each module is fully standalone and communicates only via the ZMQ bus.
+Module autodiscovery:
+  Any subfolder inside v2/modules/ that contains a main.py is treated as a module
+  and started automatically. No manual registration needed.
+
+  To disable a module temporarily, rename its main.py to main.py.disabled.
 """
 
 import signal
@@ -26,14 +29,8 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
 BROKER_SCRIPT = BASE_DIR / "bus_broker.py"
+MODULES_DIR = BASE_DIR / "modules"
 BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
-
-# Add module main.py paths here as they are created, e.g.:
-# MODULES = [
-#     BASE_DIR / "modules" / "aa_wireless" / "main.py",
-#     BASE_DIR / "modules" / "ui" / "main.py",
-# ]
-MODULES: list[Path] = []
 
 BROKER_STARTUP_DELAY = 0.5   # seconds to wait for broker to bind
 MODULE_STARTUP_DELAY = 0.2   # seconds between module launches
@@ -47,6 +44,23 @@ logging.basicConfig(
     format="[main] %(asctime)s %(levelname)s %(message)s",
 )
 log = logging.getLogger("main")
+
+# ---------------------------------------------------------------------------
+# Module autodiscovery
+# ---------------------------------------------------------------------------
+
+def discover_modules() -> list[Path]:
+    """
+    Scan modules/ and return sorted list of main.py paths.
+    A folder is a valid module if it contains exactly a 'main.py' file.
+    """
+    found = sorted(MODULES_DIR.glob("*/main.py"))
+    if not found:
+        log.warning(f"No modules found in {MODULES_DIR}")
+    for m in found:
+        log.info(f"Discovered module: {m.parent.name}")
+    return found
+
 
 # ---------------------------------------------------------------------------
 # Bus publisher (used only by main to send system.start / system.stop)
@@ -119,28 +133,31 @@ def run():
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # 1. Start broker
+    # 1. Discover modules
+    modules = discover_modules()
+
+    # 2. Start broker
     broker_proc = _start_process(BROKER_SCRIPT, "bus_broker")
     processes.append(("bus_broker", broker_proc))
     time.sleep(BROKER_STARTUP_DELAY)
 
-    # 2. Connect publisher
+    # 3. Connect publisher
     ctx, pub = _make_publisher()
     time.sleep(0.1)  # allow PUB socket to connect
 
-    # 3. Start modules
-    for module_script in MODULES:
+    # 4. Start modules
+    for module_script in modules:
         label = module_script.parent.name
         proc = _start_process(module_script, label)
         processes.append((label, proc))
         time.sleep(MODULE_STARTUP_DELAY)
 
-    # 4. Publish system.start
-    _publish(pub, "system.start", {"modules": [m.parent.name for m in MODULES]})
+    # 5. Publish system.start
+    _publish(pub, "system.start", {"modules": [m.parent.name for m in modules]})
 
     log.info("All processes started. Press Ctrl+C to stop.")
 
-    # 5. Wait — keep main alive, restart crashed modules if needed
+    # 6. Keep main alive — log unexpected exits
     while True:
         time.sleep(1)
         for label, proc in processes:
