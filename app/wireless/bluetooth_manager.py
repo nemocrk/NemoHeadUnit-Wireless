@@ -1,233 +1,200 @@
 """
 Bluetooth Manager for Android Auto Wireless Connection
 
-Uses QBluetooth for device discovery and pairing, with D-Bus for profile registration.
+Uses D-Bus ProfileManager1 for HFP/HSP/AA profile registration
+and RFCOMM channel 8 for WiFi credential handshake.
 
-Architecture:
-- QBluetooth for device discovery and pairing
-- D-Bus ProfileManager1 for HFP/HSP/AA profile registration
-- RFCOMM channel 8 for WiFi credential handshake
+Design:
+    BluetoothManager is a plain Python class with NO autonomous bus
+    connection. The bus is injected via set_bus() by the caller
+    (WirelessDaemon or WirelessService) after the broker is ready.
+    This avoids a race condition where MessageBus() in __init__
+    attempts to connect to ZMQ before bus_broker has started.
 
-Event Topics:
-- wireless.bluetooth.discovery.started
-- wireless.bluetooth.discovery.completed
-- wireless.bluetooth.paired
-- wireless.bluetooth.connected
-- connection.pairing.requested (listens from GUI)
+Event Topics published:
+    wireless.bluetooth.discovery.started
+    wireless.bluetooth.discovery.completed
+    wireless.bluetooth.discovery.failed
+    wireless.bluetooth.hfp.started
+    wireless.bluetooth.hsp.started
+    wireless.bluetooth.aa.started
+    wireless.bluetooth.registration.completed
+    wireless.bluetooth.registration.failed
+    wireless.bluetooth.pairing.started
+    wireless.bluetooth.pairing.failed
+    wireless.bluetooth.connection.started
+    wireless.bluetooth.connection.failed
 """
 
 import socket
-from typing import List, Optional, Dict
-from app.message_bus import MessageBus
+from typing import List, Optional, Dict, Any
+from app.logger import LoggerManager
+
+log = LoggerManager.get_logger('app.wireless.bluetooth_manager')
 
 
 class BluetoothManager:
     """
     Manages Bluetooth discovery, pairing, and profile registration.
-    
-    Uses QBluetooth for device discovery and Python D-Bus for profile
-    registration (ProfileManager1 D-Bus API).
+
+    Bus dependency is injected via set_bus() — never created internally.
     """
-    
-    # Event topics
-    DISCOVERY_STARTED = "wireless.bluetooth.discovery.started"
-    DISCOVERY_COMPLETED = "wireless.bluetooth.discovery.completed"
-    PAIRING_STARTED = "wireless.bluetooth.paired"
-    CONNECTION_STARTED = "wireless.bluetooth.connected"
-    
+
+    # ------------------------------------------------------------------
+    # Event topic constants
+    # ------------------------------------------------------------------
+    DISCOVERY_STARTED        = "wireless.bluetooth.discovery.started"
+    DISCOVERY_COMPLETED      = "wireless.bluetooth.discovery.completed"
+    DISCOVERY_FAILED         = "wireless.bluetooth.discovery.failed"
+    HFP_STARTED              = "wireless.bluetooth.hfp.started"
+    HSP_STARTED              = "wireless.bluetooth.hsp.started"
+    AA_STARTED               = "wireless.bluetooth.aa.started"
+    REGISTRATION_COMPLETED   = "wireless.bluetooth.registration.completed"
+    REGISTRATION_FAILED      = "wireless.bluetooth.registration.failed"
+    PAIRING_STARTED          = "wireless.bluetooth.pairing.started"
+    PAIRING_FAILED           = "wireless.bluetooth.pairing.failed"
+    CONNECTION_STARTED       = "wireless.bluetooth.connection.started"
+    CONNECTION_FAILED        = "wireless.bluetooth.connection.failed"
+
     # UUIDs
     HFP_UUID = "0000111e-0000-1000-8000-00805f9b34fb"
     HSP_UUID = "00001108-0000-1000-8000-00805f9b34fb"
-    AA_UUID = "4de17a00-52cb-11e6-bdf4-0800200c9a66"
-    
-    # Pairing capabilities
+    AA_UUID  = "4de17a00-52cb-11e6-bdf4-0800200c9a66"
+
     PAIRING_CAPABILITY = "DisplayYesNo"
-    
+
     def __init__(self):
+        # NO BusClient / MessageBus here — injected later via set_bus()
+        self._bus = None
+        self._sender = "bluetooth_manager"
+        self._initialized = False
         self.dbus = None
         self.profile_manager = None
         self.device_manager = None
-        self._initialized = False
-        self._bus = MessageBus()
-    
-    def _publish_event(self, topic: str, payload: dict) -> None:
-        """Publishes an event to the message bus."""
-        self._bus.publish(topic, __name__, payload)
-    
+
+    # ------------------------------------------------------------------
+    # Bus injection
+    # ------------------------------------------------------------------
+
+    def set_bus(self, bus: Any) -> None:
+        """Inject the shared BusClient. Call this after the broker is ready."""
+        self._bus = bus
+
+    def _publish(self, topic: str, payload: dict) -> None:
+        if self._bus:
+            self._bus.publish(topic, self._sender, payload)
+        else:
+            log.debug(f"[no bus] {topic} {payload}")
+
+    # ------------------------------------------------------------------
+    # Initialisation
+    # ------------------------------------------------------------------
+
     def init_dbus(self) -> bool:
-        """Initialize D-Bus connection."""
+        """Initialize D-Bus connection (stub — replace with real BlueZ D-Bus)."""
         try:
+            # TODO: replace with actual dbus.SystemBus() + BlueZ proxy
             self.dbus = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._initialized = True
-            self._publish_event(self.DISCOVERY_STARTED, {"status": "initialized"})
+            self._publish(self.DISCOVERY_STARTED, {"status": "initialized"})
+            log.info("D-Bus initialized (stub)")
             return True
         except Exception as e:
-            self._publish_event(self.DISCOVERY_COMPLETED, {"error": str(e)})
-            print(f"Failed to initialize D-Bus: {e}")
+            log.error(f"Failed to initialize D-Bus: {e}")
+            self._publish(self.DISCOVERY_FAILED, {"error": str(e)})
             return False
-    
+
     def register_profiles(self) -> bool:
         """
-        Register HFP/HSP/AA profiles via ProfileManager1 D-Bus API.
-        
-        Profiles:
-        - HFP AG (required by AA)
-        - HSP HS (keeps BT connection alive)
-        - AA RFCOMM (handles WiFi credential handshake)
+        Register HFP AG, HSP HS and AA RFCOMM profiles via
+        ProfileManager1 D-Bus API (stub).
         """
         if not self._initialized:
+            log.warning("register_profiles called before init_dbus")
             return False
-        
         try:
-            # Register HFP AG profile (required by AA)
-            self._publish_event(self.HFP_STARTED, {"profile": "HFP AG"})
-            print("Registering HFP AG profile")
-            
-            # Register HSP HS profile (keeps BT connection alive)
-            self._publish_event(self.HSP_STARTED, {"profile": "HSP HS"})
-            print("Registering HSP HS profile")
-            
-            # Register AA RFCOMM profile (handles WiFi handshake)
-            self._publish_event(self.AA_STARTED, {"profile": "AA RFCOMM"})
-            print("Registering AA RFCOMM profile")
-            
+            self._publish(self.HFP_STARTED,  {"profile": "HFP AG"})
+            log.info("Registering HFP AG profile (stub)")
+
+            self._publish(self.HSP_STARTED,  {"profile": "HSP HS"})
+            log.info("Registering HSP HS profile (stub)")
+
+            self._publish(self.AA_STARTED,   {"profile": "AA RFCOMM"})
+            log.info("Registering AA RFCOMM profile (stub)")
+
+            self._publish(self.REGISTRATION_COMPLETED, {"status": "ok"})
             return True
         except Exception as e:
-            self._publish_event(self.REGISTRATION_FAILED, {"error": str(e)})
-            print(f"Failed to register profiles: {e}")
+            log.error(f"Failed to register profiles: {e}")
+            self._publish(self.REGISTRATION_FAILED, {"error": str(e)})
             return False
-    
+
+    # ------------------------------------------------------------------
+    # Pairing
+    # ------------------------------------------------------------------
+
     def set_pairing_capability(self, address: str) -> bool:
-        """
-        Set pairing capability to DisplayYesNo for auto-confirmation.
-        
-        Args:
-            address: Bluetooth device address
-        """
         if not self._initialized:
             return False
-        
         try:
-            device = f"device_{address}"
-            self.device_manager.SetPairing(device, self.PAIRING_CAPABILITY)
-            self._publish_event(self.PAIRING_STARTED, {"device": address})
+            # TODO: real BlueZ SetPairing call
+            self._publish(self.PAIRING_STARTED, {"device": address})
+            log.info(f"Pairing capability set for {address} (stub)")
             return True
         except Exception as e:
-            self._publish_event(self.PAIRING_FAILED, {"error": str(e)})
-            print(f"Failed to set pairing capability: {e}")
+            log.error(f"Failed to set pairing capability: {e}")
+            self._publish(self.PAIRING_FAILED, {"error": str(e)})
             return False
-    
+
     def discover_devices(self) -> List[Dict[str, str]]:
-        """
-        Discover nearby Bluetooth devices.
-        
-        Returns:
-            List of device addresses
-        """
+        """Start Bluetooth device discovery (stub)."""
         try:
-            self._publish_event(self.DISCOVERY_STARTED, {"status": "started"})
-            devices = []
-            self._publish_event(self.DISCOVERY_COMPLETED, {"devices": devices})
+            self._publish(self.DISCOVERY_STARTED, {"status": "started"})
+            devices: List[Dict[str, str]] = []
+            # TODO: real BlueZ StartDiscovery
+            self._publish(self.DISCOVERY_COMPLETED, {"devices": devices})
             return devices
         except Exception as e:
-            self._publish_event(self.DISCOVERY_FAILED, {"error": str(e)})
-            print(f"Discovery failed: {e}")
+            log.error(f"Discovery failed: {e}")
+            self._publish(self.DISCOVERY_FAILED, {"error": str(e)})
             return []
-    
+
     def initiate_pairing(self, device_info: Dict[str, str]) -> bool:
-        """
-        Initiate pairing with a discovered device.
-        
-        Args:
-            device_info: device address
-        """
+        """Initiate pairing with a discovered device."""
         try:
             device = device_info.get("address", "")
             self.set_pairing_capability(device)
-            self._publish_event(self.PAIRING_STARTED, {"device": device})
+            self._publish(self.PAIRING_STARTED, {"device": device})
             return True
         except Exception as e:
-            self._publish_event(self.PAIRING_FAILED, {"error": str(e)})
-            print(f"Pairing failed: {e}")
+            log.error(f"Pairing failed: {e}")
+            self._publish(self.PAIRING_FAILED, {"error": str(e)})
             return False
-    
-    def handle_connection(self, socket: socket.socket) -> Optional[socket.socket]:
-        """
-        Handle incoming RFCOMM connection.
-        
-        Args:
-            socket: socket object
-        """
+
+    def handle_connection(self, conn: socket.socket) -> Optional[socket.socket]:
+        """Accept an RFCOMM socket and transfer ownership to RfcommHandler."""
         try:
-            # Set blocking mode immediately after connection
-            socket.setblocking(True)
-            socket.settimeout(10.0)
-            
-            # Transfer ownership to RFCOMM handler
-            self._publish_event(self.CONNECTION_STARTED, {"device": socket.getpeername()})
-            return socket
+            conn.setblocking(True)
+            conn.settimeout(10.0)
+            addr = conn.getpeername()
+            self._publish(self.CONNECTION_STARTED, {"device": str(addr)})
+            return conn
         except Exception as e:
-            self._publish_event(self.CONNECTION_FAILED, {"error": str(e)})
-            print(f"Connection handling failed: {e}")
+            log.error(f"Connection handling failed: {e}")
+            self._publish(self.CONNECTION_FAILED, {"error": str(e)})
             return None
-    
-    def _on_pairing_requested(self, payload: dict) -> None:
-        """Handle pairing request from message bus."""
-        print(f"Pairing requested from GUI: {payload}")
-        self._publish_event(self.DISCOVERY_STARTED, {"status": "started", "trigger": "gui"})
-        
-        # Start discovery process
-        devices = self.discover_devices()
-        self._publish_event(self.DISCOVERY_COMPLETED, {"devices": devices})
-    
-    # Event constants for external use
-    HFP_STARTED = "wireless.bluetooth.hfp.started"
-    HSP_STARTED = "wireless.bluetooth.hsp.started"
-    AA_STARTED = "wireless.bluetooth.aa.started"
-    REGISTRATION_STARTED = "wireless.bluetooth.registration.started"
-    REGISTRATION_COMPLETED = "wireless.bluetooth.registration.completed"
-    REGISTRATION_FAILED = "wireless.bluetooth.registration.failed"
-    PAIRING_STARTED = "wireless.bluetooth.pairing.started"
-    PAIRING_FAILED = "wireless.bluetooth.pairing.failed"
-    DISCOVERY_STARTED = "wireless.bluetooth.discovery.started"
-    DISCOVERY_COMPLETED = "wireless.bluetooth.discovery.completed"
-    DISCOVERY_FAILED = "wireless.bluetooth.discovery.failed"
-    CONNECTION_STARTED = "wireless.bluetooth.connection.started"
-    CONNECTION_FAILED = "wireless.bluetooth.connection.failed"
 
 
-class DbusManager:
-    """
-    D-Bus manager for BlueZ integration.
-    
-    Handles ProfileManager1 D-Bus API for profile registration
-    and DeviceManager for pairing operations.
-    """
-    
-    def __init__(self):
-        self.dbus = None
-        self.profile_manager = None
-        self.device_manager = None
-    
-    def init_dbus(self) -> bool:
-        """Initialize D-Bus connection."""
-        try:
-            self.dbus = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            return True
-        except Exception as e:
-            print(f"Failed to initialize D-Bus: {e}")
-            return False
+# ---------------------------------------------------------------------------
+# Singleton accessor (optional — callers may instantiate directly)
+# ---------------------------------------------------------------------------
 
-
-# Singleton instance
-_blutooth_manager = None
+_instance: Optional[BluetoothManager] = None
 
 
 def get_bluetooth_manager() -> BluetoothManager:
-    """Get the singleton BluetoothManager instance."""
-    global _blutooth_manager
-    if _blutooth_manager is None:
-        _blutooth_manager = BluetoothManager()
-        _blutooth_manager.init_dbus()
-        _blutooth_manager.register_profiles()
-    return _blutooth_manager
+    """Return the singleton BluetoothManager (bus NOT pre-connected)."""
+    global _instance
+    if _instance is None:
+        _instance = BluetoothManager()
+    return _instance
