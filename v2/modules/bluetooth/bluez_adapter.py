@@ -11,8 +11,14 @@ instantiated by main.py after the broker is ready.
 """
 
 import logging
+import os
 
 log = logging.getLogger("bluetooth.bluez_adapter")
+
+# Workaround: conda injects DBUS_SYSTEM_BUS_ADDRESS as empty string,
+# causing dbus-python to fall back to a non-existent conda-env socket.
+if not os.environ.get("DBUS_SYSTEM_BUS_ADDRESS"):
+    os.environ["DBUS_SYSTEM_BUS_ADDRESS"] = "unix:path=/run/dbus/system_bus_socket"
 
 # Android Auto RFCOMM profile UUID
 HFP_UUID = "0000111e-0000-1000-8000-00805f9b34fb"
@@ -20,6 +26,26 @@ HSP_UUID = "00001108-0000-1000-8000-00805f9b34fb"
 AA_UUID  = "4de17a00-52cb-11e6-bdf4-0800200c9a66"
 
 RFCOMM_CHANNEL = 8
+
+
+def _setup_glib_mainloop() -> None:
+    """Install GLib mainloop as default D-Bus mainloop.
+
+    Must be called once before the first dbus.SystemBus() so that
+    BlueZ agent callbacks (RequestConfirmation, RequestPinCode …)
+    are dispatched by the GLib event loop while blocking D-Bus calls
+    (e.g. Device1.Pair()) are running in a background thread.
+    """
+    try:
+        import dbus.mainloop.glib
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        log.debug("GLib D-Bus mainloop installed")
+    except Exception as e:
+        log.warning(f"GLib mainloop setup failed (agent callbacks may not work): {e}")
+
+
+# Install mainloop at import time so it is always set before any SystemBus().
+_setup_glib_mainloop()
 
 
 class BluezAdapter:
@@ -86,7 +112,12 @@ class BluezAdapter:
     # ------------------------------------------------------------------
 
     def register_profiles(self) -> bool:
-        """Register HFP AG, HSP HS and AA RFCOMM profiles."""
+        """Register HFP AG, HSP HS and AA RFCOMM profiles.
+
+        If a profile UUID is already registered (e.g. after an unclean
+        shutdown), the error is treated as non-fatal and registration
+        continues for the remaining profiles.
+        """
         if not self._initialized:
             log.warning("register_profiles called before init()")
             return False
@@ -96,19 +127,24 @@ class BluezAdapter:
                 {"Channel": dbus.UInt16(RFCOMM_CHANNEL), "AutoConnect": dbus.Boolean(True)},
                 signature="sv",
             )
-            self._profile_mgr.RegisterProfile("/org/bluez/profile/hfp", HFP_UUID, opts)
-            log.info("Registered HFP AG profile")
-
-            self._profile_mgr.RegisterProfile("/org/bluez/profile/hsp", HSP_UUID, opts)
-            log.info("Registered HSP HS profile")
-
-            self._profile_mgr.RegisterProfile("/org/bluez/profile/aa", AA_UUID, opts)
-            log.info("Registered AA RFCOMM profile")
-
+            self._register_one("/org/bluez/profile/hfp", HFP_UUID, opts, "HFP AG")
+            self._register_one("/org/bluez/profile/hsp", HSP_UUID, opts, "HSP HS")
+            self._register_one("/org/bluez/profile/aa",  AA_UUID,  opts, "AA RFCOMM")
             return True
         except Exception as e:
             log.error(f"Profile registration failed: {e}")
             return False
+
+    def _register_one(self, path: str, uuid: str, opts, label: str) -> None:
+        """Register a single profile, ignoring 'UUID already registered'."""
+        try:
+            self._profile_mgr.RegisterProfile(path, uuid, opts)
+            log.info(f"Registered {label} profile")
+        except Exception as e:
+            if "UUID already registered" in str(e) or "org.bluez.Error.NotPermitted" in str(e):
+                log.warning(f"{label} profile already registered — skipping")
+            else:
+                raise
 
     # ------------------------------------------------------------------
     # Adapter controls
