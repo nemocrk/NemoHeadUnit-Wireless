@@ -7,37 +7,36 @@ Responsibilities:
   - Expose AP parameters (ssid, key, bssid, interface) to caller
 
 No ZMQ dependency — caller (main.py) handles publishing.
+
+All network parameters are now fields on APConfig so they can be
+driven from the config_manager module at runtime.
 """
 
 import logging
 import os
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 log = logging.getLogger("hostapd_helper.ap_manager")
 
-# Defaults — override via APConfig
-DEFAULT_INTERFACE  = "wlan0"
-DEFAULT_SSID       = "AndroidAutoAP"
-DEFAULT_CHANNEL    = 6
-DEFAULT_SUBNET     = "192.168.50"
-GATEWAY_IP         = "192.168.50.1"
-DHCP_RANGE_START   = "192.168.50.10"
-DHCP_RANGE_END     = "192.168.50.50"
-DHCP_LEASE_TIME    = "12h"
+# Module-level constants that are NOT user-configurable
 WPA2_SECURITY_MODE = 8   # WPA2_PERSONAL constant for RFCOMM handshake
 AP_TYPE_DYNAMIC    = 1
+DHCP_LEASE_TIME    = "12h"
 
 
 @dataclass
 class APConfig:
-    interface: str = DEFAULT_INTERFACE
-    ssid: str = DEFAULT_SSID
-    key: str = ""            # generated on start() if empty
-    channel: int = DEFAULT_CHANNEL
-    subnet: str = DEFAULT_SUBNET
+    interface:        str = "wlan0"
+    ssid:             str = "AndroidAutoAP"
+    key:              str = ""           # generated on start() if empty
+    channel:          int = 6
+    subnet:           str = "192.168.50"
+    gateway_ip:       str = "192.168.50.1"
+    dhcp_range_start: str = "192.168.50.10"
+    dhcp_range_end:   str = "192.168.50.50"
 
 
 class APManager:
@@ -47,7 +46,7 @@ class APManager:
     Usage:
         cfg = APConfig(interface="wlan0", ssid="MyAP", key="secret123")
         mgr = APManager(cfg)
-        ok = mgr.start()     # writes configs, starts subprocesses
+        ok = mgr.start()           # writes configs, starts subprocesses
         params = mgr.get_params()  # {ssid, key, bssid, interface, ...}
         mgr.stop()
     """
@@ -56,7 +55,7 @@ class APManager:
         self._cfg = config or APConfig()
         self._hostapd_proc: Optional[subprocess.Popen] = None
         self._dnsmasq_proc: Optional[subprocess.Popen] = None
-        self._hostapd_conf: Optional[str] = None  # temp file path
+        self._hostapd_conf: Optional[str] = None
         self._dnsmasq_conf: Optional[str] = None
         self._bssid: str = ""
 
@@ -70,7 +69,11 @@ class APManager:
             self._cfg.key = self._generate_key()
 
         self._bssid = self._get_interface_mac(self._cfg.interface)
-        log.info(f"Starting AP: ssid={self._cfg.ssid} iface={self._cfg.interface} bssid={self._bssid}")
+        log.info(
+            f"Starting AP: ssid={self._cfg.ssid} iface={self._cfg.interface} "
+            f"bssid={self._bssid} channel={self._cfg.channel} "
+            f"gateway={self._cfg.gateway_ip}"
+        )
 
         if not self._configure_interface():
             return False
@@ -111,7 +114,7 @@ class APManager:
             "key":           self._cfg.key,
             "bssid":         self._bssid,
             "interface":     self._cfg.interface,
-            "gateway_ip":    GATEWAY_IP,
+            "gateway_ip":    self._cfg.gateway_ip,
             "security_mode": WPA2_SECURITY_MODE,
             "ap_type":       AP_TYPE_DYNAMIC,
         }
@@ -144,13 +147,13 @@ class APManager:
         cfg = self._cfg
         content = (
             f"interface={cfg.interface}\n"
-            f"dhcp-range={DHCP_RANGE_START},{DHCP_RANGE_END},{DHCP_LEASE_TIME}\n"
-            f"dhcp-option=3,{GATEWAY_IP}\n"
-            f"dhcp-option=6,{GATEWAY_IP}\n"
+            f"dhcp-range={cfg.dhcp_range_start},{cfg.dhcp_range_end},{DHCP_LEASE_TIME}\n"
+            f"dhcp-option=3,{cfg.gateway_ip}\n"
+            f"dhcp-option=6,{cfg.gateway_ip}\n"
             f"server=8.8.8.8\n"
             f"log-queries\n"
             f"log-dhcp\n"
-            f"listen-address={GATEWAY_IP}\n"
+            f"listen-address={cfg.gateway_ip}\n"
             f"bind-interfaces\n"
         )
         return self._write_temp("dnsmasq_", ".conf", content)
@@ -198,16 +201,14 @@ class APManager:
     def _configure_interface(self) -> bool:
         """Assign gateway IP to interface."""
         iface = self._cfg.interface
+        gw    = self._cfg.gateway_ip
         try:
             subprocess.run(["ip", "link", "set", iface, "up"], check=True)
+            subprocess.run(["ip", "addr", "flush", "dev", iface], check=True)
             subprocess.run(
-                ["ip", "addr", "flush", "dev", iface], check=True
+                ["ip", "addr", "add", f"{gw}/24", "dev", iface], check=True
             )
-            subprocess.run(
-                ["ip", "addr", "add", f"{GATEWAY_IP}/24", "dev", iface],
-                check=True,
-            )
-            log.info(f"Interface {iface} configured with {GATEWAY_IP}/24")
+            log.info(f"Interface {iface} configured with {gw}/24")
             return True
         except subprocess.CalledProcessError as e:
             log.error(f"Interface config failed: {e}")
@@ -223,8 +224,7 @@ class APManager:
 
     def _get_interface_mac(self, iface: str) -> str:
         try:
-            path = f"/sys/class/net/{iface}/address"
-            with open(path) as f:
+            with open(f"/sys/class/net/{iface}/address") as f:
                 return f.read().strip().upper()
         except Exception:
             return "00:00:00:00:00:00"
