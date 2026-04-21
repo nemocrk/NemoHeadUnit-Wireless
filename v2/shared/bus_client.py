@@ -69,7 +69,7 @@ class BusClient:
     def stop(self):
         """Stop the receive loop and close sockets."""
         self._running = False
-        self._pub.close()
+        self._pub.close(linger=0)
         self._sub.close()
         self._context.term()
         self.log.info("BusClient stopped.")
@@ -87,6 +87,10 @@ class BusClient:
                     handler = self._subscriptions.get(topic)
                     if handler:
                         handler(topic, payload)
+            except KeyboardInterrupt:
+                # Module received Ctrl+C directly — exit cleanly without traceback
+                self.log.info("KeyboardInterrupt received — stopping.")
+                break
             except zmq.ZMQError as e:
                 if self._running:
                     self.log.error(f"ZMQ error: {e}")
