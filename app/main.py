@@ -19,6 +19,11 @@ SIGINT / Ctrl+C design:
     called while app.exec() runs — unless the interpreter gets CPU time.
     A QTimer firing every 200ms forces Qt to yield to Python briefly, which
     is enough for signal.signal(SIGINT, handler) to fire and call app.quit().
+
+Subprocess stdout:
+    stdout=None (inherit parent’s terminal) — NOT stdout=PIPE.
+    With PIPE and no consumer the OS pipe buffer (~64 KB) fills up and
+    the subprocess blocks on write(), causing an apparent hang.
 """
 
 import sys
@@ -42,10 +47,10 @@ from app.logger import LoggerManager
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-BROKER_PUB_ADDR    = "ipc:///tmp/nemobus.pub"
-BROKER_WAIT_TIMEOUT  = 10.0   # seconds max to wait for broker
-BROKER_POLL_INTERVAL = 0.05   # seconds between attempts
-SIGINT_TIMER_MS      = 200    # QTimer interval to keep Python interpreter alive
+BROKER_PUB_ADDR      = "ipc:///tmp/nemobus.pub"
+BROKER_WAIT_TIMEOUT  = 10.0
+BROKER_POLL_INTERVAL = 0.05
+SIGINT_TIMER_MS      = 200
 
 
 def _wait_for_broker(logger, timeout: float = BROKER_WAIT_TIMEOUT) -> bool:
@@ -85,11 +90,9 @@ class Application:
         ]
         for name, cmd in procs:
             try:
-                p = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                )
+                # stdout=None: inherit parent terminal so subprocess output
+                # is visible and the OS pipe buffer cannot fill up and deadlock.
+                p = subprocess.Popen(cmd, stdout=None, stderr=None)
                 self._subprocesses.append(p)
                 self._logger.info(f"Started subprocess: {name} (pid={p.pid})")
             except FileNotFoundError:
@@ -133,11 +136,10 @@ class Application:
             return False
 
     # ------------------------------------------------------------------
-    # Graceful shutdown (called from SIGINT handler or window close)
+    # Graceful shutdown
     # ------------------------------------------------------------------
 
     def _shutdown(self) -> None:
-        """Publish shutdown event, stop bus, terminate subprocesses."""
         self._logger.info("Shutting down...")
         if self._bus:
             try:
@@ -154,11 +156,10 @@ class Application:
 
     def run(self) -> int:
         try:
-            # 1. Qt application — must be first
+            # 1. Qt application
             self._app = QApplication.instance() or QApplication(sys.argv)
 
-            # 2. Install SIGINT handler BEFORE app.exec() blocks the GIL.
-            #    Sets a flag; the QTimer watchdog will call app.quit().
+            # 2. SIGINT handler + QTimer watchdog
             _quit_requested = [False]
 
             def _on_sigint(signum, frame):
@@ -169,35 +170,33 @@ class Application:
             signal.signal(signal.SIGINT,  _on_sigint)
             signal.signal(signal.SIGTERM, _on_sigint)
 
-            # 3. QTimer watchdog: wakes Python interpreter every 200ms so
-            #    the signal handler above can fire even during app.exec().
             watchdog = QTimer()
             watchdog.setInterval(SIGINT_TIMER_MS)
-            watchdog.timeout.connect(lambda: None)  # no-op: just yields to Python
+            watchdog.timeout.connect(lambda: None)
             watchdog.start()
 
-            # 4. Start infrastructure subprocesses
+            # 3. Start subprocesses
             if not self._start_subprocesses():
                 return 1
 
-            # 5. Wait for broker socket
+            # 4. Wait for broker
             if not _wait_for_broker(self._logger):
                 self._logger.error("Cannot connect to broker, aborting")
                 self._stop_subprocesses()
                 return 1
 
-            # 6. Connect to broker
+            # 5. Connect to broker
             self._bus = BusClient(name="gui")
 
-            # 7. Wire Qt bridge
+            # 6. Wire Qt bridge
             install_qt_bridge(self._bus)
 
-            # 8. Register components
+            # 7. Register components
             if not self.register_components():
                 self._shutdown()
                 return 1
 
-            # 9. Create and show main window directly
+            # 8. Show main window directly
             self._logger.info("Creating main window")
             self._window = modern_main_window.create(
                 message_bus=self._bus,
@@ -205,15 +204,13 @@ class Application:
                 run_event_loop=False,
             )
             self._window.show()
-
-            # Notify other subscribers
             self._bus.publish('gui.startup.requested', 'app.main', {})
 
-            # 10. Qt event loop
+            # 9. Qt event loop
             self._logger.info("Starting Qt event loop")
             exit_code = self._app.exec()
 
-            # 11. Teardown
+            # 10. Teardown
             watchdog.stop()
             self._shutdown()
             return exit_code
