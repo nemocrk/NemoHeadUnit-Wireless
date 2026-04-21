@@ -13,7 +13,6 @@ never deserialises frame [1] (header) or frame [2] (payload).
 """
 
 import signal
-import sys
 import logging
 import zmq
 
@@ -44,17 +43,31 @@ def run():
     log.info(f"XPUB listening on {BROKER_SUB_ADDR}")
     log.info("Broker ready — forwarding messages (zmq.proxy)")
 
+    # Use a capture socket to allow graceful proxy interruption.
+    # Sending any message to the capture socket unblocks zmq.proxy_steerable.
+    control = context.socket(zmq.PUB)
+    control.bind("inproc://broker-control")
+
     def _shutdown(signum, frame):
         log.info("Shutdown signal received, closing broker...")
-        xsub.close()
-        xpub.close()
-        context.term()
-        sys.exit(0)
+        # Terminate the blocking proxy cleanly via a TERMINATE command
+        control.send(b"TERMINATE")
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    zmq.proxy(xsub, xpub)
+    # proxy_steerable blocks until control socket sends TERMINATE
+    try:
+        zmq.proxy_steerable(xsub, xpub, None, control)
+    except zmq.ZMQError:
+        pass
+    finally:
+        log.info("Broker shutting down...")
+        control.close()
+        xsub.close()
+        xpub.close()
+        context.term()
+        log.info("Broker stopped.")
 
 
 if __name__ == "__main__":
