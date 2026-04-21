@@ -3,17 +3,20 @@ NemoHeadUnit-Wireless v2 — hostapd_helper module
 
 Module contract:
   Name        : hostapd_helper
-  Subscribes  : system.stop
+  Priority    : 1  (service level)
+  Subscribes  : system.readytostart
+                system.start
+                system.stop
                 bluetooth.rfcomm.connected   {device_address: str}
                 config.response              (filtered by module=hostapd_helper)
                 config.changed               (filtered by module=hostapd_helper)
-  Publishes   : hostapd.starting             {ssid, interface}
+  Publishes   : system.module_ready          {name, priority}
+                system.ready                 {name, priority}
+                hostapd.starting             {ssid, interface}
                 hostapd.ready                {ssid, key, bssid, interface,
                                               gateway_ip, security_mode, ap_type}
                 hostapd.failed               {error: str}
                 hostapd.stopped              {}
-                config.get                   (on startup, to load persisted config)
-                config.set                   (when writing defaults for the first time)
 
 Configuration keys (v2/config/hostapd_helper.yaml):
   interface         str    default: wlan0
@@ -62,6 +65,7 @@ from hostapd_helper.ap_monitor import APMonitor             # noqa: E402
 # ---------------------------------------------------------------------------
 
 MODULE_NAME = "hostapd_helper"
+PRIORITY    = 1  # service level
 
 log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
@@ -99,14 +103,12 @@ _ap_monitor: APMonitor | None = None
 def _on_config_loaded(config: dict) -> None:
     global _config
     if not config:
-        # First boot — no YAML exists yet. Persist defaults so config_ui
-        # (and future runs) can read them from config_manager.
-        log.info("No persisted config found — writing defaults.")
-        for key, value in _DEFAULTS.items():
-            cfg.set(key, value)
-        # _config stays as _DEFAULTS (already set)
+        # First boot — no YAML exists yet. config_manager already seeded the
+        # defaults (passed via cfg.get(defaults=_DEFAULTS)) — nothing to do.
+        log.info("No persisted config found — defaults seeded by config_manager.")
         return
 
+    # Merge: persisted values override defaults; unknown keys are ignored
     merged = dict(_DEFAULTS)
     merged.update({k: v for k, v in config.items() if k in _DEFAULTS})
     _config = merged
@@ -137,7 +139,44 @@ def _build_ap_config() -> APConfig:
 
 
 # ---------------------------------------------------------------------------
-# Handlers
+# Boot protocol handlers
+# ---------------------------------------------------------------------------
+
+def on_system_readytostart(topic: str, payload: dict) -> None:
+    log.info(f"system.readytostart received — announcing priority {PRIORITY}")
+    bus.publish("system.module_ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+
+
+def on_system_start(topic: str, payload: dict) -> None:
+    if payload.get("priority") != PRIORITY:
+        return
+
+    log.info(f"system.start priority={PRIORITY} — initialising hostapd_helper")
+
+    # config_manager is guaranteed online (priority 0 completed).
+    # Pass defaults so config_manager seeds the YAML on first boot.
+    cfg.get(defaults=_DEFAULTS)
+
+    # Signal ready immediately — this module is event-driven (waits for
+    # bluetooth.rfcomm.connected) and has no blocking init of its own.
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info("system.ready published — hostapd_helper online")
+
+
+def on_system_stop(topic: str, payload: dict) -> None:
+    log.info("system.stop received — tearing down AP")
+    _teardown()
+    bus.stop()
+
+
+# ---------------------------------------------------------------------------
+# bluetooth.rfcomm.connected → AP lifecycle
 # ---------------------------------------------------------------------------
 
 def on_rfcomm_connected(topic: str, payload: dict) -> None:
@@ -166,12 +205,6 @@ def on_rfcomm_connected(topic: str, payload: dict) -> None:
         timeout=float(_config["monitor_timeout"]),
     )
     _ap_monitor.start()
-
-
-def on_system_stop(topic: str, payload: dict) -> None:
-    log.info("system.stop received — tearing down AP")
-    _teardown()
-    bus.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -213,11 +246,10 @@ def run() -> None:
     cfg.on_config_changed = _on_config_changed
     cfg.register()
 
+    bus.subscribe("system.readytostart",        on_system_readytostart)
+    bus.subscribe("system.start",               on_system_start)
+    bus.subscribe("system.stop",                on_system_stop)
     bus.subscribe("bluetooth.rfcomm.connected", on_rfcomm_connected)
-    bus.subscribe("system.stop",               on_system_stop)
-
-    # Request persisted config; _DEFAULTS are used until response arrives
-    cfg.get()
 
     log.info("Module started, waiting for messages...")
     bus.start(blocking=True)
