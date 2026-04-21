@@ -143,3 +143,87 @@ python v2/bus_broker.py &
 python v2/modules/config_manager/main.py &
 python v2/modules/bluetooth/main.py
 ```
+
+---
+
+## 2026-04-21 - bluetooth_ui, config_ui e system.get_modules
+
+**What changed:**
+
+### 1. `v2/main.py` — aggiunto responder `system.get_modules`
+- Nuovo import `threading` e costante `BROKER_SUB_ADDR`
+- Funzione `_module_status(proc)` → restituisce `"active"` o `"exited (<code>)"`
+- Funzione `_start_get_modules_responder(processes, stop_event)` → thread daemon che
+  ascolta `system.get_modules` e risponde con `system.modules_response`
+- Payload risposta: `{modules: [{name, pid, status}, ...]}`
+- `_stop_responder` event segnalato su Ctrl+C per terminazione pulita del thread
+
+### 2. `v2/modules/bluetooth_ui/main.py` — nuovo modulo
+Finestra PyQt6 standalone per avviare e monitorare il pairing Bluetooth.
+
+| Direzione | Topic | Payload |
+|---|---|---|
+| Subscribe | `bluetooth.device.found` | `{address, name, rssi}` |
+| Subscribe | `bluetooth.discovery.completed` | `{devices: [...]}` |
+| Subscribe | `bluetooth.pairing.pin` | `{device_address, pin}` |
+| Subscribe | `bluetooth.pairing.completed` | `{device_address}` |
+| Subscribe | `bluetooth.pairing.failed` | `{device_address, error}` |
+| Publish | `bluetooth.discover` | `{duration_sec: 10}` |
+| Publish | `bluetooth.pair` | `{device_address}` |
+| Publish | `bluetooth.confirm_pairing` | `{device_address, pin}` |
+
+UI: bottone scan, lista dispositivi con RSSI, bottone pair, dialog PIN, status bar.
+Thread safety: ZMQ gira in daemon thread, tutti gli update Qt via `QMetaObject.invokeMethod`.
+
+### 3. `v2/modules/bluetooth_ui/tests/test_bluetooth_ui.py` — test unitari
+21 test suddivisi in 6 classi: `TestInitialState`, `TestScanAction`, `TestDeviceFound`,
+`TestPairAction`, `TestBusHandlers`, `TestSystemStop`.
+
+### 4. `v2/modules/config_ui/main.py` — nuovo modulo
+Finestra PyQt6 standalone per navigare e modificare la configurazione di ogni modulo.
+
+| Direzione | Topic | Payload |
+|---|---|---|
+| Subscribe | `system.modules_response` | `{modules: [{name, pid, status}]}` |
+| Subscribe | `config.response` | `{module, config: {key: value}}` |
+| Publish | `system.get_modules` | `{}` |
+| Publish | `config.get` | `{module}` |
+| Publish | `config.set` | `{module, key, value}` |
+
+UI: tab per modulo (autodiscovery via bus), form key/value editabile, bottone Salva
+(pubblica solo le chiavi cambiate), bottone Ricarica per-tab e globale.
+
+### 5. `v2/modules/config_ui/tests/test_config_ui.py` — test unitari
+20 test suddivisi in 7 classi: `TestInitialState`, `TestSystemStart`, `TestModulesResponse`,
+`TestConfigResponse`, `TestSaveAction`, `TestRefreshActions`, `TestSystemStop`.
+
+**Why:**
+- Validare l'infrastruttura v2 end-to-end con UI tangibili
+- `bluetooth_ui` permette di verificare che il modulo `bluetooth` e il bus funzionino
+- `config_ui` permette di ispezionare e modificare la config di qualsiasi modulo a runtime
+- `system.get_modules` rende l'orchestratore interrogabile senza conoscere i moduli a priori
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Testare `bluetooth_ui` su hardware reale con modulo `bluetooth` attivo
+2. Verificare che `config_ui` mostri correttamente i tab per tutti i moduli v2
+3. Aggiungere test per `v2/main.py` responder (`system.get_modules`)
+
+**Verification commands:**
+```bash
+# Stack completo (tutti i moduli autodiscoverati)
+python v2/main.py
+
+# Test nuovi moduli
+python -m pytest v2/modules/bluetooth_ui/tests/ v2/modules/config_ui/tests/ -v
+
+# Standalone bluetooth_ui (richiede broker attivo)
+python v2/bus_broker.py &
+python v2/modules/bluetooth_ui/main.py
+
+# Standalone config_ui (richiede broker + config_manager)
+python v2/bus_broker.py &
+python v2/modules/config_manager/main.py &
+python v2/modules/config_ui/main.py
+```
