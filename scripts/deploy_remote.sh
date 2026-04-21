@@ -13,12 +13,9 @@
 #   - rsync installed locally
 #
 # What this script does:
-#   1. Syncs the repo to ~/NemoHeadUnit-Wireless on the remote machine
-#   2. Installs system dependencies (apt)
-#   3. Installs Miniconda if not present
-#   4. Creates/updates the Conda environment from environment.yml
-#   5. Initialises git submodules on the remote
-#   6. Compiles .proto files via scripts/compile_protos.sh
+#   1. Syncs v2/ and environment.yml to ~/NemoHeadUnit-Wireless on the remote
+#   2. Installs Miniconda if not present (no root required)
+#   3. Creates/updates the Conda environment from environment.yml
 
 set -euo pipefail
 
@@ -44,73 +41,47 @@ echo "=================================================="
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 1: Sync repo
+# Step 1: Sync v2/ + environment.yml
 # ---------------------------------------------------------------------------
-echo "[1/5] Syncing repo to remote..."
+echo "[1/3] Syncing v2/ to remote..."
 rsync -avz --delete \
-  --exclude='.git' \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
-  --exclude='.venv' \
-  --exclude='v2/protos/oaa' \
-  "$REPO_ROOT/" "$REMOTE:$REMOTE_DIR/"
+  "$REPO_ROOT/v2/" "$REMOTE:$REMOTE_DIR/v2/"
+
+echo "[1/3] Syncing environment.yml to remote..."
+rsync -avz \
+  "$REPO_ROOT/environment.yml" "$REMOTE:$REMOTE_DIR/environment.yml"
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 2: System dependencies
+# Step 2: Miniconda (no root)
 # ---------------------------------------------------------------------------
-echo "[2/5] Installing system dependencies..."
+echo "[2/3] Checking Miniconda on remote..."
 ssh "$REMOTE" bash <<'ENDSSH'
 set -euo pipefail
-sudo apt-get update -qq
-sudo apt-get install -y --no-install-recommends \
-  git \
-  rsync \
-  wget \
-  curl \
-  python3-dbus \
-  libdbus-1-dev \
-  gstreamer1.0-tools \
-  gstreamer1.0-plugins-base \
-  gstreamer1.0-plugins-good \
-  gstreamer1.0-plugins-bad \
-  gstreamer1.0-plugins-ugly \
-  gstreamer1.0-libav \
-  libgstreamer1.0-dev \
-  libgstreamer-plugins-base1.0-dev
-echo "[OK] System dependencies installed."
-ENDSSH
-echo ""
-
-# ---------------------------------------------------------------------------
-# Step 3: Miniconda
-# ---------------------------------------------------------------------------
-echo "[3/5] Checking Miniconda on remote..."
-ssh "$REMOTE" bash <<'ENDSSH'
-set -euo pipefail
-if command -v conda &>/dev/null; then
-  echo "[OK] Conda already installed: $(conda --version)"
+if command -v conda &>/dev/null || [ -x "$HOME/miniconda3/bin/conda" ]; then
+  echo "[OK] Conda already installed."
 else
-  echo "[INFO] Installing Miniconda..."
+  echo "[INFO] Installing Miniconda (no root)..."
   ARCH=$(uname -m)
   MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-${ARCH}.sh"
   wget -q "$MINICONDA_URL" -O /tmp/miniconda.sh
   bash /tmp/miniconda.sh -b -p "$HOME/miniconda3"
   rm /tmp/miniconda.sh
-  eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
-  conda init bash
+  "$HOME/miniconda3/bin/conda" init bash
   echo "[OK] Miniconda installed."
 fi
 ENDSSH
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 4: Conda environment
+# Step 3: Conda environment
 # ---------------------------------------------------------------------------
-echo "[4/5] Creating/updating Conda environment (py314)..."
+echo "[3/3] Creating/updating Conda environment (py314)..."
 ssh "$REMOTE" bash <<'ENDSSH'
 set -euo pipefail
-eval "$(~/miniconda3/bin/conda shell.bash hook)"
+eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
 cd ~/NemoHeadUnit-Wireless
 if conda env list | grep -q '^py314'; then
   echo "[INFO] Environment exists, updating..."
@@ -120,22 +91,6 @@ else
   conda env create -f environment.yml
 fi
 echo "[OK] Conda environment ready."
-ENDSSH
-echo ""
-
-# ---------------------------------------------------------------------------
-# Step 5: Submodules + compile protos
-# ---------------------------------------------------------------------------
-echo "[5/5] Initialising submodules and compiling protos..."
-ssh "$REMOTE" bash <<'ENDSSH'
-set -euo pipefail
-eval "$(~/miniconda3/bin/conda shell.bash hook)"
-conda activate py314
-cd ~/NemoHeadUnit-Wireless
-git init
-git submodule update --init --recursive
-bash scripts/compile_protos.sh
-echo "[OK] Protos compiled."
 ENDSSH
 echo ""
 
