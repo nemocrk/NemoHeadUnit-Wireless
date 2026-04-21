@@ -13,6 +13,7 @@ Module contract:
                 hostapd.failed               {error: str}
                 hostapd.stopped              {}
                 config.get                   (on startup, to load persisted config)
+                config.set                   (when writing defaults for the first time)
 
 Configuration keys (v2/config/hostapd_helper.yaml):
   interface         str    default: wlan0
@@ -97,6 +98,15 @@ _ap_monitor: APMonitor | None = None
 
 def _on_config_loaded(config: dict) -> None:
     global _config
+    if not config:
+        # First boot — no YAML exists yet. Persist defaults so config_ui
+        # (and future runs) can read them from config_manager.
+        log.info("No persisted config found — writing defaults.")
+        for key, value in _DEFAULTS.items():
+            cfg.set(key, value)
+        # _config stays as _DEFAULTS (already set)
+        return
+
     merged = dict(_DEFAULTS)
     merged.update({k: v for k, v in config.items() if k in _DEFAULTS})
     _config = merged
@@ -110,7 +120,6 @@ def _on_config_changed(key: str, value) -> None:
     _config[key] = value
     log.info(f"Config changed: {key} = {value!r}")
     # Note: AP config changes take effect on next bluetooth.rfcomm.connected
-    # (the AP is rebuilt from scratch each connection attempt)
 
 
 def _build_ap_config() -> APConfig:
@@ -118,7 +127,7 @@ def _build_ap_config() -> APConfig:
     return APConfig(
         interface=        str(_config["interface"]),
         ssid=             str(_config["ssid"]),
-        key=              str(_config["ap_password"]),   # empty → auto-generated
+        key=              str(_config["ap_password"]),
         channel=          int(_config["channel"]),
         subnet=           str(_config["subnet"]),
         gateway_ip=       str(_config["gateway_ip"]),
