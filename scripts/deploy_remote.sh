@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # deploy_remote.sh
-# Deploys NemoHeadUnit-Wireless v2 to a remote Linux machine via SSH/rsync.
+# Deploys NemoHeadUnit-Wireless v2 to a remote Linux machine via SSH/rsync,
+# then avvia automaticamente main.py con log rotation e output live.
 #
 # Usage:
 #   bash scripts/deploy_remote.sh <user> <host>
@@ -13,11 +14,20 @@
 #   - rsync installed locally
 #
 # What this script does:
-#   1. Syncs v2/ and environment.yml to ~/NemoHeadUnit-Wireless on the remote
-#   2. Installs Miniconda if not present (no root required)
-#   3. Creates/updates the Conda environment from environment.yml
+#   1. Ruota i log locali (deploy.log, keep ultimi 5)
+#   2. Syncs v2/ and environment.yml to ~/NemoHeadUnit-Wireless on the remote
+#   3. Installs Miniconda if not present (no root required)
+#   4. Creates/updates the Conda environment from environment.yml
+#   5. Avvia main.py via SSH con output live + tee su log
 
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+KEEP=5
+LOGFILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/logs/deploy.log"
+REMOTE_DIR="NemoHeadUnit-Wireless"
 
 # ---------------------------------------------------------------------------
 # Args
@@ -30,34 +40,57 @@ fi
 REMOTE_USER="$1"
 REMOTE_HOST="$2"
 REMOTE="$REMOTE_USER@$REMOTE_HOST"
-REMOTE_DIR="~/NemoHeadUnit-Wireless"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# ---------------------------------------------------------------------------
+# Log rotation
+# ---------------------------------------------------------------------------
+LOGDIR="$(dirname "$LOGFILE")"
+BASE="$(basename "$LOGFILE")"
+mkdir -p "$LOGDIR"
+
+for (( i=KEEP; i>1; i-- )); do
+  prev=$((i-1))
+  src="$LOGDIR/$BASE.$prev"
+  dst="$LOGDIR/$BASE.$i"
+  [ -e "$src" ] && mv -f "$src" "$dst"
+done
+
+[ -e "$LOGFILE" ] && mv -f "$LOGFILE" "$LOGDIR/$BASE.1"
+: > "$LOGFILE"
+
+# Tutto l'output da qui in poi va sia a terminale che al log
+exec > >(tee -a "$LOGFILE") 2>&1
+
 echo "=================================================="
 echo "  NemoHeadUnit-Wireless — Remote Deploy"
-echo "  Target : $REMOTE:$REMOTE_DIR"
+echo "  Target : $REMOTE:~/$REMOTE_DIR"
+echo "  Log    : $LOGFILE"
+echo "  $(date '+%Y-%m-%d %H:%M:%S')"
 echo "=================================================="
 echo ""
 
 # ---------------------------------------------------------------------------
 # Step 1: Sync v2/ + environment.yml
 # ---------------------------------------------------------------------------
-echo "[1/3] Syncing v2/ to remote..."
+echo "[1/4] Syncing v2/ to remote..."
 rsync -avz --delete \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
-  "$REPO_ROOT/v2/" "$REMOTE:$REMOTE_DIR/v2/"
+  -e ssh \
+  "$REPO_ROOT/v2/" "$REMOTE:/home/$REMOTE_USER/$REMOTE_DIR/v2/"
 
-echo "[1/3] Syncing environment.yml to remote..."
+echo "[1/4] Syncing environment.yml to remote..."
 rsync -avz \
-  "$REPO_ROOT/environment.yml" "$REMOTE:$REMOTE_DIR/environment.yml"
+  -e ssh \
+  "$REPO_ROOT/environment.yml" "$REMOTE:/home/$REMOTE_USER/$REMOTE_DIR/environment.yml"
 echo ""
 
 # ---------------------------------------------------------------------------
 # Step 2: Miniconda (no root)
 # ---------------------------------------------------------------------------
-echo "[2/3] Checking Miniconda on remote..."
+echo "[2/4] Checking Miniconda on remote..."
 ssh "$REMOTE" bash <<'ENDSSH'
 set -euo pipefail
 if command -v conda &>/dev/null || [ -x "$HOME/miniconda3/bin/conda" ]; then
@@ -78,7 +111,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # Step 3: Conda environment
 # ---------------------------------------------------------------------------
-echo "[3/3] Creating/updating Conda environment (py314)..."
+echo "[3/4] Creating/updating Conda environment (py314)..."
 ssh "$REMOTE" bash <<'ENDSSH'
 set -euo pipefail
 eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
@@ -95,14 +128,13 @@ ENDSSH
 echo ""
 
 # ---------------------------------------------------------------------------
-# Done
+# Step 4: Avvio automatico main.py (output live + tee log remoto)
 # ---------------------------------------------------------------------------
-echo "=================================================="
-echo "  Deploy completato!"
+echo "[4/4] Avvio main.py sulla macchina remota..."
+echo "      (Ctrl+C per interrompere — il log rimane in $LOGFILE)"
 echo ""
-echo "  Per avviare v2 sulla macchina remota:"
-echo "    ssh $REMOTE"
-echo "    cd ~/NemoHeadUnit-Wireless/v2"
-echo "    conda activate py314"
-echo "    python main.py"
-echo "=================================================="
+exec ssh -t "$REMOTE" \
+  "source ~/miniconda3/etc/profile.d/conda.sh && \
+   conda activate py314 && \
+   cd ~/NemoHeadUnit-Wireless/v2 && \
+   DISPLAY=:0 python -m main"
