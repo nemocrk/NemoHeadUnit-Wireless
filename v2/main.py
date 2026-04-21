@@ -34,6 +34,7 @@ BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
 
 BROKER_STARTUP_DELAY = 0.5   # seconds to wait for broker to bind
 MODULE_STARTUP_DELAY = 0.2   # seconds between module launches
+GRACE_PERIOD = 1.0            # seconds to wait for self-exit before SIGTERM
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -96,17 +97,25 @@ def _start_process(script: Path, label: str) -> subprocess.Popen:
 
 
 def _terminate_all(processes: list[tuple[str, subprocess.Popen]]):
-    # Send SIGTERM only to processes still running
+    # Phase 1: give processes that handle SIGINT on their own a grace period
+    # to self-exit (e.g. broker already received Ctrl+C alongside main).
+    # Using proc.wait() with a short timeout refreshes proc.returncode.
+    for label, proc in processes:
+        try:
+            proc.wait(timeout=GRACE_PERIOD)
+            log.info(f"{label} exited on its own (code {proc.returncode})")
+        except subprocess.TimeoutExpired:
+            pass  # still running — will be terminated below
+
+    # Phase 2: SIGTERM anything still alive
     for label, proc in reversed(processes):
         if proc.poll() is None:
             log.info(f"Terminating {label} (PID {proc.pid})...")
             proc.terminate()
 
-    # Wait only for processes that were actually running
+    # Phase 3: final wait with hard kill fallback
     for label, proc in processes:
         if proc.returncode is not None:
-            # Already exited on its own (e.g. broker self-terminated on SIGINT)
-            log.info(f"{label} already exited (code {proc.returncode})")
             continue
         try:
             proc.wait(timeout=5)
