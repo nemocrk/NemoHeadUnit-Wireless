@@ -4,12 +4,13 @@ test_ap_manager.py — Unit tests for hostapd_helper/ap_manager.py
 All subprocess calls are mocked — no hostapd, dnsmasq, or root required.
 """
 
-import os
 import subprocess
 from unittest.mock import patch, MagicMock, mock_open
 import pytest
 
-from hostapd_helper.ap_manager import APManager, APConfig, GATEWAY_IP, WPA2_PERSONAL, AP_TYPE_DYNAMIC
+from hostapd_helper.ap_manager import (
+    APManager, APConfig, GATEWAY_IP, WPA2_SECURITY_MODE, AP_TYPE_DYNAMIC
+)
 
 
 # ---------------------------------------------------------------------------
@@ -23,7 +24,7 @@ def _make_manager(ssid="TestSSID", key="testkey123", interface="wlan0") -> APMan
 
 def _mock_popen(returncode=None) -> MagicMock:
     proc = MagicMock()
-    proc.poll.return_value = returncode  # None = still running
+    proc.poll.return_value = returncode
     proc.pid = 1234
     return proc
 
@@ -56,7 +57,7 @@ class TestGetParams:
 
     def test_security_mode_is_wpa2(self):
         mgr = _make_manager()
-        assert mgr.get_params()["security_mode"] == WPA2_PERSONAL
+        assert mgr.get_params()["security_mode"] == WPA2_SECURITY_MODE
 
     def test_ap_type_is_dynamic(self):
         mgr = _make_manager()
@@ -74,13 +75,13 @@ class TestGetParams:
 class TestIsRunning:
     def test_both_running(self):
         mgr = _make_manager()
-        mgr._hostapd_proc = _mock_popen(None)  # running
+        mgr._hostapd_proc = _mock_popen(None)
         mgr._dnsmasq_proc = _mock_popen(None)
         assert mgr.is_running() is True
 
     def test_hostapd_dead(self):
         mgr = _make_manager()
-        mgr._hostapd_proc = _mock_popen(1)   # exited
+        mgr._hostapd_proc = _mock_popen(1)
         mgr._dnsmasq_proc = _mock_popen(None)
         assert mgr.is_running() is False
 
