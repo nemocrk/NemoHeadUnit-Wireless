@@ -10,7 +10,9 @@ Module contract:
   Name        : config_manager
   Subscribes  : system.start
                 system.stop
-                config.get      → {"module": "<name>", "requester": "<who>" (optional)}
+                config.get      → {"module": "<name>",
+                                    "requester": "<who>" (optional),
+                                    "defaults": {<key>: <value>, ...} (optional)}
                 config.set      → {"module": "<name>", "key": "<k>", "value": <v>}
   Publishes   : config.response → {"module": "<name>", "config": {<key>: <value>, ...},
                                     "requester": "<who>" (echoed, empty string if absent)}
@@ -28,8 +30,10 @@ Rules:
   - The module never enforces a schema; it stores whatever key/value the
     caller sends.
   - config.set only persists and notifies — it does NOT validate the value.
-  - config.get always returns the full config dict for the requested module
-    (empty dict if no config exists yet).
+  - config.get returns the full config dict for the requested module.
+    If no YAML exists yet AND a "defaults" dict is provided in the payload,
+    the defaults are persisted atomically and returned in the same response
+    (first-boot seeding, no extra round-trip needed).
   - The optional "requester" field in config.get is echoed verbatim in
     config.response so subscribers can filter responses meant for them.
 """
@@ -107,19 +111,43 @@ def on_config_get(topic: str, payload: dict):
     """
     Handles config.get requests.
 
-    Expected payload: {"module": "<module_name>", "requester": "<who>" (optional)}
-    Responds on config.response echoing the requester field so subscribers
-    can filter responses meant for them.
+    Payload fields:
+      module    : (required) module name
+      requester : (optional) echoed back in config.response for filtering
+      defaults  : (optional) dict of default values — if the YAML does not
+                  exist yet, these are persisted atomically and returned in
+                  the same response (first-boot seeding).
     """
     module    = payload.get("module")
-    requester = payload.get("requester", "")  # echo back to allow filtering
+    requester = payload.get("requester", "")
+    defaults  = payload.get("defaults")   # dict | None
 
     if not module:
         log.warning("config.get received without 'module' field — ignoring.")
         return
 
     config = _load_config(module)
-    log.info(f"config.get for '{module}' (requester='{requester}') → {len(config)} keys")
+
+    # First-boot seeding: if no YAML exists yet and the caller supplied
+    # defaults, persist them NOW so the response already carries the keys.
+    # This avoids an async cfg.set() storm that would trigger config.changed
+    # on a module that may not be fully initialised yet.
+    if not config and isinstance(defaults, dict) and defaults:
+        if _save_config(module, defaults):
+            config = dict(defaults)
+            log.info(
+                f"config.get for '{module}' (requester='{requester}'): "
+                f"no YAML found — seeded {len(config)} defaults."
+            )
+        else:
+            log.warning(
+                f"config.get for '{module}': failed to seed defaults — "
+                "returning empty config."
+            )
+    else:
+        log.info(
+            f"config.get for '{module}' (requester='{requester}') → {len(config)} keys"
+        )
 
     bus.publish("config.response", {
         "module":    module,
