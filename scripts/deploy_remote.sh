@@ -15,10 +15,11 @@
 #
 # What this script does:
 #   1. Ruota i log locali (deploy.log, keep ultimi 5)
-#   2. Syncs v2/ and environment.yml to ~/NemoHeadUnit-Wireless on the remote
-#   3. Installs Miniconda if not present (no root required)
-#   4. Creates/updates the Conda environment from environment.yml
-#   5. Avvia main.py via SSH con output live + tee su log
+#   2. Crea la directory remota se non esiste
+#   3. Syncs v2/ and environment.yml to ~/NemoHeadUnit-Wireless on the remote
+#   4. Installs Miniconda if not present (no root required)
+#   5. Creates/updates the Conda environment from environment.yml
+#   6. Avvia main.py via SSH con output live + tee su log
 
 set -euo pipefail
 
@@ -72,25 +73,33 @@ echo "=================================================="
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 1: Sync v2/ + environment.yml
+# Step 1: Crea directory remota
 # ---------------------------------------------------------------------------
-echo "[1/4] Syncing v2/ to remote..."
+echo "[1/4] Preparing remote directory..."
+ssh "$REMOTE" "mkdir -p /home/$REMOTE_USER/$REMOTE_DIR/v2"
+echo "[OK] Remote directory ready."
+echo ""
+
+# ---------------------------------------------------------------------------
+# Step 2: Sync v2/ + environment.yml
+# ---------------------------------------------------------------------------
+echo "[2/4] Syncing v2/ to remote..."
 rsync -avz --delete \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
   -e ssh \
   "$REPO_ROOT/v2/" "$REMOTE:/home/$REMOTE_USER/$REMOTE_DIR/v2/"
 
-echo "[1/4] Syncing environment.yml to remote..."
+echo "[2/4] Syncing environment.yml to remote..."
 rsync -avz \
   -e ssh \
   "$REPO_ROOT/environment.yml" "$REMOTE:/home/$REMOTE_USER/$REMOTE_DIR/environment.yml"
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 2: Miniconda (no root)
+# Step 3: Miniconda (no root)
 # ---------------------------------------------------------------------------
-echo "[2/4] Checking Miniconda on remote..."
+echo "[3/4] Checking Miniconda on remote..."
 ssh "$REMOTE" bash <<'ENDSSH'
 set -euo pipefail
 if command -v conda &>/dev/null || [ -x "$HOME/miniconda3/bin/conda" ]; then
@@ -109,9 +118,9 @@ ENDSSH
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 3: Conda environment
+# Step 4: Conda environment + avvio
 # ---------------------------------------------------------------------------
-echo "[3/4] Creating/updating Conda environment (py314)..."
+echo "[4/4] Creating/updating Conda environment (py314)..."
 ssh "$REMOTE" bash <<'ENDSSH'
 set -euo pipefail
 eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
@@ -128,9 +137,9 @@ ENDSSH
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 4: Avvio automatico main.py (output live + tee log remoto)
+# Step 5: Avvio automatico main.py (output live + tee log remoto)
 # ---------------------------------------------------------------------------
-echo "[4/4] Avvio main.py sulla macchina remota..."
+echo "[5/5] Avvio main.py sulla macchina remota..."
 echo "      (Ctrl+C per interrompere — il log rimane in $LOGFILE)"
 echo ""
 exec ssh -t "$REMOTE" \
