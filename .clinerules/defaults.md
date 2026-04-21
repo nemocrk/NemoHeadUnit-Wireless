@@ -1,0 +1,2 @@
+ - USE ```conda activate py314``` before every command
+ - NEVER Rewrite a whole file, re-read it and edit specific sections.

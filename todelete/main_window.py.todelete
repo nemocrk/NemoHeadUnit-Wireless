@@ -1,0 +1,168 @@
+"""
+Main application window for NemoHeadUnit-Wireless
+
+Provides a touch-friendly, integrated GUI with PyQt6.
+"""
+
+import sys
+import logging
+from typing import Optional
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QTabWidget
+)
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QFont, QPalette, QMouseEvent
+
+from app.connection import ConnectionManager
+from app.logger import LoggerManager
+from app.message_bus import MessageBus
+from app.gui.components.connection_tab import ConnectionTab
+from app.gui.components.media_tab import MediaTab
+from app.gui.components.config_tab import ConfigTab
+from app.gui.components.status_tab import StatusTab
+
+def create(message_bus: Optional[MessageBus] = None, 
+           connection_manager: Optional[ConnectionManager] = None):
+    """Utility function to launch the main window"""
+    # Create the application instance if it doesn't exist
+    app = QApplication.instance() or QApplication(sys.argv)
+    
+    window = MainWindow(message_bus=message_bus, 
+                        connection_manager=connection_manager, 
+                        app=app)
+    window.show()
+    return app.exec()
+
+
+class MainWindow(QMainWindow):
+    """Main application window with modular components"""
+    
+    def __init__(self, message_bus: Optional[MessageBus] = None, 
+                 connection_manager: Optional[ConnectionManager] = None,
+                 app: Optional[QApplication] = None):
+        super().__init__()
+        self.logger = LoggerManager.get_logger('app.gui.main_window')
+        self.logger.info("Initializing MainWindow")
+        
+        # Store dependencies
+        self._bus = message_bus
+        self._connection = connection_manager
+        self._app = app
+        
+        # Subscribe to bus events
+        self._subscribe_to_events()
+        
+        # Initialize modular components
+        self._init_ui()
+    
+    def _subscribe_to_events(self):
+        """Subscribe to message bus events"""
+        self.logger.debug("Subscribing to message bus events")
+        if self._bus:
+            self._bus.on("connection.status", self._on_connection_status_changed)
+            self._bus.on("media.status", self._on_media_status_changed)
+            self._bus.on("config.settings", self._on_config_changed)
+            self.logger.info("Subscribed to message bus events")
+
+    def _on_connection_status_changed(self, payload: dict):
+        """Handle connection status changes from message bus"""
+        status = payload.get("status") if isinstance(payload, dict) else payload
+        method = payload.get("method", "Bluetooth") if isinstance(payload, dict) else "Bluetooth"
+        
+        self.logger.debug(f"Connection status changed: {status}, method: {method}")
+        self.set_connection_status(status, method)
+
+    def _on_media_status_changed(self, payload: dict):
+        """Handle media status changes from message bus"""
+        if isinstance(payload, dict):
+            status = payload.get("status")
+            channel = payload.get("channel")
+            self.logger.debug(f"Media status changed: {status} for channel: {channel}")
+            self.set_media_status(status, channel)
+
+    def _on_config_changed(self, settings: dict):
+        """Handle configuration changes from message bus"""
+
+        self.logger.debug(f"Configuration changed: {settings}")
+        self.logger.info("Updating UI with new configuration")
+    
+    def _init_ui(self):
+        """Initialize the main UI components"""
+        self.logger.debug("Setting up UI components")
+        self.setWindowTitle("NemoHeadUnit-Wireless")
+        self.setMinimumSize(1024, 768)
+        self.resize(1024, 768)
+        
+        # Main layout
+        main_layout = QVBoxLayout()
+        
+        # Main container
+        main_container = QWidget()
+        main_container.setObjectName("mainContainer")
+        main_layout.addWidget(main_container)
+        
+        # Tab widget
+        self.tab_widget = QTabWidget()
+        main_layout.addWidget(self.tab_widget)
+        
+        # Initialize tabs
+        self.tab_connection = ConnectionTab()
+        self.tab_media = MediaTab()
+        self.tab_config = ConfigTab()
+        self.tab_status = StatusTab()
+        
+        # Set tabs on the tab widget
+        self.tab_widget.addTab(self.tab_connection, "Connection")
+        self.tab_widget.addTab(self.tab_media, "Media")
+        self.tab_widget.addTab(self.tab_config, "Config")
+        self.tab_widget.addTab(self.tab_status, "Status")
+        
+        # Set the central widget
+        central_widget = QWidget()
+        central_widget.setLayout(main_layout)
+        self.setCentralWidget(central_widget)
+        
+        # Status bar
+        self.status_bar = self.statusBar()
+        self.status_bar.setObjectName("statusBar")
+        self.setStatusBar(self.status_bar)
+        
+        # Timer for updating status
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_status)
+        self.timer.start(1000)
+        
+        self.logger.info("MainWindow UI setup complete")
+    
+    def update_status(self):
+        """Update status indicators"""
+        self.logger.debug("Updating status indicators")
+        # Update system status
+        self.tab_status.system_status.setText("Active")
+        self.tab_status.system_status.setStyleSheet("color: #4caf50; font-weight: bold")
+        
+        # Update CPU usage
+        import random
+        self.tab_status.cpu_usage.setText(f"{random.randint(0, 30)}%")
+        
+        # Update memory usage
+        self.tab_status.memory_usage.setText(f"{random.randint(10, 40)}%")
+        self.logger.debug("Status update complete")
+    
+    def set_connection_status(self, status: str, method: str = "Bluetooth"):
+        """Set connection status and update UI"""
+        self.logger.debug(f"Setting connection status: {status}, method: {method}")
+        self.tab_connection.set_connection_status(status, method)
+        self.logger.debug(f"Connection status updated: {status}")
+    
+    def set_media_status(self, status: str, channel: str):
+        """Set media channel status"""
+        self.logger.debug(f"Setting media status: {status} for channel: {channel}")
+        attr_name = f"{channel.lower()}_status"
+        label = getattr(self.tab_media, attr_name)
+        label.setText(status)
+        label.setStyleSheet(
+            f"color: {'#4caf50' if status == 'Active' else '#ff6b6b'}"
+        )
+        self.logger.debug(f"Media status updated: {status} for {channel}")

@@ -1,0 +1,96 @@
+"""
+Modern Config Tab Component for NemoHeadUnit-Wireless
+
+Provides a modern, car-head unit inspired design for configuration management.
+"""
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QSlider, QCheckBox,
+    QFrame
+)
+from PyQt6.QtCore import Qt
+
+
+class ConfigTabWidget(QWidget):
+    """Modern config tab with car-inspired design."""
+    
+    def __init__(self):
+        super().__init__()
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        """Initialize the modern config tab UI."""
+        layout = QVBoxLayout()
+        
+        # Header frame
+        header_frame = QFrame()
+        header_frame.setFixedHeight(180)
+        header_frame.setStyleSheet("background: rgba(255, 255, 255, 0.05); border-radius: 15px;")
+        
+        header_layout = QVBoxLayout(header_frame)
+        
+        # Display settings
+        display_layout = QHBoxLayout()
+        display_layout.setSpacing(10)
+        
+        self.display_brightness = QSlider(Qt.Orientation.Horizontal)
+        self.display_brightness.setRange(0, 100)
+        display_layout.addWidget(self.display_brightness)
+        
+        self.display_orientation = QComboBox()
+        self.display_orientation.addItems(["Portrait", "Landscape"])
+        self.display_orientation.setStyleSheet("background: rgba(255, 255, 255, 0.1); border: none; border-radius: 10px; padding: 10px;")
+        display_layout.addWidget(self.display_orientation)
+        
+        header_layout.addLayout(display_layout)
+        layout.addWidget(header_frame)
+        
+        # Audio output
+        self.audio_output = QComboBox()
+        self.audio_output.addItems(["Headphones", "Speakers", "External Audio"])
+        self.audio_output.setStyleSheet("background: rgba(255, 255, 255, 0.1); border: none; border-radius: 10px; padding: 10px;")
+        layout.addWidget(self.audio_output)
+        
+        # Navigation settings
+        self.navigation_enabled = QCheckBox("Enable Navigation")
+        self.navigation_enabled.setStyleSheet("background: rgba(255, 255, 255, 0.1); border: none; border-radius: 10px; padding: 10px;")
+        layout.addWidget(self.navigation_enabled)
+        
+        # System preferences
+        self.touch_mode = QCheckBox("Touch Mode")
+        self.touch_mode.setStyleSheet("background: rgba(255, 255, 255, 0.1); border: none; border-radius: 10px; padding: 10px;")
+        layout.addWidget(self.touch_mode)
+        
+        self.auto_connect = QCheckBox("Auto-connect on Startup")
+        self.auto_connect.setStyleSheet("background: rgba(255, 255, 255, 0.1); border: none; border-radius: 10px; padding: 10px;")
+        layout.addWidget(self.auto_connect)
+        
+        self.low_latency = QCheckBox("Low Latency Mode")
+        self.low_latency.setStyleSheet("background: rgba(255, 255, 255, 0.1); border: none; border-radius: 10px; padding: 10px;")
+        layout.addWidget(self.low_latency)
+        
+        # Advanced settings
+        self.debug_mode = QCheckBox("Debug Mode")
+        self.debug_mode.setStyleSheet("background: rgba(255, 255, 255, 0.1); border: none; border-radius: 10px; padding: 10px;")
+        layout.addWidget(self.debug_mode)
+        
+        self.log_level = QComboBox()
+        self.log_level.addItems(["Debug", "Info", "Warning"])
+        self.log_level.setStyleSheet("background: rgba(255, 255, 255, 0.1); border: none; border-radius: 10px; padding: 10px;")
+        layout.addWidget(self.log_level)
+        
+        layout.addStretch()
+        self.setLayout(layout)
+    
+    def set_brightness(self, value: int):
+        """Set display brightness."""
+        self.display_brightness.setValue(value)
+    
+    def set_orientation(self, orientation: str):
+        """Set display orientation."""
+        self.display_orientation.setCurrentIndex(1 if orientation == "Landscape" else 0)
+    
+    def set_audio_output(self, output: str):
+        """Set audio output device."""
+        outputs = ["Headphones", "Speakers", "External Audio"]
+        self.audio_output.setCurrentIndex(outputs.index(output) if output in outputs else 0)

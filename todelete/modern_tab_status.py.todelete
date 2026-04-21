@@ -1,0 +1,81 @@
+"""
+Modern Status Tab Component for NemoHeadUnit-Wireless
+
+Provides a modern, car-head unit inspired design for status monitoring.
+"""
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
+)
+from PyQt6.QtCore import Qt
+
+
+class StatusTabWidget(QWidget):
+    """Modern status tab with car-inspired design."""
+    
+    def __init__(self):
+        super().__init__()
+        self._connections = []
+        self._events = []
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        """Initialize the modern status tab UI."""
+        layout = QVBoxLayout()
+        
+        # Header frame
+        header_frame = QFrame()
+        header_frame.setFixedHeight(180)
+        header_frame.setStyleSheet("background: rgba(255, 255, 255, 0.05); border-radius: 15px;")
+        
+        header_layout = QVBoxLayout(header_frame)
+        
+        # System status
+        self.system_status = QLabel("Ready")
+        self.system_status.setStyleSheet("font-size: 24px; font-weight: bold; color: #4caf50; padding: 10px;")
+        header_layout.addWidget(self.system_status)
+        
+        # Resource usage
+        resources_layout = QHBoxLayout()
+        resources_layout.setSpacing(10)
+        
+        self.cpu_usage = QLabel("0%")
+        self.cpu_usage.setStyleSheet("background: rgba(255, 255, 255, 0.1); border: none; border-radius: 10px; padding: 10px;")
+        resources_layout.addWidget(self.cpu_usage)
+        
+        self.memory_usage = QLabel("0%")
+        self.memory_usage.setStyleSheet("background: rgba(255, 255, 255, 0.1); border: none; border-radius: 10px; padding: 10px;")
+        resources_layout.addWidget(self.memory_usage)
+        
+        header_layout.addLayout(resources_layout)
+        layout.addWidget(header_frame)
+        
+        # Event log
+        self.event_log = QFrame()
+        self.event_log.setFixedHeight(150)
+        self.event_log.setStyleSheet("background: rgba(255, 255, 255, 0.05); border-radius: 15px;")
+        
+        event_layout = QVBoxLayout(self.event_log)
+        self.event_label = QLabel("No events")
+        self.event_label.setStyleSheet("color: #888; font-size: 12px;")
+        self.event_label.setWordWrap(True)
+        event_layout.addWidget(self.event_label)
+        
+        layout.addWidget(self.event_log)
+        layout.addStretch()
+        self.setLayout(layout)
+    
+    def update_cpu_usage(self, value: int):
+        """Update CPU usage."""
+        self.cpu_usage.setText(f"{value}%")
+    
+    def update_memory_usage(self, value: int):
+        """Update memory usage."""
+        self.memory_usage.setText(f"{value}%")
+    
+    def add_event(self, event: str):
+        """Add an event to the log."""
+        self._events.append(event)
+        self.event_label.setText(
+            "\n".join(self._events[-5:])
+        )
