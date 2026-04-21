@@ -327,6 +327,8 @@ v2/
 ├── shared/
 │   └── bus_client.py
 └── modules/
+    ├── _template/          ← canonical starting point for new modules
+    │   └── main.py
     └── <module_name>/
         └── main.py
 ```
@@ -343,6 +345,8 @@ The `v2/main.py` file is the orchestrator of the whole v2 runtime. It must:
 - Handle `Ctrl+C` and process shutdown in a graceful and deterministic way
 
 The orchestrator must not contain business logic belonging to individual modules.
+
+> **Note**: The `_template` module folder is excluded from autodiscovery by convention—its name starts with `_`. The glob pattern `modules/*/main.py` will still pick it up, so if needed the orchestrator may be updated to skip folders starting with `_`.
 
 ### 15.5 Responsibilities of each module
 
@@ -394,25 +398,31 @@ Each module should be designed around a clear contract:
 - **Lifecycle**: reaction to `system.start` and `system.stop` when applicable
 - **State**: private to the module unless explicitly published
 
-This contract should be documented close to the module implementation as the module is developed.
+This contract should be documented in the module's `main.py` docstring header.
 
 ### 15.9 Development workflow for v2 modules
 
 When implementing a new module in `v2/`, developers should follow this order:
 
-1. Define the purpose of the module
-2. Define which topics it subscribes to
-3. Define which topics it publishes
-4. Implement its standalone `main.py`
-5. Keep all internal logic inside the module folder
-6. Verify it can run independently on the bus
-7. Verify it starts correctly when auto-discovered by `v2/main.py`
+1. Copy the template folder as starting point:
+   ```bash
+   cp -r v2/modules/_template v2/modules/<your_module_name>
+   ```
+2. Set `MODULE_NAME` in the new `main.py`
+3. Fill in the module contract docstring (subscribes / publishes)
+4. Implement `on_system_start`, `on_system_stop` and any topic handlers
+5. Add any additional subscriptions in `run()`
+6. Keep all internal logic inside the module folder
+7. Verify it runs standalone: `python v2/modules/<your_module_name>/main.py`
+8. Verify it is auto-discovered when launching `python v2/main.py`
+
+The template is located at [`v2/modules/_template/main.py`](../v2/modules/_template/main.py) and contains inline comments guiding each step.
 
 ### 15.10 Naming and modularity goals
 
 - Folder names should reflect the role of the module
 - Module internals should remain cohesive and small
-- Event handlers should use consistent snake_case naming
+- Event handlers should use consistent `on_<snake_case>` naming
 - Modules should prefer explicit message contracts over implicit coupling
 - The system should be able to grow by adding folders, not by expanding central orchestration code
 
@@ -428,6 +438,6 @@ NemoHeadUnit-Wireless represents a significant advancement in Android Auto emula
 
 ---
 
-*Document Version: 3.1*
+*Document Version: 3.2*
 *Last Updated: 2026-04-21*
 *Author: Nemo Development Team*
