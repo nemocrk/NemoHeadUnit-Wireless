@@ -8,11 +8,14 @@ Sockets:
     XSUB  ipc:///tmp/nemobus_v2.pub  — receives from publishers
     XPUB  ipc:///tmp/nemobus_v2.sub  — forwards to subscribers
 
-The broker is intentionally dumb: routes by topic prefix only,
-never deserialises frame [1] (header) or frame [2] (payload).
+Shutdown strategy:
+    zmq.proxy() is blocking and lives in a daemon thread.
+    SIGINT/SIGTERM set a stop_event that closes the context from the main
+    thread, which unblocks the proxy thread with a ZMQError — clean exit.
 """
 
 import signal
+import threading
 import logging
 import zmq
 
@@ -29,6 +32,7 @@ log = logging.getLogger("bus_broker")
 
 
 def run():
+    stop_event = threading.Event()
     context = zmq.Context()
 
     xsub = context.socket(zmq.XSUB)
@@ -43,31 +47,31 @@ def run():
     log.info(f"XPUB listening on {BROKER_SUB_ADDR}")
     log.info("Broker ready — forwarding messages (zmq.proxy)")
 
-    # Use a capture socket to allow graceful proxy interruption.
-    # Sending any message to the capture socket unblocks zmq.proxy_steerable.
-    control = context.socket(zmq.PUB)
-    control.bind("inproc://broker-control")
+    def _proxy_thread():
+        try:
+            zmq.proxy(xsub, xpub)
+        except zmq.ZMQError:
+            pass  # expected when context is terminated
+
+    t = threading.Thread(target=_proxy_thread, daemon=True)
+    t.start()
 
     def _shutdown(signum, frame):
         log.info("Shutdown signal received, closing broker...")
-        # Terminate the blocking proxy cleanly via a TERMINATE command
-        control.send(b"TERMINATE")
+        stop_event.set()
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # proxy_steerable blocks until control socket sends TERMINATE
-    try:
-        zmq.proxy_steerable(xsub, xpub, None, control)
-    except zmq.ZMQError:
-        pass
-    finally:
-        log.info("Broker shutting down...")
-        control.close()
-        xsub.close()
-        xpub.close()
-        context.term()
-        log.info("Broker stopped.")
+    # Block main thread until stop is requested
+    stop_event.wait()
+
+    log.info("Broker shutting down...")
+    xsub.close()
+    xpub.close()
+    context.term()   # unblocks the proxy thread
+    t.join(timeout=2)
+    log.info("Broker stopped.")
 
 
 if __name__ == "__main__":
