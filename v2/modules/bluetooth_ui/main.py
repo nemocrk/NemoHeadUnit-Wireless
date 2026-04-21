@@ -6,14 +6,18 @@ Useful for validating the v2 IPC infrastructure end-to-end.
 
 Module contract:
   Name        : bluetooth_ui
-  Subscribes  : system.start
+  Priority    : 2  (UI level)
+  Subscribes  : system.readytostart
+                system.start
                 system.stop
                 bluetooth.device.found        {address, name, rssi}
                 bluetooth.discovery.completed {devices: [...]}
                 bluetooth.pairing.pin         {device_address, pin}
                 bluetooth.pairing.completed   {device_address}
                 bluetooth.pairing.failed      {device_address, error}
-  Publishes   : bluetooth.discover            {duration_sec: int}
+  Publishes   : system.module_ready            {name, priority}
+                system.ready                   {name, priority}
+                bluetooth.discover            {duration_sec: int}
                 bluetooth.pair                {device_address: str}
                 bluetooth.confirm_pairing     {device_address: str, pin: str}
 """
@@ -46,6 +50,7 @@ from shared.logger import get_logger      # noqa: E402
 # ---------------------------------------------------------------------------
 
 MODULE_NAME = "bluetooth_ui"
+PRIORITY    = 2  # UI level
 
 log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
@@ -103,7 +108,7 @@ class BluetoothPairingWindow(QMainWindow):
         root.setSpacing(8)
         root.setContentsMargins(12, 12, 12, 12)
 
-        # — top bar ——————————————————————————————————————————————————————————
+        # — top bar ——————————————————————————————————————————————————————————————————————
         top = QHBoxLayout()
         self._btn_scan = QPushButton("🔍  Avvia Ricerca (10s)")
         self._btn_scan.setMinimumHeight(40)
@@ -118,13 +123,13 @@ class BluetoothPairingWindow(QMainWindow):
         top.addWidget(self._btn_pair, stretch=1)
         root.addLayout(top)
 
-        # — device list ——————————————————————————————————————————————————————
+        # — device list ——————————————————————————————————————————————————————————————————————
         root.addWidget(QLabel("Dispositivi trovati:"))
         self._device_list = QListWidget()
         self._device_list.itemSelectionChanged.connect(self._on_selection_changed)
         root.addWidget(self._device_list, stretch=1)
 
-        # — status bar ———————————————————————————————————————————————————————
+        # — status bar ——————————————————————————————————————————————————————————————————————
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("In attesa di system.start…")
@@ -206,7 +211,6 @@ def _invoke(slot_name: str, *args):
     """Thread-safe call from the ZMQ recv thread to the Qt main thread."""
     if _window is None:
         return
-    type_map = {str: "QString", int: "int"}
     q_args = [Q_ARG(type(a), a) for a in args]
     QMetaObject.invokeMethod(_window, slot_name, Qt.ConnectionType.QueuedConnection, *q_args)
 
@@ -215,9 +219,27 @@ def _invoke(slot_name: str, *args):
 # Bus handlers (called from ZMQ recv thread — must NOT touch Qt directly)
 # ---------------------------------------------------------------------------
 
+def on_system_readytostart(topic: str, payload: dict) -> None:
+    log.info(f"system.readytostart received — announcing priority {PRIORITY}")
+    bus.publish("system.module_ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+
+
 def on_system_start(topic: str, payload: dict) -> None:
-    log.info("system.start received")
+    if payload.get("priority") != PRIORITY:
+        return
+
+    log.info(f"system.start priority={PRIORITY} — bluetooth_ui ready")
     _invoke("set_status", "Sistema pronto. Avvia una ricerca Bluetooth.")
+
+    # UI is already visible — signal ready immediately.
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info("system.ready published — bluetooth_ui online")
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
@@ -268,13 +290,14 @@ _app: QApplication | None = None
 def run() -> None:
     global _app, _window
 
-    bus.subscribe("system.start",               on_system_start)
-    bus.subscribe("system.stop",                on_system_stop)
-    bus.subscribe("bluetooth.device.found",     on_device_found)
+    bus.subscribe("system.readytostart",           on_system_readytostart)
+    bus.subscribe("system.start",                  on_system_start)
+    bus.subscribe("system.stop",                   on_system_stop)
+    bus.subscribe("bluetooth.device.found",        on_device_found)
     bus.subscribe("bluetooth.discovery.completed", on_discovery_completed)
-    bus.subscribe("bluetooth.pairing.pin",      on_pairing_pin)
-    bus.subscribe("bluetooth.pairing.completed",on_pairing_completed)
-    bus.subscribe("bluetooth.pairing.failed",   on_pairing_failed)
+    bus.subscribe("bluetooth.pairing.pin",         on_pairing_pin)
+    bus.subscribe("bluetooth.pairing.completed",   on_pairing_completed)
+    bus.subscribe("bluetooth.pairing.failed",      on_pairing_failed)
 
     # Start the ZMQ receive loop in a background thread so Qt owns the main thread
     bus_thread = threading.Thread(target=lambda: bus.start(blocking=True), daemon=True)
