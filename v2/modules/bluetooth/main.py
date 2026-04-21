@@ -3,22 +3,24 @@ NemoHeadUnit-Wireless v2 — bluetooth module
 
 Module contract:
   Name        : bluetooth
-  Subscribes  : system.start
+  Priority    : 1  (service level)
+  Subscribes  : system.readytostart
+                system.start
                 system.stop
                 bluetooth.discover          {duration_sec: int}
                 bluetooth.pair              {device_address: str}
                 bluetooth.confirm_pairing   {device_address: str, pin: str}
                 config.response             (filtered by module=bluetooth)
                 config.changed              (filtered by module=bluetooth)
-  Publishes   : bluetooth.device.found         {address, name, rssi}
+  Publishes   : system.module_ready         {name, priority}
+                system.ready               {name, priority}
+                bluetooth.device.found         {address, name, rssi}
                 bluetooth.discovery.completed  {devices: [...]}
                 bluetooth.pairing.pin          {device_address, pin}
                 bluetooth.pairing.completed    {device_address}
                 bluetooth.pairing.failed       {device_address, error}
                 bluetooth.rfcomm.connected     {device_address}
                 bluetooth.error                {error}
-                config.get                     (after adapter init, to load persisted config)
-                config.set                     (when writing defaults for the first time)
 
 Configuration keys (v2/config/bluetooth.yaml):
   discoverable         bool   default: true
@@ -59,6 +61,7 @@ from bluetooth.rfcomm import RfcommListener        # noqa: E402
 # ---------------------------------------------------------------------------
 
 MODULE_NAME = "bluetooth"
+PRIORITY    = 1  # service level
 
 log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
@@ -75,7 +78,6 @@ _DEFAULTS = {
     "adapter_name":            "NemoHeadUnit",
 }
 
-# Live config — starts from defaults, overwritten when config.response arrives
 _config: dict = dict(_DEFAULTS)
 
 # ---------------------------------------------------------------------------
@@ -92,19 +94,11 @@ _rfcomm:    RfcommListener   | None = None
 # ---------------------------------------------------------------------------
 
 def _on_config_loaded(config: dict) -> None:
-    """Received full config from config_manager. Apply to live state."""
     global _config
     if not config:
-        # First boot — no YAML exists yet. Persist defaults so config_ui
-        # (and future runs) can read them from config_manager.
-        log.info("No persisted config found — writing defaults.")
-        for key, value in _DEFAULTS.items():
-            cfg.set(key, value)
-        # _config stays as _DEFAULTS (already set); apply immediately
+        log.info("No persisted config found — defaults seeded by config_manager.")
         _apply_config()
         return
-
-    # Merge: persisted values override defaults; unknown keys are ignored
     merged = dict(_DEFAULTS)
     merged.update({k: v for k, v in config.items() if k in _DEFAULTS})
     _config = merged
@@ -113,7 +107,6 @@ def _on_config_loaded(config: dict) -> None:
 
 
 def _on_config_changed(key: str, value) -> None:
-    """A single key was updated by an external caller — apply immediately."""
     if key not in _DEFAULTS:
         log.warning(f"config.changed: unknown key '{key}' — ignoring")
         return
@@ -123,7 +116,6 @@ def _on_config_changed(key: str, value) -> None:
 
 
 def _apply_config() -> None:
-    """Push current _config values onto the live adapter (if ready)."""
     if _adapter is None:
         return
     _adapter.set_name(str(_config["adapter_name"]))
@@ -134,26 +126,42 @@ def _apply_config() -> None:
 
 
 # ---------------------------------------------------------------------------
-# system.start / system.stop
+# Boot protocol handlers
 # ---------------------------------------------------------------------------
+
+def on_system_readytostart(topic: str, payload: dict) -> None:
+    log.info(f"system.readytostart received — announcing priority {PRIORITY}")
+    bus.publish("system.module_ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+
 
 def on_system_start(topic: str, payload: dict) -> None:
     global _adapter, _pairing, _rfcomm
 
-    log.info("system.start received — initialising Bluetooth subsystem")
+    if payload.get("priority") != PRIORITY:
+        return
+
+    log.info(f"system.start priority={PRIORITY} — initialising Bluetooth subsystem")
 
     _adapter = BluezAdapter()
     if not _adapter.init():
+        log.error("D-Bus init failed — Bluetooth unavailable")
         bus.publish("bluetooth.error", {"error": "D-Bus init failed"})
+        # Publish system.ready anyway so the boot sequence is not blocked
+        bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
         return
 
     if not _adapter.register_profiles():
+        log.error("Profile registration failed")
         bus.publish("bluetooth.error", {"error": "Profile registration failed"})
+        bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
         return
 
-    # Request persisted config AFTER adapter is ready so that
-    # _on_config_loaded → _apply_config() can safely call set_name().
-    cfg.get()
+    # config_manager is guaranteed online (priority 0 completed).
+    # Pass defaults so config_manager seeds the YAML on first boot.
+    cfg.get(defaults=_DEFAULTS)
 
     _pairing = PairingAgent(
         adapter=_adapter,
@@ -165,14 +173,17 @@ def on_system_start(topic: str, payload: dict) -> None:
 
     _rfcomm = RfcommListener(on_connected_cb=_on_rfcomm_connected)
     if not _rfcomm.start():
+        log.error("RFCOMM listener failed to start")
         bus.publish("bluetooth.error", {"error": "RFCOMM listener failed to start"})
+        bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
         return
 
     log.info("Bluetooth subsystem ready")
+    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
-    log.info("system.stop received — shutting down Bluetooth")
+    log.info("system.stop — shutting down Bluetooth")
     if _rfcomm:
         _rfcomm.stop()
     if _pairing:
@@ -268,6 +279,7 @@ def run() -> None:
     cfg.on_config_changed = _on_config_changed
     cfg.register()
 
+    bus.subscribe("system.readytostart",       on_system_readytostart)
     bus.subscribe("system.start",              on_system_start)
     bus.subscribe("system.stop",               on_system_stop)
     bus.subscribe("bluetooth.discover",        on_discover)
