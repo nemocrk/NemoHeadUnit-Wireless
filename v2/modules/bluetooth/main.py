@@ -17,7 +17,7 @@ Module contract:
                 bluetooth.pairing.failed       {device_address, error}
                 bluetooth.rfcomm.connected     {device_address}
                 bluetooth.error                {error}
-                config.get                     (on startup, to load persisted config)
+                config.get                     (after adapter init, to load persisted config)
                 config.set                     (when writing defaults for the first time)
 
 Configuration keys (v2/config/bluetooth.yaml):
@@ -69,10 +69,10 @@ cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 # ---------------------------------------------------------------------------
 
 _DEFAULTS = {
-    "discoverable":          True,
-    "discoverable_timeout":  0,
-    "discovery_duration_sec": 10,
-    "adapter_name":          "NemoHeadUnit",
+    "discoverable":            True,
+    "discoverable_timeout":    0,
+    "discovery_duration_sec":  10,
+    "adapter_name":            "NemoHeadUnit",
 }
 
 # Live config — starts from defaults, overwritten when config.response arrives
@@ -82,10 +82,10 @@ _config: dict = dict(_DEFAULTS)
 # Module-level singletons (created on system.start)
 # ---------------------------------------------------------------------------
 
-_adapter:   BluezAdapter    | None = None
+_adapter:   BluezAdapter     | None = None
 _discovery: DiscoverySession | None = None
-_pairing:   PairingAgent    | None = None
-_rfcomm:    RfcommListener  | None = None
+_pairing:   PairingAgent     | None = None
+_rfcomm:    RfcommListener   | None = None
 
 # ---------------------------------------------------------------------------
 # ConfigClient callbacks
@@ -94,6 +94,16 @@ _rfcomm:    RfcommListener  | None = None
 def _on_config_loaded(config: dict) -> None:
     """Received full config from config_manager. Apply to live state."""
     global _config
+    if not config:
+        # First boot — no YAML exists yet. Persist defaults so config_ui
+        # (and future runs) can read them from config_manager.
+        log.info("No persisted config found — writing defaults.")
+        for key, value in _DEFAULTS.items():
+            cfg.set(key, value)
+        # _config stays as _DEFAULTS (already set); apply immediately
+        _apply_config()
+        return
+
     # Merge: persisted values override defaults; unknown keys are ignored
     merged = dict(_DEFAULTS)
     merged.update({k: v for k, v in config.items() if k in _DEFAULTS})
@@ -132,10 +142,6 @@ def on_system_start(topic: str, payload: dict) -> None:
 
     log.info("system.start received — initialising Bluetooth subsystem")
 
-    # Request persisted config; _on_config_loaded will call _apply_config
-    # once config_manager responds. _DEFAULTS are used in the meantime.
-    cfg.get()
-
     _adapter = BluezAdapter()
     if not _adapter.init():
         bus.publish("bluetooth.error", {"error": "D-Bus init failed"})
@@ -145,8 +151,9 @@ def on_system_start(topic: str, payload: dict) -> None:
         bus.publish("bluetooth.error", {"error": "Profile registration failed"})
         return
 
-    # Apply defaults immediately; config.response will override when it arrives
-    _apply_config()
+    # Request persisted config AFTER adapter is ready so that
+    # _on_config_loaded → _apply_config() can safely call set_name().
+    cfg.get()
 
     _pairing = PairingAgent(
         adapter=_adapter,
@@ -185,7 +192,6 @@ def on_discover(topic: str, payload: dict) -> None:
     if _adapter is None:
         bus.publish("bluetooth.error", {"error": "Adapter not ready"})
         return
-    # Caller may override duration; fallback to configured default
     duration = int(payload.get("duration_sec", _config["discovery_duration_sec"]))
     log.info(f"Discovery requested for {duration}s")
     _discovery = DiscoverySession(
@@ -258,7 +264,6 @@ def _on_rfcomm_connected(sock, address: str) -> None:
 # ---------------------------------------------------------------------------
 
 def run() -> None:
-    # Config callbacks must be registered before bus.start()
     cfg.on_config_loaded  = _on_config_loaded
     cfg.on_config_changed = _on_config_changed
     cfg.register()
