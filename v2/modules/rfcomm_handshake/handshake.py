@@ -14,9 +14,17 @@ Credentials come from the APConfig dict published by hostapd_helper
 No ZMQ dependency — caller (main.py) provides the socket and credentials.
 """
 
+import sys
 import logging
 import socket
+from pathlib import Path
 from typing import Callable, Optional
+
+# Ensure repo root (NemoHeadUnit-Wireless/) is on sys.path
+# so that "v2.protos.*" imports resolve correctly.
+_REPO_ROOT = Path(__file__).parent.parent.parent.parent  # .../NemoHeadUnit-Wireless
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from rfcomm_handshake.packet import (
     MSG_WIFI_START_REQUEST,
@@ -30,8 +38,6 @@ from rfcomm_handshake.packet import (
     send_packet,
 )
 from v2.protos.oaa.wifi.WifiInfoResponseMessage_pb2 import WifiInfoResponse
-from v2.protos.oaa.wifi.WifiSecurityModeEnum_pb2 import WifiSecurityMode
-from v2.protos.oaa.wifi.WifiAccessPointTypeEnum_pb2 import WifiAccessPointType
 
 log = logging.getLogger("rfcomm_handshake.handshake")
 
@@ -169,11 +175,11 @@ class RfcommHandshake:
     def _encode_wifi_info(self) -> bytes:
         """Encode WifiInfoResponse using the compiled protobuf message."""
         msg = WifiInfoResponse(
-            ssid       = self._creds.get("ssid", ""),
-            bssid      = self._creds.get("bssid", ""),
-            passphrase = self._creds.get("key", ""),
+            ssid          = self._creds.get("ssid", ""),
+            bssid         = self._creds.get("bssid", ""),
+            passphrase    = self._creds.get("key", ""),
             security_mode = self._creds.get("security_mode", WPA2_SECURITY_MODE),
-            ap_type    = self._creds.get("ap_type", AP_TYPE_DYNAMIC),
+            ap_type       = self._creds.get("ap_type", AP_TYPE_DYNAMIC),
         )
         return msg.SerializeToString()
 
