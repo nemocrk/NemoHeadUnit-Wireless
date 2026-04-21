@@ -6,6 +6,7 @@ Responsibilities:
   2. Discover and start all modules found in modules/*/main.py
   3. Publish system.start after all processes are up
   4. On SIGINT (Ctrl+C): publish system.stop, then terminate all subprocesses
+  5. Respond to system.get_modules with the list of modules and their status
 
 Module autodiscovery:
   Any subfolder inside v2/modules/ that contains a main.py is treated as a module
@@ -18,6 +19,7 @@ Module autodiscovery:
 import signal
 import subprocess
 import sys
+import threading
 import time
 import json
 import zmq
@@ -34,6 +36,7 @@ BASE_DIR = Path(__file__).parent
 BROKER_SCRIPT = BASE_DIR / "bus_broker.py"
 MODULES_DIR = BASE_DIR / "modules"
 BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
+BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
 
 BROKER_STARTUP_DELAY = 0.5   # seconds to wait for broker to bind
 MODULE_STARTUP_DELAY = 0.2   # seconds between module launches
@@ -78,6 +81,72 @@ def _publish(pub: zmq.Socket, topic: str, payload: dict):
         json.dumps(payload).encode(),
     ])
     log.info(f"Published [{topic}]: {payload}")
+
+
+# ---------------------------------------------------------------------------
+# system.get_modules responder
+# ---------------------------------------------------------------------------
+
+def _module_status(proc: subprocess.Popen) -> str:
+    """Return a human-readable status string for a subprocess."""
+    code = proc.poll()
+    if code is None:
+        return "active"
+    return f"exited ({code})"
+
+
+def _start_get_modules_responder(
+    processes: list[tuple[str, subprocess.Popen]],
+    stop_event: threading.Event,
+) -> threading.Thread:
+    """
+    Background thread that listens for system.get_modules on the bus
+    and responds with system.modules_response carrying name, pid, status
+    for every managed process (broker included).
+    """
+    def _responder():
+        ctx = zmq.Context()
+
+        sub = ctx.socket(zmq.SUB)
+        sub.connect(BROKER_SUB_ADDR)
+        sub.setsockopt_string(zmq.SUBSCRIBE, "system.get_modules")
+
+        pub = ctx.socket(zmq.PUB)
+        pub.connect(BROKER_PUB_ADDR)
+
+        log.info("system.get_modules responder ready")
+
+        while not stop_event.is_set():
+            if sub.poll(timeout=500):
+                try:
+                    frames = sub.recv_multipart()
+                    if len(frames) < 2:
+                        continue
+                    log.info("system.get_modules received — building response")
+                    modules_info = [
+                        {
+                            "name":   label,
+                            "pid":    proc.pid,
+                            "status": _module_status(proc),
+                        }
+                        for label, proc in processes
+                    ]
+                    pub.send_multipart([
+                        b"system.modules_response",
+                        json.dumps({"modules": modules_info}).encode(),
+                    ])
+                except zmq.ZMQError as e:
+                    log.error(f"get_modules responder ZMQ error: {e}")
+                    break
+
+        sub.close(linger=0)
+        pub.close(linger=0)
+        ctx.term()
+        log.info("system.get_modules responder stopped")
+
+    t = threading.Thread(target=_responder, daemon=True, name="get_modules_responder")
+    t.start()
+    return t
 
 
 # ---------------------------------------------------------------------------
@@ -128,9 +197,11 @@ def run():
     processes: list[tuple[str, subprocess.Popen]] = []
     ctx = None
     pub = None
+    _stop_responder = threading.Event()
 
     def _shutdown(signum, frame):
         log.info("Ctrl+C received — shutting down...")
+        _stop_responder.set()
         if pub is not None:
             try:
                 _publish(pub, "system.stop", {"reason": "user_interrupt"})
@@ -168,9 +239,12 @@ def run():
     # 5. Publish system.start
     _publish(pub, "system.start", {"modules": [m.parent.name for m in modules]})
 
+    # 6. Start system.get_modules responder
+    _start_get_modules_responder(processes, _stop_responder)
+
     log.info("All processes started. Press Ctrl+C to stop.")
 
-    # 6. Keep main alive — log unexpected exits
+    # 7. Keep main alive — log unexpected exits
     while True:
         time.sleep(1)
         for label, proc in processes:
