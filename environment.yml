@@ -50,3 +50,7 @@ dependencies:
     - msgpack>=1.0.8
     # GStreamer Python overrides fallback (if gst-python not in conda)
     # - PyGObject>=3.46
+    # Protobuf compiler — needed to run scripts/compile_protos.sh
+    # Generates *_pb2.py from .proto files in third_party/open-android-auto
+    - grpcio-tools>=1.62
+    - protobuf>=4.25
