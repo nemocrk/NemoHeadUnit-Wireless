@@ -24,11 +24,14 @@ from rfcomm_handshake.packet import (
     MSG_WIFI_INFO_REQUEST,
     MSG_WIFI_INFO_RESPONSE,
     MSG_WIFI_CONNECT_STATUS,
-    WPA2_PERSONAL,
-    AP_DYNAMIC,
+    WPA2_SECURITY_MODE,
+    AP_TYPE_DYNAMIC,
     recv_packet,
     send_packet,
 )
+from v2.protos.oaa.wifi.WifiInfoResponseMessage_pb2 import WifiInfoResponse
+from v2.protos.oaa.wifi.WifiSecurityModeEnum_pb2 import WifiSecurityMode
+from v2.protos.oaa.wifi.WifiAccessPointTypeEnum_pb2 import WifiAccessPointType
 
 log = logging.getLogger("rfcomm_handshake.handshake")
 
@@ -59,8 +62,8 @@ class RfcommHandshake:
             "ssid": "AndroidAutoAP",
             "key": "secret123",
             "bssid": "DC:A6:32:E7:5A:FE",
-            "security_mode": 8,
-            "ap_type": 1,
+            "security_mode": WPA2_SECURITY_MODE,
+            "ap_type": AP_TYPE_DYNAMIC,
         }
         hs = RfcommHandshake(sock, creds, on_stage_cb=log_stage)
         result = hs.run()
@@ -88,23 +91,18 @@ class RfcommHandshake:
         try:
             self._sock.settimeout(15.0)
 
-            # Stage 1 — recv WifiStartRequest
             if not self._stage1_recv_start_request():
                 return HandshakeResult(False, error="Stage 1 failed: WifiStartRequest")
 
-            # Stage 2 — send WifiStartResponse
             if not self._stage2_send_start_response():
                 return HandshakeResult(False, error="Stage 2 failed: WifiStartResponse")
 
-            # Stage 3 — recv WifiInfoRequest
             if not self._stage3_recv_info_request():
                 return HandshakeResult(False, error="Stage 3 failed: WifiInfoRequest")
 
-            # Stage 4 — send WifiInfoResponse
             if not self._stage4_send_info_response():
                 return HandshakeResult(False, error="Stage 4 failed: WifiInfoResponse")
 
-            # Stage 5 — recv WifiConnectStatus
             if not self._stage5_recv_connect_status():
                 return HandshakeResult(False, error="Stage 5 failed: WifiConnectStatus")
 
@@ -125,14 +123,12 @@ class RfcommHandshake:
         if not pkt or pkt.msg_id != MSG_WIFI_START_REQUEST:
             log.error(f"Stage 1: expected msg_id={MSG_WIFI_START_REQUEST}, got {pkt}")
             return False
-        # Payload contains IP + port (protobuf — best-effort parse for now)
         self._phone_ip = self._extract_ip(pkt.payload)
         log.info(f"Stage 1 OK: phone_ip={self._phone_ip}")
         return True
 
     def _stage2_send_start_response(self) -> bool:
         self._on_stage("WifiStartResponse")
-        # Status = 0 (OK), encoded as a simple 2-byte big-endian uint
         import struct
         payload = struct.pack(">H", 0)
         ok = send_packet(self._sock, MSG_WIFI_START_RESPONSE, payload)
@@ -154,7 +150,7 @@ class RfcommHandshake:
         payload = self._encode_wifi_info()
         ok = send_packet(self._sock, MSG_WIFI_INFO_RESPONSE, payload)
         if ok:
-            log.info(f"Stage 4 OK: WifiInfoResponse sent (ssid={self._creds.get('ssid')})")
+            log.info(f"Stage 4 OK: WifiInfoResponse sent (ssid={self._creds.get('ssid')}")
         return ok
 
     def _stage5_recv_connect_status(self) -> bool:
@@ -171,26 +167,15 @@ class RfcommHandshake:
     # ------------------------------------------------------------------
 
     def _encode_wifi_info(self) -> bytes:
-        """
-        Encode WifiInfoResponse payload.
-        Format: ssid|key|bssid|security_mode(u16)|ap_type(u16)
-        NOTE: replace with proper protobuf once protos are generated.
-        """
-        import struct
-        ssid     = self._creds.get("ssid", "").encode()
-        key      = self._creds.get("key", "").encode()
-        bssid    = self._creds.get("bssid", "").encode()
-        security = self._creds.get("security_mode", WPA2_PERSONAL)
-        ap_type  = self._creds.get("ap_type", AP_DYNAMIC)
-
-        # Delimited with null bytes; proper protobuf to follow
-        payload = (
-            struct.pack(">H", len(ssid)) + ssid
-            + struct.pack(">H", len(key)) + key
-            + struct.pack(">H", len(bssid)) + bssid
-            + struct.pack(">BB", security, ap_type)
+        """Encode WifiInfoResponse using the compiled protobuf message."""
+        msg = WifiInfoResponse(
+            ssid       = self._creds.get("ssid", ""),
+            bssid      = self._creds.get("bssid", ""),
+            passphrase = self._creds.get("key", ""),
+            security_mode = self._creds.get("security_mode", WPA2_SECURITY_MODE),
+            ap_type    = self._creds.get("ap_type", AP_TYPE_DYNAMIC),
         )
-        return payload
+        return msg.SerializeToString()
 
     @staticmethod
     def _extract_ip(payload: bytes) -> str:
