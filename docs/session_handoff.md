@@ -87,3 +87,50 @@ python v2/modules/hostapd_helper/main.py
 python v2/modules/rfcomm_handshake/main.py
 python v2/modules/tcp_server/main.py
 ```
+
+---
+
+## 2026-04-21 - v2 config_manager Module
+
+**What changed:**
+
+Creato `v2/modules/config_manager/main.py` — servizio centralizzato di configurazione
+con persistenza YAML per modulo.
+
+**Why:**
+- Ogni modulo ha bisogno di leggere/scrivere configurazioni persistenti
+- Il modulo non conosce i valori a priori: li memorizza così come arrivano
+- Pattern: richiesta/risposta su bus ZMQ + notifica broadcast `config.changed`
+
+**Contract:**
+
+| Direzione | Topic | Payload |
+|---|---|---|
+| Subscribe | `config.get` | `{"module": "<name>"}` |
+| Subscribe | `config.set` | `{"module": "<name>", "key": "<k>", "value": <v>}` |
+| Publish | `config.response` | `{"module": "<name>", "config": {...}}` |
+| Publish | `config.changed` | `{"module": "<name>", "key": "<k>", "value": <v>}` |
+
+**YAML layout:** `v2/config/<module_name>.yaml` — un file per modulo.
+
+**Status:**
+Completed
+
+**Next 1-3 steps:**
+1. Aggiungere test unitari in `tests/v2/test_config_manager.py`
+2. Aggiungere helper in `v2/shared/` per `config.get`/`config.set` lato client
+3. Integrare nei moduli esistenti (`bluetooth`, `hostapd_helper`, ecc.)
+
+**Verification commands:**
+```bash
+# Avvio standalone
+python v2/modules/config_manager/main.py
+
+# Verificare autodiscovery
+python v2/main.py
+
+# Test manuale via bus (dopo aver avviato broker + modulo):
+# Publish config.set {"module": "bluetooth", "key": "pin", "value": "1234"}
+# Publish config.get {"module": "bluetooth"}
+# Expect config.response {"module": "bluetooth", "config": {"pin": "1234"}}
+```
