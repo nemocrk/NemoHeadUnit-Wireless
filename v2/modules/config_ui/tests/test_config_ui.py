@@ -15,7 +15,7 @@ import json
 import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -42,10 +42,10 @@ sys.modules.setdefault("shared", types.ModuleType("shared"))
 sys.modules["shared.logger"] = _logger_mod
 
 _mock_bus = MagicMock()
-_mock_bus.publish  = MagicMock()
+_mock_bus.publish   = MagicMock()
 _mock_bus.subscribe = MagicMock()
-_mock_bus.start    = MagicMock()
-_mock_bus.stop     = MagicMock()
+_mock_bus.start     = MagicMock()
+_mock_bus.stop      = MagicMock()
 
 _bus_mod = types.ModuleType("shared.bus_client")
 _bus_mod.BusClient = MagicMock(return_value=_mock_bus)
@@ -54,6 +54,9 @@ sys.modules["shared.bus_client"] = _bus_mod
 import v2.modules.config_ui.main as cfg_ui  # noqa: E402
 
 cfg_ui.bus = _mock_bus
+
+# Shorthand for the expected requester tag
+_REQUESTER = "config_ui"
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -86,6 +89,15 @@ def _add_tab(window, name="bluetooth", pid=1234, status="active"):
     return window._tabs[name]
 
 
+def _published_config_get_calls(mock_bus):
+    """Return list of payloads published on 'config.get'."""
+    return [
+        call.args[1]
+        for call in mock_bus.publish.call_args_list
+        if call.args[0] == "config.get"
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Initial state
 # ---------------------------------------------------------------------------
@@ -116,7 +128,7 @@ class TestModulesResponse:
     def test_tab_created_for_each_module(self, window):
         cfg_ui.on_modules_response("system.modules_response", {
             "modules": [
-                {"name": "bluetooth", "pid": 101, "status": "active"},
+                {"name": "bluetooth",      "pid": 101, "status": "active"},
                 {"name": "config_manager", "pid": 102, "status": "active"},
             ]
         })
@@ -132,13 +144,23 @@ class TestModulesResponse:
         })
         assert window._tab_widget.count() == 2
 
-    def test_config_get_published_per_module(self, window):
+    def test_config_get_published_with_requester(self, window):
+        """config.get must carry requester='config_ui' for each new tab."""
         _mock_bus.publish.reset_mock()
         cfg_ui.on_modules_response("system.modules_response", {
             "modules": [{"name": "bluetooth", "pid": 101, "status": "active"}]
         })
-        calls = [c.args for c in _mock_bus.publish.call_args_list]
-        assert ("config.get", {"module": "bluetooth"}) in calls
+        payloads = _published_config_get_calls(_mock_bus)
+        assert len(payloads) == 1
+        assert payloads[0] == {"module": "bluetooth", "requester": _REQUESTER}
+
+    def test_config_get_not_published_for_existing_tab(self, window):
+        """Second add_or_update for same module must NOT re-publish config.get."""
+        window.add_or_update_module_tab("bluetooth", 101, "active")
+        _mock_bus.publish.reset_mock()
+        window.add_or_update_module_tab("bluetooth", 101, "active")
+        payloads = _published_config_get_calls(_mock_bus)
+        assert payloads == []
 
     def test_duplicate_module_does_not_add_tab(self, window):
         window.add_or_update_module_tab("bluetooth", 101, "active")
@@ -157,11 +179,19 @@ class TestModulesResponse:
 # ---------------------------------------------------------------------------
 
 class TestConfigResponse:
+    def _response(self, module, config, requester=_REQUESTER):
+        """Simulate an incoming config.response payload."""
+        cfg_ui.on_config_response("config.response", {
+            "module":    module,
+            "config":    config,
+            "requester": requester,
+        })
+
     def test_fields_created_for_each_key(self, window):
         _add_tab(window, "bluetooth")
         window.populate_module_config("bluetooth", json.dumps({"pin": "1234", "enabled": "true"}))
         tab = window._tabs["bluetooth"]
-        assert "pin" in tab._fields
+        assert "pin"     in tab._fields
         assert "enabled" in tab._fields
 
     def test_field_value_matches_config(self, window):
@@ -179,9 +209,46 @@ class TestConfigResponse:
         window.populate_module_config("bluetooth", json.dumps({}))
         assert not window._tabs["bluetooth"]._btn_save.isEnabled()
 
+    def test_response_with_correct_requester_is_processed(self, window):
+        """requester == 'config_ui' → tab is populated."""
+        _add_tab(window, "bluetooth")
+        self._response("bluetooth", {"pin": "1234"}, requester="config_ui")
+        # on_config_response dispatches via _invoke; call populate directly to verify
+        window.populate_module_config("bluetooth", json.dumps({"pin": "1234"}))
+        assert "pin" in window._tabs["bluetooth"]._fields
+
+    def test_response_with_wrong_requester_is_ignored(self, window):
+        """requester != 'config_ui' → on_config_response must return early."""
+        _add_tab(window, "bluetooth")
+        # Pre-populate so we can detect if it gets overwritten
+        window.populate_module_config("bluetooth", json.dumps({"pin": "1234"}))
+        # Simulate a response from another requester (e.g. the bluetooth module itself)
+        cfg_ui.on_config_response("config.response", {
+            "module":    "bluetooth",
+            "config":    {"pin": "WRONG"},
+            "requester": "bluetooth",
+        })
+        # Tab must NOT be repopulated — field still holds original value
+        assert window._tabs["bluetooth"]._fields["pin"].text() == "1234"
+
+    def test_response_with_empty_requester_is_ignored(self, window):
+        """requester == '' (legacy/unknown) → also ignored by config_ui."""
+        _add_tab(window, "bluetooth")
+        window.populate_module_config("bluetooth", json.dumps({"pin": "5555"}))
+        cfg_ui.on_config_response("config.response", {
+            "module":    "bluetooth",
+            "config":    {"pin": "OVERWRITE"},
+            "requester": "",
+        })
+        assert window._tabs["bluetooth"]._fields["pin"].text() == "5555"
+
     def test_unknown_module_response_is_ignored(self, window):
-        # no crash if module tab doesn't exist
-        cfg_ui.on_config_response("config.response", {"module": "ghost", "config": {"x": 1}})
+        """No crash if module tab doesn't exist yet."""
+        cfg_ui.on_config_response("config.response", {
+            "module":    "ghost",
+            "config":    {"x": 1},
+            "requester": _REQUESTER,
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -193,8 +260,7 @@ class TestSaveAction:
         _add_tab(window, "bluetooth")
         window.populate_module_config("bluetooth", json.dumps({"pin": "1234", "enabled": "true"}))
         tab = window._tabs["bluetooth"]
-        tab._fields["pin"].setText("5678")   # changed
-        # enabled left as-is
+        tab._fields["pin"].setText("5678")
         _mock_bus.publish.reset_mock()
         tab._on_save()
         _mock_bus.publish.assert_called_once_with(
@@ -214,7 +280,6 @@ class TestSaveAction:
         tab = window._tabs["bluetooth"]
         tab._fields["pin"].setText("0000")
         tab._on_save()
-        # second save should be no-op
         _mock_bus.publish.reset_mock()
         tab._on_save()
         _mock_bus.publish.assert_not_called()
@@ -243,11 +308,15 @@ class TestRefreshActions:
         window._on_refresh_all()
         _mock_bus.publish.assert_called_with("system.get_modules", {})
 
-    def test_tab_refresh_publishes_config_get(self, window):
+    def test_tab_refresh_publishes_config_get_with_requester(self, window):
+        """↻ Ricarica on a tab must include requester='config_ui'."""
         tab = _add_tab(window, "bluetooth")
         _mock_bus.publish.reset_mock()
         tab._on_refresh()
-        _mock_bus.publish.assert_called_with("config.get", {"module": "bluetooth"})
+        _mock_bus.publish.assert_called_once_with(
+            "config.get",
+            {"module": "bluetooth", "requester": _REQUESTER},
+        )
 
 
 # ---------------------------------------------------------------------------
