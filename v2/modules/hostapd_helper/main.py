@@ -26,7 +26,14 @@ Internal helpers (no ZMQ):
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parents[2]))
+_HERE    = Path(__file__).parent   # v2/modules/hostapd_helper/
+_MODULES = _HERE.parent            # v2/modules/
+_V2      = _MODULES.parent         # v2/
+
+if str(_V2) not in sys.path:
+    sys.path.insert(0, str(_V2))
+if str(_MODULES) not in sys.path:
+    sys.path.insert(0, str(_MODULES))
 
 from shared.bus_client import BusClient   # noqa: E402
 from shared.logger import get_logger      # noqa: E402
@@ -55,16 +62,11 @@ _ap_monitor: APMonitor | None = None
 # ---------------------------------------------------------------------------
 
 def on_rfcomm_connected(topic: str, payload: dict) -> None:
-    """
-    Triggered when the phone opens the RFCOMM channel.
-    Starts the AP and begins monitoring.
-    """
     global _ap_manager, _ap_monitor
 
     device_address = payload.get("device_address", "unknown")
     log.info(f"RFCOMM connected from {device_address} — starting AP")
 
-    # Build config (defaults are fine; extend here for custom ssid/iface)
     cfg = APConfig()
     _ap_manager = APManager(cfg)
 
@@ -96,10 +98,6 @@ def on_system_stop(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _on_ap_ready(params: dict) -> None:
-    """
-    Called by APMonitor once the AP is confirmed active.
-    Publishes hostapd.ready with all params needed by rfcomm_handshake.
-    """
     log.info(f"AP ready: ssid={params.get('ssid')} bssid={params.get('bssid')}")
     bus.publish("hostapd.ready", params)
 
