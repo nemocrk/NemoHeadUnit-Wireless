@@ -9,9 +9,9 @@ Usage inside a module:
     from shared.config_client import ConfigClient
 
     cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
-    cfg.register()                     # before bus.start()
-    cfg.get()                          # async → on_config_loaded(config)
-    cfg.set("pin", "1234")             # async → on_config_changed(key, value)
+    cfg.register()                          # before bus.start()
+    cfg.get(defaults=_DEFAULTS)             # async → on_config_loaded(config)
+    cfg.set("pin", "1234")                  # async → on_config_changed(key, value)
 
     cfg.on_config_loaded  = lambda config: ...
     cfg.on_config_changed = lambda key, value: ...
@@ -22,6 +22,10 @@ by module_name so multiple modules can coexist safely on the same bus.
 config.get is published with a "requester" field set to module_name.
 config_manager echoes this field back in config.response, allowing UI
 modules (e.g. config_ui) to ignore responses not directed at them.
+
+If "defaults" is passed to get(), config_manager will persist them on
+first boot (when no YAML exists yet) and return them in the same
+config.response, so config_ui sees the keys immediately.
 """
 
 from __future__ import annotations
@@ -61,19 +65,27 @@ class ConfigClient:
     # Public API
     # ------------------------------------------------------------------
 
-    def get(self) -> None:
+    def get(self, defaults: dict | None = None) -> None:
         """
         Request the full config for this module.
         The result is delivered asynchronously via on_config_loaded.
 
-        The "requester" field is set to module_name so that observer
-        modules (e.g. config_ui) can distinguish responses by origin
-        and ignore ones not directed at them.
+        Parameters
+        ----------
+        defaults : optional dict of default key/value pairs.
+            If provided and no YAML exists yet for this module,
+            config_manager will persist the defaults atomically and
+            return them in the same config.response — so observers
+            (e.g. config_ui) see the keys on first boot without a
+            second round-trip.
         """
-        self._bus.publish("config.get", {
+        payload: dict = {
             "module":    self._module_name,
             "requester": self._module_name,
-        })
+        }
+        if defaults is not None:
+            payload["defaults"] = defaults
+        self._bus.publish("config.get", payload)
 
     def set(self, key: str, value) -> None:
         """
@@ -92,6 +104,10 @@ class ConfigClient:
 
     def _on_config_response(self, topic: str, payload: dict) -> None:
         if payload.get("module") != self._module_name:
+            return
+        # Filter: only process responses directed at this module
+        # (requester field matches module_name, set by get())
+        if payload.get("requester") != self._module_name:
             return
         if self.on_config_loaded:
             self.on_config_loaded(payload.get("config", {}))
