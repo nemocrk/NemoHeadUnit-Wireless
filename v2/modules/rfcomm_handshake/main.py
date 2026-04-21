@@ -3,12 +3,17 @@ NemoHeadUnit-Wireless v2 — rfcomm_handshake module
 
 Module contract:
   Name        : rfcomm_handshake
-  Subscribes  : system.stop
+  Priority    : 1  (service level)
+  Subscribes  : system.readytostart
+                system.start
+                system.stop
                 hostapd.ready   {ssid, key, bssid, interface,
                                  gateway_ip, security_mode, ap_type}
-  Publishes   : rfcomm.handshake.started      {device_address}
-                rfcomm.handshake.completed    {device_address, phone_ip}
-                rfcomm.handshake.failed       {device_address, error}
+  Publishes   : system.module_ready            {name, priority}
+                system.ready                   {name, priority}
+                rfcomm.handshake.started       {device_address}
+                rfcomm.handshake.completed     {device_address, phone_ip}
+                rfcomm.handshake.failed        {device_address, error}
 
 Flow:
   1. Waits for hostapd.ready — stores WiFi credentials
@@ -56,6 +61,7 @@ from rfcomm_handshake.handshake import RfcommHandshake     # noqa: E402
 # ---------------------------------------------------------------------------
 
 MODULE_NAME = "rfcomm_handshake"
+PRIORITY    = 1  # service level
 
 log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
@@ -69,6 +75,40 @@ _device_address: Optional[str] = None        # set on bluetooth.rfcomm.connected
 _pending_sock: Optional[socket.socket] = None
 
 RFCOMM_CHANNEL = 8
+
+# ---------------------------------------------------------------------------
+# Boot protocol handlers
+# ---------------------------------------------------------------------------
+
+def on_system_readytostart(topic: str, payload: dict) -> None:
+    log.info(f"system.readytostart received — announcing priority {PRIORITY}")
+    bus.publish("system.module_ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+
+
+def on_system_start(topic: str, payload: dict) -> None:
+    if payload.get("priority") != PRIORITY:
+        return
+
+    log.info(f"system.start priority={PRIORITY} — rfcomm_handshake ready")
+
+    # No blocking init — this module is fully event-driven.
+    # Handshake starts when both bluetooth.rfcomm.connected
+    # and hostapd.ready have been received.
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info("system.ready published — rfcomm_handshake online")
+
+
+def on_system_stop(topic: str, payload: dict) -> None:
+    log.info("system.stop received")
+    _close_pending_sock()
+    bus.stop()
+
 
 # ---------------------------------------------------------------------------
 # Handlers
@@ -89,11 +129,6 @@ def on_hostapd_ready(topic: str, payload: dict) -> None:
     log.info(f"hostapd.ready received: ssid={payload.get('ssid')} — ready for handshake")
     _try_start_handshake()
 
-
-def on_system_stop(topic: str, payload: dict) -> None:
-    log.info("system.stop received")
-    _close_pending_sock()
-    bus.stop()
 
 # ---------------------------------------------------------------------------
 # Handshake trigger
@@ -149,6 +184,7 @@ def _run_handshake() -> None:
 
     _close_pending_sock()
 
+
 # ---------------------------------------------------------------------------
 # Socket helpers
 # ---------------------------------------------------------------------------
@@ -178,14 +214,17 @@ def _close_pending_sock() -> None:
             pass
         _pending_sock = None
 
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def run() -> None:
+    bus.subscribe("system.readytostart",        on_system_readytostart)
+    bus.subscribe("system.start",               on_system_start)
+    bus.subscribe("system.stop",                on_system_stop)
     bus.subscribe("bluetooth.rfcomm.connected", on_bluetooth_rfcomm_connected)
     bus.subscribe("hostapd.ready",              on_hostapd_ready)
-    bus.subscribe("system.stop",               on_system_stop)
 
     log.info("Module started, waiting for messages...")
     bus.start(blocking=True)
