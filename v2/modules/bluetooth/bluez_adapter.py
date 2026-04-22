@@ -4,7 +4,10 @@ bluez_adapter.py — BlueZ D-Bus adapter initialisation and profile registration
 Responsibilities:
   - Connect to org.bluez via D-Bus SystemBus
   - Retrieve the default Adapter1 proxy
-  - Register HFP AG, HSP HS, AA RFCOMM profiles via ProfileManager1
+  - Register HFP AG, HSP HS profiles via ProfileManager1
+
+Note: AA RFCOMM profile (AA_UUID) is registered by RfcommListener in rfcomm.py
+      as a proper Profile1 D-Bus object so BlueZ can deliver NewConnection() fd.
 
 This module has NO bus (ZMQ) dependency — it is a plain helper
 instantiated by main.py after the broker is ready.
@@ -20,10 +23,9 @@ log = logging.getLogger("bluetooth.bluez_adapter")
 if not os.environ.get("DBUS_SYSTEM_BUS_ADDRESS"):
     os.environ["DBUS_SYSTEM_BUS_ADDRESS"] = "unix:path=/run/dbus/system_bus_socket"
 
-# Android Auto RFCOMM profile UUID
 HFP_UUID = "0000111e-0000-1000-8000-00805f9b34fb"
 HSP_UUID = "00001108-0000-1000-8000-00805f9b34fb"
-AA_UUID  = "4de17a00-52cb-11e6-bdf4-0800200c9a66"
+# AA_UUID is owned by rfcomm.py — do not register here to avoid duplicate UUID error.
 
 RFCOMM_CHANNEL = 8
 
@@ -112,7 +114,10 @@ class BluezAdapter:
     # ------------------------------------------------------------------
 
     def register_profiles(self) -> bool:
-        """Register HFP AG, HSP HS and AA RFCOMM profiles.
+        """Register HFP AG and HSP HS profiles.
+
+        AA RFCOMM profile is registered separately by RfcommListener
+        as a Profile1 D-Bus object so BlueZ delivers NewConnection() fd.
 
         If a profile UUID is already registered (e.g. after an unclean
         shutdown), the error is treated as non-fatal and registration
@@ -129,7 +134,6 @@ class BluezAdapter:
             )
             self._register_one("/org/bluez/profile/hfp", HFP_UUID, opts, "HFP AG")
             self._register_one("/org/bluez/profile/hsp", HSP_UUID, opts, "HSP HS")
-            self._register_one("/org/bluez/profile/aa",  AA_UUID,  opts, "AA RFCOMM")
             return True
         except Exception as e:
             log.error(f"Profile registration failed: {e}")
