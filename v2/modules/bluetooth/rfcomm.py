@@ -1,17 +1,18 @@
 """
-rfcomm.py — RFCOMM channel 8 socket listener.
+rfcomm.py — RFCOMM listener via BlueZ D-Bus Profile1 interface.
 
-Usa socket nativo AF_BLUETOOTH/BTPROTO_RFCOMM.
-Il bind richiede l'indirizzo reale dell'adapter (non 00:00:00:00:00:00)
-quando il modulo rfcomm del kernel non è caricato come modulo separato.
-L'indirizzo viene letto via `hciconfig hci0` al momento dell'avvio.
+Registra un oggetto D-Bus che implementa org.bluez.Profile1.
+BlueZ consegna il file descriptor via NewConnection() ogni volta che
+un dispositivo remoto si connette al canale RFCOMM registrato.
+
+Nessuna dipendenza da socket AF_BLUETOOTH nativo né da hciconfig:
+richiede solo dbus-python + gi (già presenti nell'environment).
 
 No ZMQ dependency — caller (main.py) handles publishing.
 """
 
+import os
 import socket
-import subprocess
-import re
 import threading
 from typing import Callable
 
@@ -25,81 +26,170 @@ from shared.logger import get_logger  # noqa: E402
 
 log = get_logger("bluetooth.rfcomm")
 
-RFCOMM_CHANNEL  = 8
-_AF_BLUETOOTH   = getattr(socket, "AF_BLUETOOTH",  31)
-_BTPROTO_RFCOMM = getattr(socket, "BTPROTO_RFCOMM",  3)
+RFCOMM_CHANNEL = 8
+AA_UUID        = "4de17a00-52cb-11e6-bdf4-0800200c9a66"
+_PROFILE_PATH  = "/org/nemo/rfcomm/aa"
 
 
-def _get_adapter_address(iface: str = "hci0") -> str:
-    """Return the BD address of the local adapter, e.g. '73:4E:4B:7F:EB:FF'."""
-    try:
-        out = subprocess.check_output(["hciconfig", iface], text=True, stderr=subprocess.DEVNULL)
-        match = re.search(r"BD Address:\s*([0-9A-Fa-f:]{17})", out)
-        if match:
-            return match.group(1)
-    except Exception as e:
-        log.warning(f"hciconfig failed: {e}")
-    return "00:00:00:00:00:00"
+class _RfcommProfile:
+    """
+    Oggetto D-Bus che implementa org.bluez.Profile1.
+
+    BlueZ chiama NewConnection(device_path, fd, properties) quando un
+    dispositivo si connette al profilo registrato.  Il file descriptor
+    viene wrappato in un socket Python e passato alla callback.
+    """
+
+    DBUS_INTERFACE = "org.bluez.Profile1"
+
+    def __init__(self, on_connected_cb: Callable[[socket.socket, str], None] | None):
+        self._on_connected_cb = on_connected_cb
+
+    # ------------------------------------------------------------------
+    # org.bluez.Profile1 methods
+    # ------------------------------------------------------------------
+
+    def Release(self):
+        log.info("Profile1.Release called by BlueZ")
+
+    def NewConnection(self, device_path: str, fd, properties):
+        """Called by BlueZ when a remote device connects."""
+        try:
+            # fd arriva come dbus.types.UnixFd — estraiamo l'int
+            raw_fd: int = fd.take() if hasattr(fd, "take") else int(fd)
+            sock = socket.fromfd(raw_fd, socket.AF_UNIX, socket.SOCK_STREAM)
+            os.close(raw_fd)  # fromfd duplica l'fd; chiudi l'originale
+
+            # Ricava l'indirizzo del device dal path D-Bus
+            # es. /org/bluez/hci0/dev_73_4E_4B_7F_EB_FF → 73:4E:4B:7F:EB:FF
+            device_addr = device_path.split("/dev_")[-1].replace("_", ":") if "/dev_" in str(device_path) else str(device_path)
+            log.info(f"RFCOMM NewConnection from {device_addr}")
+
+            if self._on_connected_cb:
+                threading.Thread(
+                    target=self._on_connected_cb,
+                    args=(sock, device_addr),
+                    daemon=True,
+                    name=f"rfcomm-handler-{device_addr}",
+                ).start()
+        except Exception as e:
+            log.error(f"NewConnection handler error: {e}")
+
+    def RequestDisconnection(self, device_path: str):
+        log.info(f"Profile1.RequestDisconnection: {device_path}")
 
 
 class RfcommListener:
+    """
+    Registra il profilo AA RFCOMM su BlueZ via D-Bus e riceve
+    connessioni tramite NewConnection() del Profile1 object.
+
+    Interfaccia pubblica identica alla versione precedente:
+        listener = RfcommListener(on_connected_cb=...)
+        listener.start() -> bool
+        listener.stop()
+    """
+
     def __init__(self, on_connected_cb: Callable[[socket.socket, str], None] | None = None):
         self._on_connected_cb = on_connected_cb
-        self._server_sock: socket.socket | None = None
-        self._running = False
-        self._thread: threading.Thread | None = None
+        self._bus = None
+        self._profile_obj = None
+        self._registered = False
 
     def start(self) -> bool:
         try:
-            local_addr = _get_adapter_address()
-            log.info(f"Binding RFCOMM to {local_addr} ch.{RFCOMM_CHANNEL}")
-            self._server_sock = socket.socket(_AF_BLUETOOTH, socket.SOCK_STREAM, _BTPROTO_RFCOMM)
-            self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._server_sock.bind((local_addr, RFCOMM_CHANNEL))
-            self._server_sock.listen(1)
-            self._running = True
-            self._thread = threading.Thread(target=self._accept_loop, daemon=True, name="rfcomm-accept")
-            self._thread.start()
-            log.info(f"RFCOMM listener started on channel {RFCOMM_CHANNEL}")
+            import dbus
+            import dbus.service
+
+            self._bus = dbus.SystemBus()
+
+            self._profile_obj = _RfcommProfileService(
+                conn=self._bus,
+                object_path=_PROFILE_PATH,
+                on_connected_cb=self._on_connected_cb,
+            )
+
+            profile_mgr = dbus.Interface(
+                self._bus.get_object("org.bluez", "/org/bluez"),
+                "org.bluez.ProfileManager1",
+            )
+            opts = dbus.Dictionary(
+                {
+                    "Channel":     dbus.UInt16(RFCOMM_CHANNEL),
+                    "AutoConnect": dbus.Boolean(True),
+                    "Role":        dbus.String("server"),
+                    "Name":        dbus.String("NemoHeadUnit AA"),
+                },
+                signature="sv",
+            )
+            profile_mgr.RegisterProfile(_PROFILE_PATH, AA_UUID, opts)
+            self._registered = True
+            log.info(f"RFCOMM Profile1 registered: {AA_UUID} ch.{RFCOMM_CHANNEL}")
             return True
-        except OSError as e:
-            log.error(f"RFCOMM listen failed: {e}")
-            return False
+
         except Exception as e:
-            log.error(f"RFCOMM listen unexpected error: {e}")
+            log.error(f"RFCOMM Profile1 registration failed: {e}")
             return False
 
     def stop(self) -> None:
-        self._running = False
-        if self._server_sock:
+        if self._registered and self._bus:
             try:
-                self._server_sock.close()
+                import dbus
+                profile_mgr = dbus.Interface(
+                    self._bus.get_object("org.bluez", "/org/bluez"),
+                    "org.bluez.ProfileManager1",
+                )
+                profile_mgr.UnregisterProfile(_PROFILE_PATH)
+                log.info("RFCOMM Profile1 unregistered")
+            except Exception as e:
+                log.warning(f"UnregisterProfile failed (non-fatal): {e}")
+            self._registered = False
+        if self._bus:
+            try:
+                self._bus.close()
             except Exception:
                 pass
         log.info("RFCOMM listener stopped")
 
-    def _accept_loop(self) -> None:
-        log.info("RFCOMM accept loop running...")
-        while self._running:
-            try:
-                if self._server_sock is None:
-                    break
-                self._server_sock.settimeout(2.0)
-                try:
-                    client_sock, client_info = self._server_sock.accept()
-                except socket.timeout:
-                    continue
-                client_addr = client_info[0] if isinstance(client_info, tuple) else str(client_info)
-                log.info(f"RFCOMM connection from {client_addr}")
-                if self._on_connected_cb:
-                    threading.Thread(
-                        target=self._on_connected_cb,
-                        args=(client_sock, client_addr),
-                        daemon=True,
-                        name=f"rfcomm-handler-{client_addr}",
-                    ).start()
-            except OSError as e:
-                if self._running:
-                    log.error(f"RFCOMM accept error: {e}")
-                break
-        log.info("RFCOMM accept loop exited")
+
+class _RfcommProfileService(dbus.service.Object):
+    """
+    dbus.service.Object che espone org.bluez.Profile1 sul system bus.
+    """
+
+    def __init__(self, conn, object_path: str, on_connected_cb):
+        import dbus.service
+        super().__init__(conn=conn, object_path=object_path)
+        self._on_connected_cb = on_connected_cb
+
+    @dbus.service.method("org.bluez.Profile1", in_signature="", out_signature="")
+    def Release(self):
+        log.info("Profile1.Release")
+
+    @dbus.service.method("org.bluez.Profile1", in_signature="oha{sv}", out_signature="")
+    def NewConnection(self, device_path, fd, properties):
+        try:
+            raw_fd: int = fd.take() if hasattr(fd, "take") else int(fd)
+            sock = socket.fromfd(raw_fd, socket.AF_UNIX, socket.SOCK_STREAM)
+            os.close(raw_fd)
+
+            device_addr = (
+                device_path.split("/dev_")[-1].replace("_", ":")
+                if "/dev_" in str(device_path)
+                else str(device_path)
+            )
+            log.info(f"RFCOMM NewConnection from {device_addr}")
+
+            if self._on_connected_cb:
+                threading.Thread(
+                    target=self._on_connected_cb,
+                    args=(sock, device_addr),
+                    daemon=True,
+                    name=f"rfcomm-handler-{device_addr}",
+                ).start()
+        except Exception as e:
+            log.error(f"NewConnection error: {e}")
+
+    @dbus.service.method("org.bluez.Profile1", in_signature="o", out_signature="")
+    def RequestDisconnection(self, device_path):
+        log.info(f"Profile1.RequestDisconnection: {device_path}")
