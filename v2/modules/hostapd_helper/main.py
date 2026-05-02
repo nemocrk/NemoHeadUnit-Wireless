@@ -54,9 +54,9 @@ if str(_V2) not in sys.path:
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
-from shared.bus_client import BusClient        # noqa: E402
-from shared.logger import get_logger           # noqa: E402
-from shared.config_client import ConfigClient  # noqa: E402
+from shared.bus_client import BusClient              # noqa: E402
+from shared.logger import get_logger, attach_bus     # noqa: E402
+from shared.config_client import ConfigClient        # noqa: E402
 
 from hostapd_helper.ap_manager import APManager, APConfig   # noqa: E402
 from hostapd_helper.ap_monitor import APMonitor             # noqa: E402
@@ -104,12 +104,8 @@ _ap_monitor: APMonitor | None = None
 def _on_config_loaded(config: dict) -> None:
     global _config
     if not config:
-        # First boot — no YAML exists yet. config_manager already seeded the
-        # defaults (passed via cfg.get(defaults=_DEFAULTS)) — nothing to do.
         log.info("No persisted config found — defaults seeded by config_manager.")
         return
-
-    # Merge: persisted values override defaults; unknown keys are ignored
     merged = dict(_DEFAULTS)
     merged.update({k: v for k, v in config.items() if k in _DEFAULTS})
     _config = merged
@@ -122,11 +118,9 @@ def _on_config_changed(key: str, value) -> None:
         return
     _config[key] = value
     log.info(f"Config changed: {key} = {value!r}")
-    # Note: AP config changes take effect on next bluetooth.rfcomm.connected
 
 
 def _build_ap_config() -> APConfig:
-    """Build an APConfig from the current live _config dict."""
     return APConfig(
         interface=        str(_config["interface"]),
         ssid=             str(_config["ssid"]),
@@ -156,13 +150,8 @@ def on_system_start(topic: str, payload: dict) -> None:
         return
 
     log.info(f"system.start priority={PRIORITY} — initialising hostapd_helper")
-
-    # config_manager is guaranteed online (priority 0 completed).
-    # Pass defaults so config_manager seeds the YAML on first boot.
     cfg.get(defaults=_DEFAULTS)
 
-    # Signal ready immediately — this module is event-driven (waits for
-    # bluetooth.rfcomm.connected) and has no blocking init of its own.
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
         "priority": PRIORITY,
@@ -254,13 +243,13 @@ def run() -> None:
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
+    attach_bus(bus)  # forward all log.* from this process to log_viewer
     time.sleep(0.05)
     on_system_readytostart()
     try:
         bus_thread.join()
     except KeyboardInterrupt:
-        pass  # gestito dal main via system.stop
-
+        pass
 
 
 if __name__ == "__main__":
