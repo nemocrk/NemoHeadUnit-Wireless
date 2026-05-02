@@ -102,14 +102,24 @@ class APManager:
         return True
 
     def stop(self) -> None:
-        """Terminate hostapd and dnsmasq, restore interface, reconnect via nmcli."""
+        """
+        Terminate hostapd and dnsmasq, restore interface to station mode,
+        hand back to NetworkManager and trigger reconnect to a saved network.
+
+        Teardown order matters:
+          1. Kill daemons (hostapd/dnsmasq release the interface)
+          2. Bring iface down, flush AP address, set type back to 'managed'
+          3. Bring iface back up so NM finds it in station mode
+          4. Tell NM the device is managed again
+          5. Ask NM to connect (now it can, iface is station + up)
+        """
         self._kill(self._hostapd_proc, "hostapd")
         self._kill(self._dnsmasq_proc, "dnsmasq")
         self._hostapd_proc = None
         self._dnsmasq_proc = None
         self._cleanup_conf(self._hostapd_conf)
         self._cleanup_conf(self._dnsmasq_conf)
-        self._restore_interface()
+        self._restore_interface()          # down → flush → set type managed → up
         self._set_network_manager_managed(True)
         self._nmcli_reconnect()
         log.info("AP stopped")
@@ -247,12 +257,37 @@ class APManager:
             return False
 
     def _restore_interface(self) -> None:
+        """
+        Reverse the AP setup: bring iface down, flush AP address,
+        restore nl80211 type to 'managed' (station), bring back up.
+
+        This MUST happen before NM is re-enabled, otherwise NM finds the
+        interface still in __ap mode and 'nmcli device connect' fails.
+        """
         iface = self._cfg.interface
-        try:
-            subprocess.run(["sudo", "ip", "addr", "flush", "dev", iface], check=False)
-            log.info(f"Interface {iface} flushed")
-        except Exception as e:
-            log.warning(f"_restore_interface: {e}")
+        cmds = [
+            (["sudo", "ip",  "link", "set",  iface, "down"],         "link down"),
+            (["sudo", "ip",  "addr", "flush", "dev", iface],          "addr flush"),
+            (["sudo", "iw",  "dev",  iface,   "set", "type", "managed"], "set type managed"),
+            (["sudo", "ip",  "link", "set",  iface, "up"],           "link up"),
+        ]
+        for cmd, label in cmds:
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, check=False, timeout=5
+                )
+                if result.returncode == 0:
+                    log.info(f"restore_interface [{label}] OK")
+                else:
+                    log.warning(
+                        f"restore_interface [{label}] failed: "
+                        f"rc={result.returncode} "
+                        f"stderr={(result.stderr or '').strip()}"
+                    )
+            except subprocess.TimeoutExpired:
+                log.warning(f"restore_interface [{label}] timed out")
+            except Exception as e:
+                log.warning(f"restore_interface [{label}] error: {e}")
 
     def _release_interface_for_ap(self) -> None:
         """Disconnect NetworkManager and mark the interface unmanaged for AP mode."""
@@ -279,11 +314,17 @@ class APManager:
 
     def _nmcli_reconnect(self) -> None:
         """
-        Ask NetworkManager to reconnect the interface to any known/saved network.
+        Ask NetworkManager to connect the interface to the best available
+        saved network.
 
-        Uses 'nmcli device connect <iface>' which triggers NM auto-selection
-        of the best available saved connection.  Best-effort: failure is logged
-        but does not raise.
+        At this point the interface is already:
+          - type station (managed), not __ap
+          - link up
+          - NM-managed
+
+        'nmcli device connect <iface>' triggers NM auto-selection among
+        all saved connections eligible for this interface.
+        Best-effort: failure is logged but does not raise.
         """
         iface = self._cfg.interface
         log.info(f"Requesting nmcli reconnect on {iface}")
