@@ -33,16 +33,6 @@ Internal helpers (no ZMQ dependency):
   discovery.py      — timed device discovery
   pairing.py        — agent, PIN, confirm
   rfcomm.py         — legacy AA RFCOMM Profile1 helper
-
-Note:
-  The AA RFCOMM handshake profile is owned by rfcomm_handshake so the process
-  that receives BlueZ's NewConnection fd can run the handshake directly.
-
-GLib mainloop note:
-  BlueZ agent callbacks (RequestConfirmation, RequestPinCode …) are
-  dispatched by the GLib event loop.  We run GLib.MainLoop in a dedicated
-  daemon thread started in on_system_start() so the ZMQ receive loop and
-  the D-Bus dispatch loop can coexist.
 """
 
 import sys
@@ -59,9 +49,9 @@ if str(_V2) not in sys.path:
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
-from shared.bus_client import BusClient        # noqa: E402
-from shared.logger import get_logger           # noqa: E402
-from shared.config_client import ConfigClient  # noqa: E402
+from shared.bus_client import BusClient              # noqa: E402
+from shared.logger import get_logger, attach_bus     # noqa: E402
+from shared.config_client import ConfigClient        # noqa: E402
 
 from bluetooth.bluez_adapter import BluezAdapter   # noqa: E402
 from bluetooth.discovery import DiscoverySession   # noqa: E402
@@ -92,26 +82,19 @@ _DEFAULTS = {
 _config: dict = dict(_DEFAULTS)
 
 # ---------------------------------------------------------------------------
-# Module-level singletons (created on system.start)
+# Module-level singletons
 # ---------------------------------------------------------------------------
 
 _adapter:   BluezAdapter     | None = None
 _discovery: DiscoverySession | None = None
 _pairing:   PairingAgent     | None = None
-_glib_loop  = None   # gi.repository.GLib.MainLoop instance
+_glib_loop  = None
 
 # ---------------------------------------------------------------------------
-# GLib mainloop — required for D-Bus agent callback dispatch
+# GLib mainloop
 # ---------------------------------------------------------------------------
 
 def _start_glib_mainloop() -> None:
-    """
-    Run GLib.MainLoop in a daemon thread.
-
-    This is mandatory: without an active GLib event loop, BlueZ never
-    delivers RequestConfirmation / RequestPinCode to our agent object,
-    even though DBusGMainLoop is set as the default mainloop.
-    """
     global _glib_loop
     try:
         from gi.repository import GLib
@@ -187,7 +170,6 @@ def on_system_start(topic: str, payload: dict) -> None:
 
     log.info(f"system.start priority={PRIORITY} — initialising Bluetooth subsystem")
 
-    # Start GLib mainloop first so D-Bus agent callbacks are dispatched
     _start_glib_mainloop()
 
     _adapter = BluezAdapter()
@@ -311,6 +293,7 @@ def _on_pairing_completed(device_address: str) -> None:
 def _on_pairing_failed(device_address: str, error: str) -> None:
     bus.publish("bluetooth.pairing.failed", {"device_address": device_address, "error": error})
 
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -330,12 +313,13 @@ def run() -> None:
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
+    attach_bus(bus)  # forward all log.* from this process to log_viewer
     time.sleep(0.05)
     on_system_readytostart()
     try:
         bus_thread.join()
     except KeyboardInterrupt:
-        pass  # gestito dal main via system.stop
+        pass
 
 
 if __name__ == "__main__":
