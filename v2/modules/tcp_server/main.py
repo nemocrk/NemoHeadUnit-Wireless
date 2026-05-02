@@ -44,10 +44,10 @@ if str(_V2) not in sys.path:
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
-from shared.bus_client import BusClient           # noqa: E402
-from shared.logger import get_logger              # noqa: E402
-from tcp_server.server import TCPServer           # noqa: E402
-from tcp_server.frame_relay import FrameRelay     # noqa: E402
+from shared.bus_client import BusClient              # noqa: E402
+from shared.logger import get_logger, attach_bus     # noqa: E402
+from tcp_server.server import TCPServer              # noqa: E402
+from tcp_server.frame_relay import FrameRelay        # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -83,9 +83,6 @@ def on_system_start(topic: str, payload: dict) -> None:
         return
 
     log.info(f"system.start priority={PRIORITY} — tcp_server ready")
-
-    # No blocking init — this module is fully event-driven.
-    # The TCP server starts only when rfcomm.handshake.completed arrives.
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
         "priority": PRIORITY,
@@ -104,10 +101,6 @@ def on_system_stop(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def on_handshake_completed(topic: str, payload: dict) -> None:
-    """
-    Phone has joined our WiFi AP — start the TCP server and wait for it.
-    Runs in a background thread so the bus receive loop stays unblocked.
-    """
     device_address = payload.get("device_address", "")
     phone_ip       = payload.get("phone_ip", "")
     log.info(f"Handshake completed from {device_address} (phone_ip={phone_ip}) — starting TCP server")
@@ -122,7 +115,7 @@ def on_handshake_completed(topic: str, payload: dict) -> None:
 def _start_server() -> None:
     global _server, _relay
 
-    _server = TCPServer()  # extend here to pass ssl_certfile/ssl_keyfile
+    _server = TCPServer()
     if not _server.start():
         bus.publish("tcp.server.error", {"error": "TCPServer.start() failed"})
         return
@@ -147,7 +140,7 @@ def _start_server() -> None:
         on_frame_cb=_on_frame,
         on_closed_cb=_on_session_closed,
     )
-    _relay.start()  # blocking — returns when socket closes
+    _relay.start()
 
 
 def _teardown() -> None:
@@ -165,10 +158,6 @@ def _teardown() -> None:
 # ---------------------------------------------------------------------------
 
 def _on_frame(channel_id: int, flags: int, payload: bytes) -> None:
-    """
-    Called for every AA frame received from the phone.
-    Publishes payload as hex string to keep JSON-serialisable.
-    """
     bus.publish("aa.frame.received", {
         "channel_id":  channel_id,
         "flags":       flags,
@@ -194,12 +183,13 @@ def run() -> None:
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
+    attach_bus(bus)  # forward all log.* from this process to log_viewer
     time.sleep(0.05)
     on_system_readytostart()
     try:
         bus_thread.join()
     except KeyboardInterrupt:
-        pass  # gestito dal main via system.stop
+        pass
 
 
 if __name__ == "__main__":
