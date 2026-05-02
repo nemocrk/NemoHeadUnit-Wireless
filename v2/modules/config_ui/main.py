@@ -48,8 +48,8 @@ from PyQt6.QtWidgets import (                                         # noqa: E4
     QFormLayout, QStatusBar, QFrame,
 )
 
-from shared.bus_client import BusClient   # noqa: E402
-from shared.logger import get_logger      # noqa: E402
+from shared.bus_client import BusClient              # noqa: E402
+from shared.logger import get_logger, attach_bus     # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -63,7 +63,6 @@ bus = BusClient(module_name=MODULE_NAME)
 
 
 def _request_config(module: str):
-    """Publish config.get with requester tag so we only handle our own responses."""
     bus.publish("config.get", {"module": module, "requester": MODULE_NAME})
 
 
@@ -72,22 +71,16 @@ def _request_config(module: str):
 # ---------------------------------------------------------------------------
 
 class ModuleConfigTab(QWidget):
-    """
-    One tab per module.
-    Shows module metadata at the top, then an editable key/value form.
-    """
-
     def __init__(self, module_name: str, pid: int, status: str):
         super().__init__()
         self._module_name = module_name
-        self._original: dict = {}   # last values received from config.response
-        self._fields:   dict[str, QLineEdit] = {}  # key → input widget
+        self._original: dict = {}
+        self._fields:   dict[str, QLineEdit] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
-        # — metadata bar
         meta = QHBoxLayout()
         meta.addWidget(QLabel(f"<b>Modulo:</b> {module_name}"))
         meta.addSpacing(24)
@@ -104,13 +97,11 @@ class ModuleConfigTab(QWidget):
         meta.addWidget(btn_refresh)
         root.addLayout(meta)
 
-        # separator
         line = QFrame()
         line.setFrameShape(QFrame.Shape.HLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
         root.addWidget(line)
 
-        # — scrollable form area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self._form_container = QWidget()
@@ -124,19 +115,13 @@ class ModuleConfigTab(QWidget):
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._form.addRow(self._placeholder)
 
-        # — save button
         self._btn_save = QPushButton("💾  Salva modifiche")
         self._btn_save.setMinimumHeight(36)
         self._btn_save.setEnabled(False)
         self._btn_save.clicked.connect(self._on_save)
         root.addWidget(self._btn_save)
 
-    # -----------------------------------------------------------------------
-    # Public slot — called from main thread via _invoke
-    # -----------------------------------------------------------------------
-
     def populate(self, config: dict):
-        """Replace the form with editable rows from the received config dict."""
         while self._form.rowCount():
             self._form.removeRow(0)
         self._fields.clear()
@@ -158,10 +143,6 @@ class ModuleConfigTab(QWidget):
     def update_status(self, pid: int, status: str):
         self._lbl_pid.setText(f"PID: {pid}")
         self._lbl_status.setText(f"Stato: {status}")
-
-    # -----------------------------------------------------------------------
-    # Internal
-    # -----------------------------------------------------------------------
 
     def _on_refresh(self):
         _request_config(self._module_name)
@@ -193,9 +174,7 @@ class ConfigWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Configurazione moduli — NemoHeadUnit v2")
         self.setMinimumSize(640, 480)
-
-        self._tabs: dict[str, ModuleConfigTab] = {}  # module_name → tab
-
+        self._tabs: dict[str, ModuleConfigTab] = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -218,10 +197,6 @@ class ConfigWindow(QMainWindow):
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("In attesa di system.start…")
-
-    # -----------------------------------------------------------------------
-    # Qt slots (main-thread safe)
-    # -----------------------------------------------------------------------
 
     @pyqtSlot(str)
     def set_status(self, message: str):
@@ -247,10 +222,6 @@ class ConfigWindow(QMainWindow):
         tab.populate(config)
         self.set_status(f"Configurazione caricata per '{module}'")
 
-    # -----------------------------------------------------------------------
-    # Internal
-    # -----------------------------------------------------------------------
-
     def _on_refresh_all(self):
         bus.publish("system.get_modules", {})
         self.set_status("Aggiornamento lista moduli…")
@@ -265,7 +236,6 @@ _app:    QApplication | None = None
 
 
 def _invoke(slot: str, *args):
-    """Thread-safe dispatch from ZMQ thread to Qt main thread."""
     if _window is None:
         return
     q_args = [Q_ARG(type(a), a) for a in args]
@@ -320,7 +290,6 @@ def on_modules_response(topic: str, payload: dict) -> None:
 
 def on_config_response(topic: str, payload: dict) -> None:
     import json
-    # Ignore responses not directed at this module
     if payload.get("requester", "") != MODULE_NAME:
         return
     module = payload.get("module", "")
@@ -342,8 +311,8 @@ def run() -> None:
     bus.subscribe("system.modules_response", on_modules_response)
     bus.subscribe("config.response",         on_config_response)
 
-
     bus_thread = bus.start(blocking=False)
+    attach_bus(bus)  # forward all log.* from this process to log_viewer
     time.sleep(0.05)
     on_system_readytostart()
 
