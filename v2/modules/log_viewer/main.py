@@ -100,10 +100,18 @@ class LogViewerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Log Viewer — NemoHeadUnit v2")
-        self.setMinimumSize(800, 500)
         self._line_count = 0
         self._filter_level = "ALL"
         self._build_ui()
+
+    def apply_default_geometry(self, app: QApplication) -> None:
+        """Right half of the primary screen, full height."""
+        screen = app.primaryScreen().availableGeometry()
+        w = screen.width() // 2
+        h = screen.height()
+        x = screen.x() + w
+        y = screen.y()
+        self.setGeometry(x, y, w, h)
 
     def _build_ui(self):
         central = QWidget()
@@ -112,7 +120,6 @@ class LogViewerWindow(QMainWindow):
         root.setSpacing(6)
         root.setContentsMargins(10, 10, 10, 10)
 
-        # — toolbar ——————————————————————————————————————————————————————————
         toolbar = QHBoxLayout()
 
         toolbar.addWidget(QLabel("Filtro livello:"))
@@ -131,7 +138,6 @@ class LogViewerWindow(QMainWindow):
 
         root.addLayout(toolbar)
 
-        # — log area —————————————————————————————————————————————————————————
         self._log_area = QTextEdit()
         self._log_area.setReadOnly(True)
         self._log_area.setFont(QFont("Monospace", 10))
@@ -140,14 +146,9 @@ class LogViewerWindow(QMainWindow):
         )
         root.addWidget(self._log_area, stretch=1)
 
-        # — status bar ———————————————————————————————————————————————————————
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("In attesa di system.start…")
-
-    # -----------------------------------------------------------------------
-    # Qt slots (called on main thread via QMetaObject.invokeMethod)
-    # -----------------------------------------------------------------------
 
     @pyqtSlot(str)
     def set_status(self, message: str):
@@ -155,7 +156,6 @@ class LogViewerWindow(QMainWindow):
 
     @pyqtSlot(str, str, str, str)
     def append_log_line(self, ts: str, module: str, level: str, message: str):
-        """Append a formatted log line, respecting the active level filter."""
         _level_order = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
         if self._filter_level != "ALL":
@@ -176,7 +176,6 @@ class LogViewerWindow(QMainWindow):
         cursor.setCharFormat(fmt)
         cursor.insertText(line + "\n")
 
-        # enforce max_lines
         self._line_count += 1
         max_lines = int(_config.get("max_lines", 500))
         if self._line_count > max_lines:
@@ -189,13 +188,8 @@ class LogViewerWindow(QMainWindow):
             cursor.removeSelectedText()
             self._line_count = max_lines
 
-        # auto-scroll to bottom
         scrollbar = self._log_area.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
-
-    # -----------------------------------------------------------------------
-    # User interactions
-    # -----------------------------------------------------------------------
 
     def _on_clear_clicked(self):
         self._log_area.clear()
@@ -215,7 +209,6 @@ _window: LogViewerWindow | None = None
 
 
 def _invoke(slot_name: str, *args):
-    """Thread-safe call from ZMQ recv thread → Qt main thread."""
     if _window is None:
         return
     q_args = [Q_ARG(type(a), a) for a in args]
@@ -223,7 +216,7 @@ def _invoke(slot_name: str, *args):
 
 
 # ---------------------------------------------------------------------------
-# Bus handlers (ZMQ recv thread — must NOT touch Qt directly)
+# Bus handlers
 # ---------------------------------------------------------------------------
 
 def on_system_readytostart() -> None:
@@ -258,10 +251,6 @@ def on_system_stop(topic: str, payload: dict) -> None:
 
 
 def on_log_entry(topic: str, payload: dict) -> None:
-    """
-    Expected payload: {module: str, level: str, message: str, ts: float}
-    ts is a Unix timestamp; we format it for display.
-    """
     raw_ts  = payload.get("ts", time.time())
     module  = str(payload.get("module", "unknown"))
     level   = str(payload.get("level", "INFO")).upper()
@@ -296,6 +285,7 @@ def run() -> None:
 
     _app = QApplication(sys.argv)
     _window = LogViewerWindow()
+    _window.apply_default_geometry(_app)  # right half, full height
     _window.show()
 
     log.info("log_viewer window open")
