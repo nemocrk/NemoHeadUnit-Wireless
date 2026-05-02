@@ -47,10 +47,10 @@ if str(_V2) not in sys.path:
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
-from shared.bus_client import BusClient                    # noqa: E402
-from shared.logger import get_logger                       # noqa: E402
+from shared.bus_client import BusClient                      # noqa: E402
+from shared.logger import get_logger, attach_bus             # noqa: E402
 from rfcomm_handshake.dbus_rfcomm import DbusRfcommListener  # noqa: E402
-from rfcomm_handshake.handshake import RfcommHandshake     # noqa: E402
+from rfcomm_handshake.handshake import RfcommHandshake       # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -66,8 +66,8 @@ bus = BusClient(module_name=MODULE_NAME)
 # Module state
 # ---------------------------------------------------------------------------
 
-_credentials: Optional[dict] = None          # set on hostapd.ready
-_device_address: Optional[str] = None        # set on Profile1.NewConnection
+_credentials: Optional[dict] = None
+_device_address: Optional[str] = None
 _pending_sock: Optional[socket.socket] = None
 _rfcomm_listener: Optional[DbusRfcommListener] = None
 _handshake_running = False
@@ -122,13 +122,11 @@ def on_system_stop(topic: str, payload: dict) -> None:
 
 
 def _start_glib_mainloop() -> None:
-    """Run the GLib loop that dispatches BlueZ Profile1 callbacks."""
     global _glib_loop
     if _glib_loop is not None:
         return
     try:
         from gi.repository import GLib
-
         _glib_loop = GLib.MainLoop()
         t = threading.Thread(target=_glib_loop.run, daemon=True, name="glib-dbus")
         t.start()
@@ -150,7 +148,6 @@ def _stop_glib_mainloop() -> None:
 # ---------------------------------------------------------------------------
 
 def _on_rfcomm_connected(sock: socket.socket, device_address: str) -> None:
-    """Store the accepted D-Bus RFCOMM socket and notify AP management."""
     global _credentials, _device_address, _pending_sock
     with _state_lock:
         if _handshake_running:
@@ -172,7 +169,6 @@ def _on_rfcomm_connected(sock: socket.socket, device_address: str) -> None:
 
 
 def on_hostapd_ready(topic: str, payload: dict) -> None:
-    """Store WiFi credentials; start handshake if device address already known."""
     global _credentials
     _credentials = payload
     log.info(f"hostapd.ready received: ssid={payload.get('ssid')} — ready for handshake")
@@ -184,10 +180,6 @@ def on_hostapd_ready(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _try_start_handshake() -> None:
-    """
-    Start the handshake only when BOTH the device address AND
-    the AP credentials are available.
-    """
     global _handshake_running
     with _state_lock:
         if _handshake_running or not _device_address or not _credentials or not _pending_sock:
@@ -270,12 +262,13 @@ def run() -> None:
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
+    attach_bus(bus)  # forward all log.* from this process to log_viewer
     time.sleep(0.05)
     on_system_readytostart()
     try:
         bus_thread.join()
     except KeyboardInterrupt:
-        pass  # gestito dal main via system.stop
+        pass
 
 
 if __name__ == "__main__":
