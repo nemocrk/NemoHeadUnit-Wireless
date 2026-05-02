@@ -21,7 +21,8 @@ Module contract:
 Configuration keys (v2/config/hostapd_helper.yaml):
   interface         str    default: wlan0
   ssid              str    default: AndroidAutoAP
-  channel           int    default: 6
+  hw_mode           str    default: a  (a=5GHz, g=2.4GHz)
+  channel           int    default: 36
   ap_password       str    default: "" (empty = random per session)
   subnet            str    default: 192.168.50
   gateway_ip        str    default: 192.168.50.1
@@ -79,12 +80,14 @@ cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 _DEFAULTS = {
     "interface":        "wlan0",
     "ssid":             "AndroidAutoAP",
-    "channel":          6,
+    "hw_mode":          "a",
+    "channel":          36,
     "ap_password":      "",
     "subnet":           "192.168.50",
     "gateway_ip":       "192.168.50.1",
     "dhcp_range_start": "192.168.50.10",
     "dhcp_range_end":   "192.168.50.50",
+    "country_code":     "IT",
     "monitor_timeout":  30,
 }
 
@@ -96,6 +99,7 @@ _config: dict = dict(_DEFAULTS)
 
 _ap_manager: APManager | None = None
 _ap_monitor: APMonitor | None = None
+_ap_ready_params: dict | None = None
 
 # ---------------------------------------------------------------------------
 # ConfigClient callbacks
@@ -125,11 +129,13 @@ def _build_ap_config() -> APConfig:
         interface=        str(_config["interface"]),
         ssid=             str(_config["ssid"]),
         key=              str(_config["ap_password"]),
+        hw_mode=          str(_config["hw_mode"]),
         channel=          int(_config["channel"]),
         subnet=           str(_config["subnet"]),
         gateway_ip=       str(_config["gateway_ip"]),
         dhcp_range_start= str(_config["dhcp_range_start"]),
         dhcp_range_end=   str(_config["dhcp_range_end"]),
+        country_code=     str(_config["country_code"]),
     )
 
 
@@ -175,6 +181,16 @@ def on_rfcomm_connected(topic: str, payload: dict) -> None:
     device_address = payload.get("device_address", "unknown")
     log.info(f"RFCOMM connected from {device_address} — starting AP")
 
+    if _ap_manager and _ap_manager.is_running():
+        params = _ap_ready_params or _ap_manager.get_params()
+        log.info(f"AP already running for RFCOMM reconnect from {device_address} — reusing it")
+        bus.publish("hostapd.ready", params)
+        return
+
+    if _ap_monitor:
+        log.info(f"AP startup already in progress for RFCOMM reconnect from {device_address}")
+        return
+
     ap_cfg = _build_ap_config()
     _ap_manager = APManager(ap_cfg)
 
@@ -202,6 +218,8 @@ def on_rfcomm_connected(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _on_ap_ready(params: dict) -> None:
+    global _ap_ready_params
+    _ap_ready_params = params
     log.info(f"AP ready: ssid={params.get('ssid')} bssid={params.get('bssid')}")
     bus.publish("hostapd.ready", params)
 
@@ -217,13 +235,14 @@ def _on_ap_failed(reason: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _teardown() -> None:
-    global _ap_manager, _ap_monitor
+    global _ap_manager, _ap_monitor, _ap_ready_params
     if _ap_monitor:
         _ap_monitor.stop()
         _ap_monitor = None
     if _ap_manager:
         _ap_manager.stop()
         _ap_manager = None
+    _ap_ready_params = None
     bus.publish("hostapd.stopped", {})
 
 

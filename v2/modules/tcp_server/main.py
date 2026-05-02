@@ -65,6 +65,8 @@ bus = BusClient(module_name=MODULE_NAME)
 
 _server: Optional[TCPServer] = None
 _relay:  Optional[FrameRelay] = None
+_server_starting = False
+_server_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Boot protocol handlers
@@ -101,8 +103,19 @@ def on_system_stop(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def on_handshake_completed(topic: str, payload: dict) -> None:
+    global _server_starting
     device_address = payload.get("device_address", "")
     phone_ip       = payload.get("phone_ip", "")
+
+    with _server_lock:
+        if _server_starting or _server is not None:
+            log.info(
+                f"Handshake completed from {device_address} (phone_ip={phone_ip}) "
+                "but TCP server is already active — ignoring duplicate"
+            )
+            return
+        _server_starting = True
+
     log.info(f"Handshake completed from {device_address} (phone_ip={phone_ip}) — starting TCP server")
     t = threading.Thread(target=_start_server, daemon=True)
     t.start()
@@ -113,19 +126,29 @@ def on_handshake_completed(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _start_server() -> None:
-    global _server, _relay
+    global _server, _relay, _server_starting
 
-    _server = TCPServer()
-    if not _server.start():
+    server = TCPServer()
+    with _server_lock:
+        _server = server
+
+    if not server.start():
+        with _server_lock:
+            if _server is server:
+                _server = None
+            _server_starting = False
         bus.publish("tcp.server.error", {"error": "TCPServer.start() failed"})
         return
 
+    with _server_lock:
+        _server_starting = False
+
     bus.publish("tcp.server.started", {
-        "host": _server.host,
-        "port": _server.port,
+        "host": server.host,
+        "port": server.port,
     })
 
-    result = _server.accept()
+    result = server.accept()
     if result is None:
         bus.publish("tcp.server.error", {"error": "No connection within timeout"})
         _teardown()
@@ -144,13 +167,15 @@ def _start_server() -> None:
 
 
 def _teardown() -> None:
-    global _server, _relay
+    global _server, _relay, _server_starting
     if _relay:
         _relay.stop()
         _relay = None
     if _server:
         _server.stop()
         _server = None
+    with _server_lock:
+        _server_starting = False
 
 
 # ---------------------------------------------------------------------------

@@ -33,11 +33,13 @@ class APConfig:
     interface:        str = "wlan0"
     ssid:             str = "AndroidAutoAP"
     key:              str = ""           # generated on start() if empty
-    channel:          int = 6
+    hw_mode:          str = "a"
+    channel:          int = 36
     subnet:           str = "192.168.50"
     gateway_ip:       str = "192.168.50.1"
     dhcp_range_start: str = "192.168.50.10"
     dhcp_range_end:   str = "192.168.50.50"
+    country_code:      str = "IT"
 
 
 class APManager:
@@ -59,6 +61,7 @@ class APManager:
         self._hostapd_conf: Optional[str] = None
         self._dnsmasq_conf: Optional[str] = None
         self._bssid: str = ""
+        self._nm_unmanaged = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -69,6 +72,7 @@ class APManager:
         if not self._cfg.key:
             self._cfg.key = self._generate_key()
 
+        self._stop_conflicting_hostapd_service()
         self._cleanup_stale_daemons()
 
         self._bssid = self._get_interface_mac(self._cfg.interface)
@@ -78,13 +82,17 @@ class APManager:
             f"gateway={self._cfg.gateway_ip}"
         )
 
+        self._release_interface_for_ap()
+
         if not self._configure_interface():
+            self.stop()
             return False
 
         self._hostapd_conf = self._write_hostapd_conf()
         self._dnsmasq_conf = self._write_dnsmasq_conf()
 
         if not self._start_hostapd():
+            self.stop()
             return False
 
         if not self._start_dnsmasq():
@@ -102,6 +110,7 @@ class APManager:
         self._cleanup_conf(self._hostapd_conf)
         self._cleanup_conf(self._dnsmasq_conf)
         self._restore_interface()
+        self._set_network_manager_managed(True)
         log.info("AP stopped")
 
     def is_running(self) -> bool:
@@ -136,19 +145,23 @@ class APManager:
         content = (
             f"interface={cfg.interface}\n"
             f"driver=nl80211\n"
+            f"country_code={cfg.country_code}\n"
+            f"ieee80211d=1\n"
             f"ssid={cfg.ssid}\n"
-            f"hw_mode=g\n"
+            f"hw_mode={cfg.hw_mode}\n"
             f"channel={cfg.channel}\n"
-            f"wmm_enabled=0\n"
+            f"ieee80211n=1\n"
+            f"wmm_enabled=1\n"
             f"macaddr_acl=0\n"
             f"auth_algs=1\n"
             f"ignore_broadcast_ssid=0\n"
             f"wpa=2\n"
             f"wpa_passphrase={cfg.key}\n"
             f"wpa_key_mgmt=WPA-PSK\n"
-            f"wpa_pairwise=TKIP\n"
             f"rsn_pairwise=CCMP\n"
         )
+        if cfg.hw_mode == "a":
+            content += "ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]\n"
         return self._write_temp("hostapd_", ".conf", content)
 
     def _write_dnsmasq_conf(self) -> str:
@@ -219,8 +232,10 @@ class APManager:
         iface = self._cfg.interface
         gw    = self._cfg.gateway_ip
         try:
-            subprocess.run(["sudo", "ip", "link", "set", iface, "up"], check=True)
+            subprocess.run(["sudo", "ip", "link", "set", iface, "down"], check=True)
             subprocess.run(["sudo", "ip", "addr", "flush", "dev", iface], check=True)
+            self._set_interface_type_ap()
+            subprocess.run(["sudo", "ip", "link", "set", iface, "up"], check=True)
             subprocess.run(
                 ["sudo", "ip", "addr", "add", f"{gw}/24", "dev", iface], check=True
             )
@@ -237,6 +252,83 @@ class APManager:
             log.info(f"Interface {iface} flushed")
         except Exception as e:
             log.warning(f"_restore_interface: {e}")
+
+    def _release_interface_for_ap(self) -> None:
+        """Disconnect NetworkManager and mark the interface unmanaged for AP mode."""
+        iface = self._cfg.interface
+        self._nmcli(["device", "disconnect", iface], "disconnect")
+        self._set_network_manager_managed(False)
+
+    def _set_network_manager_managed(self, managed: bool) -> None:
+        """
+        Tell NetworkManager to leave the AP interface alone while hostapd owns it.
+
+        This is best-effort because some systems do not run NetworkManager or do
+        not have nmcli installed.  In those cases direct ip/hostapd control can
+        still work, so we log and continue.
+        """
+        iface = self._cfg.interface
+        value = "yes" if managed else "no"
+        if managed and not self._nm_unmanaged:
+            return
+        if self._nmcli(["device", "set", iface, "managed", value], f"managed={value}"):
+            self._nm_unmanaged = not managed
+            state = "managed" if managed else "unmanaged"
+            log.info(f"NetworkManager set {iface} {state}")
+
+    def _nmcli(self, args: list[str], label: str) -> bool:
+        try:
+            result = subprocess.run(
+                ["sudo", "nmcli", *args],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                log.info(f"NetworkManager {label} OK: {' '.join(args)}")
+                return True
+
+            stderr = (result.stderr or "").strip()
+            stdout = (result.stdout or "").strip()
+            log.warning(
+                f"NetworkManager {label} failed: returncode={result.returncode} "
+                f"stdout={stdout} stderr={stderr}"
+            )
+            return False
+        except FileNotFoundError:
+            log.info(f"nmcli not found; skipping NetworkManager {label}")
+        except subprocess.TimeoutExpired:
+            log.warning(f"nmcli timed out during NetworkManager {label}")
+        except Exception as e:
+            log.warning(f"NetworkManager {label} failed: {e}")
+        return False
+
+    def _set_interface_type_ap(self) -> None:
+        """Best-effort: prepare the netdev type before hostapd takes over."""
+        iface = self._cfg.interface
+        try:
+            result = subprocess.run(
+                ["sudo", "iw", "dev", iface, "set", "type", "__ap"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                log.info(f"Interface {iface} set to __ap type")
+                return
+
+            log.warning(
+                f"Could not pre-set {iface} type __ap: returncode={result.returncode} "
+                f"stderr={(result.stderr or '').strip()}"
+            )
+        except FileNotFoundError:
+            log.info("iw not found; skipping pre-set interface type __ap")
+        except subprocess.TimeoutExpired:
+            log.warning(f"iw timed out while setting {iface} type __ap")
+        except Exception as e:
+            log.warning(f"Could not pre-set {iface} type __ap: {e}")
 
     def _get_interface_mac(self, iface: str) -> str:
         try:
@@ -314,6 +406,40 @@ class APManager:
                 subprocess.run(["sudo", "pkill", "-KILL", "-f", pattern], check=False)
             except Exception as e:
                 log.warning(f"Failed to cleanup stale {name}: {e}")
+
+    @staticmethod
+    def _stop_conflicting_hostapd_service() -> None:
+        """Stop distro hostapd.service so the app-owned hostapd can own wlan0."""
+        try:
+            active = subprocess.run(
+                ["systemctl", "is-active", "--quiet", "hostapd"],
+                check=False,
+            )
+            if active.returncode != 0:
+                return
+
+            log.warning("Stopping active hostapd.service before starting app hostapd")
+            stopped = subprocess.run(
+                ["sudo", "systemctl", "stop", "hostapd"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            if stopped.returncode == 0:
+                log.info("hostapd.service stopped")
+                return
+
+            log.warning(
+                "Could not stop hostapd.service: "
+                f"returncode={stopped.returncode} stderr={(stopped.stderr or '').strip()}"
+            )
+        except FileNotFoundError:
+            log.info("systemctl not found; skipping hostapd.service cleanup")
+        except subprocess.TimeoutExpired:
+            log.warning("Timed out while stopping hostapd.service")
+        except Exception as e:
+            log.warning(f"Could not stop hostapd.service: {e}")
 
     def _exited_immediately(
         self,

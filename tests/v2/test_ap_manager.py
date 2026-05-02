@@ -42,7 +42,8 @@ class TestAPConfig:
         assert cfg.interface == "wlan0"
         assert cfg.ssid == "AndroidAutoAP"
         assert cfg.key == ""
-        assert cfg.channel == 6
+        assert cfg.hw_mode == "a"
+        assert cfg.channel == 36
 
 
 # ---------------------------------------------------------------------------

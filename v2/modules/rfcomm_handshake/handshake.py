@@ -30,6 +30,7 @@ for _p in (_REPO_ROOT, _PROTO_ROOT):
         sys.path.insert(0, str(_p))
 
 from rfcomm_handshake.packet import (
+    Packet,
     MSG_WIFI_START_REQUEST,
     MSG_WIFI_START_RESPONSE,
     MSG_WIFI_INFO_REQUEST,
@@ -95,6 +96,7 @@ class RfcommHandshake:
         self._creds = credentials
         self._on_stage = on_stage_cb or (lambda s: None)
         self._phone_ip: str = ""
+        self._pending_pkt: Optional[Packet] = None
 
     # ------------------------------------------------------------------
     # Public
@@ -147,25 +149,19 @@ class RfcommHandshake:
     def _stage2_recv_start_response(self) -> bool:
         self._on_stage("WifiStartResponse")
         pkt = recv_packet(self._sock)
+        if pkt and pkt.msg_id == MSG_WIFI_INFO_REQUEST:
+            self._pending_pkt = pkt
+            log.info("Stage 2 skipped: phone sent WifiInfoRequest directly")
+            return True
         if not pkt or pkt.msg_id != MSG_WIFI_START_RESPONSE:
             log.error(f"Stage 2: expected msg_id={MSG_WIFI_START_RESPONSE}, got {pkt}")
             return False
-        response = WifiStartResponse()
-        try:
-            response.ParseFromString(pkt.payload)
-            self._phone_ip = response.ip_address or ""
-            log.info(
-                "Stage 2 OK: WifiStartResponse received "
-                f"(status={response.status}, ip={response.ip_address}, port={response.port})"
-            )
-        except Exception as e:
-            log.warning(f"Stage 2: could not parse WifiStartResponse payload: {e}")
-            log.info("Stage 2 OK: WifiStartResponse received")
+        self._handle_start_response(pkt, stage="Stage 2")
         return True
 
     def _stage3_recv_info_request(self) -> bool:
         self._on_stage("WifiInfoRequest")
-        pkt = recv_packet(self._sock)
+        pkt = self._take_pending_packet() or recv_packet(self._sock)
         if not pkt or pkt.msg_id != MSG_WIFI_INFO_REQUEST:
             log.error(f"Stage 3: expected msg_id={MSG_WIFI_INFO_REQUEST}, got {pkt}")
             return False
@@ -177,12 +173,15 @@ class RfcommHandshake:
         payload = self._encode_wifi_info()
         ok = send_packet(self._sock, MSG_WIFI_INFO_RESPONSE, payload)
         if ok:
-            log.info(f"Stage 4 OK: WifiInfoResponse sent (ssid={self._creds.get('ssid')}")
+            log.info(f"Stage 4 OK: WifiInfoResponse sent (ssid={self._creds.get('ssid')})")
         return ok
 
     def _stage5_recv_connect_status(self) -> bool:
         self._on_stage("WifiConnectStatus")
         pkt = recv_packet(self._sock)
+        if pkt and pkt.msg_id == MSG_WIFI_START_RESPONSE:
+            self._handle_start_response(pkt, stage="Stage 5 prelude")
+            pkt = recv_packet(self._sock)
         if not pkt or pkt.msg_id != MSG_WIFI_CONNECT_STATUS:
             log.error(f"Stage 5: expected msg_id={MSG_WIFI_CONNECT_STATUS}, got {pkt}")
             return False
@@ -212,6 +211,24 @@ class RfcommHandshake:
             ap_type       = self._creds.get("ap_type", AP_TYPE_DYNAMIC),
         )
         return msg.SerializeToString()
+
+    def _take_pending_packet(self) -> Optional[Packet]:
+        pkt = self._pending_pkt
+        self._pending_pkt = None
+        return pkt
+
+    def _handle_start_response(self, pkt: Packet, stage: str) -> None:
+        response = WifiStartResponse()
+        try:
+            response.ParseFromString(pkt.payload)
+            self._phone_ip = response.ip_address or self._phone_ip
+            log.info(
+                f"{stage} OK: WifiStartResponse received "
+                f"(status={response.status}, ip={response.ip_address}, port={response.port})"
+            )
+        except Exception as e:
+            log.warning(f"{stage}: could not parse WifiStartResponse payload: {e}")
+            log.info(f"{stage} OK: WifiStartResponse received")
 
     @staticmethod
     def _extract_ip(payload: bytes) -> str:
