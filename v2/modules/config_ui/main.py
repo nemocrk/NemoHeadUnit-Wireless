@@ -173,9 +173,17 @@ class ConfigWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Configurazione moduli — NemoHeadUnit v2")
-        self.setMinimumSize(640, 480)
         self._tabs: dict[str, ModuleConfigTab] = {}
         self._build_ui()
+
+    def apply_default_geometry(self, app: QApplication) -> None:
+        """Bottom-left quarter of the primary screen."""
+        screen = app.primaryScreen().availableGeometry()
+        w = screen.width() // 2
+        h = screen.height() // 2
+        x = screen.x()
+        y = screen.y() + h
+        self.setGeometry(x, y, w, h)
 
     def _build_ui(self):
         central = QWidget()
@@ -312,12 +320,13 @@ def run() -> None:
     bus.subscribe("config.response",         on_config_response)
 
     bus_thread = bus.start(blocking=False)
-    attach_bus(bus)  # forward all log.* from this process to log_viewer
+    attach_bus(bus)
     time.sleep(0.05)
     on_system_readytostart()
 
     _app = QApplication(sys.argv)
     _window = ConfigWindow()
+    _window.apply_default_geometry(_app)  # bottom-left quarter
     _window.show()
 
     log.info("config_ui window open")
