@@ -48,6 +48,7 @@ _logger_mod     = types.ModuleType("shared.logger")
 
 _bus_client_mod.BusClient = _bus_class
 _logger_mod.get_logger    = MagicMock(return_value=MagicMock())
+_logger_mod.attach_bus    = MagicMock()  # required by main.py import
 
 sys.modules.setdefault("shared",             _shared_pkg)
 sys.modules["shared.bus_client"] = _bus_client_mod
