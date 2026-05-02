@@ -170,10 +170,27 @@ class RfcommHandshake:
 
     def _stage4_send_info_response(self) -> bool:
         self._on_stage("WifiInfoResponse")
+        ssid          = self._creds.get("ssid", "")
+        bssid         = self._creds.get("bssid", "")
+        passphrase    = self._creds.get("key", "")
+        security_mode = self._creds.get("security_mode", WPA2_SECURITY_MODE)
+        ap_type       = self._creds.get("ap_type", AP_TYPE_DYNAMIC)
+        log.debug(
+            "Stage 4 WifiInfoResponse fields: "
+            f"ssid={ssid!r} bssid={bssid!r} "
+            f"passphrase={'*' * len(passphrase) if passphrase else '(empty!)'} "
+            f"security_mode={security_mode} ap_type={ap_type}"
+        )
+        if not ssid:
+            log.warning("Stage 4: ssid is EMPTY — phone will likely reject WifiInfoResponse")
+        if not bssid:
+            log.warning("Stage 4: bssid is EMPTY — phone may not find the AP")
+        if not passphrase:
+            log.warning("Stage 4: passphrase is EMPTY — phone will fail auth")
         payload = self._encode_wifi_info()
         ok = send_packet(self._sock, MSG_WIFI_INFO_RESPONSE, payload)
         if ok:
-            log.info(f"Stage 4 OK: WifiInfoResponse sent (ssid={self._creds.get('ssid')})")
+            log.info(f"Stage 4 OK: WifiInfoResponse sent (ssid={ssid!r}, bssid={bssid!r})")
         return ok
 
     def _stage5_recv_connect_status(self) -> bool:
