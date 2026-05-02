@@ -88,7 +88,7 @@ class APMonitor:
                 log.info(f"AP confirmed active on {iface}")
                 self._on_ready(self._ap.get_params())
                 return
-            log.debug(f"AP not yet active on {iface}, retrying...")
+            log.info(f"AP not yet active on {iface}, waiting {self._poll_interval} and then retrying...")
             time.sleep(self._poll_interval)
 
         if self._running:
@@ -117,6 +117,8 @@ class APMonitor:
                 ["ip", "addr", "show", iface],
                 capture_output=True, text=True, timeout=3,
             )
+            log.info(f"_has_ip result:\n{result}")
+            log.info(f"_has_ip flag: {"inet" in result.stdout}")
             return "inet " in result.stdout
         except Exception as e:
             log.debug(f"_has_ip check failed: {e}")
@@ -130,6 +132,8 @@ class APMonitor:
                 ["iw", "dev", iface, "info"],
                 capture_output=True, text=True, timeout=3,
             )
+            log.info(f"_is_in_ap_mode result:\n{result}")
+            log.info(f"_is_in_ap_mode flag: {"type AP" in result.stdout}")
             return "type AP" in result.stdout
         except FileNotFoundError:
             # iw not available — fall back to just checking IP

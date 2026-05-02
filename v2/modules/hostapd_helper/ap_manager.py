@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -68,6 +69,8 @@ class APManager:
         if not self._cfg.key:
             self._cfg.key = self._generate_key()
 
+        self._cleanup_stale_daemons()
+
         self._bssid = self._get_interface_mac(self._cfg.interface)
         log.info(
             f"Starting AP: ssid={self._cfg.ssid} iface={self._cfg.interface} "
@@ -105,6 +108,11 @@ class APManager:
         """Return True if both subprocesses are still alive."""
         hp = self._hostapd_proc and self._hostapd_proc.poll() is None
         dp = self._dnsmasq_proc and self._dnsmasq_proc.poll() is None
+        log.info(f"hp active:{hp}, dp active:{dp}")
+        if self._hostapd_proc and not hp:
+            self._log_process_exit_details("hostapd", self._hostapd_proc, self._hostapd_conf)
+        if self._dnsmasq_proc and not dp:
+            self._log_process_exit_details("dnsmasq", self._dnsmasq_proc, self._dnsmasq_conf)
         return bool(hp and dp)
 
     def get_params(self) -> dict:
@@ -164,12 +172,16 @@ class APManager:
 
     def _start_hostapd(self) -> bool:
         try:
+            log.info(f"Starting hostapd with config {self._hostapd_conf}")
             self._hostapd_proc = subprocess.Popen(
-                ["hostapd", self._hostapd_conf],
+                ["sudo", "hostapd", self._hostapd_conf],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                text=True,
             )
             log.info(f"hostapd started (pid={self._hostapd_proc.pid})")
+            if self._exited_immediately("hostapd", self._hostapd_proc, self._hostapd_conf):
+                return False
             return True
         except FileNotFoundError:
             log.error("hostapd not found — install hostapd")
@@ -180,12 +192,16 @@ class APManager:
 
     def _start_dnsmasq(self) -> bool:
         try:
+            log.info(f"Starting dnsmasq with config {self._dnsmasq_conf}")
             self._dnsmasq_proc = subprocess.Popen(
-                ["dnsmasq", f"--conf-file={self._dnsmasq_conf}", "--no-daemon"],
+                ["sudo", "dnsmasq", f"--conf-file={self._dnsmasq_conf}", "--no-daemon"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                text=True,
             )
             log.info(f"dnsmasq started (pid={self._dnsmasq_proc.pid})")
+            if self._exited_immediately("dnsmasq", self._dnsmasq_proc, self._dnsmasq_conf):
+                return False
             return True
         except FileNotFoundError:
             log.error("dnsmasq not found — install dnsmasq")
@@ -203,10 +219,10 @@ class APManager:
         iface = self._cfg.interface
         gw    = self._cfg.gateway_ip
         try:
-            subprocess.run(["ip", "link", "set", iface, "up"], check=True)
-            subprocess.run(["ip", "addr", "flush", "dev", iface], check=True)
+            subprocess.run(["sudo", "ip", "link", "set", iface, "up"], check=True)
+            subprocess.run(["sudo", "ip", "addr", "flush", "dev", iface], check=True)
             subprocess.run(
-                ["ip", "addr", "add", f"{gw}/24", "dev", iface], check=True
+                ["sudo", "ip", "addr", "add", f"{gw}/24", "dev", iface], check=True
             )
             log.info(f"Interface {iface} configured with {gw}/24")
             return True
@@ -217,7 +233,7 @@ class APManager:
     def _restore_interface(self) -> None:
         iface = self._cfg.interface
         try:
-            subprocess.run(["ip", "addr", "flush", "dev", iface], check=False)
+            subprocess.run(["sudo", "ip", "addr", "flush", "dev", iface], check=False)
             log.info(f"Interface {iface} flushed")
         except Exception as e:
             log.warning(f"_restore_interface: {e}")
@@ -265,3 +281,77 @@ class APManager:
             except subprocess.TimeoutExpired:
                 proc.kill()
             log.info(f"{name} terminated")
+
+    @staticmethod
+    def _cleanup_stale_daemons() -> None:
+        """
+        Stop AP daemons left behind by an earlier module/process crash.
+
+        APManager can only terminate Popen objects it still owns.  If the app is
+        restarted while hostapd/dnsmasq are alive, those Popen handles are gone
+        but the daemons can keep binding AP ports like 192.168.50.1:53.
+        Limit cleanup to commands using this module's /tmp config prefixes.
+        """
+        stale_patterns = (
+            ("hostapd", "hostapd /tmp/hostapd_"),
+            ("dnsmasq", "dnsmasq --conf-file=/tmp/dnsmasq_"),
+        )
+        for name, pattern in stale_patterns:
+            try:
+                found = subprocess.run(
+                    ["pgrep", "-af", pattern],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                matches = (found.stdout or "").strip()
+                if not matches:
+                    continue
+
+                log.warning(f"Stopping stale {name} process(es):\n{matches}")
+                subprocess.run(["sudo", "pkill", "-TERM", "-f", pattern], check=False)
+                time.sleep(0.2)
+                subprocess.run(["sudo", "pkill", "-KILL", "-f", pattern], check=False)
+            except Exception as e:
+                log.warning(f"Failed to cleanup stale {name}: {e}")
+
+    def _exited_immediately(
+        self,
+        name: str,
+        proc: subprocess.Popen,
+        conf_path: Optional[str],
+        grace_sec: float = 0.3,
+    ) -> bool:
+        """Return True and log diagnostics if a daemon exits right after start."""
+        time.sleep(grace_sec)
+        if proc.poll() is None:
+            return False
+        self._log_process_exit_details(name, proc, conf_path)
+        return True
+
+    @staticmethod
+    def _log_process_exit_details(
+        name: str,
+        proc: subprocess.Popen,
+        conf_path: Optional[str],
+    ) -> None:
+        returncode = proc.poll()
+        if returncode is None:
+            return
+
+        try:
+            stdout, stderr = proc.communicate(timeout=0.2)
+        except Exception as e:
+            stdout, stderr = "", f"<failed to read process output: {e}>"
+
+        log.error(f"{name} exited (pid={proc.pid}, returncode={returncode})")
+        if stdout:
+            log.error(f"{name} stdout:\n{stdout.strip()}")
+        if stderr:
+            log.error(f"{name} stderr:\n{stderr.strip()}")
+        if conf_path and os.path.exists(conf_path):
+            try:
+                with open(conf_path, "r", encoding="utf-8") as f:
+                    log.error(f"{name} config {conf_path}:\n{f.read().strip()}")
+            except Exception as e:
+                log.error(f"Could not read {name} config {conf_path}: {e}")

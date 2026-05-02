@@ -2,8 +2,8 @@
 handshake.py — Android Auto 5-stage RFCOMM wireless handshake.
 
 Stages:
-  1. Recv WifiStartRequest  (msg_id=1)  — phone sends its TCP IP + port
-  2. Send WifiStartResponse (msg_id=7)  — head unit acks
+  1. Send WifiStartRequest  (msg_id=1)  — head unit sends TCP IP + port
+  2. Recv WifiStartResponse (msg_id=7)  — phone acks
   3. Recv WifiInfoRequest   (msg_id=2)  — phone requests WiFi credentials
   4. Send WifiInfoResponse  (msg_id=3)  — head unit sends SSID/key/BSSID
   5. Recv WifiConnectStatus (msg_id=6)  — phone confirms WiFi join
@@ -41,8 +41,13 @@ from rfcomm_handshake.packet import (
     send_packet,
 )
 from v2.protos.oaa.wifi.WifiInfoResponseMessage_pb2 import WifiInfoResponse
+from v2.protos.oaa.wifi.WifiStartRequestMessage_pb2 import WifiStartRequest
+from v2.protos.oaa.wifi.WifiStartResponseMessage_pb2 import WifiStartResponse
+from v2.protos.oaa.wifi.WifiConnectStatusMessage_pb2 import WifiConnectStatus
 
 log = logging.getLogger("rfcomm_handshake.handshake")
+
+DEFAULT_TCP_PORT = 5288
 
 
 class HandshakeResult:
@@ -100,10 +105,10 @@ class RfcommHandshake:
         try:
             self._sock.settimeout(15.0)
 
-            if not self._stage1_recv_start_request():
+            if not self._stage1_send_start_request():
                 return HandshakeResult(False, error="Stage 1 failed: WifiStartRequest")
 
-            if not self._stage2_send_start_response():
+            if not self._stage2_recv_start_response():
                 return HandshakeResult(False, error="Stage 2 failed: WifiStartResponse")
 
             if not self._stage3_recv_info_request():
@@ -126,24 +131,37 @@ class RfcommHandshake:
     # Stages
     # ------------------------------------------------------------------
 
-    def _stage1_recv_start_request(self) -> bool:
+    def _stage1_send_start_request(self) -> bool:
         self._on_stage("WifiStartRequest")
-        pkt = recv_packet(self._sock)
-        if not pkt or pkt.msg_id != MSG_WIFI_START_REQUEST:
-            log.error(f"Stage 1: expected msg_id={MSG_WIFI_START_REQUEST}, got {pkt}")
-            return False
-        self._phone_ip = self._extract_ip(pkt.payload)
-        log.info(f"Stage 1 OK: phone_ip={self._phone_ip}")
-        return True
-
-    def _stage2_send_start_response(self) -> bool:
-        self._on_stage("WifiStartResponse")
-        import struct
-        payload = struct.pack(">H", 0)
-        ok = send_packet(self._sock, MSG_WIFI_START_RESPONSE, payload)
+        ip_address = self._creds.get("gateway_ip", "")
+        port = int(self._creds.get("tcp_port", DEFAULT_TCP_PORT))
+        payload = WifiStartRequest(
+            ip_address=ip_address,
+            port=port,
+        ).SerializeToString()
+        ok = send_packet(self._sock, MSG_WIFI_START_REQUEST, payload)
         if ok:
-            log.info("Stage 2 OK: WifiStartResponse sent")
+            log.info(f"Stage 1 OK: WifiStartRequest sent (ip={ip_address}, port={port})")
         return ok
+
+    def _stage2_recv_start_response(self) -> bool:
+        self._on_stage("WifiStartResponse")
+        pkt = recv_packet(self._sock)
+        if not pkt or pkt.msg_id != MSG_WIFI_START_RESPONSE:
+            log.error(f"Stage 2: expected msg_id={MSG_WIFI_START_RESPONSE}, got {pkt}")
+            return False
+        response = WifiStartResponse()
+        try:
+            response.ParseFromString(pkt.payload)
+            self._phone_ip = response.ip_address or ""
+            log.info(
+                "Stage 2 OK: WifiStartResponse received "
+                f"(status={response.status}, ip={response.ip_address}, port={response.port})"
+            )
+        except Exception as e:
+            log.warning(f"Stage 2: could not parse WifiStartResponse payload: {e}")
+            log.info("Stage 2 OK: WifiStartResponse received")
+        return True
 
     def _stage3_recv_info_request(self) -> bool:
         self._on_stage("WifiInfoRequest")
@@ -168,7 +186,16 @@ class RfcommHandshake:
         if not pkt or pkt.msg_id != MSG_WIFI_CONNECT_STATUS:
             log.error(f"Stage 5: expected msg_id={MSG_WIFI_CONNECT_STATUS}, got {pkt}")
             return False
-        log.info("Stage 5 OK: phone joined WiFi AP")
+        status = WifiConnectStatus()
+        try:
+            status.ParseFromString(pkt.payload)
+            log.info(
+                "Stage 5 OK: phone joined WiFi AP "
+                f"(state={status.state}, status_text={status.status_text!r})"
+            )
+        except Exception as e:
+            log.warning(f"Stage 5: could not parse WifiConnectStatus payload: {e}")
+            log.info("Stage 5 OK: phone joined WiFi AP")
         return True
 
     # ------------------------------------------------------------------

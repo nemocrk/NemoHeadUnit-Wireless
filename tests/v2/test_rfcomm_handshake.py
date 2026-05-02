@@ -10,18 +10,23 @@ import threading
 import pytest
 
 from rfcomm_handshake.packet import (
+    recv_packet,
     encode,
-    MSG_WIFI_START_REQUEST,
+    MSG_WIFI_START_RESPONSE,
     MSG_WIFI_INFO_REQUEST,
     MSG_WIFI_CONNECT_STATUS,
 )
 from rfcomm_handshake.handshake import RfcommHandshake, HandshakeResult
+from v2.protos.oaa.wifi.WifiStartRequestMessage_pb2 import WifiStartRequest
+from v2.protos.oaa.wifi.WifiStartResponseMessage_pb2 import WifiStartResponse
 
 
 CREDS = {
     "ssid":          "TestAP",
     "key":           "secret123",
     "bssid":         "AA:BB:CC:DD:EE:FF",
+    "gateway_ip":    "192.168.50.1",
+    "tcp_port":      5288,
     "security_mode": 8,
     "ap_type":       1,
 }
@@ -38,11 +43,22 @@ def _phone_side(sock: socket.socket, send_bad_stage: int = 0) -> None:
     the socket early (e.g. on wrong msg_id), which is expected.
     """
     try:
+        start_pkt = recv_packet(sock)
+        if not start_pkt:
+            return
+        start_request = WifiStartRequest()
+        start_request.ParseFromString(start_pkt.payload)
+        assert start_request.ip_address == CREDS["gateway_ip"]
+        assert start_request.port == CREDS["tcp_port"]
+
         sock.sendall(encode(
-            MSG_WIFI_START_REQUEST if send_bad_stage != 1 else 99,
-            b"192.168.50.10",
+            MSG_WIFI_START_RESPONSE if send_bad_stage != 2 else 99,
+            WifiStartResponse(
+                ip_address="192.168.50.10",
+                port=5288,
+                status=0,
+            ).SerializeToString(),
         ))
-        sock.recv(1024)   # WifiStartResponse
         sock.sendall(encode(
             MSG_WIFI_INFO_REQUEST if send_bad_stage != 3 else 99,
             b"",
@@ -115,7 +131,7 @@ class TestRfcommHandshakeSuccess:
 # ---------------------------------------------------------------------------
 
 class TestRfcommHandshakeFailure:
-    @pytest.mark.parametrize("bad_stage", [1, 3, 5])
+    @pytest.mark.parametrize("bad_stage", [2, 3, 5])
     def test_wrong_msg_id_at_stage_fails(self, bad_stage):
         a, b = socket.socketpair()
         t = threading.Thread(target=_phone_side, args=(b, bad_stage), daemon=True)

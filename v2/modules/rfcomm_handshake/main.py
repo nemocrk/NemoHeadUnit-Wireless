@@ -11,28 +11,22 @@ Module contract:
                                  gateway_ip, security_mode, ap_type}
   Publishes   : system.module_ready            {name, priority}
                 system.ready                   {name, priority}
+                bluetooth.rfcomm.connected     {device_address}
                 rfcomm.handshake.started       {device_address}
                 rfcomm.handshake.completed     {device_address, phone_ip}
                 rfcomm.handshake.failed        {device_address, error}
 
 Flow:
   1. Waits for hostapd.ready — stores WiFi credentials
-  2. Opens an RFCOMM socket to the phone (the phone connects to us
-     on RFCOMM ch.8; the bluetooth module accepted it — here we
-     open a NEW connection or reuse the shared socket via a
-     loopback bridge if needed)
-  3. Runs the 5-stage handshake via RfcommHandshake
-  4. On success → publishes rfcomm.handshake.completed {phone_ip}
+  2. Registers the AA RFCOMM Profile1 service with BlueZ D-Bus
+  3. Receives the accepted RFCOMM fd through Profile1.NewConnection
+  4. Publishes bluetooth.rfcomm.connected so hostapd_helper starts the AP
+  5. Runs the 5-stage handshake via RfcommHandshake
+  6. On success → publishes rfcomm.handshake.completed {phone_ip}
      which triggers tcp_server to start listening
 
-NOTE: Because modules are isolated processes the RFCOMM socket
-accepted by the bluetooth module cannot be passed directly.
-The bluetooth module keeps the socket open and relays bytes
-through a Unix domain socket bridge to this module.
-For now, this module opens its own RFCOMM client socket to the
-device address published in bluetooth.rfcomm.connected.
-
 Internal helpers (no ZMQ):
+  dbus_rfcomm.py — BlueZ Profile1 registration and fd handoff
   packet.py    — packet encode/decode
   handshake.py — 5-stage handshake state machine
 """
@@ -55,6 +49,7 @@ if str(_MODULES) not in sys.path:
 
 from shared.bus_client import BusClient                    # noqa: E402
 from shared.logger import get_logger                       # noqa: E402
+from rfcomm_handshake.dbus_rfcomm import DbusRfcommListener  # noqa: E402
 from rfcomm_handshake.handshake import RfcommHandshake     # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -72,10 +67,12 @@ bus = BusClient(module_name=MODULE_NAME)
 # ---------------------------------------------------------------------------
 
 _credentials: Optional[dict] = None          # set on hostapd.ready
-_device_address: Optional[str] = None        # set on bluetooth.rfcomm.connected
+_device_address: Optional[str] = None        # set on Profile1.NewConnection
 _pending_sock: Optional[socket.socket] = None
-
-RFCOMM_CHANNEL = 8
+_rfcomm_listener: Optional[DbusRfcommListener] = None
+_handshake_running = False
+_state_lock = threading.Lock()
+_glib_loop = None
 
 # ---------------------------------------------------------------------------
 # Boot protocol handlers
@@ -90,14 +87,22 @@ def on_system_readytostart() -> None:
 
 
 def on_system_start(topic: str, payload: dict) -> None:
+    global _rfcomm_listener
+
     if payload.get("priority") != PRIORITY:
         return
 
-    log.info(f"system.start priority={PRIORITY} — rfcomm_handshake ready")
+    log.info(f"system.start priority={PRIORITY} — starting RFCOMM D-Bus listener")
 
-    # No blocking init — this module is fully event-driven.
-    # Handshake starts when both bluetooth.rfcomm.connected
-    # and hostapd.ready have been received.
+    _start_glib_mainloop()
+    _rfcomm_listener = DbusRfcommListener(on_connected_cb=_on_rfcomm_connected)
+    if not _rfcomm_listener.start():
+        log.error("RFCOMM D-Bus listener failed to start")
+        bus.publish("rfcomm.handshake.failed", {
+            "device_address": "",
+            "error": "RFCOMM D-Bus listener failed to start",
+        })
+
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
         "priority": PRIORITY,
@@ -106,20 +111,63 @@ def on_system_start(topic: str, payload: dict) -> None:
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
+    global _rfcomm_listener
     log.info("system.stop received")
     _close_pending_sock()
+    if _rfcomm_listener:
+        _rfcomm_listener.stop()
+        _rfcomm_listener = None
+    _stop_glib_mainloop()
     bus.stop()
+
+
+def _start_glib_mainloop() -> None:
+    """Run the GLib loop that dispatches BlueZ Profile1 callbacks."""
+    global _glib_loop
+    if _glib_loop is not None:
+        return
+    try:
+        from gi.repository import GLib
+
+        _glib_loop = GLib.MainLoop()
+        t = threading.Thread(target=_glib_loop.run, daemon=True, name="glib-dbus")
+        t.start()
+        log.info("GLib mainloop started (thread: glib-dbus)")
+    except Exception as e:
+        log.error(f"Failed to start GLib mainloop — RFCOMM callbacks will not work: {e}")
+
+
+def _stop_glib_mainloop() -> None:
+    global _glib_loop
+    if _glib_loop and _glib_loop.is_running():
+        _glib_loop.quit()
+        log.info("GLib mainloop stopped")
+    _glib_loop = None
 
 
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
 
-def on_bluetooth_rfcomm_connected(topic: str, payload: dict) -> None:
-    """Store the device address; handshake starts once hostapd.ready arrives."""
-    global _device_address
-    _device_address = payload.get("device_address", "")
-    log.info(f"RFCOMM connected from {_device_address} — waiting for hostapd.ready")
+def _on_rfcomm_connected(sock: socket.socket, device_address: str) -> None:
+    """Store the accepted D-Bus RFCOMM socket and notify AP management."""
+    global _credentials, _device_address, _pending_sock
+    with _state_lock:
+        if _handshake_running:
+            log.warning(f"Ignoring RFCOMM connection from {device_address}: handshake already running")
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return
+        if _pending_sock and _pending_sock is not sock:
+            _close_pending_sock_locked()
+        _credentials = None
+        _device_address = device_address
+        _pending_sock = sock
+
+    log.info(f"RFCOMM connected from {device_address} — waiting for hostapd.ready")
+    bus.publish("bluetooth.rfcomm.connected", {"device_address": device_address})
     _try_start_handshake()
 
 
@@ -140,32 +188,39 @@ def _try_start_handshake() -> None:
     Start the handshake only when BOTH the device address AND
     the AP credentials are available.
     """
-    if not _device_address or not _credentials:
-        return
-    log.info(f"Both conditions met — starting handshake with {_device_address}")
-    t = threading.Thread(target=_run_handshake, daemon=True)
+    global _handshake_running
+    with _state_lock:
+        if _handshake_running or not _device_address or not _credentials or not _pending_sock:
+            return
+        _handshake_running = True
+        device_address = _device_address
+
+    log.info(f"Both conditions met — starting handshake with {device_address}")
+    t = threading.Thread(target=_run_handshake, daemon=True, name="rfcomm-handshake")
     t.start()
 
 
 def _run_handshake() -> None:
-    global _pending_sock
-    device_address = _device_address
+    global _handshake_running
+    with _state_lock:
+        device_address = _device_address
+        sock = _pending_sock
+        credentials = dict(_credentials or {})
 
     bus.publish("rfcomm.handshake.started", {"device_address": device_address})
 
-    sock = _connect_rfcomm(device_address)
     if sock is None:
         bus.publish("rfcomm.handshake.failed", {
             "device_address": device_address,
-            "error": "RFCOMM connect failed",
+            "error": "RFCOMM socket unavailable",
         })
+        with _state_lock:
+            _handshake_running = False
         return
-
-    _pending_sock = sock
 
     hs = RfcommHandshake(
         sock=sock,
-        credentials=_credentials,
+        credentials=credentials,
         on_stage_cb=lambda stage: log.info(f"Handshake stage: {stage}"),
     )
     result = hs.run()
@@ -183,30 +238,17 @@ def _run_handshake() -> None:
             "error":          result.error,
         })
 
-    _close_pending_sock()
-
-
-# ---------------------------------------------------------------------------
-# Socket helpers
-# ---------------------------------------------------------------------------
-
-def _connect_rfcomm(address: str) -> Optional[socket.socket]:
-    """Open an RFCOMM client socket to the given device address."""
-    try:
-        import bluetooth  # pybluez
-        sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
-        sock.connect((address, RFCOMM_CHANNEL))
-        log.info(f"RFCOMM socket connected to {address} ch.{RFCOMM_CHANNEL}")
-        return sock
-    except ImportError:
-        log.error("pybluez not installed — RFCOMM connect unavailable")
-        return None
-    except Exception as e:
-        log.error(f"RFCOMM connect failed: {e}")
-        return None
+    with _state_lock:
+        _close_pending_sock_locked()
+        _handshake_running = False
 
 
 def _close_pending_sock() -> None:
+    with _state_lock:
+        _close_pending_sock_locked()
+
+
+def _close_pending_sock_locked() -> None:
     global _pending_sock
     if _pending_sock:
         try:
@@ -224,7 +266,6 @@ def run() -> None:
     bus.subscribe("system.readytostart",        on_system_readytostart)
     bus.subscribe("system.start",               on_system_start)
     bus.subscribe("system.stop",                on_system_stop)
-    bus.subscribe("bluetooth.rfcomm.connected", on_bluetooth_rfcomm_connected)
     bus.subscribe("hostapd.ready",              on_hostapd_ready)
 
     log.info("Module started, waiting for messages...")

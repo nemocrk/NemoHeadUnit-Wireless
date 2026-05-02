@@ -7,11 +7,11 @@ Packet format:
   [payload: bytes]           — protobuf or raw bytes
 
 Message IDs (Android Auto wireless protocol):
-  1  WifiStartRequest   — phone → head unit: TCP IP + port
+  1  WifiStartRequest   — head unit → phone: TCP IP + port
   2  WifiInfoRequest    — phone → head unit: request WiFi credentials
   3  WifiInfoResponse   — head unit → phone: SSID, key, BSSID, security
   6  WifiConnectStatus  — phone → head unit: joined WiFi OK
-  7  WifiStartResponse  — head unit → phone: ack WifiStartRequest
+  7  WifiStartResponse  — phone → head unit: ack WifiStartRequest
 
 No ZMQ dependency.
 """

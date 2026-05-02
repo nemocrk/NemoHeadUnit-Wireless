@@ -29,7 +29,29 @@ from shared.logger import get_logger  # noqa: E402
 
 log = get_logger("bluetooth.rfcomm")
 
-RFCOMM_CHANNEL = 8
+SERVICE_RECORD = """
+<?xml version="1.0" encoding="UTF-8" ?>
+<record>
+  <attribute id="0x0001">
+    <sequence>
+      <uuid value="4de17a00-52cb-11e6-bdf4-0800200c9a66"/>
+    </sequence>
+  </attribute>
+  <attribute id="0x0004">
+    <sequence>
+      <sequence><uuid value="0x0100"/></sequence>
+      <sequence>
+        <uuid value="0x0003"/>
+        <uint8 value="0x1e"/>
+      </sequence>
+    </sequence>
+  </attribute>
+  <attribute id="0x0100">
+    <text value="NemoHeadUnit AA"/>
+  </attribute>
+</record>
+"""
+RFCOMM_CHANNEL = 30  # libero — lontano dai canali già usati
 AA_UUID        = "4de17a00-52cb-11e6-bdf4-0800200c9a66"
 _PROFILE_PATH  = "/org/nemo/rfcomm/aa"
 
@@ -109,15 +131,20 @@ class RfcommListener:
                 self._bus.get_object("org.bluez", "/org/bluez"),
                 "org.bluez.ProfileManager1",
             )
+
             opts = dbus.Dictionary(
                 {
-                    "Channel":     dbus.UInt16(RFCOMM_CHANNEL),
-                    "AutoConnect": dbus.Boolean(True),
-                    "Role":        dbus.String("server"),
-                    "Name":        dbus.String("NemoHeadUnit AA"),
+                    "Channel":               dbus.UInt16(RFCOMM_CHANNEL),
+                    "Role":                  dbus.String("server"),
+                    "Name":                  dbus.String("NemoHeadUnit AA"),
+                    "ServiceRecord":         dbus.String(SERVICE_RECORD),
+                    "RequireAuthentication": dbus.Boolean(False),
+                    "RequireAuthorization":  dbus.Boolean(False),
+                    "AutoConnect":           dbus.Boolean(False),  # inutile lato server
                 },
                 signature="sv",
             )
+            
             profile_mgr.RegisterProfile(_PROFILE_PATH, AA_UUID, opts)
             self._registered = True
             log.info(f"RFCOMM Profile1 registered: {AA_UUID} ch.{RFCOMM_CHANNEL}")

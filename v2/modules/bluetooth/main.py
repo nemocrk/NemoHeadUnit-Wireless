@@ -20,7 +20,6 @@ Module contract:
                 bluetooth.pairing.pin          {device_address, pin}
                 bluetooth.pairing.completed    {device_address}
                 bluetooth.pairing.failed       {device_address, error}
-                bluetooth.rfcomm.connected     {device_address}
                 bluetooth.error                {error}
 
 Configuration keys (v2/config/bluetooth.yaml):
@@ -33,7 +32,11 @@ Internal helpers (no ZMQ dependency):
   bluez_adapter.py  — D-Bus / BlueZ init, profile registration, set_name
   discovery.py      — timed device discovery
   pairing.py        — agent, PIN, confirm
-  rfcomm.py         — RFCOMM channel 8 accept loop
+  rfcomm.py         — legacy AA RFCOMM Profile1 helper
+
+Note:
+  The AA RFCOMM handshake profile is owned by rfcomm_handshake so the process
+  that receives BlueZ's NewConnection fd can run the handshake directly.
 
 GLib mainloop note:
   BlueZ agent callbacks (RequestConfirmation, RequestPinCode …) are
@@ -63,7 +66,6 @@ from shared.config_client import ConfigClient  # noqa: E402
 from bluetooth.bluez_adapter import BluezAdapter   # noqa: E402
 from bluetooth.discovery import DiscoverySession   # noqa: E402
 from bluetooth.pairing import PairingAgent         # noqa: E402
-from bluetooth.rfcomm import RfcommListener        # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -96,7 +98,6 @@ _config: dict = dict(_DEFAULTS)
 _adapter:   BluezAdapter     | None = None
 _discovery: DiscoverySession | None = None
 _pairing:   PairingAgent     | None = None
-_rfcomm:    RfcommListener   | None = None
 _glib_loop  = None   # gi.repository.GLib.MainLoop instance
 
 # ---------------------------------------------------------------------------
@@ -179,7 +180,7 @@ def on_system_readytostart() -> None:
 
 
 def on_system_start(topic: str, payload: dict) -> None:
-    global _adapter, _pairing, _rfcomm
+    global _adapter, _pairing
 
     if payload.get("priority") != PRIORITY:
         return
@@ -212,21 +213,12 @@ def on_system_start(topic: str, payload: dict) -> None:
     )
     _pairing.register()
 
-    _rfcomm = RfcommListener(on_connected_cb=_on_rfcomm_connected)
-    if not _rfcomm.start():
-        log.error("RFCOMM listener failed to start")
-        bus.publish("bluetooth.error", {"error": "RFCOMM listener failed to start"})
-        bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
-        return
-
     log.info("Bluetooth subsystem ready")
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
     log.info("system.stop — shutting down Bluetooth")
-    if _rfcomm:
-        _rfcomm.stop()
     if _pairing:
         _pairing.unregister()
     if _adapter:
@@ -318,11 +310,6 @@ def _on_pairing_completed(device_address: str) -> None:
 
 def _on_pairing_failed(device_address: str, error: str) -> None:
     bus.publish("bluetooth.pairing.failed", {"device_address": device_address, "error": error})
-
-def _on_rfcomm_connected(sock, address: str) -> None:
-    log.info(f"RFCOMM connected from {address}")
-    bus.publish("bluetooth.rfcomm.connected", {"device_address": address})
-
 
 # ---------------------------------------------------------------------------
 # Entry point
