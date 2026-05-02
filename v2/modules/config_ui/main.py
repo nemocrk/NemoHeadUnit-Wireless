@@ -18,6 +18,7 @@ Module contract:
                 system.get_modules       {}
                 config.get               {module: str, requester: "config_ui"}
                 config.set               {module: str, key: str, value: any}
+                system.shutdown          {}  ← triggered by the shutdown button
 
 Flow:
   1. system.readytostart → publish system.module_ready
@@ -26,6 +27,7 @@ Flow:
                                publish config.get {module, requester} for each
   4. config.response (requester=="config_ui") → populate the tab
   5. User edits + clicks Save → publish config.set for each changed key
+  6. User clicks Shutdown → publish system.shutdown {}
 """
 
 import sys
@@ -45,7 +47,7 @@ from PyQt6.QtCore import Qt, QMetaObject, Q_ARG, pyqtSlot           # noqa: E402
 from PyQt6.QtWidgets import (                                         # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTabWidget, QLabel, QLineEdit, QScrollArea,
-    QFormLayout, QStatusBar, QFrame,
+    QFormLayout, QStatusBar, QFrame, QMessageBox,
 )
 
 from shared.bus_client import BusClient              # noqa: E402
@@ -193,10 +195,22 @@ class ConfigWindow(QMainWindow):
 
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(8, 6, 8, 0)
+
         self._btn_refresh_all = QPushButton("↻ Aggiorna lista moduli")
         self._btn_refresh_all.clicked.connect(self._on_refresh_all)
         toolbar.addWidget(self._btn_refresh_all)
+
         toolbar.addStretch()
+
+        self._btn_shutdown = QPushButton("⏻  Spegni sistema")
+        self._btn_shutdown.setStyleSheet(
+            "QPushButton { color: #cc3333; font-weight: bold; }"
+            "QPushButton:hover { background-color: #3a1a1a; }"
+        )
+        self._btn_shutdown.setMinimumHeight(32)
+        self._btn_shutdown.clicked.connect(self._on_shutdown_clicked)
+        toolbar.addWidget(self._btn_shutdown)
+
         root.addLayout(toolbar)
 
         self._tab_widget = QTabWidget()
@@ -233,6 +247,20 @@ class ConfigWindow(QMainWindow):
     def _on_refresh_all(self):
         bus.publish("system.get_modules", {})
         self.set_status("Aggiornamento lista moduli…")
+
+    def _on_shutdown_clicked(self):
+        reply = QMessageBox.question(
+            self,
+            "Conferma spegnimento",
+            "Vuoi davvero spegnere il sistema?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        log.info("Shutdown requested by user")
+        bus.publish("system.shutdown", {})
+        self.set_status("Segnale di spegnimento inviato…")
 
 
 # ---------------------------------------------------------------------------
