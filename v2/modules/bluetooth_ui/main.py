@@ -43,8 +43,8 @@ from PyQt6.QtWidgets import (                                        # noqa: E40
     QDialog, QDialogButtonBox, QLineEdit, QFormLayout, QMessageBox,
 )
 
-from shared.bus_client import BusClient   # noqa: E402
-from shared.logger import get_logger      # noqa: E402
+from shared.bus_client import BusClient             # noqa: E402
+from shared.logger import get_logger, attach_bus    # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -102,7 +102,6 @@ class BluetoothPairingWindow(QMainWindow):
         root.setSpacing(8)
         root.setContentsMargins(12, 12, 12, 12)
 
-        # — top bar ——————————————————————————————————————————————————————————————————————
         top = QHBoxLayout()
         self._btn_scan = QPushButton("🔍  Avvia Ricerca (10s)")
         self._btn_scan.setMinimumHeight(40)
@@ -117,20 +116,14 @@ class BluetoothPairingWindow(QMainWindow):
         top.addWidget(self._btn_pair, stretch=1)
         root.addLayout(top)
 
-        # — device list ——————————————————————————————————————————————————————————————————————
         root.addWidget(QLabel("Dispositivi trovati:"))
         self._device_list = QListWidget()
         self._device_list.itemSelectionChanged.connect(self._on_selection_changed)
         root.addWidget(self._device_list, stretch=1)
 
-        # — status bar ——————————————————————————————————————————————————————————————————————
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("In attesa di system.start…")
-
-    # -----------------------------------------------------------------------
-    # Qt slots (always called on the main thread via QMetaObject.invokeMethod)
-    # -----------------------------------------------------------------------
 
     @pyqtSlot(str)
     def set_status(self, message: str):
@@ -170,10 +163,6 @@ class BluetoothPairingWindow(QMainWindow):
         self.set_status(f"❌  Pairing fallito con {address}: {error}")
         QMessageBox.warning(self, "Pairing fallito", f"Dispositivo: {address}\nErrore: {error}")
 
-    # -----------------------------------------------------------------------
-    # User interactions
-    # -----------------------------------------------------------------------
-
     def _on_scan_clicked(self):
         self._devices.clear()
         self._device_list.clear()
@@ -193,10 +182,6 @@ class BluetoothPairingWindow(QMainWindow):
         self._btn_pair.setEnabled(bool(self._device_list.currentItem()))
 
 
-# ---------------------------------------------------------------------------
-# Module-level window reference (created after QApplication)
-# ---------------------------------------------------------------------------
-
 _window: BluetoothPairingWindow | None = None
 
 
@@ -209,7 +194,7 @@ def _invoke(slot_name: str, *args):
 
 
 # ---------------------------------------------------------------------------
-# Bus handlers (called from ZMQ recv thread — must NOT touch Qt directly)
+# Bus handlers
 # ---------------------------------------------------------------------------
 
 def on_system_readytostart() -> None:
@@ -227,7 +212,6 @@ def on_system_start(topic: str, payload: dict) -> None:
     log.info(f"system.start priority={PRIORITY} — bluetooth_ui ready")
     _invoke("set_status", "Sistema pronto. Avvia una ricerca Bluetooth.")
 
-    # UI is already visible — signal ready immediately.
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
         "priority": PRIORITY,
@@ -292,8 +276,8 @@ def run() -> None:
     bus.subscribe("bluetooth.pairing.completed",   on_pairing_completed)
     bus.subscribe("bluetooth.pairing.failed",      on_pairing_failed)
 
-    # Start the ZMQ receive loop in a background thread so Qt owns the main thread
     bus_thread = bus.start(blocking=False)
+    attach_bus(bus)  # forward all log.* from this process to log_viewer
     time.sleep(0.05)
     on_system_readytostart()
 
