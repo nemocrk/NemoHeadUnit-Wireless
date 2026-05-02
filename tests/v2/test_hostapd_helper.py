@@ -52,6 +52,7 @@ _logger_mod        = types.ModuleType("shared.logger")
 _bus_client_mod.BusClient       = _bus_class
 _config_client_mod.ConfigClient = _cfg_class
 _logger_mod.get_logger          = MagicMock(return_value=MagicMock())
+_logger_mod.attach_bus          = MagicMock()  # required by main.py import
 
 sys.modules.setdefault("shared",               _shared_pkg)
 sys.modules["shared.bus_client"]    = _bus_client_mod
@@ -169,7 +170,6 @@ class TestRfcommConnected:
 
 class TestSystemStop:
     def test_teardown_stops_monitor_and_manager(self):
-        # Save refs BEFORE the call: _teardown() sets hh._ap_* to None
         monitor = MagicMock()
         manager = MagicMock()
         hh._ap_monitor = monitor
@@ -202,7 +202,6 @@ class TestMonitorCallbacks:
         assert ready[0] == params
 
     def test_on_ap_failed_publishes_hostapd_failed_and_tears_down(self):
-        # Save refs BEFORE the call: _teardown() sets hh._ap_* to None
         manager = MagicMock()
         monitor = MagicMock()
         hh._ap_manager = manager
