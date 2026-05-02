@@ -60,6 +60,7 @@ _logger_mod        = types.ModuleType("shared.logger")
 _bus_client_mod.BusClient       = _bus_class
 _config_client_mod.ConfigClient = _cfg_class
 _logger_mod.get_logger          = MagicMock(return_value=MagicMock())
+_logger_mod.attach_bus          = MagicMock()  # required by main.py import
 
 sys.modules.setdefault("shared",               _shared_pkg)
 sys.modules["shared.bus_client"]    = _bus_client_mod
@@ -144,14 +145,6 @@ def _published(topic):
 
 class TestSystemStart:
     def test_happy_path_initialises_subsystems(self):
-        """
-        on_system_start:
-          1. Creates adapter, calls init() and register_profiles()
-          2. Calls cfg.get() — config arrives asynchronously later
-             (set_name is called in _on_config_loaded → _apply_config, not here)
-          3. Creates PairingAgent and calls register()
-          4. Creates RfcommListener and calls start()
-        """
         adapter = _make_adapter()
         pairing = MagicMock()
         rfcomm  = _make_rfcomm()
@@ -164,8 +157,6 @@ class TestSystemStart:
 
         adapter.init.assert_called_once()
         adapter.register_profiles.assert_called_once()
-        # set_name is NOT called here — it is deferred to _apply_config()
-        # triggered by _on_config_loaded when config.response arrives
         adapter.set_name.assert_not_called()
         bt.cfg.get.assert_called_once()
         pairing.register.assert_called_once()
@@ -196,8 +187,6 @@ class TestSystemStart:
 
 class TestSystemStop:
     def test_teardown_calls_stop_on_all_subsystems(self):
-        # on_system_stop reads _rfcomm/_pairing/_adapter directly —
-        # it does NOT zero them out, so refs are safe after the call.
         bt._adapter = MagicMock()
         bt._pairing = MagicMock()
         bt._rfcomm  = MagicMock()
@@ -284,8 +273,7 @@ class TestConfirmPairing:
 
 class TestConfig:
     def test_on_config_loaded_empty_writes_defaults(self):
-        """Empty config → first boot: must write every default via cfg.set."""
-        bt._adapter = MagicMock()  # adapter ready so _apply_config() runs
+        bt._adapter = MagicMock()
         bt._on_config_loaded({})
         assert bt.cfg.set.call_count == len(bt._DEFAULTS)
 
