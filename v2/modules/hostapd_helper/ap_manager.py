@@ -88,38 +88,28 @@ class APManager:
             self.stop()
             return False
 
-        self._hostapd_conf = self._write_hostapd_conf()
         self._dnsmasq_conf = self._write_dnsmasq_conf()
-
-        if not self._start_hostapd():
-            self.stop()
-            return False
+        self._hostapd_conf = self._write_hostapd_conf()
 
         if not self._start_dnsmasq():
+            self.stop()
+            return False
+        
+        if not self._start_hostapd():
             self.stop()
             return False
 
         return True
 
     def stop(self) -> None:
-        """
-        Terminate hostapd and dnsmasq, restore interface to station mode,
-        hand back to NetworkManager and trigger reconnect to a saved network.
-
-        Teardown order matters:
-          1. Kill daemons (hostapd/dnsmasq release the interface)
-          2. Bring iface down, flush AP address, set type back to 'managed'
-          3. Bring iface back up so NM finds it in station mode
-          4. Tell NM the device is managed again
-          5. Ask NM to connect (now it can, iface is station + up)
-        """
+        """Terminate hostapd and dnsmasq, restore interface, reconnect via nmcli."""
         self._kill(self._hostapd_proc, "hostapd")
         self._kill(self._dnsmasq_proc, "dnsmasq")
         self._hostapd_proc = None
         self._dnsmasq_proc = None
         self._cleanup_conf(self._hostapd_conf)
         self._cleanup_conf(self._dnsmasq_conf)
-        self._restore_interface()          # down → flush → set type managed → up
+        self._restore_interface()
         self._set_network_manager_managed(True)
         self._nmcli_reconnect()
         log.info("AP stopped")
@@ -197,6 +187,7 @@ class APManager:
     def _start_hostapd(self) -> bool:
         try:
             log.info(f"Starting hostapd with config {self._hostapd_conf}")
+            time.sleep(0.2)
             self._hostapd_proc = subprocess.Popen(
                 ["sudo", "hostapd", self._hostapd_conf],
                 stdout=subprocess.PIPE,
@@ -243,13 +234,19 @@ class APManager:
         iface = self._cfg.interface
         gw    = self._cfg.gateway_ip
         try:
+            #subprocess.run(["sudo", "ip", "link", "set", iface, "down"], check=True)
+            time.sleep(0.2)
             subprocess.run(["sudo", "ip", "link", "set", iface, "down"], check=True)
             subprocess.run(["sudo", "ip", "addr", "flush", "dev", iface], check=True)
+            time.sleep(0.2)
             self._set_interface_type_ap()
+            time.sleep(0.2)
             subprocess.run(["sudo", "ip", "link", "set", iface, "up"], check=True)
+            time.sleep(0.2)
             subprocess.run(
                 ["sudo", "ip", "addr", "add", f"{gw}/24", "dev", iface], check=True
             )
+            time.sleep(0.2)
             log.info(f"Interface {iface} configured with {gw}/24")
             return True
         except subprocess.CalledProcessError as e:
@@ -257,43 +254,21 @@ class APManager:
             return False
 
     def _restore_interface(self) -> None:
-        """
-        Reverse the AP setup: bring iface down, flush AP address,
-        restore nl80211 type to 'managed' (station), bring back up.
-
-        This MUST happen before NM is re-enabled, otherwise NM finds the
-        interface still in __ap mode and 'nmcli device connect' fails.
-        """
         iface = self._cfg.interface
-        cmds = [
-            (["sudo", "ip",  "link", "set",  iface, "down"],         "link down"),
-            (["sudo", "ip",  "addr", "flush", "dev", iface],          "addr flush"),
-            (["sudo", "iw",  "dev",  iface,   "set", "type", "managed"], "set type managed"),
-            (["sudo", "ip",  "link", "set",  iface, "up"],           "link up"),
-        ]
-        for cmd, label in cmds:
-            try:
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, check=False, timeout=5
-                )
-                if result.returncode == 0:
-                    log.info(f"restore_interface [{label}] OK")
-                else:
-                    log.warning(
-                        f"restore_interface [{label}] failed: "
-                        f"rc={result.returncode} "
-                        f"stderr={(result.stderr or '').strip()}"
-                    )
-            except subprocess.TimeoutExpired:
-                log.warning(f"restore_interface [{label}] timed out")
-            except Exception as e:
-                log.warning(f"restore_interface [{label}] error: {e}")
+        try:
+            subprocess.run(["sudo", "ip", "addr", "flush", "dev", iface], check=False)
+            log.info(f"Interface {iface} flushed")
+        except Exception as e:
+            log.warning(f"_restore_interface: {e}")
 
     def _release_interface_for_ap(self) -> None:
         """Disconnect NetworkManager and mark the interface unmanaged for AP mode."""
         iface = self._cfg.interface
         self._nmcli(["device", "disconnect", iface], "disconnect")
+        time.sleep(0.2)
         self._set_network_manager_managed(False)
+        time.sleep(0.2)
+        subprocess.run(["sudo", "rfkill", "unblock", "wifi"], check=False)
 
     def _set_network_manager_managed(self, managed: bool) -> None:
         """
@@ -314,21 +289,16 @@ class APManager:
 
     def _nmcli_reconnect(self) -> None:
         """
-        Ask NetworkManager to connect the interface to the best available
-        saved network.
+        Ask NetworkManager to reconnect the interface to any known/saved network.
 
-        At this point the interface is already:
-          - type station (managed), not __ap
-          - link up
-          - NM-managed
-
-        'nmcli device connect <iface>' triggers NM auto-selection among
-        all saved connections eligible for this interface.
-        Best-effort: failure is logged but does not raise.
+        Uses 'nmcli device connect <iface>' which triggers NM auto-selection
+        of the best available saved connection.  Best-effort: failure is logged
+        but does not raise.
         """
         iface = self._cfg.interface
         log.info(f"Requesting nmcli reconnect on {iface}")
-        self._nmcli(["device", "connect", iface], "reconnect")
+        time.sleep(0.2)
+        subprocess.run(["sudo", "systemctl", "restart", "NetworkManager"], check=False)
 
     def _nmcli(self, args: list[str], label: str) -> bool:
         try:
