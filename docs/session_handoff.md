@@ -227,3 +227,67 @@ python v2/bus_broker.py &
 python v2/modules/config_manager/main.py &
 python v2/modules/config_ui/main.py
 ```
+
+---
+
+## 2026-05-02 - log_viewer module + bus log forwarding
+
+**What changed:**
+
+### 1. `v2/modules/log_viewer/main.py` — nuovo modulo UI
+Finestra PyQt6 standalone che mostra in realtime tutti i log pubblicati sul bus.
+
+| Direzione | Topic | Payload |
+|---|---|---|
+| Subscribe | `log.entry` | `{module, level, message, ts}` |
+| Subscribe | `system.start` / `system.stop` / `system.readytostart` | standard |
+| Publish | `system.module_ready` / `system.ready` | standard |
+
+Funzionalità UI:
+- `QTextEdit` read-only monospace su sfondo scuro (stile terminale)
+- Colori per livello: DEBUG grigio, INFO bianco, WARNING giallo, ERROR/CRITICAL rosso
+- Filtro dropdown per livello (ALL / DEBUG / INFO / WARNING / ERROR / CRITICAL)
+- Auto-scroll al bottom su ogni nuovo messaggio
+- Pulsante Clear
+- Limite righe configurabile via `config_manager` (chiave `max_lines`, default 500)
+- Priority: 2 (UI), autodiscovery automatico
+
+### 2. `v2/shared/logger.py` — aggiunto `BusLogHandler` e `attach_bus()`
+- `BusLogHandler(bus)` — `logging.Handler` che pubblica ogni record su `log.entry`
+  con payload `{module, level, message, ts}`. Errori di publish silenziati.
+- `attach_bus(bus)` — funzione pubblica da chiamare una volta dopo la connessione
+  al broker. Aggiunge il handler a tutti i logger già creati e a quelli futuri.
+- **Zero modifiche ai moduli esistenti** — il forwarding è completamente trasparente.
+
+### 3. `v2/main.py` — step 4 aggiunto
+- Import aggiornato: `from shared.logger import get_logger, attach_bus`
+- Nuovo step 4 nel `run()`: crea `BusClient(module_name="main_logger")`, lo avvia,
+  chiama `attach_bus()`. Da quel momento tutti i `log.*` dell'orchestratore e dei
+  moduli fluiscono verso `log_viewer`.
+
+**Why:**
+- Visibilità realtime dei log di tutti i moduli senza dover leggere stdout/stderr
+- Nessun accoppiamento aggiuntivo tra moduli: il logger pubblica, il viewer ascolta
+- Pattern estendibile: chiunque può subscribere `log.entry` (es. log su file, alerting)
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Scrivere test unitari per `BusLogHandler` e `log_viewer`
+2. Aggiungere filtro per modulo (oltre al filtro per livello già presente)
+3. Valutare persistenza log su file tramite un subscriber dedicato
+
+**Verification commands:**
+```bash
+# Stack completo con log_viewer attivo
+python v2/main.py
+
+# Standalone log_viewer (richiede broker attivo)
+python v2/bus_broker.py &
+python v2/modules/log_viewer/main.py
+
+# Verifica forwarding da qualsiasi modulo
+python v2/bus_broker.py &
+python v2/modules/log_viewer/main.py &
+python v2/modules/bluetooth/main.py
+```
