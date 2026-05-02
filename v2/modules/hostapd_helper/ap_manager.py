@@ -102,7 +102,7 @@ class APManager:
         return True
 
     def stop(self) -> None:
-        """Terminate hostapd and dnsmasq, restore interface."""
+        """Terminate hostapd and dnsmasq, restore interface, reconnect via nmcli."""
         self._kill(self._hostapd_proc, "hostapd")
         self._kill(self._dnsmasq_proc, "dnsmasq")
         self._hostapd_proc = None
@@ -111,6 +111,7 @@ class APManager:
         self._cleanup_conf(self._dnsmasq_conf)
         self._restore_interface()
         self._set_network_manager_managed(True)
+        self._nmcli_reconnect()
         log.info("AP stopped")
 
     def is_running(self) -> bool:
@@ -275,6 +276,18 @@ class APManager:
             self._nm_unmanaged = not managed
             state = "managed" if managed else "unmanaged"
             log.info(f"NetworkManager set {iface} {state}")
+
+    def _nmcli_reconnect(self) -> None:
+        """
+        Ask NetworkManager to reconnect the interface to any known/saved network.
+
+        Uses 'nmcli device connect <iface>' which triggers NM auto-selection
+        of the best available saved connection.  Best-effort: failure is logged
+        but does not raise.
+        """
+        iface = self._cfg.interface
+        log.info(f"Requesting nmcli reconnect on {iface}")
+        self._nmcli(["device", "connect", iface], "reconnect")
 
     def _nmcli(self, args: list[str], label: str) -> bool:
         try:
