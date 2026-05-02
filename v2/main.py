@@ -35,7 +35,7 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from shared.logger import get_logger  # noqa: E402
+from shared.logger import get_logger, attach_bus  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Config
@@ -341,13 +341,21 @@ def run() -> None:
     ctx, pub = _make_publisher()
     time.sleep(0.1)
 
-    # 4. Start all module processes
+    # 4. Attach bus log handler — all log.* calls from here on are forwarded
+    #    to the log_viewer module via the log.entry topic on the ZMQ bus.
+    from shared.bus_client import BusClient  # noqa: E402
+    _log_bus = BusClient(module_name="main_logger")
+    _log_bus.start(blocking=False)
+    attach_bus(_log_bus)
+    log.info("Bus log handler attached — logs forwarded to log.entry")
+
+    # 5. Start all module processes
     for module_script in modules:
         label = module_script.parent.name
         proc  = _start_process(module_script, label)
         processes.append((label, proc))
 
-    # 5. Multi-step boot
+    # 6. Multi-step boot
     #    a. Collect priorities via system.readytostart / system.module_ready
     log.info(f"Boot: collecting module priorities (window={READYTOSTART_WINDOW}s)...")
     priority_map = _collect_module_ready(pub, module_names, READYTOSTART_WINDOW)
@@ -362,12 +370,12 @@ def run() -> None:
 
     log.info("Boot sequence complete — all priority levels initialised.")
 
-    # 6. Start system.get_modules responder
+    # 7. Start system.get_modules responder
     _start_get_modules_responder(processes, _stop_responder)
 
     log.info("All processes started. Press Ctrl+C to stop.")
 
-    # 7. Keep main alive — log unexpected exits
+    # 8. Keep main alive — log unexpected exits
     while True:
         time.sleep(1)
         for label, proc in processes:
