@@ -39,7 +39,7 @@ from rfcomm_handshake.packet import (
     recv_packet,
     send_packet,
 )
-from v2.protos.oaa.wifi.WifiInfoResponseMessage_pb2  import WifiInfoResponse
+from v2.protos.oaa.wifi.WifiSecurityResponseMessage_pb2 import WifiSecurityResponse
 from v2.protos.oaa.wifi.WifiStartRequestMessage_pb2  import WifiStartRequest
 from v2.protos.oaa.wifi.WifiStartResponseMessage_pb2 import WifiStartResponse
 from v2.protos.oaa.wifi.WifiConnectStatusMessage_pb2 import WifiConnectStatus
@@ -192,12 +192,12 @@ class RfcommHandshake:
             f"security_mode={security_mode} ap_type={ap_type}"
         )
 
-        payload = WifiInfoResponse(
-            ssid          = ssid,
-            bssid         = bssid,
-            passphrase    = passphrase,
-            security_mode = security_mode,
-            ap_type       = ap_type,
+        payload = WifiSecurityResponse(
+            ssid               = ssid,
+            bssid              = bssid,
+            key                = passphrase,
+            security_mode      = security_mode,
+            access_point_type  = ap_type,
         ).SerializeToString()
 
         ok = send_packet(self._sock, MSG_WIFI_INFO_RESPONSE, payload)
