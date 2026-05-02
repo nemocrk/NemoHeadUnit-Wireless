@@ -1,15 +1,15 @@
 """
-handshake.py — Android Auto 5-stage RFCOMM wireless handshake.
+handshake.py — Android Auto RFCOMM wireless handshake (event-driven).
 
-Stages:
-  1. Send WifiStartRequest  (msg_id=1)  — head unit sends TCP IP + port
-  2. Recv WifiStartResponse (msg_id=7)  — phone acks
-  3. Recv WifiInfoRequest   (msg_id=2)  — phone requests WiFi credentials
-  4. Send WifiInfoResponse  (msg_id=3)  — head unit sends SSID/key/BSSID
-  5. Recv WifiConnectStatus (msg_id=6)  — phone confirms WiFi join
+Flow (aligned to openauto-prodigy BluetoothDiscoveryService.cpp):
+  1. HU sends WifiStartRequest (msg_id=1)  — proactive, on connect
+  2. Phone may send WifiStartResponse (msg_id=6)  — optional ack, logged
+  3. Phone sends WifiInfoRequest (msg_id=2)  — triggers credential response
+  4. HU sends WifiInfoResponse (msg_id=3)  — SSID/key/BSSID
+  5. Phone sends WifiConnectionStatus (msg_id=7)  — WiFi joined, done
 
-Credentials come from the APConfig dict published by hostapd_helper
-(hostapd.ready payload).
+Steps 2–5 are handled by an event loop that dispatches on msg_id.
+Order is not enforced — tolerates phones that skip the ack (step 2).
 
 No ZMQ dependency — caller (main.py) provides the socket and credentials.
 """
@@ -20,9 +20,7 @@ import socket
 from pathlib import Path
 from typing import Callable, Optional
 
-# Repo root  → enables "v2.protos.*" imports
-_REPO_ROOT  = Path(__file__).parent.parent.parent.parent  # NemoHeadUnit-Wireless/
-# v2/protos  → enables "oaa.*" imports inside the compiled proto files
+_REPO_ROOT  = Path(__file__).parent.parent.parent.parent
 _PROTO_ROOT = _REPO_ROOT / "v2" / "protos"
 
 for _p in (_REPO_ROOT, _PROTO_ROOT):
@@ -41,14 +39,17 @@ from rfcomm_handshake.packet import (
     recv_packet,
     send_packet,
 )
-from v2.protos.oaa.wifi.WifiInfoResponseMessage_pb2 import WifiInfoResponse
-from v2.protos.oaa.wifi.WifiStartRequestMessage_pb2 import WifiStartRequest
+from v2.protos.oaa.wifi.WifiInfoResponseMessage_pb2  import WifiInfoResponse
+from v2.protos.oaa.wifi.WifiStartRequestMessage_pb2  import WifiStartRequest
 from v2.protos.oaa.wifi.WifiStartResponseMessage_pb2 import WifiStartResponse
 from v2.protos.oaa.wifi.WifiConnectStatusMessage_pb2 import WifiConnectStatus
 
 log = logging.getLogger("rfcomm_handshake.handshake")
 
 DEFAULT_TCP_PORT = 5288
+
+# Maximum number of messages to process in the event loop before giving up
+_MAX_MESSAGES = 20
 
 
 class HandshakeResult:
@@ -70,15 +71,18 @@ class HandshakeResult:
 
 class RfcommHandshake:
     """
-    Executes the 5-stage Android Auto wireless RFCOMM handshake.
+    Executes the Android Auto wireless RFCOMM handshake.
+
+    Sends WifiStartRequest immediately on run(), then enters an event loop
+    that dispatches incoming messages by msg_id — same model as openauto-prodigy.
 
     Usage:
         creds = {
             "ssid": "AndroidAutoAP",
             "key": "secret123",
             "bssid": "DC:A6:32:E7:5A:FE",
-            "security_mode": WPA2_SECURITY_MODE,
-            "ap_type": AP_TYPE_DYNAMIC,
+            "gateway_ip": "192.168.50.1",
+            "tcp_port": 5288,
         }
         hs = RfcommHandshake(sock, creds, on_stage_cb=log_stage)
         result = hs.run()
@@ -92,170 +96,142 @@ class RfcommHandshake:
         credentials: dict,
         on_stage_cb: Optional[Callable[[str], None]] = None,
     ):
-        self._sock = sock
-        self._creds = credentials
+        self._sock     = sock
+        self._creds    = credentials
         self._on_stage = on_stage_cb or (lambda s: None)
-        self._phone_ip: str = ""
-        self._pending_pkt: Optional[Packet] = None
+        self._phone_ip = ""
 
     # ------------------------------------------------------------------
     # Public
     # ------------------------------------------------------------------
 
     def run(self) -> HandshakeResult:
-        """Execute the full 5-stage handshake. Blocking."""
+        """Send WifiStartRequest then enter event loop until WiFi joined."""
         try:
             self._sock.settimeout(15.0)
 
-            if not self._stage1_send_start_request():
-                return HandshakeResult(False, error="Stage 1 failed: WifiStartRequest")
+            # Step 1 — always proactive
+            if not self._send_start_request():
+                return HandshakeResult(False, error="Failed to send WifiStartRequest")
 
-            if not self._stage2_recv_start_response():
-                return HandshakeResult(False, error="Stage 2 failed: WifiStartResponse")
+            # Event loop — react to whatever the phone sends
+            info_response_sent = False
 
-            if not self._stage3_recv_info_request():
-                return HandshakeResult(False, error="Stage 3 failed: WifiInfoRequest")
+            for _ in range(_MAX_MESSAGES):
+                pkt = recv_packet(self._sock)
+                if pkt is None:
+                    return HandshakeResult(False, error="Socket closed or recv error")
 
-            if not self._stage4_send_info_response():
-                return HandshakeResult(False, error="Stage 4 failed: WifiInfoResponse")
+                log.debug(f"Event loop: received msg_id={pkt.msg_id}")
 
-            if not self._stage5_recv_connect_status():
-                return HandshakeResult(False, error="Stage 5 failed: WifiConnectStatus")
+                if pkt.msg_id == MSG_WIFI_START_RESPONSE:
+                    # Optional ack from phone
+                    self._handle_start_response(pkt)
 
-            log.info(f"Handshake completed. Phone IP: {self._phone_ip}")
-            return HandshakeResult(True, phone_ip=self._phone_ip)
+                elif pkt.msg_id == MSG_WIFI_INFO_REQUEST:
+                    # Phone wants credentials
+                    self._on_stage("WifiInfoRequest")
+                    log.info("WifiInfoRequest received")
+                    if not self._send_info_response():
+                        return HandshakeResult(False, error="Failed to send WifiInfoResponse")
+                    info_response_sent = True
+
+                elif pkt.msg_id == MSG_WIFI_CONNECT_STATUS:
+                    # Phone reports WiFi join result
+                    self._on_stage("WifiConnectionStatus")
+                    if not info_response_sent:
+                        log.warning("WifiConnectionStatus received before WifiInfoResponse was sent")
+                    self._handle_connect_status(pkt)
+                    log.info(f"Handshake completed. Phone IP: {self._phone_ip}")
+                    return HandshakeResult(True, phone_ip=self._phone_ip)
+
+                else:
+                    log.warning(f"Unknown msg_id={pkt.msg_id}, ignoring")
+
+            return HandshakeResult(False, error=f"Event loop exhausted after {_MAX_MESSAGES} messages without completion")
 
         except Exception as e:
             log.error(f"Handshake exception: {e}")
             return HandshakeResult(False, error=str(e))
 
     # ------------------------------------------------------------------
-    # Stages
+    # Senders
     # ------------------------------------------------------------------
 
-    def _stage1_send_start_request(self) -> bool:
+    def _send_start_request(self) -> bool:
         self._on_stage("WifiStartRequest")
         ip_address = self._creds.get("gateway_ip", "")
-        port = int(self._creds.get("tcp_port", DEFAULT_TCP_PORT))
-        payload = WifiStartRequest(
+        port       = int(self._creds.get("tcp_port", DEFAULT_TCP_PORT))
+        payload    = WifiStartRequest(
             ip_address=ip_address,
             port=port,
         ).SerializeToString()
         ok = send_packet(self._sock, MSG_WIFI_START_REQUEST, payload)
         if ok:
-            log.info(f"Stage 1 OK: WifiStartRequest sent (ip={ip_address}, port={port})")
+            log.info(f"WifiStartRequest sent (ip={ip_address}, port={port})")
         return ok
 
-    def _stage2_recv_start_response(self) -> bool:
-        self._on_stage("WifiStartResponse")
-        pkt = recv_packet(self._sock)
-        if pkt and pkt.msg_id == MSG_WIFI_INFO_REQUEST:
-            self._pending_pkt = pkt
-            log.info("Stage 2 skipped: phone sent WifiInfoRequest directly")
-            return True
-        if not pkt or pkt.msg_id != MSG_WIFI_START_RESPONSE:
-            log.error(f"Stage 2: expected msg_id={MSG_WIFI_START_RESPONSE}, got {pkt}")
-            return False
-        self._handle_start_response(pkt, stage="Stage 2")
-        return True
-
-    def _stage3_recv_info_request(self) -> bool:
-        self._on_stage("WifiInfoRequest")
-        pkt = self._take_pending_packet() or recv_packet(self._sock)
-        if not pkt or pkt.msg_id != MSG_WIFI_INFO_REQUEST:
-            log.error(f"Stage 3: expected msg_id={MSG_WIFI_INFO_REQUEST}, got {pkt}")
-            return False
-        log.info("Stage 3 OK: WifiInfoRequest received")
-        return True
-
-    def _stage4_send_info_response(self) -> bool:
+    def _send_info_response(self) -> bool:
         self._on_stage("WifiInfoResponse")
         ssid          = self._creds.get("ssid", "")
         bssid         = self._creds.get("bssid", "")
         passphrase    = self._creds.get("key", "")
         security_mode = self._creds.get("security_mode", WPA2_SECURITY_MODE)
         ap_type       = self._creds.get("ap_type", AP_TYPE_DYNAMIC)
+
+        if not ssid:
+            log.warning("WifiInfoResponse: ssid is EMPTY — phone will likely reject")
+        if not bssid:
+            log.warning("WifiInfoResponse: bssid is EMPTY — phone may not find AP")
+        if not passphrase:
+            log.warning("WifiInfoResponse: passphrase is EMPTY — phone will fail auth")
+
         log.debug(
-            "Stage 4 WifiInfoResponse fields: "
-            f"ssid={ssid!r} bssid={bssid!r} "
-            f"passphrase={'*' * len(passphrase) if passphrase else '(empty!)'} "
+            f"WifiInfoResponse: ssid={ssid!r} bssid={bssid!r} "
+            f"passphrase={'*' * len(passphrase) if passphrase else '(empty)'} "
             f"security_mode={security_mode} ap_type={ap_type}"
         )
-        if not ssid:
-            log.warning("Stage 4: ssid is EMPTY — phone will likely reject WifiInfoResponse")
-        if not bssid:
-            log.warning("Stage 4: bssid is EMPTY — phone may not find the AP")
-        if not passphrase:
-            log.warning("Stage 4: passphrase is EMPTY — phone will fail auth")
-        payload = self._encode_wifi_info()
+
+        payload = WifiInfoResponse(
+            ssid          = ssid,
+            bssid         = bssid,
+            passphrase    = passphrase,
+            security_mode = security_mode,
+            ap_type       = ap_type,
+        ).SerializeToString()
+
         ok = send_packet(self._sock, MSG_WIFI_INFO_RESPONSE, payload)
         if ok:
-            log.info(f"Stage 4 OK: WifiInfoResponse sent (ssid={ssid!r}, bssid={bssid!r})")
+            log.info(f"WifiInfoResponse sent (ssid={ssid!r}, bssid={bssid!r})")
         return ok
 
-    def _stage5_recv_connect_status(self) -> bool:
-        self._on_stage("WifiConnectStatus")
-        pkt = recv_packet(self._sock)
-        if pkt and pkt.msg_id == MSG_WIFI_START_RESPONSE:
-            self._handle_start_response(pkt, stage="Stage 5 prelude")
-            pkt = recv_packet(self._sock)
-        if not pkt or pkt.msg_id != MSG_WIFI_CONNECT_STATUS:
-            log.error(f"Stage 5: expected msg_id={MSG_WIFI_CONNECT_STATUS}, got {pkt}")
-            return False
+    # ------------------------------------------------------------------
+    # Handlers
+    # ------------------------------------------------------------------
+
+    def _handle_start_response(self, pkt: Packet) -> None:
+        self._on_stage("WifiStartResponse")
+        response = WifiStartResponse()
+        try:
+            response.ParseFromString(pkt.payload)
+            if response.ip_address:
+                self._phone_ip = response.ip_address
+            log.info(
+                f"WifiStartResponse (ack): status={response.status} "
+                f"ip={response.ip_address} port={response.port}"
+            )
+        except Exception as e:
+            log.warning(f"WifiStartResponse: could not parse payload: {e}")
+            log.info("WifiStartResponse (ack) received")
+
+    def _handle_connect_status(self, pkt: Packet) -> None:
         status = WifiConnectStatus()
         try:
             status.ParseFromString(pkt.payload)
             log.info(
-                "Stage 5 OK: phone joined WiFi AP "
-                f"(state={status.state}, status_text={status.status_text!r})"
+                f"WifiConnectionStatus: state={status.state} "
+                f"status_text={status.status_text!r}"
             )
         except Exception as e:
-            log.warning(f"Stage 5: could not parse WifiConnectStatus payload: {e}")
-            log.info("Stage 5 OK: phone joined WiFi AP")
-        return True
-
-    # ------------------------------------------------------------------
-    # Payload helpers
-    # ------------------------------------------------------------------
-
-    def _encode_wifi_info(self) -> bytes:
-        """Encode WifiInfoResponse using the compiled protobuf message."""
-        msg = WifiInfoResponse(
-            ssid          = self._creds.get("ssid", ""),
-            bssid         = self._creds.get("bssid", ""),
-            passphrase    = self._creds.get("key", ""),
-            security_mode = self._creds.get("security_mode", WPA2_SECURITY_MODE),
-            ap_type       = self._creds.get("ap_type", AP_TYPE_DYNAMIC),
-        )
-        return msg.SerializeToString()
-
-    def _take_pending_packet(self) -> Optional[Packet]:
-        pkt = self._pending_pkt
-        self._pending_pkt = None
-        return pkt
-
-    def _handle_start_response(self, pkt: Packet, stage: str) -> None:
-        response = WifiStartResponse()
-        try:
-            response.ParseFromString(pkt.payload)
-            self._phone_ip = response.ip_address or self._phone_ip
-            log.info(
-                f"{stage} OK: WifiStartResponse received "
-                f"(status={response.status}, ip={response.ip_address}, port={response.port})"
-            )
-        except Exception as e:
-            log.warning(f"{stage}: could not parse WifiStartResponse payload: {e}")
-            log.info(f"{stage} OK: WifiStartResponse received")
-
-    @staticmethod
-    def _extract_ip(payload: bytes) -> str:
-        """Best-effort: scan for a printable IP-like string in the protobuf payload."""
-        try:
-            text = payload.decode("utf-8", errors="ignore")
-            import re
-            match = re.search(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b", text)
-            if match:
-                return match.group(1)
-        except Exception:
-            pass
-        return ""
+            log.warning(f"WifiConnectionStatus: could not parse payload: {e}")
+            log.info("WifiConnectionStatus received")
