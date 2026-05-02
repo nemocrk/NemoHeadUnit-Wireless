@@ -11,7 +11,7 @@ Responsibilities:
             - Publish system.start {priority: P}
             - Wait for system.ready {name, priority: P} from all P-level modules
             - On timeout per module: log warning and proceed
-  4. On SIGINT/SIGTERM: publish system.stop, terminate all subprocesses
+  4. On SIGINT/SIGTERM or system.shutdown: publish system.stop, terminate all subprocesses
   5. Respond to system.get_modules with module list and status
 
 Module autodiscovery:
@@ -266,6 +266,68 @@ def _start_get_modules_responder(
 
 
 # ---------------------------------------------------------------------------
+# system.shutdown listener
+# ---------------------------------------------------------------------------
+
+def _start_shutdown_listener(
+    processes: list[tuple[str, subprocess.Popen]],
+    pub: zmq.Socket,
+    stop_event: threading.Event,
+    zmq_ctx: zmq.Context,
+) -> threading.Thread:
+    """
+    Listen for system.shutdown on the bus.
+    On receipt: publish system.stop, terminate all processes, exit cleanly.
+    """
+    def _listener():
+        ctx = zmq.Context()
+        sub = ctx.socket(zmq.SUB)
+        sub.connect(BROKER_SUB_ADDR)
+        sub.setsockopt_string(zmq.SUBSCRIBE, "system.shutdown")
+        log.info("system.shutdown listener ready")
+
+        while not stop_event.is_set():
+            if not sub.poll(timeout=500):
+                continue
+            try:
+                frames = sub.recv_multipart(flags=zmq.NOBLOCK)
+                if len(frames) < 2:
+                    continue
+                log.info("system.shutdown received — initiating orderly shutdown")
+            except (zmq.ZMQError, zmq.Again):
+                continue
+
+            sub.close(linger=0)
+            ctx.term()
+
+            stop_event.set()
+            try:
+                _publish(pub, "system.stop", {"reason": "system.shutdown"})
+                time.sleep(0.5)  # give modules time to handle system.stop
+            except Exception as e:
+                log.warning(f"Could not publish system.stop: {e}")
+
+            _terminate_all(processes)
+
+            try:
+                pub.close(linger=0)
+                zmq_ctx.term()
+            except Exception:
+                pass
+
+            log.info("Shutdown complete")
+            sys.exit(0)
+
+        sub.close(linger=0)
+        ctx.term()
+        log.info("system.shutdown listener stopped")
+
+    t = threading.Thread(target=_listener, daemon=True, name="shutdown_listener")
+    t.start()
+    return t
+
+
+# ---------------------------------------------------------------------------
 # Process management
 # ---------------------------------------------------------------------------
 
@@ -373,10 +435,13 @@ def run() -> None:
     # 7. Start system.get_modules responder
     _start_get_modules_responder(processes, _stop_responder)
 
+    # 8. Start system.shutdown listener
+    _start_shutdown_listener(processes, pub, _stop_responder, ctx)
+
     log.info("All processes started. Press Ctrl+C to stop.")
 
-    # 8. Keep main alive — log unexpected exits
-    while True:
+    # 9. Keep main alive — log unexpected exits
+    while not _stop_responder.is_set():
         time.sleep(1)
         for label, proc in processes:
             if proc.poll() is not None:
