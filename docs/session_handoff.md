@@ -344,3 +344,121 @@ python v2/main.py
 # Dopo "All Processes started", il log_viewer deve ricevere log da:
 # config_manager, bluetooth, hostapd_helper, rfcomm_handshake, tcp_server, config_ui
 ```
+
+---
+
+## 2026-05-02 - Fix: ImportError attach_bus nei test v2
+
+**What changed:**
+
+I 5 test file sotto `tests/v2/` fallivan la raccolta con `ImportError: cannot import name
+'attach_bus' from 'shared.logger'` perché gli stub manuali di `shared.logger` (creati
+con `types.ModuleType`) non esponevano `attach_bus`.
+
+Fix applicato chirurgicamente in tutti i file interessati — aggiunta di una sola riga
+nella sezione stub:
+```python
+_logger_mod.attach_bus = MagicMock()  # required by main.py import
+```
+
+| File test fixato | Commit |
+|---|---|
+| `tests/v2/test_bluetooth.py` | c074ae5 |
+| `tests/v2/test_config_manager.py` | 218a18b |
+| `tests/v2/test_hostapd_helper.py` | e95091a |
+| `tests/v2/test_rfcomm_handshake_main.py` | 20a37de |
+| `tests/v2/test_tcp_server_main.py` | 13ddef5 |
+
+**Why:**
+- `v2/shared/logger.py` espone `attach_bus` ma gli stub dei test non la dichiaravano
+- Python sollevava `ImportError` a import-time impedendo la raccolta di tutti e 5 i file
+- Risultato: 5 errori di collection, 123 test raccolti ma nessuno eseguito
+
+**Status:** Completed
+
+**Verification commands:**
+```bash
+python -m pytest tests/v2/ -v
+# Atteso: 128 test raccolti, 0 errori di collection
+```
+
+---
+
+## 2026-05-02 - Pulsante spegnimento in config_ui + nmcli reconnect in ap_manager + system.shutdown handler nel main
+
+**What changed:**
+
+### 1. `v2/modules/config_ui/main.py` — pulsante “⏻ Spegni sistema”
+- Aggiunto `QPushButton("⏻  Spegni sistema")` nella toolbar a destra (dopo `addStretch()`)
+- Al click apre `QMessageBox.question` di conferma; se confermato pubblica `system.shutdown {}`
+- Stile rosso bold per distinguerlo visivamente dagli altri bottoni
+- Import aggiunto: `QMessageBox`
+- Contratto del modulo aggiornato nel docstring (aggiunto `system.shutdown` nei Publishes)
+
+### 2. `v2/modules/hostapd_helper/ap_manager.py` — nmcli reconnect su stop
+- Aggiunto metodo `_nmcli_reconnect()`: esegue `nmcli device connect <iface>`
+- Chiamato in `stop()` subito dopo `_set_network_manager_managed(True)`:
+  ```
+  _restore_interface()
+  _set_network_manager_managed(True)
+  _nmcli_reconnect()   ← nuovo
+  ```
+- Best-effort: se nmcli non è disponibile o fallisce, viene solo loggato
+- Obiettivo: riconnettere automaticamente il WiFi alle reti salvate dopo lo stop dell’AP
+
+### 3. `v2/main.py` — gestione `system.shutdown`
+- Nuova funzione `_start_shutdown_listener(processes, pub, stop_event, zmq_ctx)`:
+  thread daemon che ascolta `system.shutdown` sul bus ZMQ
+- Alla ricezione:
+  1. Setta `_stop_responder` (ferma anche `get_modules` responder)
+  2. Pubblica `system.stop {reason: "system.shutdown"}` — i moduli fanno cleanup
+  3. Attende 0.5s per dare tempo ai moduli di gestire `system.stop`
+  4. Chiama `_terminate_all(processes)`
+  5. Chiude socket ZMQ e fa `sys.exit(0)`
+- Loop principale `while True` trasformato in `while not _stop_responder.is_set()`
+  per permettere uscita pulita anche senza SIGINT
+
+**Flusso completo pulsante → spegnimento:**
+```
+[config_ui] click ⏻ → bus.publish("system.shutdown", {})
+         ↓
+[main.py shutdown_listener] → publish("system.stop", {reason: "system.shutdown"})
+         ↓
+[tutti i moduli] on_system_stop() → bus.stop(), cleanup, ...
+         ↓
+[main.py] _terminate_all() → sys.exit(0)
+```
+
+**Why:**
+- L’utente necessitava di un modo per spegnere il sistema dalla UI senza accesso al terminale
+- Il WiFi non si riconnetteva alle reti salvate dopo lo stop dell’AP (restava in stato disconnesso)
+- `system.shutdown` completa il ciclo di vita: boot → run → shutdown tutto via bus
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Aggiungere test unitari per `_start_shutdown_listener()` in `tests/v2/test_main.py`
+2. Verificare comportamento se `system.shutdown` arriva durante il boot (prima di step 7)
+3. Valutare di aggiungere un timeout di shutdown (forza `sys.exit` se i moduli non si
+   fermano entro N secondi dopo `system.stop`)
+
+**Verification commands:**
+```bash
+# Stack completo
+python v2/main.py
+
+# Dalla config_ui: click "Spegni sistema" → conferma → tutto deve terminare
+# Nel terminale del main.py atteso:
+# "system.shutdown received — initiating orderly shutdown"
+# "system.stop published"
+# "Shutdown complete"
+
+# Test (da aggiungere)
+python -m pytest tests/v2/test_main.py -v
+```
+
+| File modificato | Commit |
+|---|---|
+| `v2/modules/config_ui/main.py` | ce147bb |
+| `v2/modules/hostapd_helper/ap_manager.py` | 6f6645f |
+| `v2/main.py` | 4065b8e |
