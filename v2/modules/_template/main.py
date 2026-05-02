@@ -85,7 +85,7 @@ if str(_MODULES) not in sys.path:
 
 from shared.bus_client import BusClient        # noqa: E402
 from shared.config_client import ConfigClient  # noqa: E402
-from shared.logger import get_logger           # noqa: E402
+from shared.logger import get_logger, attach_bus  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -225,6 +225,9 @@ def run() -> None:
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
+    # Forward all log.* calls from this process to the log_viewer via the bus.
+    # attach_bus() is safe to call even if log_viewer is not running.
+    attach_bus(bus)
     time.sleep(0.05)
     on_system_readytostart()
     try:
