@@ -21,11 +21,11 @@ import pytest
 import yaml
 
 # ---------------------------------------------------------------------------
-# Path setup — mirror what the module does at import time
+# Path setup
 # ---------------------------------------------------------------------------
 
-_TESTS = Path(__file__).parent          # tests/v2/
-_ROOT  = _TESTS.parent.parent           # repo root
+_TESTS = Path(__file__).parent
+_ROOT  = _TESTS.parent.parent
 _V2    = _ROOT / "v2"
 _MODULES = _V2 / "modules"
 
@@ -34,7 +34,7 @@ for p in (str(_V2), str(_MODULES)):
         sys.path.insert(0, p)
 
 # ---------------------------------------------------------------------------
-# Stub shared.bus_client so the module loads without a live ZMQ broker
+# Stub shared dependencies
 # ---------------------------------------------------------------------------
 
 _bus_stub = MagicMock()
@@ -45,18 +45,19 @@ shared_pkg = types.ModuleType("shared")
 bus_client_mod = types.ModuleType("shared.bus_client")
 bus_client_mod.BusClient = _bus_stub
 logger_mod = types.ModuleType("shared.logger")
-logger_mod.get_logger = MagicMock(return_value=MagicMock())
+logger_mod.get_logger  = MagicMock(return_value=MagicMock())
+logger_mod.attach_bus  = MagicMock()  # required by main.py import
 
 sys.modules.setdefault("shared", shared_pkg)
 sys.modules["shared.bus_client"] = bus_client_mod
 sys.modules["shared.logger"] = logger_mod
 
 # ---------------------------------------------------------------------------
-# Import the module under test AFTER stubs are in place
+# Import the module under test
 # ---------------------------------------------------------------------------
 
 import importlib
-import v2.modules.config_manager.main as cm  # noqa: E402  (after sys.path setup)
+import v2.modules.config_manager.main as cm  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -65,14 +66,12 @@ import v2.modules.config_manager.main as cm  # noqa: E402  (after sys.path setup
 
 @pytest.fixture(autouse=True)
 def tmp_config_dir(tmp_path, monkeypatch):
-    """Redirect CONFIG_DIR to a temporary directory for every test."""
     monkeypatch.setattr(cm, "CONFIG_DIR", tmp_path)
     yield tmp_path
 
 
 @pytest.fixture(autouse=True)
 def reset_bus_publish():
-    """Clear publish call history before each test."""
     cm.bus.publish.reset_mock()
 
 
@@ -81,7 +80,6 @@ def reset_bus_publish():
 # ---------------------------------------------------------------------------
 
 def _published_payloads(topic: str) -> list[dict]:
-    """Return all payload dicts published on *topic*."""
     return [
         args[1]
         for args, _ in cm.bus.publish.call_args_list
