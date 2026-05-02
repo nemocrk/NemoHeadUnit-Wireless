@@ -291,3 +291,56 @@ python v2/bus_broker.py &
 python v2/modules/log_viewer/main.py &
 python v2/modules/bluetooth/main.py
 ```
+
+---
+
+## 2026-05-02 - Fix: attach_bus in tutti i moduli subprocess
+
+**What changed:**
+
+Aggiunto `attach_bus(bus)` nel `run()` di tutti i moduli che giravano come sottoprocessi
+senza forwardare i propri log al `log_viewer`.
+
+| Modulo | File modificato |
+|---|---|
+| `config_manager` | `v2/modules/config_manager/main.py` |
+| `config_ui` | `v2/modules/config_ui/main.py` |
+| `hostapd_helper` | `v2/modules/hostapd_helper/main.py` |
+| `bluetooth` | `v2/modules/bluetooth/main.py` |
+| `tcp_server` | `v2/modules/tcp_server/main.py` |
+| `rfcomm_handshake` | `v2/modules/rfcomm_handshake/main.py` |
+| `log_viewer` | ⏭️ Non modificato — è il receiver, non il sender |
+
+**Pattern applicato (chirurgico, solo 2 righe per file):**
+```python
+# Import
+from shared.logger import get_logger, attach_bus
+
+# In run(), subito dopo bus.start(blocking=False):
+bus_thread = bus.start(blocking=False)
+attach_bus(bus)  # forward all log.* from this process to log_viewer
+```
+
+**Why:**
+- Ogni modulo è un processo OS separato (spawned da `v2/main.py`)
+- `attach_bus()` opera sulla memoria del processo corrente: non si propaga ai figli
+- Senza questa chiamata, i `log.*` emessi dai sottoprocessi non raggiungevano mai
+  il `log_viewer`, che quindi si fermava a "All Processes started"
+- La finestra di logging mostrava solo i log dell'orchestratore (`main.py`),
+  non quelli dei moduli
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Testare visivamente il log_viewer dopo riavvio: deve mostrare log da tutti i moduli
+2. Scrivere test unitari per `BusLogHandler.emit()` e `attach_bus()` in processi multipli
+3. Valutare l'aggiunta di un filtro per modulo nella UI del `log_viewer`
+
+**Verification commands:**
+```bash
+# Stack completo
+python v2/main.py
+
+# Dopo "All Processes started", il log_viewer deve ricevere log da:
+# config_manager, bluetooth, hostapd_helper, rfcomm_handshake, tcp_server, config_ui
+```
