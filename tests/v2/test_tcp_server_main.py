@@ -48,6 +48,7 @@ _logger_mod     = types.ModuleType("shared.logger")
 
 _bus_client_mod.BusClient = _bus_class
 _logger_mod.get_logger    = MagicMock(return_value=MagicMock())
+_logger_mod.attach_bus    = MagicMock()  # required by main.py import
 
 sys.modules.setdefault("shared",             _shared_pkg)
 sys.modules["shared.bus_client"] = _bus_client_mod
@@ -189,7 +190,6 @@ class TestOnSessionClosed:
         assert len(_published("tcp.session.closed")) == 1
 
     def test_tears_down_relay_and_server(self):
-        # Save refs BEFORE calling _on_session_closed: _teardown() sets them to None
         relay  = MagicMock()
         server = MagicMock()
         tcp._relay  = relay
@@ -209,7 +209,6 @@ class TestOnSessionClosed:
 
 class TestSystemStop:
     def test_stops_relay_and_server(self):
-        # Save refs BEFORE calling on_system_stop: _teardown() sets them to None
         relay  = MagicMock()
         server = MagicMock()
         tcp._relay  = relay
@@ -226,7 +225,6 @@ class TestSystemStop:
         tcp.bus.stop.assert_called_once()
 
     def test_does_not_publish_session_closed(self):
-        # tcp.session.closed is published by _on_session_closed, NOT on_system_stop
         tcp._relay  = MagicMock()
         tcp._server = MagicMock()
         tcp.on_system_stop("system.stop", {})
