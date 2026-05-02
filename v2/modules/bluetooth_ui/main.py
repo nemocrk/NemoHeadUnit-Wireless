@@ -87,13 +87,19 @@ class PinDialog(QDialog):
 class BluetoothPairingWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Bluetooth Pairing Monitor — NemoHeadUnit v2")
-        self.setMinimumSize(520, 400)
+        self.setWindowTitle("Bluetooth Pairing — NemoHeadUnit v2")
 
-        self._devices: dict[str, dict] = {}  # address → {name, rssi}
+        self._devices: dict[str, dict] = {}
         self._pending_pin_address: str = ""
 
         self._build_ui()
+
+    def apply_default_geometry(self, app: QApplication) -> None:
+        """Top-left quarter of the primary screen."""
+        screen = app.primaryScreen().availableGeometry()
+        w = screen.width() // 2
+        h = screen.height() // 2
+        self.setGeometry(screen.x(), screen.y(), w, h)
 
     def _build_ui(self):
         central = QWidget()
@@ -186,7 +192,6 @@ _window: BluetoothPairingWindow | None = None
 
 
 def _invoke(slot_name: str, *args):
-    """Thread-safe call from the ZMQ recv thread to the Qt main thread."""
     if _window is None:
         return
     q_args = [Q_ARG(type(a), a) for a in args]
@@ -277,12 +282,13 @@ def run() -> None:
     bus.subscribe("bluetooth.pairing.failed",      on_pairing_failed)
 
     bus_thread = bus.start(blocking=False)
-    attach_bus(bus)  # forward all log.* from this process to log_viewer
+    attach_bus(bus)
     time.sleep(0.05)
     on_system_readytostart()
 
     _app = QApplication(sys.argv)
     _window = BluetoothPairingWindow()
+    _window.apply_default_geometry(_app)  # top-left quarter
     _window.show()
 
     log.info("bluetooth_ui window open")
