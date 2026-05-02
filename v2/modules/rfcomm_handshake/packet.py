@@ -6,12 +6,12 @@ Packet format:
   [msg_id : u16 big-endian]  — message type identifier
   [payload: bytes]           — protobuf or raw bytes
 
-Message IDs (Android Auto wireless protocol):
-  1  WifiStartRequest   — head unit → phone: TCP IP + port
-  2  WifiInfoRequest    — phone → head unit: request WiFi credentials
-  3  WifiInfoResponse   — head unit → phone: SSID, key, BSSID, security
-  6  WifiConnectStatus  — phone → head unit: joined WiFi OK
-  7  WifiStartResponse  — phone → head unit: ack WifiStartRequest
+Message IDs (Android Auto wireless protocol — verified against openauto-prodigy):
+  1  WifiStartRequest        — head unit → phone: TCP IP + port
+  2  WifiInfoRequest         — phone → head unit: request WiFi credentials
+  3  WifiInfoResponse        — head unit → phone: SSID, key, BSSID, security
+  6  WifiStartResponse       — phone → head unit: ack WifiStartRequest
+  7  WifiConnectionStatus    — phone → head unit: joined WiFi OK
 
 No ZMQ dependency.
 """
@@ -27,11 +27,11 @@ log = logging.getLogger("rfcomm_handshake.packet")
 # Message ID constants
 # ---------------------------------------------------------------------------
 
-MSG_WIFI_START_REQUEST  = 1
-MSG_WIFI_INFO_REQUEST   = 2
-MSG_WIFI_INFO_RESPONSE  = 3
-MSG_WIFI_CONNECT_STATUS = 6
-MSG_WIFI_START_RESPONSE = 7
+MSG_WIFI_START_REQUEST    = 1
+MSG_WIFI_INFO_REQUEST     = 2
+MSG_WIFI_INFO_RESPONSE    = 3
+MSG_WIFI_START_RESPONSE   = 6   # phone ack — was wrongly 7
+MSG_WIFI_CONNECT_STATUS   = 7   # phone WiFi joined — was wrongly 6
 
 # Security / AP type constants
 # Names match WifiSecurityModeEnum and WifiAccessPointTypeEnum proto values
@@ -62,7 +62,7 @@ def encode(msg_id: int, payload: bytes = b"") -> bytes:
     """
     Encode a packet into bytes ready to send over the RFCOMM socket.
 
-    >>> encode(7, b"") == b'\x00\x00\x00\x07'
+    >>> encode(6, b"") == b'\\x00\\x00\\x00\\x06'
     True
     """
     header = struct.pack(">HH", len(payload), msg_id)
