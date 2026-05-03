@@ -20,16 +20,18 @@ Module contract:
 
 Flow:
   1. Waits for rfcomm.handshake.completed — phone is now on the WiFi AP
-  2. Starts TCPServer on port 5288
-  3. Accepts the phone connection (with optional SSL)
-  4. FrameRelay reads AA frames and publishes aa.frame.received + aa.frame.ch<N> for each one
-  5. On aa.frame.send → serialises the frame and writes it back to the socket
-  6. On socket close → publishes tcp.session.closed
-  7. On system.stop → server + relay shutdown
+  2. Writes AA TLS cert + key to temp files via AACerts
+  3. Starts TCPServer on port 5288 with TLS enabled
+  4. Accepts the phone connection
+  5. FrameRelay reads AA frames and publishes aa.frame.received + aa.frame.ch<N> for each one
+  6. On aa.frame.send → serialises the frame and writes it back to the phone
+  7. On socket close → publishes tcp.session.closed
+  8. On system.stop → server + relay shutdown, cert temp files cleaned up
 
 Internal helpers (no ZMQ):
   server.py      — TCP bind/listen/accept, optional SSL wrap
   frame_relay.py — AA frame header parse, per-frame callback
+  aa_certs.py    — write/cleanup AA TLS cert temp files
 """
 
 import sys
@@ -52,6 +54,7 @@ from shared.bus_client import BusClient              # noqa: E402
 from shared.logger import get_logger     # noqa: E402
 from tcp_server.server import TCPServer              # noqa: E402
 from tcp_server.frame_relay import FrameRelay        # noqa: E402
+from tcp_server.aa_certs import AACerts              # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -69,6 +72,7 @@ log = get_logger(MODULE_NAME, bus=bus)
 
 _server: Optional[TCPServer] = None
 _relay:  Optional[FrameRelay] = None
+_certs:  Optional[AACerts] = None
 _server_starting = False
 _server_lock = threading.Lock()
 _write_lock  = threading.Lock()   # protects socket writes from concurrent senders
@@ -164,9 +168,16 @@ def on_frame_send(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _start_server() -> None:
-    global _server, _relay, _server_starting
+    global _server, _relay, _certs, _server_starting
 
-    server = TCPServer()
+    # Write AA TLS cert + key to temp files
+    certs = AACerts()
+    cert_path, key_path = certs.write()
+    log.info("AA TLS cert files written")
+    with _server_lock:
+        _certs = certs
+
+    server = TCPServer(ssl_certfile=cert_path, ssl_keyfile=key_path)
     with _server_lock:
         _server = server
 
@@ -175,6 +186,9 @@ def _start_server() -> None:
             if _server is server:
                 _server = None
             _server_starting = False
+        certs.cleanup()
+        with _server_lock:
+            _certs = None
         bus.publish("tcp.server.error", {"error": "TCPServer.start() failed"})
         return
 
@@ -205,13 +219,17 @@ def _start_server() -> None:
 
 
 def _teardown() -> None:
-    global _server, _relay, _server_starting
+    global _server, _relay, _certs, _server_starting
     if _relay:
         _relay.stop()
         _relay = None
     if _server:
         _server.stop()
         _server = None
+    if _certs:
+        _certs.cleanup()
+        log.info("AA TLS cert temp files cleaned up")
+        _certs = None
     with _server_lock:
         _server_starting = False
 
