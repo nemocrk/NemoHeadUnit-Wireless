@@ -18,7 +18,7 @@ Module contract:
                 aa.handshake.state       {state}    ← debug / UI
 
 Handshake flow (end-to-end):
-  1. On tcp.session.connected: reset handshake state machine
+  1. On tcp.session.connected: reset handshake SM, send VERSION_REQUEST (HU speaks first)
   2. On aa.frame.ch0:          feed frame to ControlChannelHandshake
   3. Handshake replies via aa.frame.send → tcp_server writes back to socket
   4. On ACTIVE:  publish aa.session.active
@@ -106,6 +106,8 @@ def on_tcp_session_connected(topic: str, payload: dict) -> None:
     log.info("TCP session connected from %s — initialising handshake", address)
     _handshake = _make_handshake()
     bus.publish("aa.handshake.state", {"state": "IDLE"})
+    # HU always speaks first: phone waits in silence for VERSION_REQUEST
+    _handshake.send_version_request()
 
 
 def on_tcp_session_closed(topic: str, payload: dict) -> None:
@@ -135,7 +137,6 @@ def on_frame_ch0(topic: str, payload: dict) -> None:
         return
 
     _handshake.on_message(channel_id, flags, raw_payload)
-    # Publish current state for observability
     bus.publish("aa.handshake.state", {"state": _handshake.state.name})
 
 
