@@ -462,3 +462,29 @@ python -m pytest tests/v2/test_main.py -v
 | `v2/modules/config_ui/main.py` | ce147bb |
 | `v2/modules/hostapd_helper/ap_manager.py` | 6f6645f |
 | `v2/main.py` | 4065b8e |
+
+---
+
+## 2026-05-03 - OAA control channel handshake v2
+
+**What changed:**
+Implemented the first end-to-end Android Auto main/control channel handshake path in `v2/`.
+Added `v2/shared/proto_utils.py` as a generalized protobuf serialization/deserialization utility.
+Updated `v2/modules/tcp_server/main.py` to publish both the generic `aa.frame.received` topic and per-channel topics `aa.frame.ch<N>`, and to accept outbound frames through `aa.frame.send`.
+Updated `v2/modules/tcp_server/frame_relay.py` with `send_raw()` so bus-driven modules can write framed AA payloads back to the active TCP session.
+Added `v2/modules/oaa_control_channel/frame_codec.py` for control-channel frame encode/decode helpers.
+Added `v2/modules/oaa_control_channel/service_discovery.py` to build the ServiceDiscoveryResponse using the existing compiled protobuf modules under `v2/protos/oaa/`.
+Added `v2/modules/oaa_control_channel/handshake.py` with the callback-driven control-channel handshake state machine.
+Added `v2/modules/oaa_control_channel/main.py` to wire bus callbacks to the handshake state machine and publish `aa.session.active`, `aa.session.shutdown`, and `aa.handshake.state`.
+
+**Why:**
+The v2 runtime needed a standalone module dedicated to the Android Auto main/control channel so that handshake logic is isolated from the TCP transport and handled entirely through bus callbacks, in line with the modular architecture rules.
+The TCP layer also needed channel-aware publishing so modules can subscribe only to the AA channel they own instead of filtering all traffic centrally.
+
+**Status:**
+In Progress
+
+**Next 1-3 steps:**
+1. Add `v2/modules/oaa_control_channel/__init__.py` and verify autodiscovery/startup order in `v2/main.py`.
+2. Add dedicated tests for `proto_utils`, `frame_codec`, and `ControlChannelHandshake`, then run the full suite and verify coverage.
+3. Validate the real wire format against a phone capture and fix any message-id / TLS / framing mismatches found during integration.
