@@ -5,9 +5,9 @@ Handshake sequence (HU speaks first):
 
   HU → Phone : VERSION_REQUEST          (0x0001)  ← sent immediately on tcp.session.connected
   Phone → HU : VERSION_RESPONSE         (0x0002)
-  HU → Phone : SSL_HANDSHAKE            (0x0003)  [TLS ServerHello+Cert+Done via AACryptor]
+  HU → Phone : SSL_HANDSHAKE            (0x0003)  [TLS ClientHello via AACryptor]
   Phone → HU : SSL_HANDSHAKE            (0x0003)  [TLS rounds until complete]
-  HU → Phone : AUTH_COMPLETE            (0x0006)
+  HU → Phone : AUTH_COMPLETE            (0x0006)  ← sent by HU once TLS is_active()
   Phone → HU : SERVICE_DISCOVERY_REQ   (0x0005)
   HU → Phone : SERVICE_DISCOVERY_RES   (0x0007)
   Phone → HU : CHANNEL_OPEN_REQ         (0x0008)  [one per channel]
@@ -19,8 +19,9 @@ Handshake sequence (HU speaks first):
 TLS note:
   AA uses TLS 1.2 in-band: SSL bytes are exchanged as AA frame payloads
   on channel 0, msgId 0x0003.  AACryptor implements the memory-BIO pattern
-  of openauto-prodigy Cryptor.cpp.  Post-handshake frames with
-  encryptionType=Encrypted are decrypted/encrypted via AACryptor.
+  of aasdk Cryptor.cpp (HU = TLS client, SSL_set_connect_state).
+  Post-handshake frames with encryptionType=Encrypted are
+  decrypted/encrypted via AACryptor.
 """
 
 from __future__ import annotations
@@ -177,7 +178,6 @@ class ControlChannelHandshake:
                      p_major, p_minor)
         else:
             log.info("VERSION_RESPONSE received (no version body) — starting TLS handshake")
-        # AACryptor already init'd in send_version_request; drive the first round
         outgoing = self._cryptor.drive_handshake()
         if outgoing:
             self._send(MSG_SSL_HANDSHAKE, outgoing, encrypted=False)
@@ -187,6 +187,7 @@ class ControlChannelHandshake:
     def _on_ssl_handshake(self, body: bytes, encrypted: bool) -> None:
         """
         TLS handshake blob from phone — feed into AACryptor and send response.
+        When TLS is complete, send AUTH_COMPLETE immediately.
         Mirrors Messenger::handleHandshakeData() + Messenger::driveHandshake().
         """
         log.debug("SSL_HANDSHAKE blob received (%d bytes)", len(body))
@@ -199,11 +200,13 @@ class ControlChannelHandshake:
             self._send(MSG_SSL_HANDSHAKE, outgoing, encrypted=False)
 
         if self._cryptor.is_active():
-            log.info("TLS handshake complete via AACryptor")
+            log.info("TLS handshake complete via AACryptor — sending AUTH_COMPLETE")
+            self._send(MSG_AUTH_COMPLETE, b"", encrypted=False)
             self._state = HandshakeState.AUTH_OK
 
     def _on_auth_complete(self, body: bytes, encrypted: bool) -> None:
-        log.info("AUTH_COMPLETE — TLS session established")
+        # Phone acknowledges AUTH_COMPLETE (rare, usually phone sends SERVICE_DISCOVERY_REQ next)
+        log.info("AUTH_COMPLETE from phone — TLS session established")
         self._state = HandshakeState.AUTH_OK
 
     def _on_service_discovery_request(self, body: bytes, encrypted: bool) -> None:
