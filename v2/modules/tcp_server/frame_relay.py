@@ -6,6 +6,7 @@ Responsibilities:
   - Parse the AA frame header: [length:u32_be][channel:u8][flags:u8]
   - Publish each frame as aa.frame.received on the bus
   - Detect socket close and publish aa.session.closed
+  - Expose send_raw() for writing pre-encoded frames back to the phone
 
 Frame format (Android Auto over TCP):
   Byte 0-3 : payload length (u32 big-endian)
@@ -29,6 +30,8 @@ FRAME_HEADER_SIZE = 6  # length(4) + channel(1) + flags(1)
 class FrameRelay:
     """
     Reads AA frames from a connected TCP socket and relays them via callback.
+    Also exposes send_raw() so other components (e.g. oaa_control_channel)
+    can write frames back to the phone.
 
     Usage:
         def on_frame(channel_id, flags, payload):
@@ -79,6 +82,20 @@ class FrameRelay:
             self._sock.shutdown(socket.SHUT_RDWR)
         except Exception:
             pass
+
+    def send_raw(self, data: bytes) -> None:
+        """Write *data* verbatim to the socket (caller is responsible for framing).
+
+        Thread-safe if callers serialise access externally (tcp_server uses _write_lock).
+        Raises OSError / BrokenPipeError on socket failure.
+        """
+        total = 0
+        view = memoryview(data)
+        while total < len(data):
+            sent = self._sock.send(view[total:])
+            if sent == 0:
+                raise BrokenPipeError("send_raw: socket closed mid-write")
+            total += sent
 
     # ------------------------------------------------------------------
     # Frame reading
