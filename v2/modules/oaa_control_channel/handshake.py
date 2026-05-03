@@ -1,20 +1,19 @@
 """
 handshake.py — AA control-channel (ch 0) handshake state machine.
 
-Handshake sequence:
+Handshake sequence (HU speaks first):
 
-  Phone → HU : VERSION_REQUEST       (0x0001)
-  HU → Phone : VERSION_RESPONSE      (0x0002)
-  Phone → HU : SSL_HANDSHAKE         (0x0003)  [TLS ClientHello — in-band via AACryptor]
-  HU → Phone : SSL_HANDSHAKE         (0x0003)  [TLS ServerHello+Cert+Done]
-  ... more rounds until handshake complete ...
-  Phone → HU : AUTH_COMPLETE         (0x0006)
-  Phone → HU : SERVICE_DISCOVERY_REQ (0x0005)
-  HU → Phone : SERVICE_DISCOVERY_RES (0x0007)
-  Phone → HU : CHANNEL_OPEN_REQ      (0x0008)  [one per channel]
-  HU → Phone : CHANNEL_OPEN_RES      (0x0009)  [STATUS_OK]
-  Phone → HU : PING_REQUEST          (0x000B)
-  HU → Phone : PING_RESPONSE         (0x000C)
+  HU → Phone : VERSION_REQUEST          (0x0001)  ← sent immediately on tcp.session.connected
+  Phone → HU : VERSION_RESPONSE         (0x0002)
+  HU → Phone : SSL_HANDSHAKE            (0x0003)  [TLS ServerHello+Cert+Done via AACryptor]
+  Phone → HU : SSL_HANDSHAKE            (0x0003)  [TLS rounds until complete]
+  HU → Phone : AUTH_COMPLETE            (0x0006)
+  Phone → HU : SERVICE_DISCOVERY_REQ   (0x0005)
+  HU → Phone : SERVICE_DISCOVERY_RES   (0x0007)
+  Phone → HU : CHANNEL_OPEN_REQ         (0x0008)  [one per channel]
+  HU → Phone : CHANNEL_OPEN_RES         (0x0009)  [STATUS_OK]
+  Phone → HU : PING_REQUEST             (0x000B)
+  HU → Phone : PING_RESPONSE            (0x000C)
   → Session ACTIVE
 
 TLS note:
@@ -34,7 +33,6 @@ from typing import Callable
 
 from shared.proto_utils import decode_proto, encode_proto
 
-from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessageIds
 from protos.oaa.control.ServiceDiscoveryRequestMessage_pb2 import ServiceDiscoveryRequest
 from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
 from protos.oaa.control.ChannelOpenRequestMessage_pb2 import ChannelOpenRequest
@@ -85,11 +83,11 @@ class ControlChannelHandshake:
     Drives the AA control channel (ch 0) handshake.
 
     Args:
-        send_fn : callable(message_id: int, proto_body: bytes, encrypted: bool)
-        bt_mac        : local BT MAC address (for ServiceDiscovery)
-        wifi_bssid    : local WiFi BSSID
-        on_active_cb  : called when session becomes ACTIVE
-        on_shutdown_cb: called on SHUTDOWN_REQUEST
+        send_fn        : callable(message_id: int, proto_body: bytes, encrypted: bool)
+        bt_mac         : local BT MAC address (for ServiceDiscovery)
+        wifi_bssid     : local WiFi BSSID
+        on_active_cb   : called when session becomes ACTIVE
+        on_shutdown_cb : called on SHUTDOWN_REQUEST
     """
 
     def __init__(
@@ -110,12 +108,27 @@ class ControlChannelHandshake:
         self._cryptor      = AACryptor()
 
     # ------------------------------------------------------------------
-    # Public
+    # Public API
     # ------------------------------------------------------------------
+
+    def send_version_request(self) -> None:
+        """
+        Send VERSION_REQUEST (msgId 0x0001) to the phone.
+        Must be called immediately after TCP connect — the phone waits in
+        silence until the HU speaks first.
+        Also initialises AACryptor so it is ready when 0x0003 arrives.
+        """
+        body = struct.pack(">HH", AA_VERSION_MAJOR, AA_VERSION_MINOR)
+        self._send(MSG_VERSION_REQUEST, body, encrypted=False)
+        self._cryptor.init()
+        self._state = HandshakeState.VERSION_SENT
+        log.info(
+            "VERSION_REQUEST sent (v%d.%d) — AACryptor initialised, waiting for VERSION_RESPONSE",
+            AA_VERSION_MAJOR, AA_VERSION_MINOR,
+        )
 
     def on_message(self, channel_id: int, flags: int, payload: bytes) -> None:
         """Feed a raw payload from FrameRelay into the state machine."""
-        # Decrypt payload if flagged as encrypted and cryptor is active
         encrypted = bool(flags & 0x08)
         if encrypted and self._cryptor.is_active():
             try:
@@ -135,7 +148,7 @@ class ControlChannelHandshake:
         log.debug("CH0 ← msg_id=0x%04x state=%s len=%d", msg_id, self._state.name, len(body))
 
         handler = {
-            MSG_VERSION_REQUEST:       self._on_version_request,
+            MSG_VERSION_RESPONSE:      self._on_version_response,
             MSG_SSL_HANDSHAKE:         self._on_ssl_handshake,
             MSG_AUTH_COMPLETE:         self._on_auth_complete,
             MSG_SERVICE_DISCOVERY_REQ: self._on_service_discovery_request,
@@ -157,22 +170,19 @@ class ControlChannelHandshake:
     # Message handlers
     # ------------------------------------------------------------------
 
-    def _on_version_request(self, body: bytes, encrypted: bool) -> None:
+    def _on_version_response(self, body: bytes, encrypted: bool) -> None:
         if len(body) >= 4:
             p_major, p_minor = struct.unpack_from(">HH", body, 0)
-            log.info("VERSION_REQUEST: phone=%d.%d, HU=%d.%d",
-                     p_major, p_minor, AA_VERSION_MAJOR, AA_VERSION_MINOR)
+            log.info("VERSION_RESPONSE: phone=%d.%d — starting TLS handshake",
+                     p_major, p_minor)
         else:
-            log.info("VERSION_REQUEST: (no version in body) HU=%d.%d",
-                     AA_VERSION_MAJOR, AA_VERSION_MINOR)
-
-        response_body = struct.pack(">HHH", AA_VERSION_MAJOR, AA_VERSION_MINOR, 0)
-        self._send(MSG_VERSION_RESPONSE, response_body, encrypted=False)
-        self._state = HandshakeState.VERSION_SENT
-
-        # Initialise AACryptor now so it is ready when the first 0x0003 arrives
-        self._cryptor.init()
-        log.info("VERSION_RESPONSE sent — AACryptor initialised")
+            log.info("VERSION_RESPONSE received (no version body) — starting TLS handshake")
+        # AACryptor already init'd in send_version_request; drive the first round
+        outgoing = self._cryptor.drive_handshake()
+        if outgoing:
+            self._send(MSG_SSL_HANDSHAKE, outgoing, encrypted=False)
+            log.debug("SSL_HANDSHAKE initial blob sent (%d bytes)", len(outgoing))
+        self._state = HandshakeState.TLS_IN_PROGRESS
 
     def _on_ssl_handshake(self, body: bytes, encrypted: bool) -> None:
         """
@@ -180,7 +190,6 @@ class ControlChannelHandshake:
         Mirrors Messenger::handleHandshakeData() + Messenger::driveHandshake().
         """
         log.debug("SSL_HANDSHAKE blob received (%d bytes)", len(body))
-        self._state = HandshakeState.TLS_IN_PROGRESS
 
         self._cryptor.write_handshake_input(body)
         outgoing = self._cryptor.drive_handshake()
@@ -191,6 +200,7 @@ class ControlChannelHandshake:
 
         if self._cryptor.is_active():
             log.info("TLS handshake complete via AACryptor")
+            self._state = HandshakeState.AUTH_OK
 
     def _on_auth_complete(self, body: bytes, encrypted: bool) -> None:
         log.info("AUTH_COMPLETE — TLS session established")
