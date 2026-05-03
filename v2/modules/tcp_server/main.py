@@ -8,11 +8,13 @@ Module contract:
                 system.start
                 system.stop
                 rfcomm.handshake.completed  {device_address, phone_ip}
+                aa.frame.send               {channel_id, flags, payload_hex}
   Publishes   : system.module_ready          {name, priority}
                 system.ready                 {name, priority}
                 tcp.server.started          {host, port}
                 tcp.session.connected       {address}
-                aa.frame.received           {channel_id, flags, payload_hex}
+                aa.frame.received           {channel_id, flags, payload_hex}  (all channels)
+                aa.frame.ch<N>              {channel_id, flags, payload_hex}  (per-channel)
                 tcp.session.closed          {}
                 tcp.server.error            {error}
 
@@ -20,9 +22,10 @@ Flow:
   1. Waits for rfcomm.handshake.completed — phone is now on the WiFi AP
   2. Starts TCPServer on port 5288
   3. Accepts the phone connection (with optional SSL)
-  4. FrameRelay reads AA frames and publishes aa.frame.received for each one
-  5. On socket close → publishes tcp.session.closed
-  6. On system.stop → server + relay shutdown
+  4. FrameRelay reads AA frames and publishes aa.frame.received + aa.frame.ch<N> for each one
+  5. On aa.frame.send → serialises the frame and writes it back to the socket
+  6. On socket close → publishes tcp.session.closed
+  7. On system.stop → server + relay shutdown
 
 Internal helpers (no ZMQ):
   server.py      — TCP bind/listen/accept, optional SSL wrap
@@ -30,6 +33,7 @@ Internal helpers (no ZMQ):
 """
 
 import sys
+import struct
 import threading
 from pathlib import Path
 import time
@@ -67,6 +71,7 @@ _server: Optional[TCPServer] = None
 _relay:  Optional[FrameRelay] = None
 _server_starting = False
 _server_lock = threading.Lock()
+_write_lock  = threading.Lock()   # protects socket writes from concurrent senders
 
 # ---------------------------------------------------------------------------
 # Boot protocol handlers
@@ -119,6 +124,39 @@ def on_handshake_completed(topic: str, payload: dict) -> None:
     log.info(f"Handshake completed from {device_address} (phone_ip={phone_ip}) — starting TCP server")
     t = threading.Thread(target=_start_server, daemon=True)
     t.start()
+
+
+def on_frame_send(topic: str, payload: dict) -> None:
+    """Write an AA frame to the active socket (called by other modules via aa.frame.send).
+
+    Expected payload keys:
+        channel_id  : int   — OAA channel id (0 = control, 1 = input, ...)
+        flags       : int   — frame flags byte
+        payload_hex : str   — serialised protobuf payload as hex string
+    """
+    relay = _relay
+    if relay is None:
+        log.warning("on_frame_send: no active relay, dropping frame (ch=%s)",
+                    payload.get("channel_id"))
+        return
+
+    try:
+        channel_id  = int(payload["channel_id"])
+        flags       = int(payload["flags"])
+        raw_payload = bytes.fromhex(payload["payload_hex"])
+    except (KeyError, ValueError) as exc:
+        log.error("on_frame_send: malformed payload — %s", exc)
+        return
+
+    # AA frame wire format:
+    #   [channel_id: 1B] [flags: 1B] [length: 2B big-endian] [payload: length B]
+    frame = struct.pack(">BBH", channel_id, flags, len(raw_payload)) + raw_payload
+
+    try:
+        with _write_lock:
+            relay.send_raw(frame)
+    except Exception as exc:
+        log.error("on_frame_send: socket write failed — %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -183,11 +221,15 @@ def _teardown() -> None:
 # ---------------------------------------------------------------------------
 
 def _on_frame(channel_id: int, flags: int, payload: bytes) -> None:
-    bus.publish("aa.frame.received", {
+    frame_data = {
         "channel_id":  channel_id,
         "flags":       flags,
         "payload_hex": payload.hex(),
-    })
+    }
+    # Broadcast on generic topic (all-channel listener)
+    bus.publish("aa.frame.received", frame_data)
+    # Broadcast on per-channel topic so modules subscribe only to their channel
+    bus.publish(f"aa.frame.ch{channel_id}", frame_data)
 
 
 def _on_session_closed() -> None:
@@ -205,6 +247,7 @@ def run() -> None:
     bus.subscribe("system.start",               on_system_start)
     bus.subscribe("system.stop",                on_system_stop)
     bus.subscribe("rfcomm.handshake.completed", on_handshake_completed)
+    bus.subscribe("aa.frame.send",              on_frame_send)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
