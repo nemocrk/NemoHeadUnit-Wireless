@@ -47,6 +47,7 @@ from shared.proto_utils import decode_proto, encode_proto
 
 # Control proto imports
 from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
+from v2.protos.oaa.control.AuthCompleteIndicationMessage_pb2 import AuthCompleteIndication
 from v2.protos.oaa.control.ServiceDiscoveryRequestMessage_pb2 import ServiceDiscoveryRequest
 from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
 from v2.protos.oaa.control.ChannelOpenRequestMessage_pb2 import ChannelOpenRequest
@@ -210,7 +211,7 @@ class ControlChannelHandshake:
         outgoing = self._cryptor.drive_handshake()
 
         log.info("drive_handshake result: %d bytes, active=%s",
-                len(outgoing), self._cryptor.is_active())  # ← aggiungi questo
+                len(outgoing), self._cryptor.is_active())
 
         if outgoing:
             log.info("SSL_HANDSHAKE response (%d bytes) — sending", len(outgoing))
@@ -218,7 +219,9 @@ class ControlChannelHandshake:
 
         if self._cryptor.is_active():
             log.info("TLS handshake complete via AACryptor — sending AUTH_COMPLETE")
-            self._send(MSG_AUTH_COMPLETE, b"", encrypted=False)
+            auth = AuthCompleteIndication()
+            auth.status = 0  # STATUS_OK
+            self._send(MSG_AUTH_COMPLETE, auth.SerializeToString(), encrypted=False)
             self._state = HandshakeState.AUTH_OK
 
     def _on_auth_complete(self, body: bytes, encrypted: bool) -> None:
