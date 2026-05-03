@@ -9,12 +9,13 @@ Responsibilities:
 No ZMQ dependency — all bus publishing is handled by main.py.
 """
 
-import logging
+from shared.logger import get_logger
+
 import threading
 import time
 from typing import Callable
 
-log = logging.getLogger("bluetooth.discovery")
+log = get_logger("bluetooth.discovery")
 
 
 class DiscoverySession:

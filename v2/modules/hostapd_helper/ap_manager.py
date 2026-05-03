@@ -12,15 +12,15 @@ All network parameters are now fields on APConfig so they can be
 driven from the config_manager module at runtime.
 """
 
-import logging
 import os
-import subprocess
+from subprocess import PIPE, CalledProcessError, Popen, TimeoutExpired
 import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+from shared.logger import run_subprocess_and_log, get_logger
 
-log = logging.getLogger("hostapd_helper.ap_manager")
+log = get_logger("hostapd_helper.ap_manager")
 
 # Module-level constants that are NOT user-configurable
 WPA2_SECURITY_MODE = 8   # WPA2_PERSONAL constant for RFCOMM handshake
@@ -35,10 +35,10 @@ class APConfig:
     key:              str = ""           # generated on start() if empty
     hw_mode:          str = "a"
     channel:          int = 36
-    subnet:           str = "192.168.50"
-    gateway_ip:       str = "192.168.50.1"
-    dhcp_range_start: str = "192.168.50.10"
-    dhcp_range_end:   str = "192.168.50.50"
+    subnet:           str = "10.0.0"
+    gateway_ip:       str = "10.0.0.1"
+    dhcp_range_start: str = "10.0.0.10"
+    dhcp_range_end:   str = "10.0.0.50"
     country_code:      str = "IT"
 
 
@@ -56,8 +56,8 @@ class APManager:
 
     def __init__(self, config: Optional[APConfig] = None):
         self._cfg = config or APConfig()
-        self._hostapd_proc: Optional[subprocess.Popen] = None
-        self._dnsmasq_proc: Optional[subprocess.Popen] = None
+        self._hostapd_proc: Optional[Popen] = None
+        self._dnsmasq_proc: Optional[Popen] = None
         self._hostapd_conf: Optional[str] = None
         self._dnsmasq_conf: Optional[str] = None
         self._bssid: str = ""
@@ -88,14 +88,14 @@ class APManager:
             self.stop()
             return False
 
-        self._dnsmasq_conf = self._write_dnsmasq_conf()
         self._hostapd_conf = self._write_hostapd_conf()
+        self._dnsmasq_conf = self._write_dnsmasq_conf()
 
-        if not self._start_dnsmasq():
+        if not self._start_hostapd():
             self.stop()
             return False
-        
-        if not self._start_hostapd():
+
+        if not self._start_dnsmasq():
             self.stop()
             return False
 
@@ -188,10 +188,10 @@ class APManager:
         try:
             log.info(f"Starting hostapd with config {self._hostapd_conf}")
             time.sleep(0.2)
-            self._hostapd_proc = subprocess.Popen(
+            self._hostapd_proc = Popen(
                 ["sudo", "hostapd", self._hostapd_conf],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=PIPE,
+                stderr=PIPE,
                 text=True,
             )
             log.info(f"hostapd started (pid={self._hostapd_proc.pid})")
@@ -208,10 +208,10 @@ class APManager:
     def _start_dnsmasq(self) -> bool:
         try:
             log.info(f"Starting dnsmasq with config {self._dnsmasq_conf}")
-            self._dnsmasq_proc = subprocess.Popen(
+            self._dnsmasq_proc = Popen(
                 ["sudo", "dnsmasq", f"--conf-file={self._dnsmasq_conf}", "--no-daemon"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=PIPE,
+                stderr=PIPE,
                 text=True,
             )
             log.info(f"dnsmasq started (pid={self._dnsmasq_proc.pid})")
@@ -234,29 +234,31 @@ class APManager:
         iface = self._cfg.interface
         gw    = self._cfg.gateway_ip
         try:
-            #subprocess.run(["sudo", "ip", "link", "set", iface, "down"], check=True)
-            time.sleep(0.2)
-            subprocess.run(["sudo", "ip", "link", "set", iface, "down"], check=True)
-            subprocess.run(["sudo", "ip", "addr", "flush", "dev", iface], check=True)
-            time.sleep(0.2)
+            run_subprocess_and_log(log,["sudo", "rfkill", "unblock", "wifi"], check=False, capture_output=True)
+            time.sleep(0.5)
+            run_subprocess_and_log(log,["sudo", "ip", "link", "set", iface, "down"], check=True, capture_output=True)
+            time.sleep(0.5)
+            run_subprocess_and_log(log,["sudo", "ip", "addr", "flush", "dev", iface], check=True, capture_output=True)
+            time.sleep(0.5)
             self._set_interface_type_ap()
-            time.sleep(0.2)
-            subprocess.run(["sudo", "ip", "link", "set", iface, "up"], check=True)
-            time.sleep(0.2)
-            subprocess.run(
-                ["sudo", "ip", "addr", "add", f"{gw}/24", "dev", iface], check=True
+            time.sleep(0.5)
+            run_subprocess_and_log(log,["sudo", "ip", "link", "set", iface, "up"], check=True, capture_output=True)
+            time.sleep(0.5)
+            run_subprocess_and_log(log,
+                ["sudo", "ip", "addr", "add", f"{gw}/24", "dev", iface], check=True, capture_output=True
             )
-            time.sleep(0.2)
+            time.sleep(0.5)
             log.info(f"Interface {iface} configured with {gw}/24")
             return True
-        except subprocess.CalledProcessError as e:
+        except CalledProcessError as e:
             log.error(f"Interface config failed: {e}")
             return False
 
     def _restore_interface(self) -> None:
         iface = self._cfg.interface
         try:
-            subprocess.run(["sudo", "ip", "addr", "flush", "dev", iface], check=False)
+            run_subprocess_and_log(log,["sudo", "ip", "addr", "flush", "dev", iface], check=False, capture_output=True)
+            time.sleep(0.2)
             log.info(f"Interface {iface} flushed")
         except Exception as e:
             log.warning(f"_restore_interface: {e}")
@@ -265,10 +267,9 @@ class APManager:
         """Disconnect NetworkManager and mark the interface unmanaged for AP mode."""
         iface = self._cfg.interface
         self._nmcli(["device", "disconnect", iface], "disconnect")
-        time.sleep(0.2)
+        time.sleep(0.5)
         self._set_network_manager_managed(False)
-        time.sleep(0.2)
-        subprocess.run(["sudo", "rfkill", "unblock", "wifi"], check=False)
+        time.sleep(0.5)
 
     def _set_network_manager_managed(self, managed: bool) -> None:
         """
@@ -297,12 +298,13 @@ class APManager:
         """
         iface = self._cfg.interface
         log.info(f"Requesting nmcli reconnect on {iface}")
-        time.sleep(0.2)
-        subprocess.run(["sudo", "systemctl", "restart", "NetworkManager"], check=False)
+        time.sleep(0.5)
+        run_subprocess_and_log(log,["sudo", "systemctl", "restart", "NetworkManager"], check=False, capture_output=True)
 
     def _nmcli(self, args: list[str], label: str) -> bool:
         try:
-            result = subprocess.run(
+            result = run_subprocess_and_log(
+                log,
                 ["sudo", "nmcli", *args],
                 capture_output=True,
                 text=True,
@@ -322,7 +324,7 @@ class APManager:
             return False
         except FileNotFoundError:
             log.info(f"nmcli not found; skipping NetworkManager {label}")
-        except subprocess.TimeoutExpired:
+        except TimeoutExpired:
             log.warning(f"nmcli timed out during NetworkManager {label}")
         except Exception as e:
             log.warning(f"NetworkManager {label} failed: {e}")
@@ -332,7 +334,8 @@ class APManager:
         """Best-effort: prepare the netdev type before hostapd takes over."""
         iface = self._cfg.interface
         try:
-            result = subprocess.run(
+            result = run_subprocess_and_log(
+                log,
                 ["sudo", "iw", "dev", iface, "set", "type", "__ap"],
                 capture_output=True,
                 text=True,
@@ -349,7 +352,7 @@ class APManager:
             )
         except FileNotFoundError:
             log.info("iw not found; skipping pre-set interface type __ap")
-        except subprocess.TimeoutExpired:
+        except TimeoutExpired:
             log.warning(f"iw timed out while setting {iface} type __ap")
         except Exception as e:
             log.warning(f"Could not pre-set {iface} type __ap: {e}")
@@ -389,12 +392,12 @@ class APManager:
                 pass
 
     @staticmethod
-    def _kill(proc: Optional[subprocess.Popen], name: str) -> None:
+    def _kill(proc: Optional[Popen], name: str) -> None:
         if proc and proc.poll() is None:
             proc.terminate()
             try:
                 proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+            except TimeoutExpired:
                 proc.kill()
             log.info(f"{name} terminated")
 
@@ -405,7 +408,7 @@ class APManager:
 
         APManager can only terminate Popen objects it still owns.  If the app is
         restarted while hostapd/dnsmasq are alive, those Popen handles are gone
-        but the daemons can keep binding AP ports like 192.168.50.1:53.
+        but the daemons can keep binding AP ports like 10.0.0.1:53.
         Limit cleanup to commands using this module's /tmp config prefixes.
         """
         stale_patterns = (
@@ -414,7 +417,8 @@ class APManager:
         )
         for name, pattern in stale_patterns:
             try:
-                found = subprocess.run(
+                found = run_subprocess_and_log(
+                    log,
                     ["pgrep", "-af", pattern],
                     capture_output=True,
                     text=True,
@@ -425,9 +429,9 @@ class APManager:
                     continue
 
                 log.warning(f"Stopping stale {name} process(es):\n{matches}")
-                subprocess.run(["sudo", "pkill", "-TERM", "-f", pattern], check=False)
+                run_subprocess_and_log(log,["sudo", "pkill", "-TERM", "-f", pattern], check=False, capture_output=True)
                 time.sleep(0.2)
-                subprocess.run(["sudo", "pkill", "-KILL", "-f", pattern], check=False)
+                run_subprocess_and_log(log,["sudo", "pkill", "-KILL", "-f", pattern], check=False, capture_output=True)
             except Exception as e:
                 log.warning(f"Failed to cleanup stale {name}: {e}")
 
@@ -435,15 +439,18 @@ class APManager:
     def _stop_conflicting_hostapd_service() -> None:
         """Stop distro hostapd.service so the app-owned hostapd can own wlan0."""
         try:
-            active = subprocess.run(
+            active = run_subprocess_and_log(
+                log,
                 ["systemctl", "is-active", "--quiet", "hostapd"],
                 check=False,
+                capture_output=True,
             )
             if active.returncode != 0:
                 return
 
             log.warning("Stopping active hostapd.service before starting app hostapd")
-            stopped = subprocess.run(
+            stopped = run_subprocess_and_log(
+                log,
                 ["sudo", "systemctl", "stop", "hostapd"],
                 capture_output=True,
                 text=True,
@@ -460,7 +467,7 @@ class APManager:
             )
         except FileNotFoundError:
             log.info("systemctl not found; skipping hostapd.service cleanup")
-        except subprocess.TimeoutExpired:
+        except TimeoutExpired:
             log.warning("Timed out while stopping hostapd.service")
         except Exception as e:
             log.warning(f"Could not stop hostapd.service: {e}")
@@ -468,7 +475,7 @@ class APManager:
     def _exited_immediately(
         self,
         name: str,
-        proc: subprocess.Popen,
+        proc: Popen,
         conf_path: Optional[str],
         grace_sec: float = 0.3,
     ) -> bool:
@@ -482,7 +489,7 @@ class APManager:
     @staticmethod
     def _log_process_exit_details(
         name: str,
-        proc: subprocess.Popen,
+        proc: Popen,
         conf_path: Optional[str],
     ) -> None:
         returncode = proc.poll()

@@ -58,7 +58,7 @@ if str(_MODULES) not in sys.path:
 import yaml  # noqa: E402
 
 from shared.bus_client import BusClient              # noqa: E402
-from shared.logger import get_logger, attach_bus     # noqa: E402
+from shared.logger import get_logger     # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity & paths
@@ -67,7 +67,8 @@ from shared.logger import get_logger, attach_bus     # noqa: E402
 MODULE_NAME = "config_manager"
 PRIORITY    = 0  # infrastructure — first to initialise
 
-log = get_logger(MODULE_NAME)
+bus = BusClient(module_name=MODULE_NAME)
+log = get_logger(MODULE_NAME, bus=bus)
 
 CONFIG_DIR = _V2 / "config"
 
@@ -204,8 +205,6 @@ def on_system_stop(topic: str, payload: dict) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
-bus = BusClient(module_name=MODULE_NAME)
-
 
 def run() -> None:
     bus.subscribe("system.readytostart", on_system_readytostart)
@@ -216,7 +215,6 @@ def run() -> None:
 
     log.info("config_manager ready — waiting for messages...")
     bus_thread = bus.start(blocking=False)
-    attach_bus(bus)  # forward all log.* from this process to log_viewer
     time.sleep(0.05)
     on_system_readytostart()
     try:

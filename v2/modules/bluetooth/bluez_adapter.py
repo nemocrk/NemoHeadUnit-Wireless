@@ -13,10 +13,11 @@ This module has NO bus (ZMQ) dependency — it is a plain helper
 instantiated by main.py after the broker is ready.
 """
 
-import logging
-import os
 
-log = logging.getLogger("bluetooth.bluez_adapter")
+import os
+from shared.logger import get_logger
+
+log = get_logger("bluetooth.bluez_adapter")
 
 # Workaround: conda injects DBUS_SYSTEM_BUS_ADDRESS as empty string,
 # causing dbus-python to fall back to a non-existent conda-env socket.

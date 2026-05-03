@@ -85,7 +85,7 @@ if str(_MODULES) not in sys.path:
 
 from shared.bus_client import BusClient        # noqa: E402
 from shared.config_client import ConfigClient  # noqa: E402
-from shared.logger import get_logger, attach_bus  # noqa: E402
+from shared.logger import get_logger  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -97,8 +97,8 @@ MODULE_NAME = "_template"  # ← STEP 1: change to your module name
 # 0 = infrastructure, 1 = services, 2 = UI
 PRIORITY: int = 1          # ← STEP 2: set your priority level
 
-log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
+log = get_logger(MODULE_NAME, bus=bus)  # optional bus forwarding for this module's logs
 cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 
 # ---------------------------------------------------------------------------
@@ -225,9 +225,6 @@ def run() -> None:
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
-    # Forward all log.* calls from this process to the log_viewer via the bus.
-    # attach_bus() is safe to call even if log_viewer is not running.
-    attach_bus(bus)
     time.sleep(0.05)
     on_system_readytostart()
     try:

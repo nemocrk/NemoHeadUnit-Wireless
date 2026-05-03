@@ -48,7 +48,7 @@ if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
 from shared.bus_client import BusClient                      # noqa: E402
-from shared.logger import get_logger, attach_bus             # noqa: E402
+from shared.logger import get_logger             # noqa: E402
 from rfcomm_handshake.dbus_rfcomm import DbusRfcommListener  # noqa: E402
 from rfcomm_handshake.handshake import RfcommHandshake       # noqa: E402
 
@@ -59,8 +59,8 @@ from rfcomm_handshake.handshake import RfcommHandshake       # noqa: E402
 MODULE_NAME = "rfcomm_handshake"
 PRIORITY    = 1  # service level
 
-log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
+log = get_logger(MODULE_NAME, bus=bus)
 
 # ---------------------------------------------------------------------------
 # Module state
@@ -262,7 +262,6 @@ def run() -> None:
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
-    attach_bus(bus)  # forward all log.* from this process to log_viewer
     time.sleep(0.05)
     on_system_readytostart()
     try:

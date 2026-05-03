@@ -51,7 +51,7 @@ from PyQt6.QtWidgets import (                                         # noqa: E4
 )
 
 from shared.bus_client import BusClient              # noqa: E402
-from shared.logger import get_logger, attach_bus     # noqa: E402
+from shared.logger import get_logger     # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -60,8 +60,8 @@ from shared.logger import get_logger, attach_bus     # noqa: E402
 MODULE_NAME = "config_ui"
 PRIORITY    = 2  # UI level
 
-log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
+log = get_logger(MODULE_NAME, bus=bus)
 
 
 def _request_config(module: str):
@@ -348,7 +348,6 @@ def run() -> None:
     bus.subscribe("config.response",         on_config_response)
 
     bus_thread = bus.start(blocking=False)
-    attach_bus(bus)
     time.sleep(0.05)
     on_system_readytostart()
 

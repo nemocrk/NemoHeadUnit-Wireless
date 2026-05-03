@@ -16,6 +16,8 @@ Bus forwarding (optional, call once from main.py or any entry point):
 
 import logging
 import time
+import subprocess
+import threading
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
@@ -45,15 +47,16 @@ class BusLogHandler(logging.Handler):
         self._bus = bus
 
     def emit(self, record: logging.LogRecord) -> None:
-        try:
-            self._bus.publish("log.entry", {
-                "module":  record.name,
-                "level":   record.levelname,
-                "message": record.getMessage(),
-                "ts":      record.created,
-            })
-        except Exception:  # noqa: BLE001
-            pass  # never let bus errors break logging
+        if self._bus._running:
+            try:
+                self._bus.publish("log.entry", {
+                    "module":  record.name,
+                    "level":   record.levelname,
+                    "message": record.getMessage(),
+                    "ts":      record.created,
+                })
+            except Exception:  # noqa: BLE001
+                pass  # never let bus errors break logging
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +77,76 @@ def attach_bus(bus: "BusClient") -> None:
     _bus_handler = BusLogHandler(bus)
     # Attach to all already-created loggers
     for logger_obj in LoggerManager._loggers.values():
+        logger_obj.logger.info(f"Attaching bus handler to logger '{logger_obj.name}'")
         logger_obj._attach_bus_handler(_bus_handler)
 
+# ---------------------------------------------------------------------------
+# Internal helper for subprocess execution with real-time logging
+# ---------------------------------------------------------------------------
+
+def run_subprocess_and_log(logger: Logger, *popenargs,
+    input=None, capture_output=False, timeout=None, check=False, **kwargs):
+    """Run a subprocess and log its output in real time.
+
+    Args:
+        *popenargs: Positional arguments for subprocess.Popen
+        input: Optional input to send to the subprocess
+        capture_output: If True, captures stdout and stderr and returns them
+        timeout: Optional timeout in seconds
+        check: If True, raises CalledProcessError on non-zero exit code
+        **kwargs: Additional keyword arguments for subprocess.Popen
+
+    Returns:
+        CompletedProcess instance with stdout and stderr if capture_output is True
+    """
+    # Ensure text=True for real-time logging. 
+    # We pop these from kwargs to avoid "multiple values for keyword argument" errors
+    # if the caller also tries to provide them.
+    kwargs.pop("text", None)
+    bufsize = kwargs.pop("bufsize", 1)
+
+    process = subprocess.Popen(*popenargs,
+        stdin=subprocess.PIPE if input else None,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+        text=True, bufsize=bufsize, **kwargs)
+
+    try:
+        if input:
+            process.stdin.write(input)
+            process.stdin.close()
+
+        stdout_lines = []
+        stderr_lines = []
+
+        def reader(pipe, log_func, prefix, accumulator):
+            for line in iter(pipe.readline, ""):
+                if line:
+                    log_func(f"{prefix} {line.strip()}")
+                    accumulator.append(line)
+            pipe.close()
+
+        if capture_output:
+            t1 = threading.Thread(target=reader, args=(process.stdout, logger.info, "[subprocess stdout]", stdout_lines))
+            t2 = threading.Thread(target=reader, args=(process.stderr, logger.error, "[subprocess stderr]", stderr_lines))
+            t1.start()
+            t2.start()
+            
+            return_code = process.wait(timeout=timeout)
+            t1.join()
+            t2.join()
+        else:
+            return_code = process.wait(timeout=timeout)
+        if check and return_code != 0:
+            raise subprocess.CalledProcessError(return_code, popenargs[0],
+                output=''.join(stdout_lines) if capture_output else None,
+                stderr=''.join(stderr_lines) if capture_output else None)
+        return subprocess.CompletedProcess(popenargs[0], return_code,
+            stdout=''.join(stdout_lines) if capture_output else None,
+            stderr=''.join(stderr_lines) if capture_output else None)
+    except Exception as e:
+        logger.error(f"Subprocess execution failed: {e}")
+        raise
 
 # ---------------------------------------------------------------------------
 # Log level enum
@@ -116,7 +187,10 @@ class Logger:
         # If a bus handler was already attached before this logger was created,
         # attach it immediately so we don’t miss early messages.
         if _bus_handler is not None:
+            self.logger.info(f"Attaching bus handler to logger '{name}'")
             self._attach_bus_handler(_bus_handler)
+        else:
+            self.logger.info(f"No bus handler to attach for logger '{name}' yet")
 
     def _attach_bus_handler(self, handler: BusLogHandler) -> None:
         """Idempotent: removes any previous BusLogHandler before adding the new one."""
@@ -188,9 +262,16 @@ class LoggerManager:
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_logger(name: str, level: int = logging.INFO) -> Logger:
+def get_logger(name: str, level: int = logging.INFO, bus: "BusClient" = None) -> Logger:
     """Get or create a logger for the given module name."""
-    return LoggerManager.get_logger(name, level)
+    logger = LoggerManager.get_logger(name, level)
+    logger.info(f"Logger '{name}' created with level {logging.getLevelName(level)}")
+    if bus:
+        logger.info(f"Starting attach_bus for logger '{name}'")
+        attach_bus(bus)
+    else:
+        logger.info(f"No bus provided for logger '{name}' — skipping attach_bus")
+    return logger
 
 
 def set_verbosity(module_name: str, level: int) -> None:

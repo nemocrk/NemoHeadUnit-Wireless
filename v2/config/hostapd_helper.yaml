@@ -1,11 +1,11 @@
 ap_password: NemoKarr-02532378
 channel: 36
 country_code: IT
-dhcp_range_end: 192.168.50.50
-dhcp_range_start: 192.168.50.10
-gateway_ip: 192.168.50.1
+dhcp_range_end: 10.0.0.10
+dhcp_range_start: 10.0.0.2
+gateway_ip: 10.0.0.1
 hw_mode: a
 interface: wlan0
 monitor_timeout: 30
-ssid: AndroidAutoAP
-subnet: 192.168.50
+ssid: NemoHeadUnit-WiFi
+subnet: 10.0.0

@@ -24,10 +24,10 @@ Configuration keys (v2/config/hostapd_helper.yaml):
   hw_mode           str    default: a  (a=5GHz, g=2.4GHz)
   channel           int    default: 36
   ap_password       str    default: "" (empty = random per session)
-  subnet            str    default: 192.168.50
-  gateway_ip        str    default: 192.168.50.1
-  dhcp_range_start  str    default: 192.168.50.10
-  dhcp_range_end    str    default: 192.168.50.50
+  subnet            str    default: 10.0.0
+  gateway_ip        str    default: 10.0.0.1
+  dhcp_range_start  str    default: 10.0.0.10
+  dhcp_range_end    str    default: 10.0.0.50
   monitor_timeout   int    default: 30
 
 Flow:
@@ -56,7 +56,7 @@ if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
 from shared.bus_client import BusClient              # noqa: E402
-from shared.logger import get_logger, attach_bus     # noqa: E402
+from shared.logger import get_logger     # noqa: E402
 from shared.config_client import ConfigClient        # noqa: E402
 
 from hostapd_helper.ap_manager import APManager, APConfig   # noqa: E402
@@ -69,8 +69,8 @@ from hostapd_helper.ap_monitor import APMonitor             # noqa: E402
 MODULE_NAME = "hostapd_helper"
 PRIORITY    = 1  # service level
 
-log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
+log = get_logger(MODULE_NAME, bus=bus)
 cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 
 # ---------------------------------------------------------------------------
@@ -83,10 +83,10 @@ _DEFAULTS = {
     "hw_mode":          "a",
     "channel":          36,
     "ap_password":      "",
-    "subnet":           "192.168.50",
-    "gateway_ip":       "192.168.50.1",
-    "dhcp_range_start": "192.168.50.10",
-    "dhcp_range_end":   "192.168.50.50",
+    "subnet":           "10.0.0",
+    "gateway_ip":       "10.0.0.1",
+    "dhcp_range_start": "10.0.0.10",
+    "dhcp_range_end":   "10.0.0.50",
     "country_code":     "IT",
     "monitor_timeout":  30,
 }
@@ -262,7 +262,6 @@ def run() -> None:
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
-    attach_bus(bus)  # forward all log.* from this process to log_viewer
     time.sleep(0.05)
     on_system_readytostart()
     try:

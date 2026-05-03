@@ -12,13 +12,12 @@ Responsibilities:
 No ZMQ dependency — callbacks notify main.py.
 """
 
-import logging
-import subprocess
 import threading
 import time
+from shared.logger import run_subprocess_and_log, get_logger
 from typing import Callable, Optional
 
-log = logging.getLogger("hostapd_helper.ap_monitor")
+log = get_logger("hostapd_helper.ap_monitor")
 
 DEFAULT_POLL_INTERVAL = 1.0   # seconds between checks
 DEFAULT_TIMEOUT       = 30.0  # seconds before giving up
@@ -113,7 +112,9 @@ class APMonitor:
     def _has_ip(iface: str) -> bool:
         """Check /sys/class/net/<iface>/operstate == 'up' and ip addr shows inet."""
         try:
-            result = subprocess.run(
+            log.info(f"Checking if {iface} has IP assigned...")
+            result = run_subprocess_and_log(
+                log,
                 ["ip", "addr", "show", iface],
                 capture_output=True, text=True, timeout=3,
             )
@@ -121,14 +122,16 @@ class APMonitor:
             log.info(f"_has_ip flag: {"inet" in result.stdout}")
             return "inet " in result.stdout
         except Exception as e:
-            log.debug(f"_has_ip check failed: {e}")
+            log.warning(f"_has_ip check failed: {e}")
             return False
 
     @staticmethod
     def _is_in_ap_mode(iface: str) -> bool:
         """Use `iw dev <iface> info` and check type is 'AP'."""
         try:
-            result = subprocess.run(
+            log.info(f"Checking if {iface} is in AP mode...")
+            result = run_subprocess_and_log(
+                log,
                 ["iw", "dev", iface, "info"],
                 capture_output=True, text=True, timeout=3,
             )
@@ -137,8 +140,8 @@ class APMonitor:
             return "type AP" in result.stdout
         except FileNotFoundError:
             # iw not available — fall back to just checking IP
-            log.debug("iw not found, skipping AP mode check")
+            log.warning("iw not found, skipping AP mode check")
             return True
         except Exception as e:
-            log.debug(f"_is_in_ap_mode check failed: {e}")
+            log.warning(f"_is_in_ap_mode check failed: {e}")
             return False

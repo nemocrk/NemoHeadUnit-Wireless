@@ -17,11 +17,11 @@ No ZMQ dependency.
 """
 
 import struct
-import logging
+from shared.logger import get_logger
 from dataclasses import dataclass
 from typing import Optional
 
-log = logging.getLogger("rfcomm_handshake.packet")
+log = get_logger("rfcomm_handshake.packet")
 
 # ---------------------------------------------------------------------------
 # Message ID constants

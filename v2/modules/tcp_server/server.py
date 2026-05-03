@@ -10,12 +10,12 @@ Responsibilities:
 No ZMQ dependency.
 """
 
-import logging
+from shared.logger import get_logger
 import socket
 import ssl
 from typing import Optional, Tuple
 
-log = logging.getLogger("tcp_server.server")
+log = get_logger("tcp_server.server")
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 5288

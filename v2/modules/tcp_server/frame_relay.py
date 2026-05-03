@@ -16,12 +16,12 @@ Frame format (Android Auto over TCP):
 No ZMQ dependency — caller injects a publish callable.
 """
 
-import logging
+from shared.logger import get_logger
 import socket
 import struct
 from typing import Callable, Optional
 
-log = logging.getLogger("tcp_server.frame_relay")
+log = get_logger("tcp_server.frame_relay")
 
 FRAME_HEADER_SIZE = 6  # length(4) + channel(1) + flags(1)
 

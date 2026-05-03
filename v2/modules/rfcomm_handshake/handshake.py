@@ -15,7 +15,7 @@ No ZMQ dependency — caller (main.py) provides the socket and credentials.
 """
 
 import sys
-import logging
+from shared.logger import get_logger
 import socket
 from pathlib import Path
 from typing import Callable, Optional
@@ -44,7 +44,7 @@ from v2.protos.oaa.wifi.WifiStartRequestMessage_pb2  import WifiStartRequest
 from v2.protos.oaa.wifi.WifiStartResponseMessage_pb2 import WifiStartResponse
 from v2.protos.oaa.wifi.WifiConnectStatusMessage_pb2 import WifiConnectStatus
 
-log = logging.getLogger("rfcomm_handshake.handshake")
+log = get_logger("rfcomm_handshake.handshake")
 
 DEFAULT_TCP_PORT = 5288
 
