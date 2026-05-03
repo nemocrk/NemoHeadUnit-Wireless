@@ -114,10 +114,15 @@ class TCPServer:
     def _wrap_ssl(self, raw_sock: socket.socket) -> socket.socket:
         """
         Wrap raw socket with TLS using server-side cert + key.
+        Client certificate verification is intentionally disabled
+        (SSL_VERIFY_NONE) — the Android phone does not present a CA-signed
+        client cert, matching openauto-prodigy Cryptor behaviour.
         Falls back to plain socket on error.
         """
         try:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
             ctx.load_cert_chain(certfile=self._ssl_cert, keyfile=self._ssl_key)
             wrapped = ctx.wrap_socket(raw_sock, server_side=True)
             log.info("SSL/TLS wrap applied")
