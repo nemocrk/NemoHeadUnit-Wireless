@@ -64,7 +64,7 @@ def _make_handshake() -> ControlChannelHandshake:
     """Instantiate a fresh handshake state machine wired to the bus."""
     def send_fn(message_id: int, proto_body: bytes, encrypted: bool = False) -> None:
         frame = encode_control_frame(message_id, proto_body, encrypted=encrypted)
-        log.debug("CH0 → msg_id=0x%04x len=%d enc=%s",
+        log.info("CH0 → msg_id=0x%04x len=%d enc=%s",
                   message_id, len(proto_body), encrypted)
         bus.publish("aa.frame.send", frame)
 

@@ -156,6 +156,11 @@ class FrameRelay:
 
         # 4. Read payload
         payload = self._recv_exact(payload_len) if payload_len else b""
+
+        log.info(
+            f"Frame: channel={channel_id} flags=0x{flags:02x} len={payload_len if payload else 0}"
+        )
+
         if payload is None:
             return None
 

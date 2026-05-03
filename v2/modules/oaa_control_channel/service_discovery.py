@@ -27,57 +27,56 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_V2 = Path(__file__).resolve().parents[2]
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
+_REPO_ROOT  = Path(__file__).parent.parent.parent.parent
+_PROTO_ROOT = _REPO_ROOT / "v2" / "protos"
+
+for _p in (_REPO_ROOT, _PROTO_ROOT):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from shared.proto_utils import encode_proto  # noqa: E402
 
 # Control / discovery
-from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (
+from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (
     ServiceDiscoveryResponse,
 )
-from protos.oaa.control.ChannelDescriptorData_pb2 import ChannelDescriptor
+from v2.protos.oaa.control.ChannelDescriptorData_pb2 import ChannelDescriptor
 
 # AV / Video / Audio enums
-from protos.oaa.av.AVChannelData_pb2 import AVChannel  # noqa
-from protos.oaa.av.AVStreamTypeEnum_pb2 import AVStreamType
-from protos.oaa.audio.AudioTypeEnum_pb2 import AudioType
-from protos.oaa.audio.AudioConfigData_pb2 import AudioConfig
-from protos.oaa.video.VideoConfigData_pb2 import VideoConfig
-from protos.oaa.video.VideoResolutionEnum_pb2 import VideoResolution
-from protos.oaa.video.VideoFPSEnum_pb2 import VideoFPS
-from protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType
-
-# Input
-from protos.oaa.input.InputChannelData_pb2 import InputChannel
-from protos.oaa.input.TouchConfigData_pb2 import TouchScreenConfig
+from v2.protos.oaa.av.AVChannelData_pb2 import AVChannel  # noqa
+from v2.protos.oaa.av.AVStreamTypeEnum_pb2 import AVStreamType
+from v2.protos.oaa.audio.AudioTypeEnum_pb2 import AudioType
+from v2.protos.oaa.audio.AudioConfigData_pb2 import AudioConfig
+from v2.protos.oaa.video.VideoConfigData_pb2 import VideoConfig
+from v2.protos.oaa.video.VideoResolutionEnum_pb2 import VideoResolution
+from v2.protos.oaa.video.VideoFPSEnum_pb2 import VideoFPS
+from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType
 
 # Sensor
-from protos.oaa.sensor.SensorChannelData_pb2 import SensorChannel
-from protos.oaa.sensor.SensorTypeEnum_pb2 import SensorType
+from v2.protos.oaa.sensor.SensorChannelData_pb2 import SensorChannel
+from v2.protos.oaa.sensor.SensorTypeEnum_pb2 import SensorType
 
 # Bluetooth
-from protos.oaa.bluetooth.BluetoothChannelData_pb2 import BluetoothChannel
-from protos.oaa.bluetooth.BluetoothPairingMethodEnum_pb2 import BluetoothPairingMethod
+from v2.protos.oaa.bluetooth.BluetoothChannelData_pb2 import BluetoothChannel
+from v2.protos.oaa.bluetooth.BluetoothPairingMethodEnum_pb2 import BluetoothPairingMethod
 
 # WiFi
-from protos.oaa.wifi.WifiChannelData_pb2 import WifiChannel
+from v2.protos.oaa.wifi.WifiChannelData_pb2 import WifiChannel
 
 # Navigation
-from protos.oaa.navigation.NavigationChannelData_pb2 import NavigationChannel
-from protos.oaa.navigation.NavigationTypeEnum_pb2 import NavigationType
-from protos.oaa.navigation.NavigationImageOptionsData_pb2 import NavigationImageOptions
+from v2.protos.oaa.navigation.NavigationChannelData_pb2 import NavigationChannel
+from v2.protos.oaa.navigation.NavigationTypeEnum_pb2 import NavigationType
+from v2.protos.oaa.navigation.NavigationImageOptionsData_pb2 import NavigationImageOptions
 
 # Media
-from protos.oaa.media.MediaChannelData_pb2 import MediaInfoChannel
+from v2.protos.oaa.media.MediaChannelData_pb2 import MediaInfoChannel
 
 # AV Input
-from protos.oaa.av.AVInputChannelData_pb2 import AVInputChannel
+from v2.protos.oaa.av.AVInputChannelData_pb2 import AVInputChannel
 
 # Phone status
 try:
-    from protos.oaa.phone.PhoneStatusChannelData_pb2 import PhoneStatusChannel
+    from v2.protos.oaa.phone.PhoneStatusChannelData_pb2 import PhoneStatusChannel
     _HAS_PHONE_STATUS = True
 except ImportError:
     _HAS_PHONE_STATUS = False

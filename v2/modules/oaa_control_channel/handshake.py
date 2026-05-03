@@ -27,19 +27,32 @@ TLS note:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import struct
+import sys
 import time
 from enum import IntEnum, auto
 from typing import Callable
 
+
+_REPO_ROOT  = Path(__file__).parent.parent.parent.parent
+_PROTO_ROOT = _REPO_ROOT / "v2" / "protos"
+
+for _p in (_REPO_ROOT, _PROTO_ROOT):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+
 from shared.proto_utils import decode_proto, encode_proto
 
-from protos.oaa.control.ServiceDiscoveryRequestMessage_pb2 import ServiceDiscoveryRequest
-from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
-from protos.oaa.control.ChannelOpenRequestMessage_pb2 import ChannelOpenRequest
-from protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse
-from protos.oaa.control.PingRequestMessage_pb2 import PingRequest
-from protos.oaa.control.PingResponseMessage_pb2 import PingResponse
+# Control proto imports
+from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
+from v2.protos.oaa.control.ServiceDiscoveryRequestMessage_pb2 import ServiceDiscoveryRequest
+from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
+from v2.protos.oaa.control.ChannelOpenRequestMessage_pb2 import ChannelOpenRequest
+from v2.protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse
+from v2.protos.oaa.control.PingRequestMessage_pb2 import PingRequest
+from v2.protos.oaa.control.PingResponseMessage_pb2 import PingResponse
 
 from oaa_control_channel.frame_codec import encode_control_frame, decode_control_frame
 from oaa_control_channel.service_discovery import build_service_discovery_response
@@ -48,23 +61,24 @@ from oaa_control_channel.aa_cryptor import AACryptor
 log = logging.getLogger("oaa_control_channel.handshake")
 
 # ---------------------------------------------------------------------------
-# Control message IDs
+# Control message IDs (mirrors ControlMessageIds proto enum)
 # ---------------------------------------------------------------------------
 
-MSG_VERSION_REQUEST        = 0x0001
-MSG_VERSION_RESPONSE       = 0x0002
-MSG_SSL_HANDSHAKE          = 0x0003
-MSG_AUTH_COMPLETE          = 0x0006
-MSG_SERVICE_DISCOVERY_REQ  = 0x0005
-MSG_SERVICE_DISCOVERY_RES  = 0x0007
-MSG_CHANNEL_OPEN_REQ       = 0x0008
-MSG_CHANNEL_OPEN_RES       = 0x0009
-MSG_PING_REQUEST           = 0x000B
-MSG_PING_RESPONSE          = 0x000C
-MSG_SHUTDOWN_REQUEST       = 0x000D
-MSG_SHUTDOWN_RESPONSE      = 0x000E
-MSG_BYEBYE_RESPONSE        = 0x000F
+MSG_VERSION_REQUEST        = ControlMessage.Enum.VERSION_REQUEST
+MSG_VERSION_RESPONSE       = ControlMessage.Enum.VERSION_RESPONSE
+MSG_SSL_HANDSHAKE          = ControlMessage.Enum.SSL_HANDSHAKE
+MSG_AUTH_COMPLETE          = ControlMessage.Enum.AUTH_COMPLETE
+MSG_SERVICE_DISCOVERY_REQ  = ControlMessage.Enum.SERVICE_DISCOVERY_REQUEST
+MSG_SERVICE_DISCOVERY_RES  = ControlMessage.Enum.SERVICE_DISCOVERY_RESPONSE
+MSG_CHANNEL_OPEN_REQ       = ControlMessage.Enum.CHANNEL_OPEN_REQUEST
+MSG_CHANNEL_OPEN_RES       = ControlMessage.Enum.CHANNEL_OPEN_RESPONSE
+MSG_PING_REQUEST           = ControlMessage.Enum.PING_REQUEST
+MSG_PING_RESPONSE          = ControlMessage.Enum.PING_RESPONSE
+MSG_SHUTDOWN_REQUEST       = ControlMessage.Enum.SHUTDOWN_REQUEST
+MSG_SHUTDOWN_RESPONSE      = ControlMessage.Enum.SHUTDOWN_RESPONSE
+MSG_BYEBYE_RESPONSE        = ControlMessage.Enum.SHUTDOWN_RESPONSE # Assuming this is a typo and should be BYEBYE_RESPONSE if it exists, otherwise SHUTDOWN_RESPONSE is used.
 
+# AA protocol version advertised by HU
 AA_VERSION_MAJOR = 1
 AA_VERSION_MINOR = 7
 
@@ -190,13 +204,16 @@ class ControlChannelHandshake:
         When TLS is complete, send AUTH_COMPLETE immediately.
         Mirrors Messenger::handleHandshakeData() + Messenger::driveHandshake().
         """
-        log.debug("SSL_HANDSHAKE blob received (%d bytes)", len(body))
+        log.info("SSL_HANDSHAKE blob received (%d bytes)", len(body))
 
         self._cryptor.write_handshake_input(body)
         outgoing = self._cryptor.drive_handshake()
 
+        log.info("drive_handshake result: %d bytes, active=%s",
+                len(outgoing), self._cryptor.is_active())  # ← aggiungi questo
+
         if outgoing:
-            log.debug("SSL_HANDSHAKE response (%d bytes) — sending", len(outgoing))
+            log.info("SSL_HANDSHAKE response (%d bytes) — sending", len(outgoing))
             self._send(MSG_SSL_HANDSHAKE, outgoing, encrypted=False)
 
         if self._cryptor.is_active():
