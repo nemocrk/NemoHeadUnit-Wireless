@@ -3,16 +3,21 @@ server.py — TCP server for Android Auto protocol session.
 
 Responsibilities:
   - Bind and listen on port 5288
-  - Optionally wrap accepted socket with SSL/TLS (internal)
-  - Accept exactly one connection at a time
+  - Accept exactly one plain TCP connection at a time
   - Return the connected socket to the caller (main.py)
+
+TLS note:
+  Android Auto does NOT use TLS directly on the TCP socket.
+  Encryption is negotiated in-band as AA frames on channel 0 (msgId 0x0003).
+  The Cryptor in openauto-prodigy uses memory BIOs: SSL handshake bytes are
+  exchanged as AA frame payloads, not as raw TLS records on the wire.
+  → This server must remain plain TCP. TLS is handled by oaa_control_channel.
 
 No ZMQ dependency.
 """
 
 from shared.logger import get_logger
 import socket
-import ssl
 from typing import Optional, Tuple
 
 log = get_logger("tcp_server.server")
@@ -24,31 +29,22 @@ ACCEPT_TIMEOUT = 60  # seconds to wait for a connection
 
 class TCPServer:
     """
-    Single-connection TCP server for the Android Auto protocol session.
+    Single-connection plain TCP server for the Android Auto protocol session.
 
     Usage:
         srv = TCPServer()
         ok = srv.start()
         conn, addr = srv.accept()    # blocks up to ACCEPT_TIMEOUT
         srv.stop()
-
-    SSL:
-        Pass ssl_certfile + ssl_keyfile to enable TLS wrapping.
-        The wrap is done internally after accept(), before returning
-        the socket to the caller.
     """
 
     def __init__(
         self,
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
-        ssl_certfile: Optional[str] = None,
-        ssl_keyfile: Optional[str] = None,
     ):
         self.host = host
         self.port = port
-        self._ssl_cert = ssl_certfile
-        self._ssl_key  = ssl_keyfile
         self._server_sock: Optional[socket.socket] = None
         self._running = False
 
@@ -97,8 +93,7 @@ class TCPServer:
             raw_sock, addr = self._server_sock.accept()
             address_str = f"{addr[0]}:{addr[1]}"
             log.info(f"Connection accepted from {address_str}")
-            conn = self._wrap_ssl(raw_sock) if self._ssl_cert else raw_sock
-            return conn, address_str
+            return raw_sock, address_str
         except socket.timeout:
             log.warning("TCP accept timed out — no connection received")
             return None
@@ -106,30 +101,6 @@ class TCPServer:
             if self._running:
                 log.error(f"TCP accept error: {e}")
             return None
-
-    # ------------------------------------------------------------------
-    # SSL
-    # ------------------------------------------------------------------
-
-    def _wrap_ssl(self, raw_sock: socket.socket) -> socket.socket:
-        """
-        Wrap raw socket with TLS using server-side cert + key.
-        Client certificate verification is intentionally disabled
-        (SSL_VERIFY_NONE) — the Android phone does not present a CA-signed
-        client cert, matching openauto-prodigy Cryptor behaviour.
-        Falls back to plain socket on error.
-        """
-        try:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            ctx.load_cert_chain(certfile=self._ssl_cert, keyfile=self._ssl_key)
-            wrapped = ctx.wrap_socket(raw_sock, server_side=True)
-            log.info("SSL/TLS wrap applied")
-            return wrapped
-        except Exception as e:
-            log.error(f"SSL wrap failed, falling back to plain socket: {e}")
-            return raw_sock
 
     # ------------------------------------------------------------------
     # Context manager
