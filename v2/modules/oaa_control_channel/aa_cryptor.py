@@ -1,17 +1,23 @@
 """
-aa_cryptor.py — In-band TLS for Android Auto (mirrors Cryptor.cpp from openauto-prodigy).
+aa_cryptor.py — In-band TLS for Android Auto (mirrors Cryptor.cpp from aasdk/opencardev).
 
 Android Auto does NOT use TLS on the TCP socket directly.
 Instead, TLS bytes are exchanged as AA frame payloads on channel 0, msgId 0x0003.
-This class implements the server side using OpenSSL memory BIOs via Python's ssl module.
 
-Usage (server role):
+The HU is the TLS CLIENT (mirrors aasdk Cryptor.cpp: SSL_set_connect_state).
+The phone is the TLS server.
+
+Usage (client role):
     cryptor = AACryptor()
-    cryptor.init()                          # SSL_set_accept_state
+    cryptor.init()                          # SSL_set_connect_state
 
-    # Phone sends frame ch=0 msgId=0x0003 with ClientHello bytes
-    cryptor.write_handshake_input(client_hello_bytes)
-    out = cryptor.drive_handshake()         # returns ServerHello+Cert bytes to send back
+    # After VERSION_RESPONSE: HU speaks first in TLS
+    out = cryptor.drive_handshake()         # returns ClientHello bytes
+    # -> send out as frame ch=0 msgId=0x0003
+
+    # Phone replies with ServerHello+Cert (frame 0x0003 payload)
+    cryptor.write_handshake_input(server_hello_bytes)
+    out = cryptor.drive_handshake()         # returns next TLS round bytes
     # -> send out as frame ch=0 msgId=0x0003
 
     # ... more rounds until cryptor.is_active() == True
@@ -24,7 +30,6 @@ Usage (server role):
 from __future__ import annotations
 
 import ssl
-import struct
 from typing import Optional
 
 from shared.logger import get_logger
@@ -32,7 +37,8 @@ from shared.logger import get_logger
 log = get_logger("oaa_control_channel.aa_cryptor")
 
 # ---------------------------------------------------------------------------
-# AA certificate + private key (from openauto-prodigy Cryptor.cpp)
+# AA certificate + private key (from aasdk/opencardev Cryptor.cpp)
+# The HU presents this cert as client certificate during the TLS handshake.
 # ---------------------------------------------------------------------------
 
 _AA_CERT_PEM = b"""-----BEGIN CERTIFICATE-----
@@ -88,11 +94,14 @@ KAwp3tIHPoJOQiKNQ3/qks5km/9dujUGU2ARiU3qmxLMdgegFz8e
 
 class AACryptor:
     """
-    Server-side in-band TLS for Android Auto.
-    Mirrors the memory-BIO pattern of openauto-prodigy Cryptor.cpp.
+    Client-side in-band TLS for Android Auto.
+    Mirrors the memory-BIO pattern of aasdk Cryptor.cpp (SSL_set_connect_state).
+
+    The HU is the TLS client; the phone is the TLS server.
+    The HU sends ClientHello immediately after VERSION_RESPONSE.
 
     The public API is intentionally minimal:
-        init()                   — create SSL context, set accept state
+        init()                   — create SSL context, set connect state (client)
         write_handshake_input()  — feed bytes received from phone (frame 0x0003 payload)
         drive_handshake()        — advance SSL state machine, return bytes to send
         is_active()              — True once handshake is complete
@@ -113,10 +122,14 @@ class AACryptor:
     # ------------------------------------------------------------------
 
     def init(self) -> None:
-        """Initialise server-side SSL with AA cert+key and memory BIOs."""
+        """Initialise client-side TLS with AA cert+key and memory BIOs.
+
+        Mirrors aasdk Cryptor::init() which calls SSL_set_connect_state.
+        The cert+key are loaded so the HU can present them if the phone
+        requests client authentication during the handshake.
+        """
         import tempfile, os
 
-        # Write cert + key to temp files (ssl.SSLContext needs file paths)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pem") as cf:
             cf.write(_AA_CERT_PEM)
             cert_path = cf.name
@@ -125,13 +138,12 @@ class AACryptor:
             key_path = kf.name
 
         try:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  # SSL_set_connect_state
             ctx.check_hostname = False
-            ctx.verify_mode    = ssl.CERT_NONE
-            # Allow TLS 1.2 which is what AA uses
+            ctx.verify_mode    = ssl.CERT_NONE             # phone cert is self-signed
             ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             ctx.maximum_version = ssl.TLSVersion.TLSv1_2
-            ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+            ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)  # for client-auth
         finally:
             os.unlink(cert_path)
             os.unlink(key_path)
@@ -141,11 +153,12 @@ class AACryptor:
         self._ssl_obj = ctx.wrap_bio(
             self._in_bio,
             self._out_bio,
-            server_side=True,
+            server_side=False,          # HU = TLS client
+            server_hostname=None,
         )
         self._ctx    = ctx
         self._active = False
-        log.info("AACryptor initialised (TLS 1.2 server, memory BIO)")
+        log.info("AACryptor initialised (TLS 1.2 client, memory BIO)")
 
     def deinit(self) -> None:
         self._ssl_obj = None
@@ -166,7 +179,8 @@ class AACryptor:
     def drive_handshake(self) -> bytes:
         """Advance the SSL state machine. Returns bytes to send to the phone.
 
-        Returns empty bytes if no output is ready yet.
+        On first call (in_bio empty): generates ClientHello immediately.
+        On subsequent calls: processes phone reply and generates next round.
         Mirrors Cryptor::doHandshake() + Cryptor::readHandshakeBuffer().
         """
         if self._ssl_obj is None:
@@ -175,11 +189,10 @@ class AACryptor:
         if not self._active:
             try:
                 self._ssl_obj.do_handshake()
-                # If we get here without exception, handshake is complete
                 self._active = True
                 log.info("TLS handshake complete")
             except ssl.SSLWantReadError:
-                pass  # normal: need more data from phone
+                pass  # normal: waiting for more data from phone
             except ssl.SSLError as e:
                 log.error("TLS handshake error: %s", e)
 
