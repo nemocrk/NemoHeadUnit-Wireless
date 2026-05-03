@@ -20,18 +20,19 @@ Module contract:
 
 Flow:
   1. Waits for rfcomm.handshake.completed — phone is now on the WiFi AP
-  2. Writes AA TLS cert + key to temp files via AACerts
-  3. Starts TCPServer on port 5288 with TLS enabled
-  4. Accepts the phone connection
-  5. FrameRelay reads AA frames and publishes aa.frame.received + aa.frame.ch<N> for each one
-  6. On aa.frame.send → serialises the frame and writes it back to the phone
-  7. On socket close → publishes tcp.session.closed
-  8. On system.stop → server + relay shutdown, cert temp files cleaned up
+  2. Starts plain TCPServer on port 5288
+  3. Accepts the phone connection (plain TCP — no TLS wrap)
+  4. FrameRelay reads AA frames and publishes aa.frame.received + aa.frame.ch<N>
+  5. On aa.frame.send → serialises the frame and writes it back to the phone
+  6. On socket close → publishes tcp.session.closed
+  7. On system.stop → server + relay shutdown
+
+  TLS note: Android Auto negotiates encryption in-band on channel 0 (msgId 0x0003).
+  The TCP socket is always plain. TLS is handled by oaa_control_channel.
 
 Internal helpers (no ZMQ):
-  server.py      — TCP bind/listen/accept, optional SSL wrap
+  server.py      — TCP bind/listen/accept (plain)
   frame_relay.py — AA frame header parse, per-frame callback
-  aa_certs.py    — write/cleanup AA TLS cert temp files
 """
 
 import sys
@@ -50,11 +51,10 @@ if str(_V2) not in sys.path:
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
-from shared.bus_client import BusClient              # noqa: E402
-from shared.logger import get_logger     # noqa: E402
-from tcp_server.server import TCPServer              # noqa: E402
-from tcp_server.frame_relay import FrameRelay        # noqa: E402
-from tcp_server.aa_certs import AACerts              # noqa: E402
+from shared.bus_client import BusClient       # noqa: E402
+from shared.logger import get_logger          # noqa: E402
+from tcp_server.server import TCPServer       # noqa: E402
+from tcp_server.frame_relay import FrameRelay # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -72,7 +72,6 @@ log = get_logger(MODULE_NAME, bus=bus)
 
 _server: Optional[TCPServer] = None
 _relay:  Optional[FrameRelay] = None
-_certs:  Optional[AACerts] = None
 _server_starting = False
 _server_lock = threading.Lock()
 _write_lock  = threading.Lock()   # protects socket writes from concurrent senders
@@ -92,7 +91,6 @@ def on_system_readytostart() -> None:
 def on_system_start(topic: str, payload: dict) -> None:
     if payload.get("priority") != PRIORITY:
         return
-
     log.info(f"system.start priority={PRIORITY} — tcp_server ready")
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
@@ -134,9 +132,9 @@ def on_frame_send(topic: str, payload: dict) -> None:
     """Write an AA frame to the active socket (called by other modules via aa.frame.send).
 
     Expected payload keys:
-        channel_id  : int   — OAA channel id (0 = control, 1 = input, ...)
+        channel_id  : int   — AA channel id (0 = control, 1 = input, ...)
         flags       : int   — frame flags byte
-        payload_hex : str   — serialised protobuf payload as hex string
+        payload_hex : str   — serialised payload as hex string
     """
     relay = _relay
     if relay is None:
@@ -152,8 +150,7 @@ def on_frame_send(topic: str, payload: dict) -> None:
         log.error("on_frame_send: malformed payload — %s", exc)
         return
 
-    # AA frame wire format:
-    #   [channel_id: 1B] [flags: 1B] [length: 2B big-endian] [payload: length B]
+    # AA wire format: [channel:1B][flags:1B][len:2B_BE][payload]
     frame = struct.pack(">BBH", channel_id, flags, len(raw_payload)) + raw_payload
 
     try:
@@ -168,16 +165,9 @@ def on_frame_send(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _start_server() -> None:
-    global _server, _relay, _certs, _server_starting
+    global _server, _relay, _server_starting
 
-    # Write AA TLS cert + key to temp files
-    certs = AACerts()
-    cert_path, key_path = certs.write()
-    log.info("AA TLS cert files written")
-    with _server_lock:
-        _certs = certs
-
-    server = TCPServer(ssl_certfile=cert_path, ssl_keyfile=key_path)
+    server = TCPServer()
     with _server_lock:
         _server = server
 
@@ -186,9 +176,6 @@ def _start_server() -> None:
             if _server is server:
                 _server = None
             _server_starting = False
-        certs.cleanup()
-        with _server_lock:
-            _certs = None
         bus.publish("tcp.server.error", {"error": "TCPServer.start() failed"})
         return
 
@@ -219,17 +206,13 @@ def _start_server() -> None:
 
 
 def _teardown() -> None:
-    global _server, _relay, _certs, _server_starting
+    global _server, _relay, _server_starting
     if _relay:
         _relay.stop()
         _relay = None
     if _server:
         _server.stop()
         _server = None
-    if _certs:
-        _certs.cleanup()
-        log.info("AA TLS cert temp files cleaned up")
-        _certs = None
     with _server_lock:
         _server_starting = False
 
@@ -244,9 +227,7 @@ def _on_frame(channel_id: int, flags: int, payload: bytes) -> None:
         "flags":       flags,
         "payload_hex": payload.hex(),
     }
-    # Broadcast on generic topic (all-channel listener)
     bus.publish("aa.frame.received", frame_data)
-    # Broadcast on per-channel topic so modules subscribe only to their channel
     bus.publish(f"aa.frame.ch{channel_id}", frame_data)
 
 
