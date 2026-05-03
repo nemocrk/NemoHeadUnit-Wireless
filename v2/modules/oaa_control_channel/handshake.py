@@ -1,12 +1,13 @@
 """
 handshake.py — AA control-channel (ch 0) handshake state machine.
 
-Handshake sequence handled here:
+Handshake sequence:
 
   Phone → HU : VERSION_REQUEST       (0x0001)
   HU → Phone : VERSION_RESPONSE      (0x0002)
-  Phone → HU : SSL_HANDSHAKE         (0x0003)  [TLS ClientHello pass-through]
-  HU → Phone : SSL_HANDSHAKE         (0x0003)  [TLS ServerHello pass-through]
+  Phone → HU : SSL_HANDSHAKE         (0x0003)  [TLS ClientHello — in-band via AACryptor]
+  HU → Phone : SSL_HANDSHAKE         (0x0003)  [TLS ServerHello+Cert+Done]
+  ... more rounds until handshake complete ...
   Phone → HU : AUTH_COMPLETE         (0x0006)
   Phone → HU : SERVICE_DISCOVERY_REQ (0x0005)
   HU → Phone : SERVICE_DISCOVERY_RES (0x0007)
@@ -16,12 +17,11 @@ Handshake sequence handled here:
   HU → Phone : PING_RESPONSE         (0x000C)
   → Session ACTIVE
 
-Note on TLS: AA wireless runs with TLS but the Python daemon delegates
-crypto to the OpenSSL layer of the TCP stack.  The SSL_HANDSHAKE blobs
-(0x0003) are forwarded verbatim; no Python-level crypto is required.
-
-After the session becomes ACTIVE the module keeps the channel alive by
-responding to PING_REQUEST messages.
+TLS note:
+  AA uses TLS 1.2 in-band: SSL bytes are exchanged as AA frame payloads
+  on channel 0, msgId 0x0003.  AACryptor implements the memory-BIO pattern
+  of openauto-prodigy Cryptor.cpp.  Post-handshake frames with
+  encryptionType=Encrypted are decrypted/encrypted via AACryptor.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from typing import Callable
 
 from shared.proto_utils import decode_proto, encode_proto
 
-# Control proto imports
 from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessageIds
 from protos.oaa.control.ServiceDiscoveryRequestMessage_pb2 import ServiceDiscoveryRequest
 from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
@@ -45,11 +44,12 @@ from protos.oaa.control.PingResponseMessage_pb2 import PingResponse
 
 from oaa_control_channel.frame_codec import encode_control_frame, decode_control_frame
 from oaa_control_channel.service_discovery import build_service_discovery_response
+from oaa_control_channel.aa_cryptor import AACryptor
 
 log = logging.getLogger("oaa_control_channel.handshake")
 
 # ---------------------------------------------------------------------------
-# Control message IDs (mirrors ControlMessageIds proto enum)
+# Control message IDs
 # ---------------------------------------------------------------------------
 
 MSG_VERSION_REQUEST        = 0x0001
@@ -66,7 +66,6 @@ MSG_SHUTDOWN_REQUEST       = 0x000D
 MSG_SHUTDOWN_RESPONSE      = 0x000E
 MSG_BYEBYE_RESPONSE        = 0x000F
 
-# AA protocol version advertised by HU
 AA_VERSION_MAJOR = 1
 AA_VERSION_MINOR = 7
 
@@ -85,12 +84,8 @@ class ControlChannelHandshake:
     """
     Drives the AA control channel (ch 0) handshake.
 
-    The caller feeds raw payloads via on_message() and sends responses
-    by passing a *send_fn* callable.
-
     Args:
         send_fn : callable(message_id: int, proto_body: bytes, encrypted: bool)
-                  Must publish the frame onto aa.frame.send.
         bt_mac        : local BT MAC address (for ServiceDiscovery)
         wifi_bssid    : local WiFi BSSID
         on_active_cb  : called when session becomes ACTIVE
@@ -112,13 +107,23 @@ class ControlChannelHandshake:
         self._on_shutdown  = on_shutdown_cb
         self._state        = HandshakeState.IDLE
         self._open_channels: set[int] = set()
+        self._cryptor      = AACryptor()
 
     # ------------------------------------------------------------------
-    # Public entry point
+    # Public
     # ------------------------------------------------------------------
 
     def on_message(self, channel_id: int, flags: int, payload: bytes) -> None:
         """Feed a raw payload from FrameRelay into the state machine."""
+        # Decrypt payload if flagged as encrypted and cryptor is active
+        encrypted = bool(flags & 0x08)
+        if encrypted and self._cryptor.is_active():
+            try:
+                payload = self._cryptor.decrypt(payload)
+            except Exception as e:
+                log.error("decrypt failed: %s", e)
+                return
+
         frame = decode_control_frame(channel_id, flags, payload)
         if frame is None:
             log.warning("on_message: malformed frame (payload too short)")
@@ -126,7 +131,6 @@ class ControlChannelHandshake:
 
         msg_id = frame.message_id
         body   = frame.body
-        encrypted = bool(flags & 0x08)
 
         log.debug("CH0 ← msg_id=0x%04x state=%s len=%d", msg_id, self._state.name, len(body))
 
@@ -154,8 +158,6 @@ class ControlChannelHandshake:
     # ------------------------------------------------------------------
 
     def _on_version_request(self, body: bytes, encrypted: bool) -> None:
-        """Phone sends VERSION_REQUEST; HU replies with its supported version."""
-        # body: [major:u16_be][minor:u16_be] from phone
         if len(body) >= 4:
             p_major, p_minor = struct.unpack_from(">HH", body, 0)
             log.info("VERSION_REQUEST: phone=%d.%d, HU=%d.%d",
@@ -164,30 +166,37 @@ class ControlChannelHandshake:
             log.info("VERSION_REQUEST: (no version in body) HU=%d.%d",
                      AA_VERSION_MAJOR, AA_VERSION_MINOR)
 
-        # VERSION_RESPONSE: [major:u16_be][minor:u16_be][status:u16_be=0x00 (OK)]
         response_body = struct.pack(">HHH", AA_VERSION_MAJOR, AA_VERSION_MINOR, 0)
         self._send(MSG_VERSION_RESPONSE, response_body, encrypted=False)
         self._state = HandshakeState.VERSION_SENT
-        log.info("VERSION_RESPONSE sent")
+
+        # Initialise AACryptor now so it is ready when the first 0x0003 arrives
+        self._cryptor.init()
+        log.info("VERSION_RESPONSE sent — AACryptor initialised")
 
     def _on_ssl_handshake(self, body: bytes, encrypted: bool) -> None:
-        """TLS handshake blob — forward verbatim back to phone as server hello.
-
-        In the Python daemon the TLS termination is handled by the OpenSSL
-        layer underneath.  This handler is a no-op acknowledgement so the
-        state machine progresses; the actual crypto bytes are already consumed
-        by the TLS socket wrapper before reaching FrameRelay.
         """
-        log.debug("SSL_HANDSHAKE blob received (%d bytes) — TLS handled by socket layer", len(body))
+        TLS handshake blob from phone — feed into AACryptor and send response.
+        Mirrors Messenger::handleHandshakeData() + Messenger::driveHandshake().
+        """
+        log.debug("SSL_HANDSHAKE blob received (%d bytes)", len(body))
         self._state = HandshakeState.TLS_IN_PROGRESS
 
+        self._cryptor.write_handshake_input(body)
+        outgoing = self._cryptor.drive_handshake()
+
+        if outgoing:
+            log.debug("SSL_HANDSHAKE response (%d bytes) — sending", len(outgoing))
+            self._send(MSG_SSL_HANDSHAKE, outgoing, encrypted=False)
+
+        if self._cryptor.is_active():
+            log.info("TLS handshake complete via AACryptor")
+
     def _on_auth_complete(self, body: bytes, encrypted: bool) -> None:
-        """Phone signals TLS auth is done — session is now encrypted."""
         log.info("AUTH_COMPLETE — TLS session established")
         self._state = HandshakeState.AUTH_OK
 
     def _on_service_discovery_request(self, body: bytes, encrypted: bool) -> None:
-        """Build and send the ServiceDiscoveryResponse with all channel descriptors."""
         req = decode_proto(ServiceDiscoveryRequest, body)
         if req is not None:
             log.info("SERVICE_DISCOVERY_REQUEST from '%s'", getattr(req, 'phone_name', '?'))
@@ -202,7 +211,6 @@ class ControlChannelHandshake:
         log.info("SERVICE_DISCOVERY_RESPONSE sent (%d bytes)", len(sdr_bytes))
 
     def _on_channel_open_request(self, body: bytes, encrypted: bool) -> None:
-        """Phone opens a channel; HU responds with STATUS_OK (0)."""
         req = decode_proto(ChannelOpenRequest, body)
         ch_id = getattr(req, 'channel_id', -1) if req else -1
 
@@ -214,7 +222,6 @@ class ControlChannelHandshake:
         self._send(MSG_CHANNEL_OPEN_RES, encode_proto(resp), encrypted=encrypted)
 
     def _on_ping_request(self, body: bytes, encrypted: bool) -> None:
-        """Echo PING_REQUEST back as PING_RESPONSE; mark session ACTIVE on first ping."""
         req = decode_proto(PingRequest, body)
         timestamp = getattr(req, 'timestamp', int(time.time() * 1_000_000)) if req else 0
 
@@ -230,12 +237,8 @@ class ControlChannelHandshake:
                 self._on_active()
 
     def _on_shutdown_request(self, body: bytes, encrypted: bool) -> None:
-        """Phone is disconnecting; send shutdown response and notify caller."""
         log.info("SHUTDOWN_REQUEST received")
         self._state = HandshakeState.SHUTDOWN
-
-        # ShutdownResponse has no fields
         self._send(MSG_SHUTDOWN_RESPONSE, b"", encrypted=encrypted)
-
         if self._on_shutdown:
             self._on_shutdown()
