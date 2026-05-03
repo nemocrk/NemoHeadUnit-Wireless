@@ -22,11 +22,10 @@ Flow:
   1. Waits for rfcomm.handshake.completed — phone is now on the WiFi AP
   2. Starts plain TCPServer on port 5288
   3. Accepts the phone connection (plain TCP — no TLS wrap)
-  4. Immediately sends VERSION_REQUEST (ch0, msgId 0x0001) — HU speaks first
-  5. FrameRelay reads AA frames and publishes aa.frame.received + aa.frame.ch<N>
-  6. On aa.frame.send → serialises the frame and writes it back to the phone
-  7. On socket close → publishes tcp.session.closed
-  8. On system.stop → server + relay shutdown
+  4. FrameRelay reads AA frames and publishes aa.frame.received + aa.frame.ch<N>
+  5. On aa.frame.send → serialises the frame and writes it back to the phone
+  6. On socket close → publishes tcp.session.closed
+  7. On system.stop → server + relay shutdown
 
   TLS note: Android Auto negotiates encryption in-band on channel 0 (msgId 0x0003).
   The TCP socket is always plain. TLS is handled by oaa_control_channel.
@@ -66,10 +65,6 @@ PRIORITY    = 1  # service level
 
 bus = BusClient(module_name=MODULE_NAME)
 log = get_logger(MODULE_NAME, bus=bus)
-
-# AA protocol version advertised by the HU
-_AA_VERSION_MAJOR = 1
-_AA_VERSION_MINOR = 7
 
 # ---------------------------------------------------------------------------
 # Module state
@@ -169,29 +164,6 @@ def on_frame_send(topic: str, payload: dict) -> None:
 # Server lifecycle
 # ---------------------------------------------------------------------------
 
-def _send_version_request() -> None:
-    """
-    Send AA VERSION_REQUEST on channel 0, msgId 0x0001.
-    The HU always speaks first after TCP connect — the phone waits in silence.
-    Payload: major(2B BE) + minor(2B BE)
-    Frame  : [ch=0x00][flags=0x00][len=6 BE][msgId=0x0001 BE][major BE][minor BE]
-    """
-    msg_id = 0x0001
-    body   = struct.pack(">HH", _AA_VERSION_MAJOR, _AA_VERSION_MINOR)
-    # control payload = msgId(2B) + body
-    ctrl_payload = struct.pack(">H", msg_id) + body
-    frame = struct.pack(">BBH", 0, 0x00, len(ctrl_payload)) + ctrl_payload
-    try:
-        with _write_lock:
-            _relay.send_raw(frame)
-        log.info(
-            "VERSION_REQUEST sent (v%d.%d) — waiting for VERSION_RESPONSE",
-            _AA_VERSION_MAJOR, _AA_VERSION_MINOR,
-        )
-    except Exception as exc:
-        log.error("_send_version_request failed: %s", exc)
-
-
 def _start_server() -> None:
     global _server, _relay, _server_starting
 
@@ -231,9 +203,6 @@ def _start_server() -> None:
         on_closed_cb=_on_session_closed,
     )
     _relay.start()
-
-    # HU speaks first: phone waits for VERSION_REQUEST before sending anything
-    _send_version_request()
 
 
 def _teardown() -> None:
