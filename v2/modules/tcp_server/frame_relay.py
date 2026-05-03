@@ -3,18 +3,32 @@ frame_relay.py — Read Android Auto frames from TCP socket and relay to bus.
 
 Responsibilities:
   - Read frames from the connected socket in a loop
-  - Parse the AA frame header: [length:u32_be][channel:u8][flags:u8]
-  - Publish each frame as aa.frame.received on the bus
-  - Detect socket close and publish aa.session.closed
+  - Parse the AA frame header and dispatch to callback
+  - Detect socket close and notify via on_closed_cb
   - Expose send_raw() for writing pre-encoded frames back to the phone
 
-Frame format (Android Auto over TCP):
-  Byte 0-3 : payload length (u32 big-endian)
-  Byte 4   : channel_id
-  Byte 5   : flags (0x0B = first+last+encrypted frame)
-  Byte 6+  : payload bytes
+Wire format (verified against openauto-prodigy FrameSerializer.cpp + FrameHeader.cpp):
 
-No ZMQ dependency — caller injects a publish callable.
+  BULK / MIDDLE / LAST frame:
+    Byte 0   : channel_id
+    Byte 1   : flags  (bits: frameType[1:0] | messageType[2] | encryptionType[3])
+    Byte 2-3 : payload length  (u16 big-endian)
+    Byte 4+  : payload bytes
+
+  FIRST frame (frameType bits = 0x01):
+    Byte 0   : channel_id
+    Byte 1   : flags
+    Byte 2-3 : this-frame payload length  (u16 big-endian)
+    Byte 4-7 : total message length        (u32 big-endian)
+    Byte 8+  : payload bytes
+
+  FrameType encoding (flags & 0x03):
+    0x00 = Bulk   (single-frame message, most common)
+    0x01 = First  (first of multi-frame message)
+    0x02 = Middle
+    0x03 = Last
+
+No ZMQ dependency — caller injects callbacks.
 """
 
 from shared.logger import get_logger
@@ -24,7 +38,14 @@ from typing import Callable, Optional
 
 log = get_logger("tcp_server.frame_relay")
 
-FRAME_HEADER_SIZE = 6  # length(4) + channel(1) + flags(1)
+# Frame header is always 2 bytes: [channel_id][flags]
+FRAME_HEADER_SIZE = 2
+# Size field after header is always 2 bytes (u16 BE)
+FRAME_SIZE_FIELD  = 2
+# FIRST frames have an extra 4-byte total-length field
+FRAME_TOTAL_LEN_FIELD = 4
+
+FRAMETYPE_FIRST = 0x01
 
 
 class FrameRelay:
@@ -105,18 +126,42 @@ class FrameRelay:
         """
         Read one AA frame from the socket.
         Returns (channel_id, flags, payload) or None on error/close.
+
+        Layout (BULK frame, the common case):
+          [channel_id:1B][flags:1B][payload_len:2B_BE][payload]
+
+        FIRST frames have an extra 4B total_len field before the payload;
+        we read and discard it here (reassembly is out of scope for the relay).
         """
+        # 1. Read 2-byte header
         header = self._recv_exact(FRAME_HEADER_SIZE)
         if not header:
             return None
-        payload_len = struct.unpack_from(">I", header, 0)[0]
-        channel_id  = header[4]
-        flags       = header[5]
+        channel_id = header[0]
+        flags      = header[1]
+        frame_type = flags & 0x03
+
+        # 2. Read 2-byte payload length
+        size_field = self._recv_exact(FRAME_SIZE_FIELD)
+        if not size_field:
+            return None
+        payload_len = struct.unpack(">H", size_field)[0]
+
+        # 3. FIRST frames carry an extra 4-byte total-message-length field
+        if frame_type == FRAMETYPE_FIRST:
+            total_len_field = self._recv_exact(FRAME_TOTAL_LEN_FIELD)
+            if not total_len_field:
+                return None
+            # total_len available if needed: struct.unpack(">I", total_len_field)[0]
+
+        # 4. Read payload
         payload = self._recv_exact(payload_len) if payload_len else b""
         if payload is None:
             return None
+
         log.debug(
-            f"Frame: channel={channel_id} flags=0x{flags:02x} len={payload_len}"
+            "Frame: channel=%d flags=0x%02x type=%d len=%d",
+            channel_id, flags, frame_type, payload_len,
         )
         return channel_id, flags, payload
 
