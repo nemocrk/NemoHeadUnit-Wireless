@@ -33,7 +33,10 @@ Module contract:
 YAML layout  (CONFIG_DIR/<module_name>.yaml):
     pin: "1234"
     enabled: true
-    ...
+    channels:
+      - channel_id: 3
+        av_channel: {stream_type: VIDEO, ...}
+      ...
 
 Rules:
   - The module stores whatever key/value the caller sends, UNLESS a schema
@@ -48,7 +51,8 @@ Rules:
     the defaults are persisted atomically and returned in the same response
     (first-boot seeding, no extra round-trip needed).
     If no YAML exists yet AND no "defaults" are provided but a schema is
-    registered, scalar defaults are derived from schema field.default values
+    registered, defaults are derived from schema field.default values
+    (ConfigFieldSchema scalars AND ConfigFieldList with a non-empty default)
     and seeded the same way (schema-first seeding).
   - If a "schema" dict is provided in config.get, it is stored in RAM and
     echoed verbatim in every subsequent config.response for that module.
@@ -75,6 +79,7 @@ import yaml  # noqa: E402
 from shared.bus_client import BusClient                                          # noqa: E402
 from shared.logger import get_logger                                             # noqa: E402
 from shared.config_schema import (                                               # noqa: E402
+    ConfigFieldList,
     ConfigFieldSchema,
     schema_from_dict,
     schema_to_dict,
@@ -144,18 +149,24 @@ def _schema_dict_for_response(module: str) -> dict | None:
 
 
 def _defaults_from_schema(module: str) -> dict:
-    """Derive a defaults dict from scalar ConfigFieldSchema entries.
+    """Derive a defaults dict from the registered schema for *module*.
 
-    Structured nodes (ConfigFieldMessage / ConfigFieldList / ConfigFieldOneof)
-    are skipped — only plain ConfigFieldSchema entries with a non-None .default
-    are included.
+    Includes:
+      - ConfigFieldSchema entries with a non-None .default (scalar leaves)
+      - ConfigFieldList entries with a non-empty list .default
+        (e.g. the 'channels' field in service_discovery)
+
+    Structured nodes without defaults (ConfigFieldMessage, ConfigFieldOneof,
+    empty-default ConfigFieldList) are skipped.
     """
     schema = _schemas.get(module, {})
-    return {
-        k: v.default
-        for k, v in schema.items()
-        if isinstance(v, ConfigFieldSchema) and v.default is not None
-    }
+    result: dict = {}
+    for k, v in schema.items():
+        if isinstance(v, ConfigFieldSchema) and v.default is not None:
+            result[k] = v.default
+        elif isinstance(v, ConfigFieldList) and v.default:
+            result[k] = v.default
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +196,7 @@ def on_config_get(topic: str, payload: dict):
     if not config:
         # --- Determine seeding source ---
         # Priority 1: explicit defaults= payload (legacy / mixed pattern)
-        # Priority 2: scalar defaults derived from the registered schema
+        # Priority 2: scalar + list defaults derived from the registered schema
         #             (schema-first pattern — no defaults= needed)
         if isinstance(defaults, dict) and defaults:
             seed = defaults
