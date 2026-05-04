@@ -4,6 +4,86 @@ Registro delle sessioni di sviluppo, modifiche apportate e prossimi step.
 
 ---
 
+## 2026-05-04 — config_schema: _SCHEMA per bluetooth e hostapd_helper + piano oaa_control_channel
+
+**What changed:**
+- `modules/bluetooth/main.py` — aggiunto import `field_bool`, `field_int`, `field_string` da `shared.config_schema`; aggiunto `_SCHEMA` con tutti e 4 i campi tipizzati (`discoverable: field_bool`, `discoverable_timeout: field_int(min=0)`, `discovery_duration_sec: field_int(min=1, max=120)`, `adapter_name: field_string`); aggiornata chiamata `cfg.get(defaults=_DEFAULTS, schema=_SCHEMA)`
+- `modules/hostapd_helper/main.py` — aggiunto import `field_enum`, `field_int`, `field_string` da `shared.config_schema`; aggiunto `_SCHEMA` con tutti gli 11 campi tipizzati (`hw_mode: field_enum(choices=["a","g"])`, `channel: field_int(min=1, max=196)`, `monitor_timeout: field_int(min=5, max=120)`, le restanti 8 chiavi come `field_string`); aggiornata chiamata `cfg.get(defaults=_DEFAULTS, schema=_SCHEMA)`
+
+**Why:**
+I due moduli usavano `ConfigClient` ma non passavano lo schema a `cfg.get()`, quindi `config_manager` non poteva validare i valori in ingresso e `config_ui` non poteva mostrare widget tipizzati. Con l'aggiunta di `_SCHEMA` entrambi i moduli sono ora fully typed.
+
+**Schema aggiunto — bluetooth:**
+
+| Chiave | Tipo | Vincoli |
+|---|---|---|
+| `discoverable` | `field_bool` | default `True` |
+| `discoverable_timeout` | `field_int` | `min=0` |
+| `discovery_duration_sec` | `field_int` | `min=1, max=120` |
+| `adapter_name` | `field_string` | default `NemoHeadUnit` |
+
+**Schema aggiunto — hostapd_helper:**
+
+| Chiave | Tipo | Vincoli |
+|---|---|---|
+| `interface` | `field_string` | default `wlan0` |
+| `ssid` | `field_string` | default `AndroidAutoAP` |
+| `hw_mode` | `field_enum` | choices `["a", "g"]` |
+| `channel` | `field_int` | `min=1, max=196` |
+| `ap_password` | `field_string` | default `""` |
+| `subnet` | `field_string` | — |
+| `gateway_ip` | `field_string` | — |
+| `dhcp_range_start` | `field_string` | — |
+| `dhcp_range_end` | `field_string` | — |
+| `country_code` | `field_string` | default `IT` |
+| `monitor_timeout` | `field_int` | `min=5, max=120` |
+
+**Status:** Completed
+
+---
+
+## PIANO — oaa_control_channel: typed schema + migrazione a ConfigClient
+
+**Problema identificato:**
+`oaa_control_channel` bypassa `ConfigClient` e gestisce manualmente il ciclo `config.get` → `config.response` tramite subscriber raw. Questo è un residuo storico che impedisce la validazione dei valori e i widget tipizzati in `config_ui`. Il modulo non passa alcun schema, tutte le 16 chiavi sono non tipizzate.
+
+**Step A — Aggiungere `_SCHEMA` in `service_discovery.py`:**
+
+| Chiave | Tipo suggerito | Vincoli |
+|---|---|---|
+| `hu.name`, `hu.make`, `hu.model`, `hu.sw_version` | `field_string` | nessuno |
+| `video.resolution` | `field_enum` | choices `["VIDEO_1280x720", "VIDEO_800x480", ...]` |
+| `video.fps` | `field_enum` | choices `["_30", "_60"]` |
+| `video.dpi` | `field_int` | `min=72, max=320` |
+| `touch.width`, `touch.height` | `field_int` | `min=480` |
+| `audio.media.sample_rate`, `audio.speech.sample_rate` | `field_int` | choices fisse → valutare `field_enum` |
+| `audio.system.sample_rate` | `field_int` | choices fisse (16000) → `field_enum` |
+| `audio.media.channel_count` | `field_int` | `min=1, max=2` |
+| `nav.min_interval_ms` | `field_int` | `min=100, max=5000` |
+| `nav.image.width`, `nav.image.height` | `field_int` | `min=32, max=256` |
+
+**Step B — Migrare `main.py` a `ConfigClient`:**
+- Aggiungere `cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)`
+- Rimuovere il publish manuale di `config.get` da `on_system_start` e il subscriber `on_config_response`
+- Spostare la logica attuale di `on_config_response` in `_on_config_loaded(config: dict)`
+- Rinominare `on_config_changed` → mantenuto ma collegato a `cfg.on_config_changed`
+- Chiamare `cfg.get(defaults=DEFAULTS, schema=_SCHEMA)` in `on_system_start`
+- Chiamare `cfg.register()` in `run()` prima delle subscribe
+
+**Step C — Verificare che `system.ready` sia pubblicato solo dopo `_on_config_loaded`:**
+Attualmente il modulo pubblica `system.ready` all'interno di `on_config_response`. Con `ConfigClient`, lo stesso comportamento deve essere garantito nel callback `_on_config_loaded`.
+
+**Rischio:** il modulo usa la config *prima* di pubblicare `system.ready` (necessario per costruire la `ServiceDiscoveryResponse`). La migrazione a `ConfigClient` non deve rompere questa garanzia.
+
+**Status:** Da fare (prossima sessione)
+
+**Next 1-3 steps:**
+1. Aggiungere `_SCHEMA` in `service_discovery.py` (Step A)
+2. Migrare `oaa_control_channel/main.py` a `ConfigClient` (Step B + C)
+3. Aggiungere test unitari per `_on_config_loaded` e `_on_config_changed` in `oaa_control_channel`
+
+---
+
 ## 2026-05-04 — config_schema: tipo `bool` + QCheckBox in config_ui
 
 **What changed:**
