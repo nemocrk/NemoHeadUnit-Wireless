@@ -89,7 +89,7 @@ from shared.bus_client import BusClient        # noqa: E402
 from shared.config_client import ConfigClient  # noqa: E402
 from shared.logger import get_logger           # noqa: E402
 from shared.config_schema import (             # noqa: E402
-    field_string, field_int, field_float, field_enum,
+    field_string, field_int, field_float, field_enum, field_bool,
 )
 
 # ---------------------------------------------------------------------------
@@ -122,18 +122,20 @@ cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 #   field_string(default)                     → free-text QLineEdit
 #   field_int(default, min=None, max=None)    → QLineEdit+±  or  Slider
 #   field_float(default, min=None, max=None)  → QLineEdit+±  or  Slider
-#   field_enum(default, choices=[...]         → QComboBox
+#   field_enum(default, choices=[...])        → QComboBox
+#   field_bool(default)                       → QCheckBox
 
 _DEFAULTS = {
     # "my_key":  "default_value",
     # "timeout": 10,
-    # "enabled": "on",
+    # "enabled": True,
 }
 
 _SCHEMA = {
     # "my_key":  field_string(default="default_value"),
     # "timeout": field_int(default=10, min=1, max=300),
-    # "enabled": field_enum(default="on", choices=["off", "on"]),
+    # "mode":    field_enum(default="auto", choices=["off", "auto", "on"]),
+    # "enabled": field_bool(default=True),
 }
 
 _config: dict = dict(_DEFAULTS)
