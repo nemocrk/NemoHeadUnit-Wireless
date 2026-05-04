@@ -174,7 +174,7 @@ class _FieldWidget(QWidget):
             self._edit.setFixedWidth(80)
             btn_minus = QPushButton("-")
             btn_plus  = QPushButton("+")
-            for btn in (btn_minus, btn_plus)
+            for btn in (btn_minus, btn_plus):
                 btn.setFixedWidth(28)
             btn_minus.clicked.connect(lambda: self._step_float(-0.1))
             btn_plus.clicked.connect(lambda: self._step_float(+0.1))
@@ -326,13 +326,14 @@ class _ScalarListEditor(QWidget):
         self._rows.append(fw)
         self._rows_vbox.addWidget(row)
 
-        # Capture index at creation time; rewire on delete
+        # Delete by identity — no index arithmetic needed
         btn_del.clicked.connect(lambda _checked=False, w=row, f=fw: self._delete_row(w, f))
 
     def _delete_row(self, row_widget: QWidget, fw: "_FieldWidget") -> None:
         if fw in self._rows:
             self._rows.remove(fw)
         self._rows_vbox.removeWidget(row_widget)
+        row_widget.hide()
         row_widget.deleteLater()
 
     def _on_add(self) -> None:
