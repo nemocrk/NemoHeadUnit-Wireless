@@ -4,6 +4,51 @@ Registro delle sessioni di sviluppo, modifiche apportate e prossimi step.
 
 ---
 
+## 2026-05-04 — config_schema: tipo `bool` + QCheckBox in config_ui
+
+**What changed:**
+- `shared/config_schema.py` — aggiunto `"bool"` al `Literal` dei tipi; aggiunte costanti `_BOOL_TRUE`/`_BOOL_FALSE` per coercion flessibile (accetta `True/False`, `1/0`, `"true"/"false"`, `"yes"/"no"`, `"on"/"off"`, case-insensitive); aggiunta factory `field_bool(default: bool = False)`; aggiunto branch `bool` in `validate_value()` con passthrough nativo Python `bool`/`int` e coercion da stringa
+- `modules/config_ui/main.py` — aggiunto `QCheckBox` agli import PyQt6; aggiunta costante locale `_BOOL_TRUE`; aggiunto metodo `_build_bool()` in `_FieldWidget` (crea `QCheckBox` checked/unchecked in base al valore raw); aggiunto branch `elif field_schema.type == "bool"` in `__init__`; aggiunto branch `"checkbox"` in `get_value()` (ritorna `bool` nativo); confronto bool-aware in `_on_save()` per evitare falsi positivi `True vs "True"`; docstring widget selection aggiornato con riga `bool → QCheckBox`
+- `modules/_template/main.py` — aggiunto `field_bool` alla riga di import da `config_schema`; aggiornati commenti di `_DEFAULTS` e `_SCHEMA` con esempio `"enabled": field_bool(default=True)`
+
+**Why:**
+I moduli che necessitano di toggle semplici (abilitare/disabilitare una feature) non avevano un tipo dedicato: erano costretti a usare `field_enum(choices=["off", "on"])` o `field_string`. Il nuovo tipo `bool` copre questo caso con un widget nativo (`QCheckBox`) e una validazione robusta che gestisce tutte le forme comuni del valore booleano.
+
+**Coercion `bool` accettata:**
+
+| Input | Risultato |
+|---|---|
+| `True` / `False` | passthrough |
+| `1` / `0` | `True` / `False` |
+| `"true"`, `"yes"`, `"on"`, `"1"` | `True` |
+| `"false"`, `"no"`, `"off"`, `"0"` | `False` |
+| qualsiasi altro | `ValueError` |
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Scrivere test unitari per `field_bool()` e `validate_value()` (tutti i casi coercion + `ValueError`)
+2. Aggiornare un modulo reale (es. `bluetooth`) con `field_bool` per almeno una chiave (es. `auto_connect`)
+3. Aggiungere test per `config_manager.on_config_set` con tipo `bool` (verifica che la validazione rifiuti input non validi)
+
+---
+
+## 2026-05-04 — config_schema: typed widgets e validazione lato config_manager
+
+**What changed:**
+- `shared/config_schema.py` — creato: `ConfigFieldSchema` dataclass con campi `type`, `default`, `min`, `max`, `choices`; factory helpers `field_string`, `field_int`, `field_float`, `field_enum`; `schema_to_dict` / `schema_from_dict` per serializzazione bus-safe; `validate_value()` con coercion e range check
+- `shared/config_client.py` — `cfg.get()` ora accetta `schema=_SCHEMA`; lo schema viene serializzato con `schema_to_dict` e incluso nel payload di `config.get`
+- `modules/config_manager/main.py` — aggiunto `_schemas: dict` (RAM); `on_config_get` salva lo schema se presente nel payload; `on_config_set` valida il valore con `validate_value()` prima di persistere, pubblica `config.error {module, key, value, reason}` in caso di errore
+- `modules/config_ui/main.py` — `_FieldWidget` con widget tipizzati: `QLineEdit` (string), `QSlider`/`QLineEdit±` (int/float), `QComboBox` (enum); badge `[TYPE]` accanto al label; `mark_error()` + `set_error()` per errori inline; `on_config_error` subscriber
+- `modules/_template/main.py` — aggiunto pattern `_SCHEMA` con import e commenti per tutti i tipi disponibili
+
+**Why:**
+Prima tutta la configurazione era priva di tipo: ogni chiave era una stringa libera, senza validazione né widget dedicato. Ora il contratto tra modulo e config_manager è esplicito, la UI mostra il widget corretto per ogni tipo e i valori non validi vengono rifiutati con feedback inline.
+
+**Status:** Completed
+
+---
+
 ## 2026-05-04 — Graceful session restart: flusso completo SHUTDOWN → VERSION_REQUEST
 
 **What changed:**
