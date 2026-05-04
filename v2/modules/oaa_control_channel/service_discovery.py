@@ -44,6 +44,12 @@ build_from_schema_cfg(schema_cfg, bt_mac, wifi_bssid)
 
 build_service_discovery_response(cfg, bt_mac, wifi_bssid)
     Legacy flat-dict API.  Still fully functional for backward compat.
+
+channels_from_sdr_bytes(sdr_bytes)
+    Parse serialised SDR bytes and return the channel list as a list of
+    plain dicts suitable for publishing on the bus.  Used by handshake.py
+    to populate the oaa_control_channel.open_channels payload without
+    re-running build_from_schema_cfg().
 """
 
 from __future__ import annotations
@@ -360,6 +366,75 @@ def build_from_schema_cfg(
             ch.wifi_channel.bssid = wifi_bssid
 
     return encode_proto(resp)
+
+
+# ---------------------------------------------------------------------------
+# channel_manager helper
+# ---------------------------------------------------------------------------
+
+# Mapping from ChannelDescriptor oneof field name to the key used in the
+# dict representation returned by channels_from_sdr_bytes().
+_ONEOF_CHANNEL_FIELDS = (
+    "av_channel",
+    "sensor_channel",
+    "input_channel",
+    "bluetooth_channel",
+    "wifi_channel",
+    "navigation_channel",
+    "media_info_channel",
+    "av_input_channel",
+    "phone_status_channel",
+)
+
+
+def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
+    """Parse serialised ServiceDiscoveryResponse bytes and return the channel
+    list as plain dicts.
+
+    Each dict contains at minimum:
+        {"channel_id": <int>, "<oneof_field>": {}}
+
+    For av_channel the dict also includes "av_type" at the top level so
+    registry.resolve_module_type() can distinguish VIDEO from AUDIO without
+    needing protobuf enums.
+
+    This function is the bridge between handshake.py (which holds sdr_bytes)
+    and channel_manager (which needs a JSON-serialisable channel list).
+
+    Args:
+        sdr_bytes: raw proto bytes from build_from_schema_cfg().
+
+    Returns:
+        List of channel dicts, one per ChannelDescriptor in the SDR.
+        Returns an empty list on parse errors.
+    """
+    try:
+        resp = ServiceDiscoveryResponse()
+        resp.ParseFromString(sdr_bytes)
+    except Exception as exc:
+        log.error("channels_from_sdr_bytes: parse error — %s", exc)
+        return []
+
+    result: list[dict] = []
+    for ch in resp.channels:
+        entry: dict = {"channel_id": ch.channel_id}
+
+        # Identify which oneof field is set
+        for field_name in _ONEOF_CHANNEL_FIELDS:
+            if ch.HasField(field_name):
+                sub = getattr(ch, field_name)
+                # For av_channel expose av_type at the top level so
+                # registry.resolve_module_type() can distinguish video / audio
+                # without importing proto enums.
+                if field_name == "av_channel":
+                    entry["av_channel"] = {"av_type": sub.stream_type}
+                else:
+                    entry[field_name] = {}
+                break
+
+        result.append(entry)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
