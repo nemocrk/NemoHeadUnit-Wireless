@@ -262,3 +262,77 @@ python v2/bus_broker.py &
 python v2/modules/config_manager/main.py &
 python v2/modules/config_ui/main.py
 ```
+
+---
+
+## 2026-05-04 - video module — AA video channel handler
+
+**What changed:**
+
+Creato `v2/modules/video/main.py` — modulo che gestisce il canale video Android Auto
+con scoperta dinamica del channel id e flow control via MediaAck.
+
+**Architettura:**
+
+| Responsabilità | Modulo |
+|---|---|
+| Handshake AA (setup/open/stop), MediaAck, pubblica `video.frame` | `video` (questo modulo) |
+| Pipeline GStreamer, rendering su display | `video_ui` (futuro) |
+
+**Channel discovery:**
+- Su `system.start` pubblica `config.get {module: "oaa_control_channel", requester: "video"}`
+- Su `config.response`: scansiona `channels[]` cercando `av_channel.stream_type == "VIDEO"`
+- Estrae `channel_id` e si sottoscrive dinamicamente ad `aa.frame.chN`
+- Fallback su `channel_id=3` se la config non è disponibile
+- `system.ready` viene pubblicato solo dopo che il canale è risolto
+
+**Flow control:**
+- `AVChannelSetupRequest` → `AVChannelSetupResponse` (max_unacked=1)
+- `AVChannelOpenRequest` → `AVChannelOpenResponse`
+- `MediaWithTimestamp` → MediaAck immediato (indipendente da video_ui) + pubblica `video.frame`
+- `AVChannelStopIndication` → pubblica `video.state=STOPPED`
+
+**Payload `video.frame`:**
+```python
+{
+    "channel_id": 3,
+    "session_id": 0,
+    "ts_us":      1234567890,
+    "data_b64":   "AAAAAW..."   # H.264 NAL data in base64
+}
+```
+
+**Why:**
+- Il modulo `video` non può delegare gli ACK al `video_ui`: se il display non è
+  attivo, il flusso si bloccherebbe. Gli ACK sono inviati sempre, indipendentemente
+  dalla presenza di `video_ui`.
+- La separazione `video` / `video_ui` segue il pattern già in uso (`bluetooth` /
+  `bluetooth_ui`, `config_manager` / `config_ui`) e rende il modulo testabile
+  senza GStreamer installato.
+- Il channel id non è hardcoded: segue eventuali modifiche alla configurazione
+  di `oaa_control_channel` senza richiedere modifiche al modulo `video`.
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Aggiungere test unitari per `_resolve_video_channel()`, `_handle_setup_request()`,
+   `_handle_media_with_timestamp()` e il parsing varint
+2. Creare `v2/modules/video_ui/main.py` con pipeline GStreamer
+   (`appsrc → queue leaky=downstream → h264parse → avdec_h264 → videoconvert → xvimagesink`)
+3. Aggiungere `video` all'autodiscovery in `v2/main.py`
+
+**Commit:**
+
+| File | Commit |
+|---|---|
+| `v2/modules/video/main.py` | [285a76a](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/285a76a2ebefddc093d9f3cfc892503cf832a1ac) |
+
+**Verification commands:**
+```bash
+# Import smoke test
+python -c "from v2.modules.video.main import _resolve_video_channel; print('OK')"
+
+# Standalone (richiede bus_broker attivo)
+python v2/bus_broker.py &
+python v2/modules/video/main.py
+```
