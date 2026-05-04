@@ -15,7 +15,10 @@ Handshake sequence (HU speaks first):
   ... repeat until tcp.server.tls_handshake_completed ...
   HU → Phone : AUTH_COMPLETE            (0x0006)  ← sent on tls_handshake_completed
   Phone → HU : SERVICE_DISCOVERY_REQ   (0x0005)
-  HU → Phone : SERVICE_DISCOVERY_RES   (0x0007)
+  HU → Bus  : oaa_control_channel.open_channels {sdr_bytes_hex, channels}
+                                                  ← channel_manager spawns channel modules
+  Bus → HU  : channel_manager.channels_ready {sdr_bytes_hex}
+  HU → Phone : SERVICE_DISCOVERY_RES   (0x0007)  ← sent only after all channel modules are up
   Phone → HU : CHANNEL_OPEN_REQ         (0x0008)  [one per channel]
   HU → Phone : CHANNEL_OPEN_RES         (0x0009)  [STATUS_OK]
   Phone → HU : PING_REQUEST             (0x000B)
@@ -29,6 +32,15 @@ TLS note:
   TLS operations to tcp_server via bus messages.
   Post-handshake frames with encryptionType=Encrypted are decrypted by
   tcp_server before being published on aa.frame.ch<N>.
+
+Channel manager integration:
+  On SERVICE_DISCOVERY_REQUEST handshake.py does NOT send the response
+  immediately. Instead it:
+    1. Builds sdr_bytes via build_from_schema_cfg()
+    2. Publishes oaa_control_channel.open_channels {sdr_bytes_hex, channels}
+    3. Waits for channel_manager.channels_ready {sdr_bytes_hex} via on_channels_ready()
+    4. Sends SERVICE_DISCOVERY_RESPONSE to the phone
+  This guarantees all channel modules are up before the phone starts opening channels.
 """
 
 from __future__ import annotations
@@ -63,7 +75,7 @@ from v2.protos.oaa.control.PingRequestMessage_pb2 import PingRequest
 from v2.protos.oaa.control.PingResponseMessage_pb2 import PingResponse
 
 from oaa_control_channel.frame_codec import encode_control_frame, decode_control_frame
-from oaa_control_channel.service_discovery import build_from_schema_cfg
+from oaa_control_channel.service_discovery import build_from_schema_cfg, channels_from_sdr_bytes
 
 log = logging.getLogger("oaa_control_channel.handshake")
 
@@ -95,7 +107,8 @@ class HandshakeState(IntEnum):
     VERSION_SENT     = auto()
     TLS_IN_PROGRESS  = auto()
     AUTH_OK          = auto()
-    CHANNELS_OPENING = auto()
+    WAITING_CHANNELS = auto()  # waiting for channel_manager.channels_ready
+    CHANNELS_OPENING = auto()  # SDR sent, phone opening channels
     ACTIVE           = auto()
     SHUTDOWN         = auto()
 
@@ -109,6 +122,10 @@ class ControlChannelHandshake:
       publish  aa.handshake.feed_input   {payload_hex}    ← feeds SSL round bytes to cryptor
       receive  on_tls_handshake_blob(outgoing)            ← forwards blob to phone as SSL_HANDSHAKE
       receive  on_tls_complete()                          ← sends AUTH_COMPLETE to phone
+
+    Channel manager delegation:
+      publish  oaa_control_channel.open_channels {sdr_bytes_hex, channels}  ← triggers channel_manager
+      receive  on_channels_ready(sdr_bytes_hex)           ← sends SERVICE_DISCOVERY_RES to phone
 
     Args:
         send_fn        : callable(message_id: int, proto_body: bytes, encrypted: bool)
@@ -142,6 +159,9 @@ class ControlChannelHandshake:
         self._on_shutdown  = on_shutdown_cb
         self._state        = HandshakeState.IDLE
         self._open_channels: set[int] = set()
+        # Encryption flag saved at SERVICE_DISCOVERY_REQUEST time,
+        # reused when actually sending SERVICE_DISCOVERY_RESPONSE.
+        self._sdr_encrypted: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -214,6 +234,24 @@ class ControlChannelHandshake:
         self._send(MSG_AUTH_COMPLETE, auth.SerializeToString(), encrypted=False)
         self._state = HandshakeState.AUTH_OK
 
+    def on_channels_ready(self, sdr_bytes_hex: str) -> None:
+        """Called by oaa_control_channel/main.py on channel_manager.channels_ready.
+
+        All channel modules are up — now safe to send SERVICE_DISCOVERY_RESPONSE
+        to the phone so it starts opening individual channels.
+        """
+        if self._state != HandshakeState.WAITING_CHANNELS:
+            log.warning(
+                "on_channels_ready called in unexpected state %s — ignored",
+                self._state.name,
+            )
+            return
+
+        sdr_bytes = bytes.fromhex(sdr_bytes_hex)
+        self._send(MSG_SERVICE_DISCOVERY_RES, sdr_bytes, encrypted=self._sdr_encrypted)
+        self._state = HandshakeState.CHANNELS_OPENING
+        log.info("SERVICE_DISCOVERY_RESPONSE sent (%d bytes)", len(sdr_bytes))
+
     @property
     def state(self) -> HandshakeState:
         return self._state
@@ -252,9 +290,24 @@ class ControlChannelHandshake:
             wifi_bssid=self._wifi_bssid,
         )
 
-        self._send(MSG_SERVICE_DISCOVERY_RES, sdr_bytes, encrypted=encrypted)
-        self._state = HandshakeState.CHANNELS_OPENING
-        log.info("SERVICE_DISCOVERY_RESPONSE sent (%d bytes)", len(sdr_bytes))
+        # Save encryption flag: reused in on_channels_ready() when we
+        # actually send SERVICE_DISCOVERY_RESPONSE.
+        self._sdr_encrypted = encrypted
+
+        # Extract channel list from the serialised SDR so channel_manager
+        # can resolve module types without re-parsing config.
+        channels = channels_from_sdr_bytes(sdr_bytes)
+
+        self._publish("oaa_control_channel.open_channels", {
+            "sdr_bytes_hex": sdr_bytes.hex(),
+            "channels":      channels,
+        })
+        self._state = HandshakeState.WAITING_CHANNELS
+        log.info(
+            "SERVICE_DISCOVERY_REQUEST handled — open_channels published, "
+            "waiting for channel_manager.channels_ready (%d channels)",
+            len(channels),
+        )
 
     def _on_channel_open_request(self, body: bytes, encrypted: bool) -> None:
         req = decode_proto(ChannelOpenRequest, body)
