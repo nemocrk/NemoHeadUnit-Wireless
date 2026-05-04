@@ -63,7 +63,7 @@ from v2.protos.oaa.control.PingRequestMessage_pb2 import PingRequest
 from v2.protos.oaa.control.PingResponseMessage_pb2 import PingResponse
 
 from oaa_control_channel.frame_codec import encode_control_frame, decode_control_frame
-from oaa_control_channel.service_discovery import build_service_discovery_response
+from oaa_control_channel.service_discovery import build_from_schema_cfg
 
 log = logging.getLogger("oaa_control_channel.handshake")
 
@@ -113,9 +113,12 @@ class ControlChannelHandshake:
     Args:
         send_fn        : callable(message_id: int, proto_body: bytes, encrypted: bool)
         publish_fn     : callable(topic: str, payload: dict)  — bus.publish
-        cfg            : config dict pre-loaded from config_manager (keys as in service_discovery.DEFAULTS)
-        bt_mac         : local BT MAC address (for ServiceDiscovery)
-        wifi_bssid     : local WiFi BSSID
+        cfg            : nested config dict with proto field names as keys
+                         (mirrors service_discovery._SCHEMA / SEMANTIC_DEFAULTS).
+                         Passed directly to build_from_schema_cfg() at
+                         SERVICE_DISCOVERY_REQUEST time.
+        bt_mac         : local BT MAC address (runtime, not persisted in config)
+        wifi_bssid     : local WiFi BSSID    (runtime, not persisted in config)
         on_active_cb   : called when session becomes ACTIVE
         on_shutdown_cb : called on SHUTDOWN_REQUEST
     """
@@ -243,8 +246,8 @@ class ControlChannelHandshake:
         if req is not None:
             log.info("SERVICE_DISCOVERY_REQUEST from '%s'", getattr(req, 'phone_name', '?'))
 
-        sdr_bytes = build_service_discovery_response(
-            cfg=self._cfg,
+        sdr_bytes = build_from_schema_cfg(
+            schema_cfg=self._cfg,
             bt_mac=self._bt_mac,
             wifi_bssid=self._wifi_bssid,
         )
