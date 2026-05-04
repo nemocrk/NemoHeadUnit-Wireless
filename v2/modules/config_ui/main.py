@@ -12,7 +12,7 @@ Module contract:
                 system.modules_response  {modules: [{name, pid, status}, ...]}
                 config.response          {module, config: {key: value, ...},
                                           requester: str,
-                                          schema: {key: {type, ...}, ...} (optional)}
+                                          schema: {key: {type, ...}, ...} (optional)
                                           <- only processed when requester == "config_ui"
                 config.error             {module, key, value, reason}
   Publishes   : system.module_ready       {name, priority}
@@ -419,6 +419,10 @@ def _build_message_form(
 # _AccordionItem  — single collapsible list item
 # ---------------------------------------------------------------------------
 
+# Shared stylesheet for accordion header labels — forces white text so it is
+# always readable regardless of the application palette / system theme.
+_ACCORDION_HEADER_LABEL_STYLE = "color: #e0e0e0; background: transparent;"
+
 class _AccordionItem(QWidget):
     """
     A collapsible row representing one element of a ConfigFieldList.
@@ -460,9 +464,14 @@ class _AccordionItem(QWidget):
 
         self._arrow = QLabel("v")
         self._arrow.setFixedWidth(14)
-        self._arrow.setStyleSheet("color: #888; font-size: 10px; background: transparent;")
-        self._title_lbl = QLabel(f"Elemento {index}")
-        self._title_lbl.setStyleSheet("font-weight: bold; background: transparent;")
+        self._arrow.setStyleSheet(
+            f"{_ACCORDION_HEADER_LABEL_STYLE} font-size: 10px;"
+        )
+
+        self._title_lbl = QLabel(f"Canale {index}")
+        self._title_lbl.setStyleSheet(
+            f"{_ACCORDION_HEADER_LABEL_STYLE} font-weight: bold;"
+        )
 
         btn_del = QPushButton("x")
         btn_del.setFixedSize(22, 22)
@@ -510,7 +519,7 @@ class _AccordionItem(QWidget):
 
     def set_index(self, index: int):
         self._index = index
-        self._title_lbl.setText(f"Elemento {index}")
+        self._title_lbl.setText(f"Canale {index}")
 
     def _toggle(self):
         self._expanded = not self._expanded
@@ -536,7 +545,7 @@ class _ListFieldInlineEditor(QWidget):
       [Accordion item 0]  (collapsed)
       [Accordion item 1]  (collapsed)
       ...
-      [+ Aggiungi elemento]
+      [+ Aggiungi canale]
 
     Each item has a [x] delete button in its header.
     get_value() -> list  is called by _on_save().
@@ -559,7 +568,7 @@ class _ListFieldInlineEditor(QWidget):
         root.addWidget(self._items_container)
 
         # Add button
-        self._btn_add = QPushButton("+ Aggiungi elemento")
+        self._btn_add = QPushButton("+ Aggiungi canale")
         self._btn_add.setStyleSheet(
             "QPushButton { color: #4caf50; background: transparent;"
             " border: 1px dashed #4caf50; border-radius: 4px; padding: 4px 12px; }"
