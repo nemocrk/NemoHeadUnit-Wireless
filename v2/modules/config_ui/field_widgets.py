@@ -29,6 +29,7 @@ _OptionalMessageWidget
     omitted from the payload (returns None).
     Exposes:
         get_value() -> dict | None
+        validate()  -> list[str]   (empty when unchecked or all fields valid)
 """
 
 from __future__ import annotations
@@ -513,6 +514,10 @@ class _OptionalMessageWidget(QWidget):
     get_value() returns:
         dict   — when checkbox is checked (the sub-form values)
         None   — when unchecked (field is omitted from payload)
+
+    validate() returns:
+        []              — when unchecked (nothing to validate)
+        list[str]       — human-readable errors for required-but-empty sub-fields
     """
 
     def __init__(
@@ -578,6 +583,19 @@ class _OptionalMessageWidget(QWidget):
         if hasattr(self._body, "get_value"):
             return self._body.get_value()
         return None
+
+    def validate(self) -> list[str]:
+        """
+        Returns a list of human-readable error strings for required-but-empty
+        sub-fields.  Always returns [] when the widget is unchecked — the
+        whole message is absent and there is nothing to validate.
+        """
+        if not self._checkbox.isChecked():
+            return []
+        # Delegate to the body widget if it exposes validate()
+        if hasattr(self._body, "validate"):
+            return self._body.validate()
+        return []
 
     def set_error(self, message: "str | None") -> None:
         pass
