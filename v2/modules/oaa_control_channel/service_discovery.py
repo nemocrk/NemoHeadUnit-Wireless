@@ -23,26 +23,24 @@ Channels advertised:
 
 Schema
 ------
-_SCHEMA is generated at import time from ServiceDiscoveryResponse.DESCRIPTOR
-via proto_utils.schema_from_proto_message(). It reflects the full proto tree
-as a config_schema-compatible dict (ConfigFieldMessage / ConfigFieldList /
-ConfigFieldOneof / ConfigFieldSchema leaves).
+_SCHEMA is a hand-crafted flat-scalar dict.  Every configurable parameter
+for all channel descriptors is exposed as a top-level ConfigFieldSchema so
+that config_manager can seed, persist, and render it without needing
+ConfigFieldList / ConfigFieldMessage support.
 
-Semantic defaults (SEMANTIC_DEFAULTS) are applied on top of the raw proto
-defaults so that the config UI starts with sane values instead of proto
-zero-values.
+Channel descriptors are structural / runtime: they are built at handshake
+time by build_from_schema_cfg() from the flat scalar values.  They are
+never stored in the YAML config.
 
 Entry points
 ------------
-build_service_discovery_response(cfg, bt_mac, wifi_bssid)
-    Legacy flat-dict API. Still fully functional. Used until config_manager
-    supports nested/structured cfg dicts.
-
 build_from_schema_cfg(schema_cfg, bt_mac, wifi_bssid)
-    New proto-driven API. Accepts a nested dict matching _SCHEMA structure
-    (i.e. field names are proto field names, not the old flat keys).
-    Use this once config_manager is updated to handle ConfigFieldMessage /
-    ConfigFieldList / ConfigFieldOneof.
+    Primary API.  Reads the flat scalar keys from *schema_cfg* and
+    constructs all channel descriptors.  bt_mac / wifi_bssid are injected
+    at runtime and never persisted.
+
+build_service_discovery_response(cfg, bt_mac, wifi_bssid)
+    Legacy flat-dict API.  Still fully functional for backward compat.
 """
 
 from __future__ import annotations
@@ -59,13 +57,13 @@ for _p in (_REPO_ROOT, _PROTO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from shared.proto_utils import encode_proto, schema_from_proto_message  # noqa: E402
-from shared.config_schema import (
+from shared.proto_utils import encode_proto  # noqa: E402
+from shared.config_schema import (           # noqa: E402
     AnyFieldSchema,
-    ConfigFieldList,
-    ConfigFieldMessage,
-    ConfigFieldOneof,
-    ConfigFieldSchema,
+    field_bool,
+    field_enum,
+    field_int,
+    field_string,
 )
 
 # Control / discovery
@@ -118,59 +116,69 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Proto-derived schema
+# Hand-crafted flat-scalar schema
+# ---------------------------------------------------------------------------
+# Every configurable parameter for all channel descriptors is a top-level
+# ConfigFieldSchema so config_manager can seed, persist, and render it
+# without needing ConfigFieldList / ConfigFieldMessage support.
+#
+# Keys use snake_case and are grouped by logical area for readability.
+# They are NOT proto field names — they are the keys used in _cfg / YAML.
+#
+# Channel descriptors are built at handshake time by build_from_schema_cfg().
 # ---------------------------------------------------------------------------
 
-# Full config schema generated from the ServiceDiscoveryResponse proto tree.
-# Generated once at import time; reflects ALL fields in the proto, including
-# nested messages, repeated fields, and oneof groups.
-_SCHEMA: dict[str, AnyFieldSchema] = schema_from_proto_message(
-    ServiceDiscoveryResponse.DESCRIPTOR
-)
+_VIDEO_RESOLUTIONS = [
+    "VIDEO_800x480",
+    "VIDEO_1280x720",
+    "VIDEO_1920x1080",
+]
 
-# Semantic defaults: override proto zero-values with sane operational values.
-# These are applied via _apply_defaults_to_schema() at the end of this section.
-# Structure mirrors proto field names (NOT the old flat keys).
-SEMANTIC_DEFAULTS: dict[str, Any] = {
-    "head_unit_name":        "NemoHeadUnit",
-    "headunit_manufacturer": "Nemo",
-    "headunit_model":        "NemoHeadUnit-Wireless",
-    "sw_version":            "2.0",
-    "sw_build":              "1",
-    "car_model":             "Universal",
-    "car_year":              "2025",
-    "car_serial":            "20250101",
-    "can_play_native_media_during_vr": True,
+_VIDEO_FPS = ["_30", "_60"]
+
+_DRIVER_POSITIONS = ["LEFT", "RIGHT"]
+
+_SCHEMA: dict[str, AnyFieldSchema] = {
+    # --- Head-unit identity ---
+    "head_unit_name":        field_string(default="NemoHeadUnit"),
+    "headunit_manufacturer": field_string(default="Nemo"),
+    "headunit_model":        field_string(default="NemoHeadUnit-Wireless"),
+    "sw_version":            field_string(default="2.0"),
+    "sw_build":              field_string(default="1"),
+    # --- Vehicle identity ---
+    "car_model":             field_string(default="Universal"),
+    "car_year":              field_string(default="2025"),
+    "car_serial":            field_string(default="20250101"),
+    "driver_position":       field_enum(default="LEFT", choices=_DRIVER_POSITIONS),
+    # --- Session control ---
+    "can_play_native_media_during_vr": field_bool(default=True),
+    # --- Video (ch 3) ---
+    "video_resolution": field_enum(default="VIDEO_1280x720", choices=_VIDEO_RESOLUTIONS),
+    "video_fps":        field_enum(default="_30",            choices=_VIDEO_FPS),
+    "video_dpi":        field_int(default=140, min=72, max=600),
+    # --- Touch / Input (ch 1) ---
+    "touch_width":  field_int(default=1280, min=320, max=7680),
+    "touch_height": field_int(default=720,  min=240, max=4320),
+    # --- Audio — Media (ch 4) ---
+    "audio_media_sample_rate":   field_enum(default="48000", choices=["44100", "48000"]),
+    "audio_media_channel_count": field_enum(default="2",     choices=["1", "2"]),
+    # --- Audio — Speech (ch 5) ---
+    "audio_speech_sample_rate": field_enum(default="48000", choices=["16000", "48000"]),
+    # --- Audio — System (ch 6) ---
+    "audio_system_sample_rate": field_enum(default="16000", choices=["16000", "48000"]),
+    # --- Navigation (ch 9) ---
+    "nav_min_interval_ms": field_int(default=500,  min=100,  max=5000),
+    "nav_image_width":     field_int(default=64,   min=32,   max=256),
+    "nav_image_height":    field_int(default=64,   min=32,   max=256),
+    # --- Bluetooth (ch 8) — informational; bt_mac is injected at runtime ---
+    "bt_pairing_pin": field_string(default=""),
+    # --- WiFi (ch 14) — bssid_override overrides the runtime bssid when non-empty ---
+    "wifi_bssid_override": field_string(default=""),
 }
 
-
-def _apply_defaults_to_schema(
-    schema: dict[str, AnyFieldSchema],
-    overrides: dict[str, Any],
-) -> None:
-    """Apply semantic default overrides to scalar leaves in *schema* in-place.
-
-    Only top-level scalar keys are overridden; nested message defaults are
-    left to proto zero-values unless explicitly included in *overrides*.
-    """
-    for key, value in overrides.items():
-        node = schema.get(key)
-        if isinstance(node, ConfigFieldSchema):
-            schema[key] = ConfigFieldSchema(
-                type=node.type,
-                default=value,
-                min=node.min,
-                max=node.max,
-                choices=node.choices,
-            )
-        else:
-            log.debug(
-                "_apply_defaults_to_schema: key %r not found as scalar in schema — skipped",
-                key,
-            )
-
-
-_apply_defaults_to_schema(_SCHEMA, SEMANTIC_DEFAULTS)
+# SEMANTIC_DEFAULTS mirrors _SCHEMA defaults verbatim so that _cfg in
+# main.py is always fully populated from boot even if no YAML is present.
+SEMANTIC_DEFAULTS: dict[str, Any] = {k: v.default for k, v in _SCHEMA.items()}  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +206,7 @@ DEFAULTS: dict = {
 
 
 # ---------------------------------------------------------------------------
-# Proto-driven builder (new API)
+# Primary builder — reads flat scalar _cfg, builds all channel descriptors
 # ---------------------------------------------------------------------------
 
 def build_from_schema_cfg(
@@ -206,114 +214,211 @@ def build_from_schema_cfg(
     bt_mac:     str = "00:00:00:00:00:00",
     wifi_bssid: str = "",
 ) -> bytes:
-    """Build and serialise a ServiceDiscoveryResponse from a nested schema cfg dict.
+    """Build and serialise a ServiceDiscoveryResponse from a flat scalar cfg dict.
 
-    *schema_cfg* must mirror the proto field-name tree produced by _SCHEMA.
-    Use this entry point once config_manager supports ConfigFieldMessage /
-    ConfigFieldList / ConfigFieldOneof.
+    *schema_cfg* must use the keys defined in _SCHEMA / SEMANTIC_DEFAULTS.
+    bt_mac and wifi_bssid are injected at runtime and are never persisted.
+
+    If wifi_bssid_override is non-empty in schema_cfg, it takes precedence
+    over the runtime wifi_bssid argument.
 
     Args:
-        schema_cfg:  nested dict with proto field names as keys.
+        schema_cfg:  flat dict with _SCHEMA keys as keys.
         bt_mac:      local BT adapter MAC (runtime, not persisted).
         wifi_bssid:  local WiFi BSSID (runtime, not persisted).
 
     Returns:
         Serialised proto bytes ready to send on the wire.
     """
-    resp = ServiceDiscoveryResponse()
-    _dict_to_proto(resp, schema_cfg)
+    def _g(key: str) -> Any:
+        """Get a value from schema_cfg, falling back to SEMANTIC_DEFAULTS."""
+        return schema_cfg.get(key, SEMANTIC_DEFAULTS[key])
 
-    # Runtime-only fields injected after generic population
-    for ch in resp.channels:
-        bt = ch.HasField("bluetooth_channel") and ch.bluetooth_channel
-        if bt:
-            bt.adapter_address = bt_mac
-        wf = ch.HasField("wifi_channel") and ch.wifi_channel
-        if wf:
-            wf.bssid = wifi_bssid
+    resp = ServiceDiscoveryResponse()
+
+    # --- Head-unit identity scalars ---
+    resp.head_unit_name              = str(_g("head_unit_name"))
+    resp.headunit_manufacturer       = str(_g("headunit_manufacturer"))
+    resp.headunit_model              = str(_g("headunit_model"))
+    resp.sw_version                  = str(_g("sw_version"))
+    resp.sw_build                    = str(_g("sw_build"))
+    resp.car_model                   = str(_g("car_model"))
+    resp.car_year                    = str(_g("car_year"))
+    resp.car_serial                  = str(_g("car_serial"))
+    resp.can_play_native_media_during_vr = bool(_g("can_play_native_media_during_vr"))
+
+    driver_pos_str = str(_g("driver_position"))
+    resp.driver_position = (
+        DriverPosition.RIGHT if driver_pos_str == "RIGHT" else DriverPosition.LEFT
+    )
+
+    # --- Resolve runtime WiFi BSSID ---
+    bssid_override = str(_g("wifi_bssid_override"))
+    effective_bssid = bssid_override if bssid_override else wifi_bssid
+
+    # --- Channel descriptors (flat scalars → proto) ---
+    descriptors = [
+        _build_video_descriptor_from_cfg(schema_cfg),
+        _build_media_audio_descriptor_from_cfg(schema_cfg),
+        _build_speech_audio_descriptor_from_cfg(schema_cfg),
+        _build_system_audio_descriptor_from_cfg(schema_cfg),
+        _build_input_descriptor_from_cfg(schema_cfg),
+        _build_sensor_descriptor(),
+        _build_bluetooth_descriptor(bt_mac),
+        _build_wifi_descriptor(effective_bssid),
+        _build_av_input_descriptor(),
+        _build_navigation_descriptor_from_cfg(schema_cfg),
+        _build_media_status_descriptor(),
+    ]
+    if _HAS_PHONE_STATUS:
+        descriptors.append(_build_phone_status_descriptor())
+
+    for desc in descriptors:
+        resp.channels.add().MergeFrom(desc)
 
     return encode_proto(resp)
 
 
-def _dict_to_proto(msg: Any, data: dict) -> None:
-    """Recursively populate a proto message from a nested plain dict.
+# ---------------------------------------------------------------------------
+# New channel descriptor builders (read flat scalar _cfg)
+# ---------------------------------------------------------------------------
 
-    Keys in *data* must match proto field names exactly.
-    Enum values are accepted as string names (e.g. "VIDEO_1280x720") and
-    resolved via the field's enum_type descriptor.
-    Repeated fields expect a list of values or dicts.
-    """
-    descriptor = msg.DESCRIPTOR
-    fields_by_name = descriptor.fields_by_name
+def _build_video_descriptor_from_cfg(cfg: dict) -> ChannelDescriptor:
+    desc = ChannelDescriptor()
+    desc.channel_id = 3
+    av = desc.av_channel
+    av.stream_type = AVStreamType.VIDEO
 
-    for key, value in data.items():
-        if key not in fields_by_name:
-            log.debug("_dict_to_proto(%s): unknown field %r — skipped", descriptor.name, key)
-            continue
+    resolution_name = str(cfg.get("video_resolution", SEMANTIC_DEFAULTS["video_resolution"]))
+    fps_name        = str(cfg.get("video_fps",        SEMANTIC_DEFAULTS["video_fps"]))
 
-        field_desc = fields_by_name[key]
-        is_repeated = field_desc.label == field_desc.LABEL_REPEATED
-
-        if is_repeated:
-            proto_list = getattr(msg, key)
-            for item in (value if isinstance(value, list) else []):
-                if field_desc.message_type is not None:
-                    entry = proto_list.add()
-                    if isinstance(item, dict):
-                        _dict_to_proto(entry, item)
-                else:
-                    proto_list.append(_coerce_scalar(field_desc, item))
-            continue
-
-        if field_desc.message_type is not None:
-            if isinstance(value, dict) and value:
-                _dict_to_proto(getattr(msg, key), value)
-            continue
-
-        try:
-            setattr(msg, key, _coerce_scalar(field_desc, value))
-        except (AttributeError, ValueError, TypeError) as exc:
-            log.warning("_dict_to_proto(%s): cannot set %r=%r — %s", descriptor.name, key, value, exc)
+    cfg_pb = av.video_configs.add()
+    cfg_pb.video_resolution = VideoResolution.Enum.Value(resolution_name)
+    cfg_pb.video_fps        = VideoFPS.Enum.Value(fps_name)
+    cfg_pb.margin_width     = 0
+    cfg_pb.margin_height    = 0
+    cfg_pb.dpi              = int(cfg.get("video_dpi", SEMANTIC_DEFAULTS["video_dpi"]))
+    cfg_pb.codec            = MediaCodecType.MEDIA_CODEC_VIDEO_H264_BP
+    return desc
 
 
-def _coerce_scalar(field_desc: Any, value: Any) -> Any:
-    """Coerce *value* to the correct Python type for *field_desc*.
+def _build_media_audio_descriptor_from_cfg(cfg: dict) -> ChannelDescriptor:
+    desc = ChannelDescriptor()
+    desc.channel_id = 4
+    av = desc.av_channel
+    av.stream_type = AVStreamType.AUDIO
+    av.audio_type  = AudioType.MEDIA
+    ac = av.audio_configs.add()
+    ac.sample_rate   = int(cfg.get("audio_media_sample_rate",   SEMANTIC_DEFAULTS["audio_media_sample_rate"]))
+    ac.bit_depth     = 16
+    ac.channel_count = int(cfg.get("audio_media_channel_count", SEMANTIC_DEFAULTS["audio_media_channel_count"]))
+    return desc
 
-    Enum fields accept either an integer or a string name.
-    """
-    from google.protobuf import descriptor as _descriptor
 
-    if field_desc.type == _descriptor.FieldDescriptor.TYPE_ENUM:
-        if isinstance(value, str):
-            return field_desc.enum_type.values_by_name[value].number
-        return int(value)
+def _build_speech_audio_descriptor_from_cfg(cfg: dict) -> ChannelDescriptor:
+    desc = ChannelDescriptor()
+    desc.channel_id = 5
+    av = desc.av_channel
+    av.stream_type = AVStreamType.AUDIO
+    av.audio_type  = AudioType.SPEECH
+    ac = av.audio_configs.add()
+    ac.sample_rate   = int(cfg.get("audio_speech_sample_rate", SEMANTIC_DEFAULTS["audio_speech_sample_rate"]))
+    ac.bit_depth     = 16
+    ac.channel_count = 1
+    return desc
 
-    if field_desc.type == _descriptor.FieldDescriptor.TYPE_BOOL:
-        if isinstance(value, str):
-            return value.lower() in {"true", "1", "yes", "on"}
-        return bool(value)
 
-    if field_desc.type in {
-        _descriptor.FieldDescriptor.TYPE_INT32,
-        _descriptor.FieldDescriptor.TYPE_INT64,
-        _descriptor.FieldDescriptor.TYPE_UINT32,
-        _descriptor.FieldDescriptor.TYPE_UINT64,
-        _descriptor.FieldDescriptor.TYPE_FIXED32,
-        _descriptor.FieldDescriptor.TYPE_FIXED64,
-        _descriptor.FieldDescriptor.TYPE_SFIXED32,
-        _descriptor.FieldDescriptor.TYPE_SFIXED64,
-        _descriptor.FieldDescriptor.TYPE_SINT32,
-        _descriptor.FieldDescriptor.TYPE_SINT64,
-    }:
-        return int(value)
+def _build_system_audio_descriptor_from_cfg(cfg: dict) -> ChannelDescriptor:
+    desc = ChannelDescriptor()
+    desc.channel_id = 6
+    av = desc.av_channel
+    av.stream_type = AVStreamType.AUDIO
+    av.audio_type  = AudioType.SYSTEM
+    ac = av.audio_configs.add()
+    ac.sample_rate   = int(cfg.get("audio_system_sample_rate", SEMANTIC_DEFAULTS["audio_system_sample_rate"]))
+    ac.bit_depth     = 16
+    ac.channel_count = 1
+    return desc
 
-    if field_desc.type in {
-        _descriptor.FieldDescriptor.TYPE_FLOAT,
-        _descriptor.FieldDescriptor.TYPE_DOUBLE,
-    }:
-        return float(value)
 
-    return str(value)  # STRING / BYTES fallback
+def _build_input_descriptor_from_cfg(cfg: dict) -> ChannelDescriptor:
+    desc = ChannelDescriptor()
+    desc.channel_id = 1
+    inp = desc.input_channel
+    ts = inp.touch_screen_configs.add()
+    ts.width  = int(cfg.get("touch_width",  SEMANTIC_DEFAULTS["touch_width"]))
+    ts.height = int(cfg.get("touch_height", SEMANTIC_DEFAULTS["touch_height"]))
+    for kc in [3, 4, 84, 85, 86, 87, 88, 126, 127, 219, 231]:
+        inp.supported_keycodes.append(kc)
+    return desc
+
+
+def _build_navigation_descriptor_from_cfg(cfg: dict) -> ChannelDescriptor:
+    desc = ChannelDescriptor()
+    desc.channel_id = 9
+    nav = desc.navigation_channel
+    nav.minimum_interval_ms             = int(cfg.get("nav_min_interval_ms", SEMANTIC_DEFAULTS["nav_min_interval_ms"]))
+    nav.type                            = NavigationType.TURN_BY_TURN
+    nav.image_options.width             = int(cfg.get("nav_image_width",     SEMANTIC_DEFAULTS["nav_image_width"]))
+    nav.image_options.height            = int(cfg.get("nav_image_height",    SEMANTIC_DEFAULTS["nav_image_height"]))
+    nav.image_options.colour_depth_bits = 32
+    return desc
+
+
+# ---------------------------------------------------------------------------
+# Shared channel descriptor builders (no config params — reused by both APIs)
+# ---------------------------------------------------------------------------
+
+def _build_sensor_descriptor() -> ChannelDescriptor:
+    desc = ChannelDescriptor()
+    desc.channel_id = 2
+    sc = desc.sensor_channel
+    for st in [SensorType.NIGHT_DATA, SensorType.DRIVING_STATUS, SensorType.PARKING_BRAKE]:
+        sc.sensors.add().type = st
+    return desc
+
+
+def _build_bluetooth_descriptor(bt_mac: str) -> ChannelDescriptor:
+    desc = ChannelDescriptor()
+    desc.channel_id = 8
+    bt = desc.bluetooth_channel
+    bt.adapter_address = bt_mac
+    bt.supported_pairing_methods.append(BluetoothPairingMethod.PIN)
+    return desc
+
+
+def _build_wifi_descriptor(bssid: str) -> ChannelDescriptor:
+    desc = ChannelDescriptor()
+    desc.channel_id = 14
+    wf = desc.wifi_channel
+    wf.bssid = bssid
+    return desc
+
+
+def _build_av_input_descriptor() -> ChannelDescriptor:
+    desc = ChannelDescriptor()
+    desc.channel_id = 7
+    av = desc.av_input_channel
+    av.stream_type = AVStreamType.AUDIO
+    ac = av.audio_config
+    ac.sample_rate   = 16000
+    ac.bit_depth     = 16
+    ac.channel_count = 1
+    return desc
+
+
+def _build_media_status_descriptor() -> ChannelDescriptor:
+    desc = ChannelDescriptor()
+    desc.channel_id = 10
+    desc.media_info_channel.SetInParent()
+    return desc
+
+
+def _build_phone_status_descriptor() -> ChannelDescriptor:
+    desc = ChannelDescriptor()
+    desc.channel_id = 11
+    desc.phone_status_channel.SetInParent()
+    return desc
 
 
 # ---------------------------------------------------------------------------
@@ -440,44 +545,6 @@ def _build_input_descriptor(cfg: dict) -> ChannelDescriptor:
     return desc
 
 
-def _build_sensor_descriptor() -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 2
-    sc = desc.sensor_channel
-    for st in [SensorType.NIGHT_DATA, SensorType.DRIVING_STATUS, SensorType.PARKING_BRAKE]:
-        sc.sensors.add().type = st
-    return desc
-
-
-def _build_bluetooth_descriptor(bt_mac: str) -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 8
-    bt = desc.bluetooth_channel
-    bt.adapter_address = bt_mac
-    bt.supported_pairing_methods.append(BluetoothPairingMethod.PIN)
-    return desc
-
-
-def _build_wifi_descriptor(bssid: str) -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 14
-    wf = desc.wifi_channel
-    wf.bssid = bssid
-    return desc
-
-
-def _build_av_input_descriptor() -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 7
-    av = desc.av_input_channel
-    av.stream_type = AVStreamType.AUDIO
-    ac = av.audio_config
-    ac.sample_rate   = 16000
-    ac.bit_depth     = 16
-    ac.channel_count = 1
-    return desc
-
-
 def _build_navigation_descriptor(cfg: dict) -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 9
@@ -487,18 +554,4 @@ def _build_navigation_descriptor(cfg: dict) -> ChannelDescriptor:
     nav.image_options.width             = int(cfg.get("nav.image.width",  DEFAULTS["nav.image.width"]))
     nav.image_options.height            = int(cfg.get("nav.image.height", DEFAULTS["nav.image.height"]))
     nav.image_options.colour_depth_bits = 32
-    return desc
-
-
-def _build_media_status_descriptor() -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 10
-    desc.media_info_channel.SetInParent()
-    return desc
-
-
-def _build_phone_status_descriptor() -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 11
-    desc.phone_status_channel.SetInParent()
     return desc
