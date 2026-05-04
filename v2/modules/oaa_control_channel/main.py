@@ -41,19 +41,22 @@ Restart flow (config change):
   3. on_aa_session_restarting() creates a fresh ControlChannelHandshake (with updated _cfg)
      and immediately sends VERSION_REQUEST on the existing TCP connection
 
-Config flow:
-  1. on_system_start() calls cfg.get(defaults=_CFG_DEFAULTS) via ConfigClient.
-     NOTE: schema is intentionally NOT passed here because _SCHEMA is proto-derived
-     (keys: head_unit_name, channels, ...) while _CFG_DEFAULTS uses the legacy flat
-     keys (hu.name, video.fps, ...). Passing both would cause config_manager to
-     register a schema whose keys never match the persisted yaml.
-     TODO: migrate to build_from_schema_cfg() + proto-native config keys so that
-     _SCHEMA can be passed and config_ui shows typed widgets for this module.
-  2. ConfigClient receives config.response and calls _on_config_loaded(config)
-  3. system.ready is published only inside _on_config_loaded, after _cfg is populated
-  4. build_service_discovery_response() reads from _cfg at handshake time
-  5. On config.changed: ConfigClient calls _on_config_changed(key, value),
-     _cfg is updated and aa.session.restart triggers graceful tcp_server shutdown.
+Config flow (proto-native):
+  1. on_system_start() calls cfg.get(schema=_SCHEMA) via ConfigClient.
+     _SCHEMA is derived from ServiceDiscoveryResponse.DESCRIPTOR — keys are proto
+     field names (head_unit_name, channels, ...).  schema=_SCHEMA is passed so
+     config_manager stores the typed schema and config_ui renders typed widgets.
+     No flat defaults dict is passed: SEMANTIC_DEFAULTS are already baked into
+     _SCHEMA via _apply_defaults_to_schema() at import time in service_discovery.py.
+  2. ConfigClient delivers config.response → _on_config_loaded(config).
+     Only top-level scalar keys present in _cfg are updated from the response;
+     nested/structural keys (channels, etc.) are left to proto zero-values since
+     they are never persisted via config.set.
+  3. system.ready is published only after _on_config_loaded populates _cfg.
+  4. _cfg is a nested dict (proto field names) passed directly to
+     build_from_schema_cfg() inside ControlChannelHandshake at handshake time.
+  5. On config.changed: key is a top-level proto scalar (e.g. head_unit_name);
+     _cfg[key] is updated in-place and aa.session.restart triggers graceful restart.
 """
 
 import sys
@@ -74,7 +77,7 @@ from shared.logger import get_logger                 # noqa: E402
 from shared.config_client import ConfigClient        # noqa: E402
 from oaa_control_channel.frame_codec import encode_control_frame  # noqa: E402
 from oaa_control_channel.handshake import ControlChannelHandshake  # noqa: E402
-from oaa_control_channel.service_discovery import DEFAULTS as _CFG_DEFAULTS  # noqa: E402
+from oaa_control_channel.service_discovery import SEMANTIC_DEFAULTS, _SCHEMA  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -92,7 +95,12 @@ cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 # ---------------------------------------------------------------------------
 
 _handshake: ControlChannelHandshake | None = None
-_cfg: dict = dict(_CFG_DEFAULTS)  # in-memory config; populated by _on_config_loaded at boot
+
+# _cfg is a nested dict with proto field names as keys — mirrors SEMANTIC_DEFAULTS.
+# Populated by _on_config_loaded at boot; top-level scalar keys are updated by
+# _on_config_changed at runtime.  Passed directly to build_from_schema_cfg() via
+# ControlChannelHandshake._cfg at SERVICE_DISCOVERY_REQUEST time.
+_cfg: dict = dict(SEMANTIC_DEFAULTS)
 
 
 def _make_handshake() -> ControlChannelHandshake:
@@ -125,8 +133,10 @@ def on_system_start(topic: str, payload: dict) -> None:
     if payload.get("priority") != PRIORITY:
         return
     log.info("system.start priority=%d — requesting config from config_manager", PRIORITY)
-    # schema intentionally omitted — see Config flow in module docstring
-    cfg.get(defaults=_CFG_DEFAULTS)
+    # Pass schema=_SCHEMA so config_manager stores the typed schema and config_ui
+    # renders typed widgets (QSpinBox, QComboBox, etc.) for each proto field.
+    # No defaults dict: SEMANTIC_DEFAULTS are baked into _SCHEMA at import time.
+    cfg.get(schema=_SCHEMA)
     # system.ready is published in _on_config_loaded once _cfg is populated
 
 
@@ -140,25 +150,36 @@ def on_system_stop(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _on_config_loaded(config: dict) -> None:
-    """Called by ConfigClient when config.response is received for this module."""
+    """Called by ConfigClient when config.response is received for this module.
+
+    Merges only top-level scalar keys from the persisted config into _cfg.
+    Nested/structural keys (channels, etc.) are never persisted via config.set
+    and must not overwrite the SEMANTIC_DEFAULTS structural skeleton.
+    """
     global _cfg
     if config:
-        _cfg.update(config)
-        log.info("Config loaded: %d keys", len(_cfg))
+        scalar_keys = {k for k, v in _cfg.items() if not isinstance(v, (dict, list))}
+        merged = {k: v for k, v in config.items() if k in scalar_keys}
+        _cfg.update(merged)
+        log.info("Config loaded: %d scalar key(s) merged from config_manager", len(merged))
     else:
-        log.warning("config.response returned empty config — using built-in defaults")
+        log.warning("config.response returned empty config — using SEMANTIC_DEFAULTS")
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info("system.ready published — oaa_control_channel online")
 
 
 def _on_config_changed(key: str, value) -> None:
-    """Called by ConfigClient when a config value for this module changes at runtime.
+    """Called by ConfigClient when a top-level scalar config key changes at runtime.
 
-    Update the in-memory dict and trigger a graceful session restart so the
-    next handshake uses the new values.  tcp_server drives the shutdown/restart
-    sequence and eventually publishes aa.session.restarting.
+    Only top-level scalar keys are persisted via config.set — nested/structural
+    fields (channels, repeated fields) cannot be changed via the bus API.
+    Update the in-memory dict and trigger a graceful session restart.
     """
     global _cfg, _handshake
+
+    if key not in _cfg or isinstance(_cfg.get(key), (dict, list)):
+        log.warning("_on_config_changed: key %r is not a settable scalar — ignoring", key)
+        return
 
     _cfg[key] = value
     log.info("Config updated: %s = %r — triggering session restart", key, value)
