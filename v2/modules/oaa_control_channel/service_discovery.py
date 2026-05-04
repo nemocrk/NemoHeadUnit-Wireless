@@ -63,6 +63,7 @@ for _p in (_REPO_ROOT, _PROTO_ROOT):
 from shared.proto_utils import encode_proto, schema_from_proto_message, dict_to_proto  # noqa: E402
 from shared.config_schema import (           # noqa: E402
     AnyFieldSchema,
+    ConfigFieldList,
     ConfigFieldSchema,
 )
 
@@ -264,11 +265,15 @@ def _apply_defaults_to_schema(
     schema: dict[str, AnyFieldSchema],
     overrides: dict[str, Any],
 ) -> None:
-    """Apply semantic default overrides to scalar leaves in *schema* in-place.
+    """Apply semantic default overrides to schema nodes in-place.
 
-    Only top-level scalar ConfigFieldSchema keys are overridden; nested message
-    and list defaults are left to proto zero-values / ConfigFieldList.default
-    unless explicitly included in *overrides*.
+    Handles:
+      - ConfigFieldSchema  (scalar): replaces .default with the override value.
+      - ConfigFieldList:             replaces .default with the override list,
+                                     preserving the existing .item_schema.
+
+    Other node types (ConfigFieldMessage, ConfigFieldOneof) are skipped—
+    their structure comes from the proto descriptor, not from overrides.
     """
     for key, value in overrides.items():
         node = schema.get(key)
@@ -280,10 +285,16 @@ def _apply_defaults_to_schema(
                 max=node.max,
                 choices=node.choices,
             )
+        elif isinstance(node, ConfigFieldList):
+            schema[key] = ConfigFieldList(
+                item_schema=node.item_schema,
+                default=value if isinstance(value, list) else [],
+            )
         else:
             log.debug(
-                "_apply_defaults_to_schema: key %r is not a scalar in schema — skipped",
+                "_apply_defaults_to_schema: key %r — unsupported node type %s, skipped",
                 key,
+                type(node).__name__ if node is not None else "<missing>",
             )
 
 
