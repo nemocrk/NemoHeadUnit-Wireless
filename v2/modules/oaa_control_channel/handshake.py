@@ -113,6 +113,7 @@ class ControlChannelHandshake:
     Args:
         send_fn        : callable(message_id: int, proto_body: bytes, encrypted: bool)
         publish_fn     : callable(topic: str, payload: dict)  — bus.publish
+        cfg            : config dict pre-loaded from config_manager (keys as in service_discovery.DEFAULTS)
         bt_mac         : local BT MAC address (for ServiceDiscovery)
         wifi_bssid     : local WiFi BSSID
         on_active_cb   : called when session becomes ACTIVE
@@ -123,6 +124,7 @@ class ControlChannelHandshake:
         self,
         send_fn: Callable[[int, bytes, bool], None],
         publish_fn: Callable[[str, dict], None],
+        cfg: dict | None = None,
         bt_mac: str = "00:00:00:00:00:00",
         wifi_bssid: str = "",
         on_active_cb: Callable[[], None] | None = None,
@@ -130,6 +132,7 @@ class ControlChannelHandshake:
     ):
         self._send         = send_fn
         self._publish      = publish_fn
+        self._cfg          = cfg if cfg is not None else {}
         self._bt_mac       = bt_mac
         self._wifi_bssid   = wifi_bssid
         self._on_active    = on_active_cb
@@ -241,6 +244,7 @@ class ControlChannelHandshake:
             log.info("SERVICE_DISCOVERY_REQUEST from '%s'", getattr(req, 'phone_name', '?'))
 
         sdr_bytes = build_service_discovery_response(
+            cfg=self._cfg,
             bt_mac=self._bt_mac,
             wifi_bssid=self._wifi_bssid,
         )
