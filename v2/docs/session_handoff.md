@@ -4,6 +4,64 @@ Registro delle sessioni di sviluppo, modifiche apportate e prossimi step.
 
 ---
 
+## 2026-05-04 — Migrazione cfg.get(schema=): tutti i moduli allineati al nuovo pattern
+
+**What changed:**
+
+- `modules/_template/main.py` — rimosso `_DEFAULTS`; `_config` ora seeded da `{k: v.default for k, v in _SCHEMA.items()}`; `cfg.get(schema=_SCHEMA)` (rimosso `defaults=`); `_on_config_loaded` e `_on_config_changed` usano `_SCHEMA` come riferimento; aggiunto guard `isinstance(v, (dict, list))` in `_on_config_changed`; docstring step 3/4 aggiornata per riflettere che `_SCHEMA` è l'unica fonte di verità (default + tipo + vincoli).
+- `modules/bluetooth/main.py` — rimosso `_DEFAULTS`; `_config` seeded da schema; `cfg.get(schema=_SCHEMA)` in `on_system_start`; merge in `_on_config_loaded` usa `_SCHEMA.items()` come base; aggiunto guard strutturale in `_on_config_changed`.
+- `modules/hostapd_helper/main.py` — identiche modifiche a `bluetooth`; rimosso `_DEFAULTS`; stesso pattern di merge e guard.
+- `modules/log_viewer/main.py` — **era l'unico modulo senza `_SCHEMA`**: aggiunto import `field_int` da `shared.config_schema`; aggiunto `_SCHEMA = {"max_lines": field_int(default=500, min=50, max=10000)}`; rimosso `_DEFAULTS`; `_config` seeded da schema; `cfg.get(schema=_SCHEMA)` in `on_system_start`; entrambi i callback allineati al nuovo pattern.
+
+**Why:**
+Tutti i moduli che usavano `cfg.get(defaults=_DEFAULTS, schema=_SCHEMA)` mantenevano una doppia sorgente di verità: `_DEFAULTS` per il seeding di primo boot e `_SCHEMA` per la validazione. Il `config_manager` può derivare i default direttamente da `field.default` dentro `_SCHEMA`, rendendo `_DEFAULTS` ridondante e fonte potenziale di disallineamento. Con questo refactor, `_SCHEMA` è l'unica fonte di verità per default, tipo e vincoli.
+
+**Pattern uniforme ora applicato a tutti i moduli con config:**
+```python
+_SCHEMA = {
+    "my_key": field_int(default=10, min=1, max=300),
+    ...
+}
+_config: dict = {k: v.default for k, v in _SCHEMA.items()}  # seed in-RAM
+
+def _on_config_loaded(config: dict) -> None:
+    merged = {k: v.default for k, v in _SCHEMA.items()}
+    merged.update({k: v for k, v in config.items()
+                   if k in _SCHEMA and not isinstance(v, (dict, list))})
+    _config = merged
+
+def _on_config_changed(key: str, value) -> None:
+    if key not in _SCHEMA or isinstance(value, (dict, list)):
+        return  # ignora chiavi sconosciute e valori strutturali
+    _config[key] = value
+
+# in on_system_start:
+cfg.get(schema=_SCHEMA)  # defaults= non più necessario
+```
+
+**Commit:**
+
+| SHA | Modulo | Descrizione |
+|---|---|---|
+| [`04b3527`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/04b35272a1d23e6a9e04e2609c7aa1c16b81666b) | `_template` | Rimuove `_DEFAULTS`; nuovo pattern schema-first; docstring aggiornata |
+| [`2fcfcc2`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/2fcfcc293f447302936ebb7fc88eb3b58230fd5c) | `bluetooth` | Rimuove `_DEFAULTS`; `cfg.get(schema=)` only; guard strutturale |
+| [`84d592a`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/84d592a49d43955abaefc368fd7892587568d5b0) | `hostapd_helper` | Idem; rimuove `_DEFAULTS` |
+| [`5cef2fe`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/5cef2fecd65c73bede4fc59f221d0e3deb826b0e) | `log_viewer` | Aggiunge `_SCHEMA` ex-novo; allinea al pattern |
+
+**Scope della migrazione:**
+Moduli già migrati in sessioni precedenti: `oaa_control_channel`, `main.py` (top-level).
+Moduli senza config (nessun `cfg`): non coinvolti.
+Moduli con config, ora tutti allineati: `_template`, `bluetooth`, `hostapd_helper`, `log_viewer`.
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Scrivere test unitari per `_on_config_loaded` con payload misto (scalari + strutturali) — verifica che solo i scalari vengano mergiati
+2. Verificare che `config_manager` legga correttamente `field.default` da `_SCHEMA` quando riceve `cfg.get(schema=)` senza `defaults=` (test su `config_manager/main.py`)
+3. Aggiornare `docs/project-vision.md` o la wiki con il pattern canonico `schema-first` come standard architetturale ufficiale
+
+---
+
 ## 2026-05-04 — config_schema: _SCHEMA per bluetooth e hostapd_helper + piano oaa_control_channel
 
 **What changed:**
@@ -159,7 +217,7 @@ VERSION_REQUEST → phone  (handshake riparte sulla stessa TCP conn)
 **Nuovi messaggi bus:**
 
 | Messaggio | Da | A | Payload |
-|---|---|---|---|
+|---|---|---|
 | `aa.session.restart` | `oaa_control_channel` | `tcp_server` | `{}` |
 | `aa.session.restarting` | `tcp_server` | `oaa_control_channel` | `{}` |
 
@@ -185,7 +243,7 @@ Tutte le impostazioni utente erano hardcoded in `service_discovery.py`. Ora sono
 **Nuovi messaggi bus:**
 
 | Messaggio | Da | A | Payload |
-|---|---|---|---|
+|---|---|---|
 | `config.get` | `oaa_control_channel` | `config_manager` | `{module, requester, defaults}` |
 | `config.response` | `config_manager` | `oaa_control_channel` | `{module, config, requester}` |
 | `config.changed` | `config_manager` | `oaa_control_channel` | `{module, key, value}` |
@@ -231,7 +289,7 @@ In precedenza `AACryptor` viveva in `oaa_control_channel`, che gestiva autonomam
 **Nuovi messaggi bus introdotti:**
 
 | Messaggio | Da | A | Payload |
-|---|---|---|---|
+|---|---|---|
 | `aa.handshake.start_tls` | `oaa_control_channel` | `tcp_server` | `{}` |
 | `aa.handshake.feed_input` | `oaa_control_channel` | `tcp_server` | `{payload_hex}` |
 | `tcp.server.tls_handshake` | `tcp_server` | `oaa_control_channel` | `{outgoing_hex}` |
