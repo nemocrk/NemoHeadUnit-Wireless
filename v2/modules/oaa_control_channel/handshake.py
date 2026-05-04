@@ -45,7 +45,6 @@ Channel manager integration:
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 import struct
 import sys
@@ -62,22 +61,23 @@ for _p in (_REPO_ROOT, _PROTO_ROOT):
         sys.path.insert(0, str(_p))
 
 
-from shared.proto_utils import decode_proto, encode_proto
+from shared.logger import get_logger                                                    # noqa: E402
+from shared.proto_utils import decode_proto, encode_proto                               # noqa: E402
 
 # Control proto imports
-from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
-from v2.protos.oaa.control.AuthCompleteIndicationMessage_pb2 import AuthCompleteIndication
-from v2.protos.oaa.control.ServiceDiscoveryRequestMessage_pb2 import ServiceDiscoveryRequest
-from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
-from v2.protos.oaa.control.ChannelOpenRequestMessage_pb2 import ChannelOpenRequest
-from v2.protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse
-from v2.protos.oaa.control.PingRequestMessage_pb2 import PingRequest
-from v2.protos.oaa.control.PingResponseMessage_pb2 import PingResponse
+from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage             # noqa: E402
+from v2.protos.oaa.control.AuthCompleteIndicationMessage_pb2 import AuthCompleteIndication  # noqa: E402
+from v2.protos.oaa.control.ServiceDiscoveryRequestMessage_pb2 import ServiceDiscoveryRequest  # noqa: E402
+from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse  # noqa: E402
+from v2.protos.oaa.control.ChannelOpenRequestMessage_pb2 import ChannelOpenRequest     # noqa: E402
+from v2.protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
+from v2.protos.oaa.control.PingRequestMessage_pb2 import PingRequest                   # noqa: E402
+from v2.protos.oaa.control.PingResponseMessage_pb2 import PingResponse                 # noqa: E402
 
-from oaa_control_channel.frame_codec import encode_control_frame, decode_control_frame
-from oaa_control_channel.service_discovery import build_from_schema_cfg, channels_from_sdr_bytes
+from oaa_control_channel.frame_codec import encode_control_frame, decode_control_frame  # noqa: E402
+from oaa_control_channel.service_discovery import build_from_schema_cfg, channels_from_sdr_bytes  # noqa: E402
 
-log = logging.getLogger("oaa_control_channel.handshake")
+log = get_logger("oaa_control_channel.handshake")
 
 # ---------------------------------------------------------------------------
 # Control message IDs (mirrors ControlMessageIds proto enum)
