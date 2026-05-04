@@ -6,6 +6,7 @@ Public API
 decode_proto(proto_class, raw_bytes) → Message | None
 encode_proto(msg) → bytes
 proto_to_dict(msg) → dict
+dict_to_proto(msg, data) → None
 schema_from_proto_message(descriptor) → dict[str, AnyFieldSchema]
 
 schema_from_proto_message
@@ -27,12 +28,20 @@ Mapping rules:
 
 Cyclic references (self-referential messages) are broken by tracking
 visited descriptor full_names and returning an empty ConfigFieldMessage.
+
+dict_to_proto
+-------------
+Recursively populates a proto message from a nested plain dict.
+Keys must match proto field names exactly.
+Enum values are accepted as string names (e.g. "VIDEO_1280x720") and
+resolved via the field's enum_type descriptor.
+Repeated fields expect a list of values or dicts.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Type, TypeVar
+from typing import Any, Type, TypeVar
 
 from google.protobuf import descriptor as _descriptor
 from google.protobuf.message import Message, DecodeError
@@ -121,6 +130,52 @@ def proto_to_dict(msg: Message) -> dict:
     return MessageToDict(msg, preserving_proto_field_name=True, including_default_value_fields=False)
 
 
+def dict_to_proto(msg: Any, data: dict) -> None:
+    """Recursively populate a proto message from a nested plain dict.
+
+    Keys in *data* must match proto field names exactly.
+    Enum values are accepted as string names (e.g. "VIDEO_1280x720") and
+    resolved via the field's enum_type descriptor.
+    Repeated fields expect a list of values or dicts.
+
+    Unknown keys are silently skipped (logged at DEBUG level).
+    """
+    descriptor = msg.DESCRIPTOR
+    fields_by_name = descriptor.fields_by_name
+
+    for key, value in data.items():
+        if key not in fields_by_name:
+            log.debug("dict_to_proto(%s): unknown field %r — skipped", descriptor.name, key)
+            continue
+
+        field_desc = fields_by_name[key]
+        is_repeated = field_desc.label == field_desc.LABEL_REPEATED
+
+        if is_repeated:
+            proto_list = getattr(msg, key)
+            for item in (value if isinstance(value, list) else []):
+                if field_desc.message_type is not None:
+                    entry = proto_list.add()
+                    if isinstance(item, dict):
+                        dict_to_proto(entry, item)
+                else:
+                    proto_list.append(_coerce_scalar(field_desc, item))
+            continue
+
+        if field_desc.message_type is not None:
+            if isinstance(value, dict) and value:
+                dict_to_proto(getattr(msg, key), value)
+            continue
+
+        try:
+            setattr(msg, key, _coerce_scalar(field_desc, value))
+        except (AttributeError, ValueError, TypeError) as exc:
+            log.warning(
+                "dict_to_proto(%s): cannot set %r=%r — %s",
+                descriptor.name, key, value, exc,
+            )
+
+
 def schema_from_proto_message(
     descriptor: _descriptor.Descriptor,
     visited: set[str] | None = None,
@@ -159,14 +214,13 @@ def schema_from_proto_message(
     visited = visited | {descriptor.full_name}  # immutable copy per recursion branch
 
     # --- Collect oneof group names so we can group their fields ---
-    # oneof_decl gives us the oneof objects; we map each field to its oneof name.
     oneof_names: dict[str, str] = {}  # field_name → oneof_group_name
     for oneof in descriptor.oneofs:
         for f in oneof.fields:
             oneof_names[f.name] = oneof.name
 
     schema: dict[str, AnyFieldSchema] = {}
-    processed_oneofs: set[str] = set()  # oneof group names already emitted
+    processed_oneofs: set[str] = set()
 
     for field_desc in descriptor.fields:
         fname = field_desc.name
@@ -176,10 +230,9 @@ def schema_from_proto_message(
         if fname in oneof_names:
             group_name = oneof_names[fname]
             if group_name in processed_oneofs:
-                continue  # already emitted this oneof group
+                continue
             processed_oneofs.add(group_name)
 
-            # Collect all branches in this oneof group
             oneof_obj = descriptor.oneofs_by_name[group_name]
             branches: dict[str, AnyFieldSchema] = {}
             for branch_field in oneof_obj.fields:
@@ -187,10 +240,9 @@ def schema_from_proto_message(
                     branch_fields = schema_from_proto_message(branch_field.message_type, visited)
                     branches[branch_field.name] = ConfigFieldMessage(
                         fields=branch_fields,
-                        optional=True,  # oneof branches are always optional by definition
+                        optional=True,
                     )
                 else:
-                    # Scalar oneof branch (rare but valid)
                     branches[branch_field.name] = _scalar_field(branch_field)
 
             first_branch = next(iter(branches))
@@ -213,7 +265,6 @@ def schema_from_proto_message(
         # --- nested message (non-repeated, non-oneof) ---
         if field_desc.message_type is not None:
             nested_fields = schema_from_proto_message(field_desc.message_type, visited)
-            # Non-repeated standalone messages are optional by default (checkbox in UI)
             schema[fname] = ConfigFieldMessage(fields=nested_fields, optional=True)
             continue
 
@@ -238,7 +289,6 @@ def _scalar_field(field_desc: _descriptor.FieldDescriptor) -> AnyFieldSchema:
         return field_string(default="")
 
     if t in (_descriptor.FieldDescriptor.TYPE_BYTES,):
-        # Bytes represented as empty hex string
         return field_string(default="")
 
     if t == _descriptor.FieldDescriptor.TYPE_ENUM:
@@ -255,10 +305,33 @@ def _scalar_field(field_desc: _descriptor.FieldDescriptor) -> AnyFieldSchema:
     if t in _FLOAT_TYPES:
         return field_float(default=0.0)
 
-    # Fallback: unknown type treated as string
     log.warning(
         "_scalar_field: unrecognised proto field type %d for field %r — falling back to string",
         t,
         field_desc.name,
     )
     return field_string(default="")
+
+
+def _coerce_scalar(field_desc: Any, value: Any) -> Any:
+    """Coerce *value* to the correct Python type for *field_desc*.
+
+    Enum fields accept either an integer or a string name.
+    """
+    if field_desc.type == _descriptor.FieldDescriptor.TYPE_ENUM:
+        if isinstance(value, str):
+            return field_desc.enum_type.values_by_name[value].number
+        return int(value)
+
+    if field_desc.type == _descriptor.FieldDescriptor.TYPE_BOOL:
+        if isinstance(value, str):
+            return value.lower() in {"true", "1", "yes", "on"}
+        return bool(value)
+
+    if field_desc.type in _INT_TYPES:
+        return int(value)
+
+    if field_desc.type in _FLOAT_TYPES:
+        return float(value)
+
+    return str(value)  # STRING / BYTES fallback
