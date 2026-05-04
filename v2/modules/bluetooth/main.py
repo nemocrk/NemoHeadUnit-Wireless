@@ -127,16 +127,35 @@ def _stop_glib_mainloop() -> None:
 # ---------------------------------------------------------------------------
 
 def _on_config_loaded(config: dict) -> None:
-    global _config
+    """Called by ConfigClient when config.response is received.
+
+    Applies the loaded config to the adapter, registers the pairing agent,
+    and only then publishes system.ready so the rest of the system knows
+    bluetooth is fully initialised with correct settings.
+    """
+    global _config, _pairing
     if not config:
         log.info("No persisted config found — defaults seeded by config_manager.")
-        _apply_config()
-        return
-    merged = dict(_DEFAULTS)
-    merged.update({k: v for k, v in config.items() if k in _DEFAULTS})
-    _config = merged
-    log.info(f"Config loaded: {_config}")
+    else:
+        merged = dict(_DEFAULTS)
+        merged.update({k: v for k, v in config.items() if k in _DEFAULTS})
+        _config = merged
+        log.info(f"Config loaded: {_config}")
+
     _apply_config()
+
+    # Register the pairing agent only after adapter is configured
+    if _pairing is None and _adapter is not None:
+        _pairing = PairingAgent(
+            adapter=_adapter,
+            on_pin_requested=_on_pin_requested,
+            on_pairing_completed=_on_pairing_completed,
+            on_pairing_failed=_on_pairing_failed,
+        )
+        _pairing.register()
+
+    log.info("Bluetooth subsystem ready")
+    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
 def _on_config_changed(key: str, value) -> None:
@@ -171,7 +190,7 @@ def on_system_readytostart() -> None:
 
 
 def on_system_start(topic: str, payload: dict) -> None:
-    global _adapter, _pairing
+    global _adapter
 
     if payload.get("priority") != PRIORITY:
         return
@@ -193,18 +212,8 @@ def on_system_start(topic: str, payload: dict) -> None:
         bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
         return
 
+    # system.ready is published in _on_config_loaded once the adapter is configured
     cfg.get(defaults=_DEFAULTS, schema=_SCHEMA)
-
-    _pairing = PairingAgent(
-        adapter=_adapter,
-        on_pin_requested=_on_pin_requested,
-        on_pairing_completed=_on_pairing_completed,
-        on_pairing_failed=_on_pairing_failed,
-    )
-    _pairing.register()
-
-    log.info("Bluetooth subsystem ready")
-    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
