@@ -238,3 +238,42 @@ In precedenza `AACryptor` viveva in `oaa_control_channel`, che gestiva autonomam
 | `tcp.server.tls_handshake_completed` | `tcp_server` | `oaa_control_channel` | `{}` |
 
 **Status:** Completed
+
+---
+
+## 2026-05-04 — Schema strutturato: config_manager + oaa_control_channel + config_ui
+
+**What changed:**
+- `modules/config_manager/main.py` — import esteso con `ConfigFieldSchema`, `schema_to_dict`; `_schema_dict_for_response()` ora usa `schema_to_dict(schema)` invece del loop manuale `{k: v.to_dict()}` che rompeva su nodi strutturati; in `on_config_set()` aggiunto guard `isinstance(field_schema, ConfigFieldSchema)` prima di chiamare `validate_value()` — i nodi strutturati (Message/List/Oneof) vengono persistiti as-is con `log.debug`
+- `modules/oaa_control_channel/main.py` — import esteso con `_SCHEMA` da `service_discovery`; `on_system_start()` ora chiama `cfg.get(defaults=_CFG_DEFAULTS, schema=_SCHEMA)` invece di `cfg.get(defaults=_CFG_DEFAULTS)`; il docstring Config flow aggiornato
+- `modules/config_ui/main.py` — import esteso con `ConfigFieldSchema`; estratta nuova funzione `_schema_type_badge(field_schema)` che legge `.type` solo su `ConfigFieldSchema`, per i nodi strutturati usa `type().__name__.replace("ConfigField","").upper()` → badge `[MESSAGE]`/`[LIST]`/`[ONEOF]`; in `ModuleConfigTab.populate()` aggiunto guard `isinstance(ConfigFieldSchema)` — i nodi strutturati passano `scalar_schema=None` a `_FieldWidget` (QLineEdit fallback)
+
+**Why:**
+`config_schema` supporta ora nodi strutturati (`ConfigFieldMessage`, `ConfigFieldList`, `ConfigFieldOneof`) oltre ai tipi scalari. I tre moduli che interagiscono con lo schema avevano codice che assumeva solo `ConfigFieldSchema` scalare: `config_manager` rompeva la serializzazione della risposta, `oaa_control_channel` non passava lo schema strutturato al boot, `config_ui` avrebbe sollevato `AttributeError` sul badge `.type`.
+
+**Flusso completo ora funzionante:**
+```
+boot
+ └─ oaa_control_channel.on_system_start()
+     └─ cfg.get(defaults=_CFG_DEFAULTS, schema=_SCHEMA)
+         └─ bus.publish("config.get", {schema: schema_to_dict(_SCHEMA)})
+             └─ config_manager.on_config_get()
+                 ├─ schema_from_dict(raw_schema) → _schemas["oaa_control_channel"]
+                 └─ bus.publish("config.response", {schema: schema_to_dict(...)})
+                     └─ config_ui riceve schema proto-derivato, renderizza badge corretti
+```
+
+**Commit:**
+
+| SHA | File | Descrizione |
+|---|---|---|
+| `2515d08` | `config_manager/main.py` | `schema_to_dict()` + guard scalare in `on_config_set` |
+| `0e85e78` | `oaa_control_channel/main.py` | Passa `schema=_SCHEMA` a `cfg.get()` |
+| `a18570f` | `config_ui/main.py` | Badge + populate() sicuri su nodi strutturati |
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Scrivere test unitari per `config_manager`: `_schema_dict_for_response()` con nodi strutturati, guard scalare in `on_config_set`
+2. Scrivere test unitari per `config_ui`: `_schema_type_badge()` per tutti i tipi, `populate()` con schema misto scalare+strutturato
+3. Verificare che `ConfigClient.get(schema=_SCHEMA)` serializzi correttamente `_SCHEMA` con nodi strutturati (test su `shared/config_client.py`)
