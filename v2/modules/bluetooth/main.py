@@ -202,13 +202,13 @@ def on_system_start(topic: str, payload: dict) -> None:
         log.error("D-Bus init failed — Bluetooth unavailable")
         bus.publish("bluetooth.error", {"error": "D-Bus init failed"})
         bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
-        return
+        #return
 
     if not _adapter.register_profiles():
         log.error("Profile registration failed")
         bus.publish("bluetooth.error", {"error": "Profile registration failed"})
         bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
-        return
+        #return
 
     # system.ready is published in _on_config_loaded once the adapter is configured.
     # schema= is sufficient: config_manager derives defaults from field.default.
