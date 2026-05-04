@@ -336,3 +336,116 @@ python -c "from v2.modules.video.main import _resolve_video_channel; print('OK')
 python v2/bus_broker.py &
 python v2/modules/video/main.py
 ```
+
+---
+
+## 2026-05-04 - input module — AA input channel handler
+
+**What changed:**
+
+Creato `v2/modules/channel_modules/input/main.py` — modulo che gestisce il canale
+Input Android Auto (touch + tasti fisici), ispirato a `InputOrchestrator` e
+`InputEventHandlerLogic` di NemoHeadUnit originale.
+
+**Ruolo nel sistema:**
+
+| Aspetto | Dettaglio |
+|---|---|
+| Direzione dati | HU → telefono (invia `InputReport`) |
+| Messaggi in ingresso | `ChannelOpenRequest`, `KeyBindingRequest` |
+| Messaggi in uscita | `InputReport` (touch + key) |
+| Stato | `IDLE` → `OPEN` → `BOUND` |
+| Bus events in | `oaa.frame.*`, `input.touch`, `input.key` |
+| Keycode negotiation | accetta intersezione tra richiesti e `_DEFAULT_KEYCODES` |
+| Helper pubblici | `send_touch_down/up/move`, `send_key_down/up` |
+| Proto dependency | zero (hand-rolled: varint, fixed64, bytes field) |
+
+**Channel discovery:**
+- Stesso pattern di `video`: richiede config a `oaa_control_channel`,
+  cerca `stream_type == "INPUT"`, fallback `channel_id = 7`.
+
+**Ispirazione da NemoHeadUnit originale:**
+- `InputOrchestrator.on_key_binding_request()` → logica di negotiation keycodes
+- `InputEventHandlerLogic.send_touch()` / `send_key()` → builder `_build_input_report_touch/key()`
+- `default_supported_keycodes()` → `_DEFAULT_KEYCODES` lista identica
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Aggiungere `__init__.py` per `input/`, `audio/`, `sensor/`
+2. Creare test unitari per `InputModule` (touch report encoding, key negotiation)
+3. Aggiungere `input` all'autodiscovery in `v2/main.py`
+
+**Commit:**
+
+| File | Commit |
+|---|---|
+| `v2/modules/channel_modules/input/main.py` | (pushed questa sessione) |
+
+**Verification commands:**
+```bash
+python -c "from v2.modules.channel_modules.input.main import InputModule; print('OK')"
+```
+
+---
+
+## 2026-05-04 - sensor module — AA sensor channel handler
+
+**What changed:**
+
+Creato `v2/modules/channel_modules/sensor/main.py` — modulo che gestisce il canale
+Sensor Android Auto (DrivingStatus, NightMode, GPS), ispirato a `SensorOrchestrator`
+e `SensorEventHandlerLogic` di NemoHeadUnit originale.
+
+**Ruolo nel sistema:**
+
+| Aspetto | Dettaglio |
+|---|---|
+| Direzione dati | HU → telefono (invia `SensorEventIndication`) |
+| Messaggi in ingresso | `ChannelOpenRequest`, `SensorStartRequest` |
+| Messaggi in uscita | `ChannelOpenResponse`, `SensorStartResponse`, `SensorEventIndication` |
+| Stato | `IDLE` → `OPEN` |
+| Bus events in | `sensor.driving_status`, `sensor.night_mode`, `sensor.gps` |
+| Proto dependency | zero (hand-rolled: varint, sfixed32, bytes field) |
+
+**SensorType wire values:**
+
+| Costante | Valore | Campo SensorBatch |
+|---|---|---|
+| `SENSOR_DRIVING_STATUS` | 1 | field 1 (`DrivingStatusData`) |
+| `SENSOR_NIGHT_MODE` | 4 | field 4 (`NightModeData`) |
+| `SENSOR_LOCATION` | 6 | field 6 (`GPSData`, sfixed32 × 1e7/1e6/1e3) |
+
+**Channel discovery:**
+- Stesso pattern di `video` e `input`: richiede config a `oaa_control_channel`,
+  cerca `stream_type == "SENSOR"`, fallback `channel_id = 10`.
+
+**Comportamento immediato alla startup del sensore:**
+- `SensorStartRequest` per `DRIVING_STATUS` → invia subito `DRIVE_STATUS_UNRESTRICTED`
+- `SensorStartRequest` per `NIGHT_MODE` → invia subito `night_mode = False`
+
+**Ispirazione da NemoHeadUnit originale:**
+- `SensorOrchestrator.on_sensor_start_request()` → `_handle_sensor_start_request()` + `_build_default_sensor_batch()`
+- `SensorEventHandlerLogic` → struttura on_channel_open / on_sensor_start / on_channel_error
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Aggiungere `__init__.py` per `sensor/`, `input/`, `audio/`
+2. Creare test unitari per `SensorModule` (encoding sfixed32, default batch, GPS payload)
+3. Aggiungere `sensor` all'autodiscovery in `v2/main.py`
+
+**Commit:**
+
+| File | Commit |
+|---|---|
+| `v2/modules/channel_modules/sensor/main.py` | [9ed34d0](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/9ed34d08891e13f3070ff1de808bff4f842ee824) |
+
+**Verification commands:**
+```bash
+python -c "from v2.modules.channel_modules.sensor.main import SensorModule; print('OK')"
+
+# Standalone
+python v2/bus_broker.py &
+python v2/modules/channel_modules/sensor/main.py
+```
