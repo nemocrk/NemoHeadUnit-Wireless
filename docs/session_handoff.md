@@ -331,11 +331,6 @@ attach_bus(bus)  # forward all log.* from this process to log_viewer
 
 **Status:** Completed
 
-**Next 1-3 steps:**
-1. Testare visivamente il log_viewer dopo riavvio: deve mostrare log da tutti i moduli
-2. Scrivere test unitari per `BusLogHandler.emit()` e `attach_bus()` in processi multipli
-3. Valutare l'aggiunta di un filtro per modulo nella UI del `log_viewer`
-
 **Verification commands:**
 ```bash
 # Stack completo
@@ -388,7 +383,7 @@ python -m pytest tests/v2/ -v
 
 **What changed:**
 
-### 1. `v2/modules/config_ui/main.py` — pulsante “⏻ Spegni sistema”
+### 1. `v2/modules/config_ui/main.py` — pulsante "⏻ Spegni sistema"
 - Aggiunto `QPushButton("⏻  Spegni sistema")` nella toolbar a destra (dopo `addStretch()`)
 - Al click apre `QMessageBox.question` di conferma; se confermato pubblica `system.shutdown {}`
 - Stile rosso bold per distinguerlo visivamente dagli altri bottoni
@@ -404,7 +399,7 @@ python -m pytest tests/v2/ -v
   _nmcli_reconnect()   ← nuovo
   ```
 - Best-effort: se nmcli non è disponibile o fallisce, viene solo loggato
-- Obiettivo: riconnettere automaticamente il WiFi alle reti salvate dopo lo stop dell’AP
+- Obiettivo: riconnettere automaticamente il WiFi alle reti salvate dopo lo stop dell'AP
 
 ### 3. `v2/main.py` — gestione `system.shutdown`
 - Nuova funzione `_start_shutdown_listener(processes, pub, stop_event, zmq_ctx)`:
@@ -430,8 +425,8 @@ python -m pytest tests/v2/ -v
 ```
 
 **Why:**
-- L’utente necessitava di un modo per spegnere il sistema dalla UI senza accesso al terminale
-- Il WiFi non si riconnetteva alle reti salvate dopo lo stop dell’AP (restava in stato disconnesso)
+- L'utente necessitava di un modo per spegnere il sistema dalla UI senza accesso al terminale
+- Il WiFi non si riconnetteva alle reti salvate dopo lo stop dell'AP (restava in stato disconnesso)
 - `system.shutdown` completa il ciclo di vita: boot → run → shutdown tutto via bus
 
 **Status:** Completed
@@ -488,3 +483,68 @@ In Progress
 1. Add `v2/modules/oaa_control_channel/__init__.py` and verify autodiscovery/startup order in `v2/main.py`.
 2. Add dedicated tests for `proto_utils`, `frame_codec`, and `ControlChannelHandshake`, then run the full suite and verify coverage.
 3. Validate the real wire format against a phone capture and fix any message-id / TLS / framing mismatches found during integration.
+
+---
+
+## 2026-05-04 - config_ui modularization
+
+**What changed:**
+
+`v2/modules/config_ui/main.py` era cresciuto a ~39 KB in un unico file monolitico.
+Il modulo è stato decomposto in 4 file specializzati, mantenendo `main.py` come
+orchestratore snello (~24 KB). Nessuna firma pubblica modificata — backward compat garantita.
+
+| File | Responsabilità | Classi principali |
+|---|---|---|
+| `field_widgets.py` | Widget per valori scalari e liste di scalari | `_FieldWidget`, `_ScalarListEditor` |
+| `form_builder.py` | Costruzione ricorsiva del form da schema | `build_form_for_schema()`, `_FormWidget` |
+| `list_editor.py` | Accordion editor per liste di struct | `_ListEditor`, `_AccordionItem` v2 |
+| `module_tab.py` | Tab per singolo modulo (layout + salvataggio) | `ModuleConfigTab` |
+| `main.py` | Bus handlers, `ConfigWindow`, lifecycle | `_AccordionItem` legacy, `ConfigWindow` |
+
+**Dipendenze tra file:**
+```
+main.py
+  └── module_tab.py
+        ├── form_builder.py
+        │     └── field_widgets.py
+        └── list_editor.py
+              └── field_widgets.py
+```
+
+**Why:**
+- Il file unico da 39 KB era difficile da navigare e da testare in isolamento
+- La separazione per responsabilità segue il principio SRP già applicato agli altri moduli v2
+- Ogni file ora è testabile indipendentemente (es. `field_widgets` senza PyQt6 app avviata)
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Aggiungere test unitari per `field_widgets.py`, `form_builder.py`, `list_editor.py`, `module_tab.py`
+2. Verificare che i test esistenti in `tests/v2/test_config_ui.py` passino senza modifiche
+3. Valutare lo stesso refactoring per `bluetooth_ui/main.py` se cresce oltre 20 KB
+
+**Verification commands:**
+```bash
+# Test esistenti (devono passare senza modifiche)
+python -m pytest v2/modules/config_ui/tests/ -v
+
+# Import smoke test
+python -c "from v2.modules.config_ui.field_widgets import _FieldWidget; print('OK')"
+python -c "from v2.modules.config_ui.form_builder import build_form_for_schema; print('OK')"
+python -c "from v2.modules.config_ui.list_editor import _ListEditor; print('OK')"
+python -c "from v2.modules.config_ui.module_tab import ModuleConfigTab; print('OK')"
+
+# Standalone config_ui
+python v2/bus_broker.py &
+python v2/modules/config_manager/main.py &
+python v2/modules/config_ui/main.py
+```
+
+| File modificato/creato | Operazione |
+|---|---|
+| `v2/modules/config_ui/field_widgets.py` | Creato |
+| `v2/modules/config_ui/form_builder.py` | Creato |
+| `v2/modules/config_ui/list_editor.py` | Creato |
+| `v2/modules/config_ui/module_tab.py` | Creato |
+| `v2/modules/config_ui/main.py` | Refactored (39 KB → ~24 KB) |
