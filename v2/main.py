@@ -278,7 +278,12 @@ def _start_shutdown_listener(
 ) -> threading.Thread:
     """
     Listen for system.shutdown on the bus.
-    On receipt: publish system.stop, terminate all processes, exit cleanly.
+    On receipt: publish system.stop, terminate all module processes, then
+    signal the main thread via stop_event so it can terminate the broker.
+
+    NOTE: sys.exit() from a secondary thread only raises SystemExit in that
+    thread — it does NOT terminate the process. The main thread is responsible
+    for the final broker teardown and process exit.
     """
     def _listener():
         ctx = zmq.Context()
@@ -301,7 +306,8 @@ def _start_shutdown_listener(
             sub.close(linger=0)
             ctx.term()
 
-            stop_event.set()
+            # Publish system.stop before setting stop_event so the main loop
+            # does not exit while modules are still receiving the message.
             try:
                 _publish(pub, "system.stop", {"reason": "system.shutdown"})
                 time.sleep(0.5)  # give modules time to handle system.stop
@@ -315,17 +321,10 @@ def _start_shutdown_listener(
                 zmq_ctx.term()
             except Exception:
                 pass
-            
-            broker_proc.terminate()
-            try:                
-                broker_proc.wait(timeout=GRACE_PERIOD)
-                log.info(f"bus_broker exited on its own (code {broker_proc.returncode})")
-            except subprocess.TimeoutExpired:
-                log.warning("bus_broker did not exit cleanly, killing...")
-                broker_proc.kill()  
 
-            log.info("Shutdown complete")
-            sys.exit(0)
+            # Signal the main thread: it will terminate the broker and exit.
+            stop_event.set()
+            return
 
         sub.close(linger=0)
         ctx.term()
@@ -372,11 +371,34 @@ def _terminate_all(processes: list[tuple[str, subprocess.Popen]]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Broker teardown (called only from the main thread)
+# ---------------------------------------------------------------------------
+
+def _terminate_broker(broker_proc: subprocess.Popen) -> None:
+    """Terminate bus_broker and wait for it to exit. Called from main thread."""
+    if broker_proc.poll() is not None:
+        return  # already exited
+    log.info(f"Terminating bus_broker (PID {broker_proc.pid})...")
+    broker_proc.terminate()
+    try:
+        broker_proc.wait(timeout=GRACE_PERIOD)
+        log.info(f"bus_broker exited (code {broker_proc.returncode})")
+    except subprocess.TimeoutExpired:
+        log.warning("bus_broker did not exit cleanly — killing")
+        broker_proc.kill()
+        broker_proc.wait()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def run() -> None:
-    processes: list[tuple[str, subprocess.Popen]] = []
+    # broker_proc is tracked separately so the main thread can terminate it
+    # after all modules have stopped (see shutdown flow below).
+    broker_proc: subprocess.Popen | None = None
+    # processes excludes bus_broker — _terminate_all() handles only modules.
+    module_processes: list[tuple[str, subprocess.Popen]] = []
     ctx = None
     pub = None
     _stop_responder = threading.Event()
@@ -391,9 +413,11 @@ def run() -> None:
             except Exception:
                 pass
             pub.close(linger=0)
-        _terminate_all(processes)
+        _terminate_all(module_processes)
         if ctx is not None:
             ctx.term()
+        if broker_proc is not None:
+            _terminate_broker(broker_proc)
         sys.exit(0)
 
     signal.signal(signal.SIGINT,  _shutdown)
@@ -405,15 +429,13 @@ def run() -> None:
 
     # 2. Start broker
     broker_proc = _start_process(BROKER_SCRIPT, "bus_broker")
-    processes.append(("bus_broker", broker_proc))
     time.sleep(BROKER_STARTUP_DELAY)
 
     # 3. Connect publisher
     ctx, pub = _make_publisher()
     time.sleep(0.1)
 
-    # 4. Attach bus log handler — all log.* calls from here on are forwarded
-    #    to the log_viewer module via the log.entry topic on the ZMQ bus.
+    # 4. Attach bus log handler
     from shared.bus_client import BusClient  # noqa: E402
     _log_bus = BusClient(module_name="main_logger")
     _log_bus.start(blocking=False)
@@ -424,15 +446,13 @@ def run() -> None:
     for module_script in modules:
         label = module_script.parent.name
         proc  = _start_process(module_script, label)
-        processes.append((label, proc))
+        module_processes.append((label, proc))
 
     # 6. Multi-step boot
-    #    a. Collect priorities via system.readytostart / system.module_ready
     log.info(f"Boot: collecting module priorities (window={READYTOSTART_WINDOW}s)...")
     priority_map = _collect_module_ready(pub, module_names, READYTOSTART_WINDOW)
     log.info(f"Boot: priority map → {dict(priority_map)}")
 
-    #    b. Start each priority level in order
     for level in sorted(priority_map):
         expected = priority_map[level]
         log.info(f"Boot: starting priority {level} modules: {expected}")
@@ -442,19 +462,28 @@ def run() -> None:
     log.info("Boot sequence complete — all priority levels initialised.")
 
     # 7. Start system.get_modules responder
-    _start_get_modules_responder(processes, _stop_responder)
+    _start_get_modules_responder(module_processes, _stop_responder)
 
     # 8. Start system.shutdown listener
-    _start_shutdown_listener(processes, pub, _stop_responder, ctx, broker_proc)
+    #    The listener sets _stop_responder when shutdown is complete so the
+    #    main thread can proceed to broker teardown.
+    _start_shutdown_listener(module_processes, pub, _stop_responder, ctx, broker_proc)
 
     log.info("All processes started. Press Ctrl+C to stop.")
 
     # 9. Keep main alive — log unexpected exits
     while not _stop_responder.is_set():
         time.sleep(1)
-        for label, proc in processes:
+        for label, proc in module_processes:
             if proc.poll() is not None:
                 log.warning(f"{label} exited unexpectedly (code {proc.returncode})")
+
+    # 10. Main thread teardown: terminate broker (modules already stopped by
+    #     the listener thread before stop_event was set).
+    log.info("Main thread: terminating bus_broker...")
+    _terminate_broker(broker_proc)
+    log.info("Shutdown complete.")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
