@@ -40,6 +40,7 @@ Widget selection by schema type
   float (no bounds)   → QLineEdit + −/+ buttons (step 0.1)
   float (with bounds) → QSlider (horizontal, ×100 int mapping) + value label
   enum                → QComboBox
+  bool                → QCheckBox
   (no schema)         → QLineEdit  (backward-compatible fallback)
 """
 
@@ -61,7 +62,7 @@ from PyQt6.QtWidgets import (                                         # noqa: E4
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTabWidget, QLabel, QLineEdit, QScrollArea,
     QFormLayout, QStatusBar, QFrame, QMessageBox, QComboBox,
-    QSlider, QSpinBox, QDoubleSpinBox,
+    QSlider, QSpinBox, QDoubleSpinBox, QCheckBox,
 )
 
 from shared.bus_client import BusClient              # noqa: E402
@@ -87,6 +88,9 @@ def _request_config(module: str):
 # Typed field widget factory
 # ---------------------------------------------------------------------------
 
+_BOOL_TRUE = {"true", "1", "yes", "on"}
+
+
 class _FieldWidget(QWidget):
     """
     Container that wraps the appropriate Qt widget for a config field and
@@ -107,6 +111,8 @@ class _FieldWidget(QWidget):
 
         if field_schema is None:
             self._build_string(str(raw_value) if raw_value is not None else "")
+        elif field_schema.type == "bool":
+            self._build_bool(raw_value)
         elif field_schema.type == "enum":
             self._build_enum(raw_value, field_schema.choices)
         elif field_schema.type == "int":
@@ -125,6 +131,19 @@ class _FieldWidget(QWidget):
         self._edit = QLineEdit(value)
         self._edit.setPlaceholderText("(vuoto)")
         self._layout.addWidget(self._edit)
+
+    def _build_bool(self, value):
+        self._widget_type = "checkbox"
+        # Accept bool, int, or string truthy values
+        if isinstance(value, bool):
+            checked = value
+        elif isinstance(value, int):
+            checked = bool(value)
+        else:
+            checked = str(value).strip().lower() in _BOOL_TRUE
+        self._checkbox = QCheckBox()
+        self._checkbox.setChecked(checked)
+        self._layout.addWidget(self._checkbox)
 
     def _build_enum(self, value, choices: list[str]):
         self._widget_type = "combobox"
@@ -240,6 +259,8 @@ class _FieldWidget(QWidget):
 
     def get_value(self):
         wt = self._widget_type
+        if wt == "checkbox":
+            return self._checkbox.isChecked()  # returns Python bool
         if wt == "combobox":
             return self._combo.currentText()
         if wt == "int_slider":
@@ -376,7 +397,13 @@ class ModuleConfigTab(QWidget):
         changed = {}
         for key, fw in self._fields.items():
             new_val = fw.get_value()
-            if str(new_val) != str(self._original.get(key, "")):
+            orig    = self._original.get(key)
+            # Bool: compare as bool to avoid True vs "True" mismatch
+            if isinstance(new_val, bool):
+                orig_bool = orig if isinstance(orig, bool) else str(orig).strip().lower() in _BOOL_TRUE
+                if new_val != orig_bool:
+                    changed[key] = new_val
+            elif str(new_val) != str(orig if orig is not None else ""):
                 changed[key] = new_val
 
         if not changed:
