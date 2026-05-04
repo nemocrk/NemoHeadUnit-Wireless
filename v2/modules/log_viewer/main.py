@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (                                        # noqa: E40
 from shared.bus_client import BusClient        # noqa: E402
 from shared.config_client import ConfigClient  # noqa: E402
 from shared.logger import get_logger           # noqa: E402
+from shared.config_schema import field_int     # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -53,11 +54,17 @@ log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
 cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 
-_DEFAULTS = {
-    "max_lines": 500,
+# ---------------------------------------------------------------------------
+# Config schema
+# ---------------------------------------------------------------------------
+# config_manager derives defaults from field.default — no separate _DEFAULTS needed.
+
+_SCHEMA = {
+    "max_lines": field_int(default=500, min=50, max=10000),
 }
 
-_config: dict = dict(_DEFAULTS)
+# In-RAM config: seed from schema defaults.
+_config: dict = {k: v.default for k, v in _SCHEMA.items()}
 
 # ---------------------------------------------------------------------------
 # Level → colour mapping
@@ -79,14 +86,17 @@ def _on_config_loaded(config: dict) -> None:
     global _config
     if not config:
         return
-    merged = dict(_DEFAULTS)
-    merged.update({k: v for k, v in config.items() if k in _DEFAULTS})
+    merged = {k: v.default for k, v in _SCHEMA.items()}
+    merged.update({k: v for k, v in config.items() if k in _SCHEMA and not isinstance(v, (dict, list))})
     _config = merged
     log.info(f"Config loaded: {_config}")
 
 
 def _on_config_changed(key: str, value) -> None:
-    if key not in _DEFAULTS:
+    if key not in _SCHEMA:
+        return
+    if isinstance(value, (dict, list)):
+        log.warning(f"config.changed: structural value for '{key}' rejected")
         return
     _config[key] = value
     log.info(f"Config changed: {key} = {value!r}")
@@ -232,7 +242,8 @@ def on_system_start(topic: str, payload: dict) -> None:
         return
 
     log.info(f"system.start priority={PRIORITY} — log_viewer ready")
-    cfg.get(defaults=_DEFAULTS)
+    # schema= is sufficient: config_manager derives defaults from field.default.
+    cfg.get(schema=_SCHEMA)
     _invoke("set_status", "Sistema pronto. In ascolto log…")
 
     bus.publish("system.ready", {
