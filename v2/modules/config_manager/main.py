@@ -40,6 +40,9 @@ Rules:
     has been registered for that module and key — in which case the value
     is validated (and coerced) before persisting. On failure, config.error
     is published and the value is NOT persisted.
+    Structured schema nodes (ConfigFieldMessage / ConfigFieldList /
+    ConfigFieldOneof) are stored as-is without scalar validation; deep
+    validation of nested values is the caller's responsibility.
   - config.get returns the full config dict for the requested module.
     If no YAML exists yet AND a "defaults" dict is provided in the payload,
     the defaults are persisted atomically and returned in the same response
@@ -66,9 +69,14 @@ if str(_MODULES) not in sys.path:
 
 import yaml  # noqa: E402
 
-from shared.bus_client import BusClient                          # noqa: E402
-from shared.logger import get_logger                             # noqa: E402
-from shared.config_schema import schema_from_dict, validate_value  # noqa: E402
+from shared.bus_client import BusClient                                          # noqa: E402
+from shared.logger import get_logger                                             # noqa: E402
+from shared.config_schema import (                                               # noqa: E402
+    ConfigFieldSchema,
+    schema_from_dict,
+    schema_to_dict,
+    validate_value,
+)
 
 # ---------------------------------------------------------------------------
 # Module identity & paths
@@ -82,7 +90,7 @@ log = get_logger(MODULE_NAME, bus=bus)
 
 CONFIG_DIR = _V2 / "config"
 
-# In-RAM schema registry: module_name → {key → ConfigFieldSchema}
+# In-RAM schema registry: module_name → {key → AnyFieldSchema}
 _schemas: dict[str, dict] = {}
 
 
@@ -120,11 +128,16 @@ def _save_config(module: str, data: dict) -> bool:
 
 
 def _schema_dict_for_response(module: str) -> dict | None:
-    """Return the serialised schema for *module*, or None if not registered."""
+    """Return the serialised schema for *module*, or None if not registered.
+
+    Uses schema_to_dict() so that structured nodes (ConfigFieldMessage /
+    ConfigFieldList / ConfigFieldOneof) are serialised correctly alongside
+    plain ConfigFieldSchema scalars.
+    """
     schema = _schemas.get(module)
     if not schema:
         return None
-    return {k: v.to_dict() for k, v in schema.items()}
+    return schema_to_dict(schema)
 
 
 # ---------------------------------------------------------------------------
@@ -189,23 +202,32 @@ def on_config_set(topic: str, payload: dict):
         log.warning(f"config.set missing 'module' or 'key': {payload} — ignoring.")
         return
 
-    # Validate against schema if registered
+    # Validate against schema if registered.
+    # Structured nodes (ConfigFieldMessage / ConfigFieldList / ConfigFieldOneof)
+    # are stored as-is — scalar validate_value() is only invoked for plain
+    # ConfigFieldSchema entries.
     schema = _schemas.get(module)
     if schema and key in schema:
-        try:
-            value = validate_value(schema[key], value)
-        except ValueError as exc:
-            reason = str(exc)
-            log.warning(
-                f"config.set validation failed for '{module}'.{key} = {value!r}: {reason}"
+        field_schema = schema[key]
+        if isinstance(field_schema, ConfigFieldSchema):
+            try:
+                value = validate_value(field_schema, value)
+            except ValueError as exc:
+                reason = str(exc)
+                log.warning(
+                    f"config.set validation failed for '{module}'.{key} = {value!r}: {reason}"
+                )
+                bus.publish("config.error", {
+                    "module": module,
+                    "key":    key,
+                    "value":  payload.get("value"),
+                    "reason": reason,
+                })
+                return
+        else:
+            log.debug(
+                f"config.set '{module}'.{key}: structured field — skipping scalar validation."
             )
-            bus.publish("config.error", {
-                "module": module,
-                "key":    key,
-                "value":  payload.get("value"),
-                "reason": reason,
-            })
-            return
 
     data = _load_config(module)
     data[key] = value
