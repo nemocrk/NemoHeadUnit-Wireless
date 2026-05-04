@@ -65,6 +65,7 @@ from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (
     ServiceDiscoveryResponse,
 )
 from v2.protos.oaa.control.ChannelDescriptorData_pb2 import ChannelDescriptor
+from v2.protos.oaa.common.DriverPositionEnum_pb2 import DriverPosition
 
 # AV / Video / Audio enums
 from v2.protos.oaa.av.AVChannelData_pb2 import AVChannel  # noqa
@@ -151,9 +152,9 @@ def build_service_discovery_response(
     resp.car_model        = "Universal"
     resp.car_year         = "2025"
     resp.car_serial       = "20250101"
-    resp.left_hand_drive  = True
-    resp.manufacturer     = cfg.get("hu.make",       DEFAULTS["hu.make"])
-    resp.model            = cfg.get("hu.model",      DEFAULTS["hu.model"])
+    resp.driver_position  = DriverPosition.LEFT
+    resp.headunit_manufacturer     = cfg.get("hu.make",       DEFAULTS["hu.make"])
+    resp.headunit_model            = cfg.get("hu.model",      DEFAULTS["hu.model"])
     resp.sw_build         = "1"
     resp.sw_version       = cfg.get("hu.sw_version", DEFAULTS["hu.sw_version"])
     resp.can_play_native_media_during_vr = True
@@ -196,13 +197,14 @@ def _build_video_descriptor(cfg: dict) -> ChannelDescriptor:
     fps_name        = cfg.get("video.fps",         DEFAULTS["video.fps"])
 
     cfg_pb = av.video_configs.add()
-    cfg_pb.video_resolution = VideoResolution.Value(resolution_name)
-    cfg_pb.video_fps        = VideoFPS.Value(fps_name)
+    cfg_pb.video_resolution = VideoResolution.Enum.Value(resolution_name)
+    cfg_pb.video_fps        = VideoFPS.Enum.Value(fps_name)
     cfg_pb.margin_width     = 0
     cfg_pb.margin_height    = 0
     cfg_pb.dpi              = int(cfg.get("video.dpi", DEFAULTS["video.dpi"]))
     cfg_pb.codec            = MediaCodecType.MEDIA_CODEC_VIDEO_H264_BP  # protocol constant
 
+    return desc
     return desc
 
 
@@ -255,6 +257,7 @@ def _build_input_descriptor(cfg: dict) -> ChannelDescriptor:
     for kc in [3, 4, 84, 85, 86, 87, 88, 126, 127, 219, 231]:  # protocol constant
         inp.supported_keycodes.append(kc)
     return desc
+    return desc
 
 
 def _build_sensor_descriptor() -> ChannelDescriptor:
@@ -267,6 +270,7 @@ def _build_sensor_descriptor() -> ChannelDescriptor:
         SensorType.PARKING_BRAKE,
     ]:  # protocol constants
         sc.sensors.add().type = st
+    return desc
     return desc
 
 
@@ -284,6 +288,7 @@ def _build_wifi_descriptor(bssid: str) -> ChannelDescriptor:
     desc.channel_id = 14  # protocol constant
     wf = desc.wifi_channel
     wf.bssid = bssid
+    return desc
     return desc
 
 
@@ -316,10 +321,12 @@ def _build_media_status_descriptor() -> ChannelDescriptor:
     desc.channel_id = 10  # protocol constant
     desc.media_info_channel.SetInParent()  # empty — just advertise support
     return desc
+    return desc
 
 
 def _build_phone_status_descriptor() -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 11  # protocol constant
     desc.phone_status_channel.SetInParent()
+    return desc
     return desc

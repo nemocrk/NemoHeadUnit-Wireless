@@ -11,6 +11,23 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/v2/main.py"
+        },
+        {
+            "name": "Explore Protocol",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/v2/shared/proto_explorer.py",
+            "args": [
+                "${input:pythonClass}"
+            ]
+        }
+    ],
+    "inputs": [
+        {
+            "id": "pythonClass",
+            "type": "promptString",
+            "description": "Inserisci il nome della classe:",
+            "default": "---"
         }
     ]
 }

@@ -236,6 +236,7 @@ def _on_ap_failed(reason: str) -> None:
 
 def _teardown() -> None:
     global _ap_manager, _ap_monitor, _ap_ready_params
+    log.info("Tearing down AP and monitor")
     if _ap_monitor:
         _ap_monitor.stop()
         _ap_monitor = None
@@ -243,6 +244,7 @@ def _teardown() -> None:
         _ap_manager.stop()
         _ap_manager = None
     _ap_ready_params = None
+    log.info("AP and monitor stopped")
     bus.publish("hostapd.stopped", {})
 
 
