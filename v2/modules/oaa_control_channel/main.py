@@ -41,21 +41,19 @@ Restart flow (config change):
   3. on_aa_session_restarting() creates a fresh ControlChannelHandshake (with updated _cfg)
      and immediately sends VERSION_REQUEST on the existing TCP connection
 
-Config flow (proto-native):
+Config flow (flat-scalar schema):
   1. on_system_start() calls cfg.get(schema=_SCHEMA) via ConfigClient.
-     _SCHEMA is derived from ServiceDiscoveryResponse.DESCRIPTOR — keys are proto
-     field names (head_unit_name, channels, ...).  schema=_SCHEMA is passed so
-     config_manager stores the typed schema and config_ui renders typed widgets.
-     No flat defaults dict is passed: SEMANTIC_DEFAULTS are already baked into
-     _SCHEMA via _apply_defaults_to_schema() at import time in service_discovery.py.
+     _SCHEMA is a hand-crafted flat-scalar dict — 25 keys covering identity,
+     video, audio, touch, nav, bt, and wifi params.
+     No defaults dict is passed: SEMANTIC_DEFAULTS are the field .default
+     values baked into _SCHEMA at definition time in service_discovery.py.
   2. ConfigClient delivers config.response → _on_config_loaded(config).
-     Only top-level scalar keys present in _cfg are updated from the response;
-     nested/structural keys (channels, etc.) are left to proto zero-values since
-     they are never persisted via config.set.
+     All 25 scalar keys present in _cfg are updated from the response;
+     unknown keys from config are silently ignored.
   3. system.ready is published only after _on_config_loaded populates _cfg.
-  4. _cfg is a nested dict (proto field names) passed directly to
-     build_from_schema_cfg() inside ControlChannelHandshake at handshake time.
-  5. On config.changed: key is a top-level proto scalar (e.g. head_unit_name);
+  4. _cfg is passed directly to build_from_schema_cfg() inside
+     ControlChannelHandshake at SERVICE_DISCOVERY_REQUEST time.
+  5. On config.changed: key is any top-level scalar from _SCHEMA;
      _cfg[key] is updated in-place and aa.session.restart triggers graceful restart.
 """
 
@@ -96,9 +94,11 @@ cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 
 _handshake: ControlChannelHandshake | None = None
 
-# _cfg is a nested dict with proto field names as keys — mirrors SEMANTIC_DEFAULTS.
-# Populated by _on_config_loaded at boot; top-level scalar keys are updated by
-# _on_config_changed at runtime.  Passed directly to build_from_schema_cfg() via
+# _cfg is a flat dict with all 25 _SCHEMA keys as keys.
+# Initialised from SEMANTIC_DEFAULTS at import time so that every key is
+# always present even if no YAML has been saved yet.
+# Populated by _on_config_loaded at boot; any key can be updated at runtime
+# by _on_config_changed.  Passed directly to build_from_schema_cfg() via
 # ControlChannelHandshake._cfg at SERVICE_DISCOVERY_REQUEST time.
 _cfg: dict = dict(SEMANTIC_DEFAULTS)
 
@@ -134,8 +134,8 @@ def on_system_start(topic: str, payload: dict) -> None:
         return
     log.info("system.start priority=%d — requesting config from config_manager", PRIORITY)
     # Pass schema=_SCHEMA so config_manager stores the typed schema and config_ui
-    # renders typed widgets (QSpinBox, QComboBox, etc.) for each proto field.
-    # No defaults dict: SEMANTIC_DEFAULTS are baked into _SCHEMA at import time.
+    # renders the correct widget for each key (QSpinBox, QComboBox, QCheckBox, etc.).
+    # No defaults dict: every field.default in _SCHEMA equals SEMANTIC_DEFAULTS[key].
     cfg.get(schema=_SCHEMA)
     # system.ready is published in _on_config_loaded once _cfg is populated
 
@@ -152,16 +152,18 @@ def on_system_stop(topic: str, payload: dict) -> None:
 def _on_config_loaded(config: dict) -> None:
     """Called by ConfigClient when config.response is received for this module.
 
-    Merges only top-level scalar keys from the persisted config into _cfg.
-    Nested/structural keys (channels, etc.) are never persisted via config.set
-    and must not overwrite the SEMANTIC_DEFAULTS structural skeleton.
+    Merges every key present in _cfg (all 25 flat scalars) from the persisted
+    config into _cfg.  Keys not present in _cfg are silently ignored so that
+    old YAML fields never pollute the runtime dict.
     """
     global _cfg
     if config:
-        scalar_keys = {k for k, v in _cfg.items() if not isinstance(v, (dict, list))}
-        merged = {k: v for k, v in config.items() if k in scalar_keys}
+        merged = {k: v for k, v in config.items() if k in _cfg}
         _cfg.update(merged)
-        log.info("Config loaded: %d scalar key(s) merged from config_manager", len(merged))
+        log.info(
+            "Config loaded: %d/%d key(s) merged from config_manager",
+            len(merged), len(_cfg),
+        )
     else:
         log.warning("config.response returned empty config — using SEMANTIC_DEFAULTS")
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
@@ -169,16 +171,16 @@ def _on_config_loaded(config: dict) -> None:
 
 
 def _on_config_changed(key: str, value) -> None:
-    """Called by ConfigClient when a top-level scalar config key changes at runtime.
+    """Called by ConfigClient when any schema key changes at runtime.
 
-    Only top-level scalar keys are persisted via config.set — nested/structural
-    fields (channels, repeated fields) cannot be changed via the bus API.
-    Update the in-memory dict and trigger a graceful session restart.
+    Only keys present in _cfg are accepted — unknown keys are silently ignored.
+    Update the in-memory dict and trigger a graceful session restart so the
+    phone re-negotiates with the updated ServiceDiscoveryResponse.
     """
     global _cfg, _handshake
 
-    if key not in _cfg or isinstance(_cfg.get(key), (dict, list)):
-        log.warning("_on_config_changed: key %r is not a settable scalar — ignoring", key)
+    if key not in _cfg:
+        log.warning("_on_config_changed: key %r is not a known schema key — ignoring", key)
         return
 
     _cfg[key] = value
