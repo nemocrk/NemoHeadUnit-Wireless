@@ -49,7 +49,7 @@ BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
 
 BROKER_STARTUP_DELAY  = 0.5   # s — wait for broker to bind
 MODULE_STARTUP_DELAY  = 0.2   # s — between module launches
-GRACE_PERIOD          = 1.0   # s — wait for self-exit before SIGTERM
+GRACE_PERIOD          = 5.0   # s — wait for self-exit before SIGTERM
 READYTOSTART_WINDOW   = 10.0   # s — collect system.module_ready replies
 MODULE_READY_TIMEOUT  = 5.0   # s — per-module timeout for system.ready
 
@@ -274,6 +274,7 @@ def _start_shutdown_listener(
     pub: zmq.Socket,
     stop_event: threading.Event,
     zmq_ctx: zmq.Context,
+    broker_proc: subprocess.Popen,
 ) -> threading.Thread:
     """
     Listen for system.shutdown on the bus.
@@ -314,6 +315,14 @@ def _start_shutdown_listener(
                 zmq_ctx.term()
             except Exception:
                 pass
+            
+            broker_proc.terminate()
+            try:                
+                broker_proc.wait(timeout=GRACE_PERIOD)
+                log.info(f"bus_broker exited on its own (code {broker_proc.returncode})")
+            except subprocess.TimeoutExpired:
+                log.warning("bus_broker did not exit cleanly, killing...")
+                broker_proc.kill()  
 
             log.info("Shutdown complete")
             sys.exit(0)
@@ -436,7 +445,7 @@ def run() -> None:
     _start_get_modules_responder(processes, _stop_responder)
 
     # 8. Start system.shutdown listener
-    _start_shutdown_listener(processes, pub, _stop_responder, ctx)
+    _start_shutdown_listener(processes, pub, _stop_responder, ctx, broker_proc)
 
     log.info("All processes started. Press Ctrl+C to stop.")
 
