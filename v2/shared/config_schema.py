@@ -5,13 +5,14 @@ Lightweight schema descriptor for module configuration keys.
 
 Usage (inside a module):
 
-    from shared.config_schema import field_string, field_int, field_float, field_enum
+    from shared.config_schema import field_string, field_int, field_float, field_enum, field_bool
 
     _SCHEMA = {
-        "pin":    field_string(default="1234"),
-        "volume": field_int(default=80, min=0, max=100),
-        "gain":   field_float(default=1.0, min=0.0, max=2.0),
-        "mode":   field_enum(default="auto", choices=["off", "auto", "on"]),
+        "pin":     field_string(default="1234"),
+        "volume":  field_int(default=80, min=0, max=100),
+        "gain":    field_float(default=1.0, min=0.0, max=2.0),
+        "mode":    field_enum(default="auto", choices=["off", "auto", "on"]),
+        "enabled": field_bool(default=True),
     }
 
 Pass _SCHEMA to cfg.get():
@@ -32,6 +33,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+# Accepted truthy/falsy strings for bool coercion (case-insensitive)
+_BOOL_TRUE  = {"true", "1", "yes", "on"}
+_BOOL_FALSE = {"false", "0", "no", "off"}
+
 
 # ---------------------------------------------------------------------------
 # Schema descriptor
@@ -39,7 +44,7 @@ from typing import Literal
 
 @dataclass
 class ConfigFieldSchema:
-    type:    Literal["int", "float", "string", "enum"]
+    type:    Literal["int", "float", "string", "enum", "bool"]
     default: object
 
     # int / float only
@@ -104,6 +109,10 @@ def field_enum(default: str, choices: list[str]) -> ConfigFieldSchema:
     return ConfigFieldSchema(type="enum", default=default, choices=choices)
 
 
+def field_bool(default: bool = False) -> ConfigFieldSchema:
+    return ConfigFieldSchema(type="bool", default=bool(default))
+
+
 # ---------------------------------------------------------------------------
 # Schema serialisation helpers
 # ---------------------------------------------------------------------------
@@ -131,11 +140,26 @@ def validate_value(schema_field: ConfigFieldSchema, value: object) -> object:
 
     Coercion rules
     --------------
-    - int/float: str → int/float (tolerates values coming as strings from QLineEdit)
-    - string:    value is str-cast
-    - enum:      value must be one of choices (str comparison)
+    - bool:       bool passthrough; str coerced via _BOOL_TRUE/_BOOL_FALSE
+    - int/float:  str → int/float (tolerates values coming as strings from QLineEdit)
+    - string:     value is str-cast
+    - enum:       value must be one of choices (str comparison)
     """
     t = schema_field.type
+
+    if t == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return bool(value)
+        str_val = str(value).strip().lower()
+        if str_val in _BOOL_TRUE:
+            return True
+        if str_val in _BOOL_FALSE:
+            return False
+        raise ValueError(
+            f"expected bool (true/false/yes/no/on/off/1/0), got {value!r}"
+        )
 
     if t == "string":
         return str(value)
