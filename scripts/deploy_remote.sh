@@ -84,6 +84,7 @@ echo ""
 # Step 2: Sync v2/ + environment.yml
 # ---------------------------------------------------------------------------
 echo "[2/5] Syncing v2/ to remote..."
+rm $REPO_ROOT/v2/config/*.yaml || true
 rsync -avz --delete \
   --exclude='__pycache__' \
   --exclude='*.pyc' \

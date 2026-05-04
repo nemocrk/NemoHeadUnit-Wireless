@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QFormLayout,
     QLabel,
@@ -85,8 +86,8 @@ class _FormWidget(QWidget):
         if optional:
             lbl_text = f"{label} <span style='color:#666; font-size:10px'>(opz.)</span>"
         lbl = QLabel(lbl_text)
-        lbl.setTextFormat(QLabel.TextFormat if hasattr(QLabel, 'TextFormat') else 0)  # type: ignore
-        lbl.setStyleSheet("color: #cdd6f4; font-weight: 500;")
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl.setStyleSheet("font-weight: 500;")
         if description:
             lbl.setToolTip(description)
             widget.setToolTip(description)

@@ -108,6 +108,9 @@ class ChannelManagerSession:
         """
         launch_list: list[dict] = []
 
+        import json
+        log.info("Starting channel modules for channels: %s", json.dumps(channels, indent=2))
+
         for ch in channels:
             ch_id = ch.get("channel_id")
             if ch_id == 0:

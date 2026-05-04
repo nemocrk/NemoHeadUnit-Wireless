@@ -320,7 +320,16 @@ def _coerce_scalar(field_desc: Any, value: Any) -> Any:
     """
     if field_desc.type == _descriptor.FieldDescriptor.TYPE_ENUM:
         if isinstance(value, str):
-            return field_desc.enum_type.values_by_name[value].number
+            try:
+                # 1. Prova il matching esatto del nome
+                return field_desc.enum_type.values_by_name[value].number
+            except KeyError:
+                # 2. Prova un matching case-insensitive come fallback
+                for val in field_desc.enum_type.values:
+                    if val.name.upper() == value.upper():
+                        return val.number
+                # 3. Se è una stringa numerica, convertila in int
+                return int(value)
         return int(value)
 
     if field_desc.type == _descriptor.FieldDescriptor.TYPE_BOOL:
@@ -329,6 +338,13 @@ def _coerce_scalar(field_desc: Any, value: Any) -> Any:
         return bool(value)
 
     if field_desc.type in _INT_TYPES:
+        if isinstance(value, str):
+            # Gestione del caso in cui la configurazione sia una stringa (letterale)
+            # ma il campo proto sia tecnicamente un intero.
+            if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
+                return int(value)
+            # Nota: Se arriviamo qui con una stringa non numerica per un campo int,
+            # setattr solleverà l'errore che viene poi loggato da dict_to_proto.
         return int(value)
 
     if field_desc.type in _FLOAT_TYPES:

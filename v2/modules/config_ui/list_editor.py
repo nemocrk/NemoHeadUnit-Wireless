@@ -61,7 +61,7 @@ class _AccordionItem(QWidget):
         # --- header bar ---
         header = QWidget()
         header.setStyleSheet(
-            "background: #1e2a36; border-radius: 4px;"
+            "border-radius: 4px;"
         )
         hbox = QHBoxLayout(header)
         hbox.setContentsMargins(6, 4, 6, 4)
@@ -69,7 +69,7 @@ class _AccordionItem(QWidget):
 
         self._toggle_btn = QPushButton(f"▼  {header_text}")
         self._toggle_btn.setStyleSheet(
-            "QPushButton { color: #cdd6f4; background: transparent;"
+            "QPushButton { background: transparent;"
             " border: none; text-align: left; font-size: 12px; }"
         )
         self._toggle_btn.setSizePolicy(
@@ -94,7 +94,7 @@ class _AccordionItem(QWidget):
         frame = QFrame()
         frame.setStyleSheet(
             "QFrame { border: 1px solid #2d3f50; border-top: none;"
-            " border-radius: 0 0 4px 4px; background: #141c23; }"
+            " border-radius: 0 0 4px 4px; }"
         )
         fl = QVBoxLayout(frame)
         fl.setContentsMargins(8, 6, 8, 6)

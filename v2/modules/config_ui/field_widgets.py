@@ -34,6 +34,7 @@ _OptionalMessageWidget
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import Qt
@@ -539,7 +540,7 @@ class _OptionalMessageWidget(QWidget):
         chk_layout.setContentsMargins(0, 2, 0, 2)
         chk_layout.setSpacing(6)
         self._checkbox = QCheckBox("attivo")
-        self._checkbox.setStyleSheet("color: #aaa; font-size: 11px;")
+        self._checkbox.setStyleSheet("font-size: 11px;")
         chk_layout.addWidget(self._checkbox)
         chk_layout.addStretch()
         root.addWidget(chk_row)
@@ -547,20 +548,21 @@ class _OptionalMessageWidget(QWidget):
         # Body frame
         self._frame = QFrame()
         self._frame.setStyleSheet(
-            "QFrame { border: 1px solid #2d3f50; border-radius: 4px;"
-            " background: #111820; }"
+            "QFrame { border: 1px solid #2d3f50; border-radius: 4px; }"
         )
         frame_layout = QVBoxLayout(self._frame)
         frame_layout.setContentsMargins(10, 6, 10, 6)
         frame_layout.setSpacing(4)
 
         from config_ui.form_builder import build_form_for_schema
-        self._body = build_form_for_schema(field_schema, raw_value or {})
+        # Create a non-optional copy to prevent infinite recursion if schema is recursive
+        schema_without_optional = replace(field_schema, optional=False)
+        self._body = build_form_for_schema(schema_without_optional, raw_value or {})
         frame_layout.addWidget(self._body)
         root.addWidget(self._frame)
 
-        # Initial state: active if raw_value is not None
-        is_active = raw_value is not None
+        # Initial state: active only if raw_value is not empty dict/None
+        is_active = bool(raw_value) if raw_value is not None else False
         self._checkbox.setChecked(is_active)
         self._frame.setVisible(is_active)
 

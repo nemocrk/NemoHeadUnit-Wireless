@@ -196,7 +196,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
                 "stream_type": "AUDIO",
                 "audio_type":  "MEDIA",
                 "audio_configs": [
-                    {"sample_rate": 48000, "bit_depth": 16, "channel_count": 2},
+                    {"sample_rate": 48000, "bit_depth": 16, "channel_count": 2, "codec": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS"},
                 ],
             },
         },
@@ -207,7 +207,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
                 "stream_type": "AUDIO",
                 "audio_type":  "SPEECH",
                 "audio_configs": [
-                    {"sample_rate": 48000, "bit_depth": 16, "channel_count": 1},
+                    {"sample_rate": 48000, "bit_depth": 16, "channel_count": 1, "codec": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS"},
                 ],
             },
         },
@@ -218,7 +218,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
                 "stream_type": "AUDIO",
                 "audio_type":  "SYSTEM",
                 "audio_configs": [
-                    {"sample_rate": 16000, "bit_depth": 16, "channel_count": 1},
+                    {"sample_rate": 16000, "bit_depth": 16, "channel_count": 1, "codec": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS"},
                 ],
             },
         },
@@ -243,7 +243,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
             "channel_id": 9,
             "navigation_channel": {
                 "minimum_interval_ms": 500,
-                "type": "TURN_BY_TURN",
+                "type": 1,  # TURN_BY_TURN
                 "image_options": {
                     "width":              64,
                     "height":             64,

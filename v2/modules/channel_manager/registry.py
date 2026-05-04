@@ -25,7 +25,7 @@ from __future__ import annotations
 # ---------------------------------------------------------------------------
 
 AV_TYPE_VIDEO  = 1
-AV_TYPE_AUDIO  = 2
+AV_TYPE_AUDIO  = 3
 
 # ---------------------------------------------------------------------------
 # Audio stream-type constants (mirrors AudioStreamType proto enum)
