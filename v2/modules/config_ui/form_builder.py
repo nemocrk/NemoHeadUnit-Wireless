@@ -3,16 +3,25 @@ config_ui — form_builder
 
 Single public entry-point:
 
-    build_form_for_schema(schema, value) -> _FormWidget
+    build_form_for_schema(schema, value) -> QWidget
 
-Where _FormWidget exposes get_value() -> dict | scalar.
+Where the returned widget exposes get_value() -> dict | scalar.
 
 The builder is fully recursive:
-    - scalar         -> _FieldWidget
-    - list<scalar>   -> _ScalarListEditor
-    - list<struct>   -> _ListEditor
-    - struct/message -> _FormWidget (recursive)
-    - unknown / None -> plain QLineEdit wrapped in _FormWidget
+    - scalar                    -> _FieldWidget
+    - list<scalar>              -> _ScalarListEditor
+    - list<struct>              -> _ListEditor
+    - oneof                     -> _OneofWidget
+    - message (optional=False)  -> _FormWidget  (recursive)
+    - message (optional=True)   -> _OptionalMessageWidget (checkbox-gated)
+    - unknown / None            -> plain QLineEdit wrapped in _FormWidget
+
+Additional public helper:
+
+    build_default_value(schema) -> any
+        Returns a Python value (scalar / dict / list) suitable as the
+        default for a new item of the given schema type.
+        Used by _ListEditor._default_item() for recursive defaults.
 """
 
 from __future__ import annotations
@@ -26,12 +35,18 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from v2.modules.config_ui.field_widgets import _FieldWidget, _ScalarListEditor
+from v2.modules.config_ui.field_widgets import (
+    _FieldWidget,
+    _OneofWidget,
+    _OptionalMessageWidget,
+    _ScalarListEditor,
+)
 
 if TYPE_CHECKING:
     from shared.config_schema import (
         ConfigFieldList,
         ConfigFieldMessage,
+        ConfigFieldOneof,
         ConfigFieldSchema,
     )
 
@@ -45,7 +60,8 @@ class _FormWidget(QWidget):
     A QFormLayout-based widget that maps field keys to sub-widgets.
 
     Each sub-widget must expose get_value() -> any.
-    _FormWidget.get_value() returns the dict of all sub-values.
+    _FormWidget.get_value() returns the dict of all sub-values,
+    omitting keys whose widget returns None (optional fields not active).
     """
 
     def __init__(self, parent: "QWidget | None" = None):
@@ -63,8 +79,13 @@ class _FormWidget(QWidget):
         label: str,
         widget: QWidget,
         description: str = "",
+        optional: bool = False,
     ) -> None:
-        lbl = QLabel(label)
+        lbl_text = label
+        if optional:
+            lbl_text = f"{label} <span style='color:#666; font-size:10px'>(opz.)</span>"
+        lbl = QLabel(lbl_text)
+        lbl.setTextFormat(QLabel.TextFormat if hasattr(QLabel, 'TextFormat') else 0)  # type: ignore
         lbl.setStyleSheet("color: #cdd6f4; font-weight: 500;")
         if description:
             lbl.setToolTip(description)
@@ -73,10 +94,58 @@ class _FormWidget(QWidget):
         self._sub[key] = widget
 
     def get_value(self) -> dict:
-        return {
-            k: (w.get_value() if hasattr(w, "get_value") else w.text())
-            for k, w in self._sub.items()
-        }
+        result = {}
+        for k, w in self._sub.items():
+            val = w.get_value() if hasattr(w, "get_value") else w.text()
+            if val is not None:          # None = optional field not active, omit
+                result[k] = val
+        return result
+
+
+# ---------------------------------------------------------------------------
+# build_default_value — produce a default Python value for any schema node
+# ---------------------------------------------------------------------------
+
+def build_default_value(schema) -> object:
+    """
+    Return a sensible default Python value for *schema*.
+
+    - ConfigFieldSchema  -> schema.default (or type-appropriate zero)
+    - ConfigFieldMessage -> {} (sub-fields filled lazily when the widget opens)
+    - ConfigFieldList    -> []
+    - ConfigFieldOneof   -> None  (no branch pre-selected)
+    - None               -> ""
+    """
+    if schema is None:
+        return ""
+
+    try:
+        from shared.config_schema import (
+            ConfigFieldList,
+            ConfigFieldMessage,
+            ConfigFieldOneof,
+            ConfigFieldSchema,
+        )
+    except ImportError:
+        return ""
+
+    if isinstance(schema, ConfigFieldSchema):
+        default = getattr(schema, "default", None)
+        if default is not None:
+            return default
+        type_defaults = {"int": 0, "float": 0.0, "bool": False, "string": "", "enum": ""}
+        return type_defaults.get(schema.type, "")
+
+    if isinstance(schema, ConfigFieldMessage):
+        return {}
+
+    if isinstance(schema, ConfigFieldList):
+        return []
+
+    if isinstance(schema, ConfigFieldOneof):
+        return None
+
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -91,31 +160,31 @@ def build_form_for_schema(
     """
     Build a Qt form widget for *schema* pre-populated with *value*.
 
-    Returns a _FormWidget (get_value()->dict) or a _FieldWidget/list editor
+    Returns a _FormWidget (get_value()->dict) or a leaf widget
     depending on schema type.
 
     Parameters
     ----------
-    schema : ConfigFieldMessage | ConfigFieldSchema | ConfigFieldList | None
+    schema : ConfigFieldMessage | ConfigFieldOneof | ConfigFieldList |
+             ConfigFieldSchema | None
     value  : the current config value (dict, list, scalar, or JSON string)
     """
-    # Lazy imports to avoid circular dependency at module load time
     try:
         from shared.config_schema import (
             ConfigFieldList,
             ConfigFieldMessage,
+            ConfigFieldOneof,
             ConfigFieldSchema,
         )
         _HAS_SCHEMA = True
     except ImportError:
         _HAS_SCHEMA = False
-        ConfigFieldList    = None
-        ConfigFieldMessage = None
-        ConfigFieldSchema  = None
+        ConfigFieldList    = None  # type: ignore
+        ConfigFieldMessage = None  # type: ignore
+        ConfigFieldOneof   = None  # type: ignore
+        ConfigFieldSchema  = None  # type: ignore
 
-    # ------------------------------------------------------------------
     # Coerce JSON string value to dict / list
-    # ------------------------------------------------------------------
     if isinstance(value, str):
         try:
             value = json.loads(value)
@@ -137,17 +206,30 @@ def build_form_for_schema(
         return _FieldWidget("", value, None)
 
     # ------------------------------------------------------------------
+    # ConfigFieldOneof
+    # ------------------------------------------------------------------
+    if _HAS_SCHEMA and isinstance(schema, ConfigFieldOneof):
+        return _OneofWidget(schema, value, parent)
+
+    # ------------------------------------------------------------------
     # ConfigFieldMessage (struct)
     # ------------------------------------------------------------------
     if _HAS_SCHEMA and isinstance(schema, ConfigFieldMessage):
+        is_optional = getattr(schema, "optional", False)
+
+        if is_optional:
+            # Checkbox-gated widget: shows body only when active
+            return _OptionalMessageWidget(schema, value, parent)
+
         if not isinstance(value, dict):
             value = {}
         form = _FormWidget(parent)
         for field_key, field_schema in schema.fields.items():
-            raw = value.get(field_key, getattr(field_schema, "default", None))
+            raw = value.get(field_key, build_default_value(field_schema))
             sub = _build_any(field_schema, field_key, raw)
-            desc = getattr(field_schema, "description", "") or ""
-            form.add_field(field_key, field_key, sub, desc)
+            desc     = getattr(field_schema, "description", "") or ""
+            optional = getattr(field_schema, "optional", False)
+            form.add_field(field_key, field_key, sub, desc, optional=optional)
         return form
 
     # ------------------------------------------------------------------
@@ -157,11 +239,9 @@ def build_form_for_schema(
         if not isinstance(value, list):
             value = []
         item_schema = schema.item_schema
-        # list<struct>
-        if isinstance(item_schema, ConfigFieldMessage):
+        if isinstance(item_schema, (ConfigFieldMessage, ConfigFieldOneof)):
             from v2.modules.config_ui.list_editor import _ListEditor
             return _ListEditor(schema, value, parent)
-        # list<scalar>
         return _ScalarListEditor(schema, value, parent)
 
     # ------------------------------------------------------------------
@@ -171,13 +251,13 @@ def build_form_for_schema(
         return _FieldWidget("", value, schema)
 
     # ------------------------------------------------------------------
-    # Fallback — treat as plain string
+    # Fallback
     # ------------------------------------------------------------------
     return _FieldWidget("", str(value) if value is not None else "", None)
 
 
 # ---------------------------------------------------------------------------
-# Internal helper
+# Internal helpers
 # ---------------------------------------------------------------------------
 
 def _build_any(field_schema, key: str, value) -> QWidget:
@@ -189,14 +269,16 @@ def _build_any(field_schema, key: str, value) -> QWidget:
         from shared.config_schema import (
             ConfigFieldList,
             ConfigFieldMessage,
+            ConfigFieldOneof,
             ConfigFieldSchema,
         )
         _HAS_SCHEMA = True
     except ImportError:
         _HAS_SCHEMA = False
-        ConfigFieldList    = None
-        ConfigFieldMessage = None
-        ConfigFieldSchema  = None
+        ConfigFieldList    = None  # type: ignore
+        ConfigFieldMessage = None  # type: ignore
+        ConfigFieldOneof   = None  # type: ignore
+        ConfigFieldSchema  = None  # type: ignore
 
     if field_schema is None:
         if isinstance(value, dict):
@@ -206,7 +288,12 @@ def _build_any(field_schema, key: str, value) -> QWidget:
         return _FieldWidget(key, value, None)
 
     if _HAS_SCHEMA:
+        if isinstance(field_schema, ConfigFieldOneof):
+            return _OneofWidget(field_schema, value)
         if isinstance(field_schema, ConfigFieldMessage):
+            is_optional = getattr(field_schema, "optional", False)
+            if is_optional:
+                return _OptionalMessageWidget(field_schema, value)
             return build_form_for_schema(field_schema, value)
         if isinstance(field_schema, ConfigFieldList):
             return build_form_for_schema(field_schema, value)
