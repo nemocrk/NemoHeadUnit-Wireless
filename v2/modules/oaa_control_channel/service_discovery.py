@@ -54,7 +54,6 @@ channels_from_sdr_bytes(sdr_bytes)
 
 from __future__ import annotations
 
-import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -66,51 +65,52 @@ for _p in (_REPO_ROOT, _PROTO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from shared.logger import get_logger                                                    # noqa: E402
 from shared.proto_utils import encode_proto, schema_from_proto_message, dict_to_proto  # noqa: E402
-from shared.config_schema import (           # noqa: E402
+from shared.config_schema import (                                                      # noqa: E402
     AnyFieldSchema,
     ConfigFieldList,
     ConfigFieldSchema,
 )
 
 # Control / discovery
-from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (
+from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (                # noqa: E402
     ServiceDiscoveryResponse,
 )
-from v2.protos.oaa.control.ChannelDescriptorData_pb2 import ChannelDescriptor
-from v2.protos.oaa.common.DriverPositionEnum_pb2 import DriverPosition
+from v2.protos.oaa.control.ChannelDescriptorData_pb2 import ChannelDescriptor          # noqa: E402
+from v2.protos.oaa.common.DriverPositionEnum_pb2 import DriverPosition                 # noqa: E402
 
 # AV / Video / Audio enums
-from v2.protos.oaa.av.AVChannelData_pb2 import AVChannel  # noqa
-from v2.protos.oaa.av.AVStreamTypeEnum_pb2 import AVStreamType
-from v2.protos.oaa.audio.AudioTypeEnum_pb2 import AudioType
-from v2.protos.oaa.audio.AudioConfigData_pb2 import AudioConfig
-from v2.protos.oaa.video.VideoConfigData_pb2 import VideoConfig
-from v2.protos.oaa.video.VideoResolutionEnum_pb2 import VideoResolution
-from v2.protos.oaa.video.VideoFPSEnum_pb2 import VideoFPS
-from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType
+from v2.protos.oaa.av.AVChannelData_pb2 import AVChannel                               # noqa
+from v2.protos.oaa.av.AVStreamTypeEnum_pb2 import AVStreamType                         # noqa: E402
+from v2.protos.oaa.audio.AudioTypeEnum_pb2 import AudioType                            # noqa: E402
+from v2.protos.oaa.audio.AudioConfigData_pb2 import AudioConfig                        # noqa: E402
+from v2.protos.oaa.video.VideoConfigData_pb2 import VideoConfig                        # noqa: E402
+from v2.protos.oaa.video.VideoResolutionEnum_pb2 import VideoResolution                # noqa: E402
+from v2.protos.oaa.video.VideoFPSEnum_pb2 import VideoFPS                              # noqa: E402
+from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType                     # noqa: E402
 
 # Sensor
-from v2.protos.oaa.sensor.SensorChannelData_pb2 import SensorChannel
-from v2.protos.oaa.sensor.SensorTypeEnum_pb2 import SensorType
+from v2.protos.oaa.sensor.SensorChannelData_pb2 import SensorChannel                   # noqa: E402
+from v2.protos.oaa.sensor.SensorTypeEnum_pb2 import SensorType                         # noqa: E402
 
 # Bluetooth
-from v2.protos.oaa.bluetooth.BluetoothChannelData_pb2 import BluetoothChannel
-from v2.protos.oaa.bluetooth.BluetoothPairingMethodEnum_pb2 import BluetoothPairingMethod
+from v2.protos.oaa.bluetooth.BluetoothChannelData_pb2 import BluetoothChannel          # noqa: E402
+from v2.protos.oaa.bluetooth.BluetoothPairingMethodEnum_pb2 import BluetoothPairingMethod  # noqa: E402
 
 # WiFi
-from v2.protos.oaa.wifi.WifiChannelData_pb2 import WifiChannel
+from v2.protos.oaa.wifi.WifiChannelData_pb2 import WifiChannel                         # noqa: E402
 
 # Navigation
-from v2.protos.oaa.navigation.NavigationChannelData_pb2 import NavigationChannel
-from v2.protos.oaa.navigation.NavigationTypeEnum_pb2 import NavigationType
-from v2.protos.oaa.navigation.NavigationImageOptionsData_pb2 import NavigationImageOptions
+from v2.protos.oaa.navigation.NavigationChannelData_pb2 import NavigationChannel       # noqa: E402
+from v2.protos.oaa.navigation.NavigationTypeEnum_pb2 import NavigationType             # noqa: E402
+from v2.protos.oaa.navigation.NavigationImageOptionsData_pb2 import NavigationImageOptions  # noqa: E402
 
 # Media
-from v2.protos.oaa.media.MediaChannelData_pb2 import MediaInfoChannel
+from v2.protos.oaa.media.MediaChannelData_pb2 import MediaInfoChannel                  # noqa: E402
 
 # AV Input
-from v2.protos.oaa.av.AVInputChannelData_pb2 import AVInputChannel
+from v2.protos.oaa.av.AVInputChannelData_pb2 import AVInputChannel                     # noqa: E402
 
 # Phone status
 try:
@@ -119,7 +119,7 @@ try:
 except ImportError:
     _HAS_PHONE_STATUS = False
 
-log = logging.getLogger(__name__)
+log = get_logger("oaa_control_channel.service_discovery")
 
 
 # ---------------------------------------------------------------------------
