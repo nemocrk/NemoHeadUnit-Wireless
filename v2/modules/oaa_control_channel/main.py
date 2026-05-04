@@ -10,19 +10,25 @@ Module contract:
                 tcp.session.connected    {address}
                 tcp.session.closed       {}
                 aa.frame.ch0             {channel_id, flags, payload_hex}
+                tcp.server.tls_handshake            {outgoing_hex}  ← forward TLS blob to phone
+                tcp.server.tls_handshake_completed  {}              ← send AUTH_COMPLETE
   Publishes   : system.module_ready      {name, priority}
                 system.ready             {name, priority}
                 aa.frame.send            {channel_id, flags, payload_hex}
-                aa.session.active        {}         ← session fully negotiated
-                aa.session.shutdown      {}         ← phone disconnected
-                aa.handshake.state       {state}    ← debug / UI
+                aa.handshake.start_tls   {}              ← trigger AACryptor init in tcp_server
+                aa.handshake.feed_input  {payload_hex}   ← relay SSL round bytes to tcp_server
+                aa.session.active        {}               ← session fully negotiated
+                aa.session.shutdown      {}               ← phone disconnected
+                aa.handshake.state       {state}          ← debug / UI
 
 Handshake flow (end-to-end):
   1. On tcp.session.connected: reset handshake SM, send VERSION_REQUEST (HU speaks first)
   2. On aa.frame.ch0:          feed frame to ControlChannelHandshake
   3. Handshake replies via aa.frame.send → tcp_server writes back to socket
-  4. On ACTIVE:  publish aa.session.active
-  5. On tcp.session.closed: publish aa.session.shutdown + reset
+  4. TLS delegated to tcp_server: handshake publishes aa.handshake.start_tls / feed_input,
+     tcp_server replies tcp.server.tls_handshake / tls_handshake_completed
+  5. On ACTIVE:  publish aa.session.active
+  6. On tcp.session.closed: publish aa.session.shutdown + reset
 """
 
 import sys
@@ -70,6 +76,7 @@ def _make_handshake() -> ControlChannelHandshake:
 
     return ControlChannelHandshake(
         send_fn=send_fn,
+        publish_fn=bus.publish,
         on_active_cb=_on_session_active,
         on_shutdown_cb=_on_session_shutdown,
     )
@@ -141,6 +148,33 @@ def on_frame_ch0(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# TLS delegation handlers (from tcp_server)
+# ---------------------------------------------------------------------------
+
+def on_tls_handshake(topic: str, payload: dict) -> None:
+    """tcp_server has a TLS blob to send to the phone."""
+    if _handshake is None:
+        log.warning("tcp.server.tls_handshake received but no active handshake — dropping")
+        return
+    try:
+        outgoing_hex = payload["outgoing_hex"]
+    except KeyError as exc:
+        log.error("on_tls_handshake: missing key — %s", exc)
+        return
+    _handshake.on_tls_handshake_blob(outgoing_hex)
+    bus.publish("aa.handshake.state", {"state": _handshake.state.name})
+
+
+def on_tls_handshake_completed(topic: str, payload: dict) -> None:
+    """tcp_server signals TLS is_active() — send AUTH_COMPLETE to phone."""
+    if _handshake is None:
+        log.warning("tcp.server.tls_handshake_completed received but no active handshake — dropping")
+        return
+    _handshake.on_tls_complete()
+    bus.publish("aa.handshake.state", {"state": _handshake.state.name})
+
+
+# ---------------------------------------------------------------------------
 # Handshake callbacks
 # ---------------------------------------------------------------------------
 
@@ -161,12 +195,14 @@ def _on_session_shutdown() -> None:
 # ---------------------------------------------------------------------------
 
 def run() -> None:
-    bus.subscribe("system.readytostart",     on_system_readytostart)
-    bus.subscribe("system.start",            on_system_start)
-    bus.subscribe("system.stop",             on_system_stop)
-    bus.subscribe("tcp.session.connected",   on_tcp_session_connected)
-    bus.subscribe("tcp.session.closed",      on_tcp_session_closed)
-    bus.subscribe("aa.frame.ch0",            on_frame_ch0)
+    bus.subscribe("system.readytostart",                on_system_readytostart)
+    bus.subscribe("system.start",                       on_system_start)
+    bus.subscribe("system.stop",                        on_system_stop)
+    bus.subscribe("tcp.session.connected",              on_tcp_session_connected)
+    bus.subscribe("tcp.session.closed",                 on_tcp_session_closed)
+    bus.subscribe("aa.frame.ch0",                       on_frame_ch0)
+    bus.subscribe("tcp.server.tls_handshake",           on_tls_handshake)
+    bus.subscribe("tcp.server.tls_handshake_completed", on_tls_handshake_completed)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
