@@ -42,7 +42,10 @@ Restart flow (config change):
      and immediately sends VERSION_REQUEST on the existing TCP connection
 
 Config flow:
-  1. on_system_start() calls cfg.get(defaults=_CFG_DEFAULTS) via ConfigClient
+  1. on_system_start() calls cfg.get(defaults=_CFG_DEFAULTS, schema=_SCHEMA) via ConfigClient
+     _SCHEMA is the proto-derived schema from service_discovery._SCHEMA.
+     config_manager stores it in RAM and echoes it in config.response so
+     config_ui can render typed widgets for each field.
   2. ConfigClient receives config.response and calls _on_config_loaded(config)
   3. system.ready is published only inside _on_config_loaded, after _cfg is populated
   4. build_service_discovery_response() reads from _cfg at handshake time
@@ -68,7 +71,10 @@ from shared.logger import get_logger                 # noqa: E402
 from shared.config_client import ConfigClient        # noqa: E402
 from oaa_control_channel.frame_codec import encode_control_frame  # noqa: E402
 from oaa_control_channel.handshake import ControlChannelHandshake  # noqa: E402
-from oaa_control_channel.service_discovery import DEFAULTS as _CFG_DEFAULTS  # noqa: E402
+from oaa_control_channel.service_discovery import (  # noqa: E402
+    DEFAULTS as _CFG_DEFAULTS,
+    _SCHEMA,
+)
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -119,7 +125,7 @@ def on_system_start(topic: str, payload: dict) -> None:
     if payload.get("priority") != PRIORITY:
         return
     log.info("system.start priority=%d — requesting config from config_manager", PRIORITY)
-    cfg.get(defaults=_CFG_DEFAULTS)
+    cfg.get(defaults=_CFG_DEFAULTS, schema=_SCHEMA)
     # system.ready is published in _on_config_loaded once _cfg is populated
 
 
