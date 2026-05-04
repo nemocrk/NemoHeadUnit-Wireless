@@ -11,8 +11,10 @@ Module contract:
                 system.stop
                 system.modules_response  {modules: [{name, pid, status}, ...]}
                 config.response          {module, config: {key: value, ...},
-                                          requester: str}  ← only processed when
-                                                              requester == "config_ui"
+                                          requester: str,
+                                          schema: {key: {type, ...}, ...} (optional)}
+                                          ← only processed when requester == "config_ui"
+                config.error             {module, key, value, reason}
   Publishes   : system.module_ready       {name, priority}
                 system.ready              {name, priority}
                 system.get_modules       {}
@@ -25,9 +27,20 @@ Flow:
   2. system.start (priority==2) → publish system.ready + system.get_modules
   3. system.modules_response → build one tab per module,
                                publish config.get {module, requester} for each
-  4. config.response (requester=="config_ui") → populate the tab
+  4. config.response (requester=="config_ui") → populate the tab with typed widgets
   5. User edits + clicks Save → publish config.set for each changed key
-  6. User clicks Shutdown → publish system.shutdown {}
+  6. config.error → show inline error badge next to the offending field
+  7. User clicks Shutdown → publish system.shutdown {}
+
+Widget selection by schema type
+--------------------------------
+  string              → QLineEdit
+  int  (no bounds)    → QLineEdit + −/+ buttons
+  int  (with bounds)  → QSlider (horizontal) + value label
+  float (no bounds)   → QLineEdit + −/+ buttons (step 0.1)
+  float (with bounds) → QSlider (horizontal, ×100 int mapping) + value label
+  enum                → QComboBox
+  (no schema)         → QLineEdit  (backward-compatible fallback)
 """
 
 import sys
@@ -47,11 +60,13 @@ from PyQt6.QtCore import Qt, QMetaObject, Q_ARG, pyqtSlot           # noqa: E402
 from PyQt6.QtWidgets import (                                         # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTabWidget, QLabel, QLineEdit, QScrollArea,
-    QFormLayout, QStatusBar, QFrame, QMessageBox,
+    QFormLayout, QStatusBar, QFrame, QMessageBox, QComboBox,
+    QSlider, QSpinBox, QDoubleSpinBox,
 )
 
 from shared.bus_client import BusClient              # noqa: E402
-from shared.logger import get_logger     # noqa: E402
+from shared.logger import get_logger                 # noqa: E402
+from shared.config_schema import schema_from_dict    # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -69,6 +84,180 @@ def _request_config(module: str):
 
 
 # ---------------------------------------------------------------------------
+# Typed field widget factory
+# ---------------------------------------------------------------------------
+
+class _FieldWidget(QWidget):
+    """
+    Container that wraps the appropriate Qt widget for a config field and
+    exposes a uniform get_value() / set_value() interface.
+    """
+
+    def __init__(self, key: str, raw_value, field_schema=None):
+        super().__init__()
+        self._key    = key
+        self._schema = field_schema
+        self._layout = QHBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(4)
+
+        self._error_lbl = QLabel()
+        self._error_lbl.setStyleSheet("color: #cc3333; font-size: 11px;")
+        self._error_lbl.setVisible(False)
+
+        if field_schema is None:
+            self._build_string(str(raw_value) if raw_value is not None else "")
+        elif field_schema.type == "enum":
+            self._build_enum(raw_value, field_schema.choices)
+        elif field_schema.type == "int":
+            self._build_int(raw_value, field_schema.min, field_schema.max)
+        elif field_schema.type == "float":
+            self._build_float(raw_value, field_schema.min, field_schema.max)
+        else:  # string or unknown
+            self._build_string(str(raw_value) if raw_value is not None else "")
+
+        self._layout.addWidget(self._error_lbl)
+
+    # ---- builders --------------------------------------------------------
+
+    def _build_string(self, value: str):
+        self._widget_type = "lineedit"
+        self._edit = QLineEdit(value)
+        self._edit.setPlaceholderText("(vuoto)")
+        self._layout.addWidget(self._edit)
+
+    def _build_enum(self, value, choices: list[str]):
+        self._widget_type = "combobox"
+        self._combo = QComboBox()
+        self._combo.addItems(choices)
+        if str(value) in choices:
+            self._combo.setCurrentText(str(value))
+        self._layout.addWidget(self._combo)
+
+    def _build_int(self, value, min_v, max_v):
+        try:
+            int_val = int(value)
+        except (TypeError, ValueError):
+            int_val = 0
+
+        if min_v is not None and max_v is not None:
+            # Slider mode
+            self._widget_type = "int_slider"
+            self._slider = QSlider(Qt.Orientation.Horizontal)
+            self._slider.setMinimum(int(min_v))
+            self._slider.setMaximum(int(max_v))
+            self._slider.setValue(int_val)
+            self._val_lbl = QLabel(str(int_val))
+            self._val_lbl.setMinimumWidth(36)
+            self._val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+            self._slider.valueChanged.connect(
+                lambda v: self._val_lbl.setText(str(v))
+            )
+            self._layout.addWidget(self._slider, stretch=1)
+            self._layout.addWidget(self._val_lbl)
+        else:
+            # LineEdit + −/+ buttons
+            self._widget_type = "int_step"
+            self._edit = QLineEdit(str(int_val))
+            self._edit.setFixedWidth(80)
+            btn_minus = QPushButton("−")
+            btn_plus  = QPushButton("+")
+            for btn in (btn_minus, btn_plus):
+                btn.setFixedWidth(28)
+            btn_minus.clicked.connect(lambda: self._step_int(-1))
+            btn_plus.clicked.connect(lambda:  self._step_int(+1))
+            self._layout.addWidget(btn_minus)
+            self._layout.addWidget(self._edit)
+            self._layout.addWidget(btn_plus)
+
+    def _build_float(self, value, min_v, max_v):
+        try:
+            float_val = float(value)
+        except (TypeError, ValueError):
+            float_val = 0.0
+
+        if min_v is not None and max_v is not None:
+            # Slider mode (×100 mapping for 2-decimal precision)
+            self._widget_type = "float_slider"
+            self._float_min = float(min_v)
+            self._float_max = float(max_v)
+            self._slider = QSlider(Qt.Orientation.Horizontal)
+            self._slider.setMinimum(0)
+            self._slider.setMaximum(100)
+            self._slider.setValue(self._float_to_slider(float_val))
+            self._val_lbl = QLabel(f"{float_val:.2f}")
+            self._val_lbl.setMinimumWidth(44)
+            self._val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
+            self._slider.valueChanged.connect(
+                lambda v: self._val_lbl.setText(f"{self._slider_to_float(v):.2f}")
+            )
+            self._layout.addWidget(self._slider, stretch=1)
+            self._layout.addWidget(self._val_lbl)
+        else:
+            # LineEdit + −/+ buttons (step 0.1)
+            self._widget_type = "float_step"
+            self._edit = QLineEdit(f"{float_val:.2f}")
+            self._edit.setFixedWidth(80)
+            btn_minus = QPushButton("−")
+            btn_plus  = QPushButton("+")
+            for btn in (btn_minus, btn_plus):
+                btn.setFixedWidth(28)
+            btn_minus.clicked.connect(lambda: self._step_float(-0.1))
+            btn_plus.clicked.connect(lambda:  self._step_float(+0.1))
+            self._layout.addWidget(btn_minus)
+            self._layout.addWidget(self._edit)
+            self._layout.addWidget(btn_plus)
+
+    # ---- slider <-> float helpers ----------------------------------------
+
+    def _float_to_slider(self, v: float) -> int:
+        span = self._float_max - self._float_min
+        if span == 0:
+            return 0
+        return round((v - self._float_min) / span * 100)
+
+    def _slider_to_float(self, pos: int) -> float:
+        span = self._float_max - self._float_min
+        return self._float_min + pos / 100 * span
+
+    # ---- step helpers ----------------------------------------------------
+
+    def _step_int(self, delta: int):
+        try:
+            v = int(self._edit.text()) + delta
+        except ValueError:
+            v = delta
+        self._edit.setText(str(v))
+
+    def _step_float(self, delta: float):
+        try:
+            v = round(float(self._edit.text()) + delta, 10)
+        except ValueError:
+            v = delta
+        self._edit.setText(f"{v:.2f}")
+
+    # ---- public interface ------------------------------------------------
+
+    def get_value(self):
+        wt = self._widget_type
+        if wt == "combobox":
+            return self._combo.currentText()
+        if wt == "int_slider":
+            return self._slider.value()
+        if wt == "float_slider":
+            return self._slider_to_float(self._slider.value())
+        # lineedit, int_step, float_step
+        return self._edit.text()
+
+    def set_error(self, message: str | None):
+        if message:
+            self._error_lbl.setText(f"⚠ {message}")
+            self._error_lbl.setVisible(True)
+        else:
+            self._error_lbl.setVisible(False)
+
+
+# ---------------------------------------------------------------------------
 # Per-module tab widget
 # ---------------------------------------------------------------------------
 
@@ -77,7 +266,8 @@ class ModuleConfigTab(QWidget):
         super().__init__()
         self._module_name = module_name
         self._original: dict = {}
-        self._fields:   dict[str, QLineEdit] = {}
+        self._fields:   dict[str, _FieldWidget] = {}
+        self._schema:   dict = {}   # key → ConfigFieldSchema (or empty)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -123,11 +313,29 @@ class ModuleConfigTab(QWidget):
         self._btn_save.clicked.connect(self._on_save)
         root.addWidget(self._btn_save)
 
-    def populate(self, config: dict):
+    def populate(self, config: dict, schema_raw: dict | None = None):
+        """
+        Rebuild the form with typed widgets.
+
+        Parameters
+        ----------
+        config     : {key: value} dict from config.response
+        schema_raw : optional plain-dict schema from config.response["schema"]
+        """
         while self._form.rowCount():
             self._form.removeRow(0)
         self._fields.clear()
         self._original = dict(config)
+
+        # Parse schema if provided
+        if schema_raw:
+            try:
+                self._schema = schema_from_dict(schema_raw)
+            except Exception as exc:
+                log.warning(f"Failed to parse schema for '{self._module_name}': {exc}")
+                self._schema = {}
+        else:
+            self._schema = {}
 
         if not config:
             self._form.addRow(QLabel("Nessuna configurazione trovata per questo modulo."))
@@ -135,12 +343,23 @@ class ModuleConfigTab(QWidget):
             return
 
         for key, value in sorted(config.items()):
-            edit = QLineEdit(str(value))
-            edit.setPlaceholderText("(vuoto)")
-            self._fields[key] = edit
-            self._form.addRow(QLabel(key), edit)
+            field_schema = self._schema.get(key)  # may be None
+            widget = _FieldWidget(key, value, field_schema)
+            self._fields[key] = widget
+            type_badge = ""
+            if field_schema:
+                type_badge = f" <span style='color:#888; font-size:10px'>[{field_schema.type.upper()}]</span>"
+            label = QLabel(f"{key}{type_badge}")
+            label.setTextFormat(Qt.TextFormat.RichText)
+            self._form.addRow(label, widget)
 
         self._btn_save.setEnabled(True)
+
+    def mark_error(self, key: str, reason: str):
+        """Show inline error badge on the field that failed validation."""
+        widget = self._fields.get(key)
+        if widget:
+            widget.set_error(reason)
 
     def update_status(self, pid: int, status: str):
         self._lbl_pid.setText(f"PID: {pid}")
@@ -150,13 +369,19 @@ class ModuleConfigTab(QWidget):
         _request_config(self._module_name)
 
     def _on_save(self):
-        changed = {
-            key: edit.text()
-            for key, edit in self._fields.items()
-            if edit.text() != str(self._original.get(key, ""))
-        }
+        # Clear previous errors
+        for fw in self._fields.values():
+            fw.set_error(None)
+
+        changed = {}
+        for key, fw in self._fields.items():
+            new_val = fw.get_value()
+            if str(new_val) != str(self._original.get(key, "")):
+                changed[key] = new_val
+
         if not changed:
             return
+
         for key, value in changed.items():
             bus.publish("config.set", {
                 "module": self._module_name,
@@ -234,15 +459,23 @@ class ConfigWindow(QMainWindow):
         self._tab_widget.addTab(tab, name)
         _request_config(name)
 
-    @pyqtSlot(str, str)
-    def populate_module_config(self, module: str, config_json: str):
+    @pyqtSlot(str, str, str)
+    def populate_module_config(self, module: str, config_json: str, schema_json: str):
         import json
         tab = self._tabs.get(module)
         if tab is None:
             return
-        config = json.loads(config_json)
-        tab.populate(config)
+        config     = json.loads(config_json)
+        schema_raw = json.loads(schema_json) if schema_json else None
+        tab.populate(config, schema_raw)
         self.set_status(f"Configurazione caricata per '{module}'")
+
+    @pyqtSlot(str, str, str)
+    def show_config_error(self, module: str, key: str, reason: str):
+        tab = self._tabs.get(module)
+        if tab:
+            tab.mark_error(key, reason)
+        self.set_status(f"Errore di validazione: '{module}'.{key} — {reason}")
 
     def _on_refresh_all(self):
         bus.publish("system.get_modules", {})
@@ -328,10 +561,24 @@ def on_config_response(topic: str, payload: dict) -> None:
     import json
     if payload.get("requester", "") != MODULE_NAME:
         return
+    module     = payload.get("module", "")
+    config     = payload.get("config", {})
+    schema_raw = payload.get("schema")   # may be None
+    log.info(f"config.response for '{module}': {len(config)} chiavi, schema={'sì' if schema_raw else 'no'}")
+    _invoke(
+        "populate_module_config",
+        module,
+        json.dumps(config),
+        json.dumps(schema_raw) if schema_raw else "",
+    )
+
+
+def on_config_error(topic: str, payload: dict) -> None:
     module = payload.get("module", "")
-    config = payload.get("config", {})
-    log.info(f"config.response for '{module}': {len(config)} chiavi")
-    _invoke("populate_module_config", module, json.dumps(config))
+    key    = payload.get("key", "")
+    reason = payload.get("reason", "errore sconosciuto")
+    log.warning(f"config.error for '{module}'.{key}: {reason}")
+    _invoke("show_config_error", module, key, reason)
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +593,7 @@ def run() -> None:
     bus.subscribe("system.stop",             on_system_stop)
     bus.subscribe("system.modules_response", on_modules_response)
     bus.subscribe("config.response",         on_config_response)
+    bus.subscribe("config.error",            on_config_error)
 
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)
