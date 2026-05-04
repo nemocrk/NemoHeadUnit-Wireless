@@ -14,77 +14,71 @@ Responsibilities:
   7. While running: log unexpected child crashes to console (mirror of main.py)
 
 Bus events (subscribe):
-  oaa_control_channel.open_channels  {sdr_bytes_hex, channels}  ← start session
+  system.readytostart                 {}                         ← boot handshake
+  system.start                        {priority}                 ← boot handshake
+  system.stop                         {}                         ← process exit
+  oaa_control_channel.open_channels   {sdr_bytes_hex, channels}  ← start session
   channel_manager.module_ready        {name}                     ← child ready
   aa.session.shutdown                 {}                         ← stop session
   aa.session.restart                  {}                         ← stop + restart
-  system.stop                         {}                         ← process exit
 
 Bus events (publish):
+  system.module_ready                 {name, priority}           → boot handshake
+  system.ready                        {name, priority}           → boot handshake
   channel_manager.channels_ready      {sdr_bytes_hex}            → all children up
   channel_manager.shutdown            {}                         → tell children to stop
   channel_manager.stopped             {}                         → all children stopped
-  system.module_ready                 {name, priority}           → boot handshake
-  system.ready                        {name, priority}           → boot handshake
 
 PRIORITY is set to 2 so channel_manager starts after config_manager (1)
 but before any UI modules (3+).
+
+NOTE — Intentional deviation from _template:
+  Session logic is encapsulated in ChannelManagerSession (OOP) rather than
+  plain module-level functions. This is justified by the per-session lifecycle
+  (spawn → wait → shutdown) that requires shared mutable state across multiple
+  event handlers. All bus subscriptions still follow the on_<topic> naming
+  convention defined in the template.
 """
 
 from __future__ import annotations
 
-import json
-import logging
-import sys
 import threading
 import time
 from pathlib import Path
+import sys
 
-import zmq
+_HERE    = Path(__file__).parent        # v2/modules/channel_manager/
+_MODULES = _HERE.parent                 # v2/modules/
+_V2      = _MODULES.parent              # v2/
 
-_V2_ROOT = Path(__file__).parent.parent.parent
-if str(_V2_ROOT) not in sys.path:
-    sys.path.insert(0, str(_V2_ROOT))
+if str(_V2) not in sys.path:
+    sys.path.insert(0, str(_V2))
+if str(_MODULES) not in sys.path:
+    sys.path.insert(0, str(_MODULES))
 
-from shared.logger import get_logger, attach_bus  # noqa: E402
-from shared.bus_client import BusClient           # noqa: E402
+from shared.bus_client import BusClient                                        # noqa: E402
+from shared.logger import get_logger                                           # noqa: E402
 from modules.channel_manager.registry import resolve_module_type, module_name  # noqa: E402
-from modules.channel_manager.launcher import Launcher  # noqa: E402
+from modules.channel_manager.launcher import Launcher                          # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Config
+# Module identity
 # ---------------------------------------------------------------------------
 
-MODULE_NAME  = "channel_manager"
-PRIORITY     = 2
+MODULE_NAME = "channel_manager"
+PRIORITY    = 2
 
-BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
-BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
+# No ConfigClient — channel_manager has no user-configurable keys.
+
+bus = BusClient(module_name=MODULE_NAME)
+log = get_logger(MODULE_NAME, bus=bus)
 
 # Seconds to wait for all children to publish channel_manager.module_ready
 CHILDREN_READY_TIMEOUT = 15.0  # per child
 CRASH_POLL_INTERVAL    = 1.0   # s
 
-log = get_logger(MODULE_NAME)
-
 # ---------------------------------------------------------------------------
-# ZMQ helpers
-# ---------------------------------------------------------------------------
-
-def _make_pub() -> tuple[zmq.Context, zmq.Socket]:
-    ctx = zmq.Context()
-    sock = ctx.socket(zmq.PUB)
-    sock.connect(BROKER_PUB_ADDR)
-    return ctx, sock
-
-
-def _publish(pub: zmq.Socket, topic: str, payload: dict) -> None:
-    pub.send_multipart([topic.encode(), json.dumps(payload).encode()])
-    log.debug("Published [%s]: %s", topic, payload)
-
-
-# ---------------------------------------------------------------------------
-# Session manager
+# Session manager (intentional OOP — see module docstring)
 # ---------------------------------------------------------------------------
 
 class ChannelManagerSession:
@@ -93,12 +87,11 @@ class ChannelManagerSession:
     Instantiated fresh for each new oaa_control_channel.open_channels event.
     """
 
-    def __init__(self, pub: zmq.Socket) -> None:
-        self._pub      = pub
+    def __init__(self) -> None:
         self._launcher = Launcher()
         self._expected: set[str] = set()
         self._ready:    set[str] = set()
-        self._lock = threading.Lock()
+        self._lock      = threading.Lock()
         self._all_ready = threading.Event()
 
     # ------------------------------------------------------------------
@@ -171,8 +164,7 @@ class ChannelManagerSession:
         timeout = CHILDREN_READY_TIMEOUT * max(n, 1)
         if self._all_ready.wait(timeout=timeout):
             log.info("All %d channel module(s) ready — publishing channels_ready", n)
-            _publish(self._pub, "channel_manager.channels_ready",
-                     {"sdr_bytes_hex": sdr_bytes_hex})
+            bus.publish("channel_manager.channels_ready", {"sdr_bytes_hex": sdr_bytes_hex})
             return True
 
         with self._lock:
@@ -190,10 +182,10 @@ class ChannelManagerSession:
     def shutdown(self) -> None:
         """Orderly shutdown: signal children, wait, then publish stopped."""
         log.info("Shutting down channel modules...")
-        _publish(self._pub, "channel_manager.shutdown", {})
+        bus.publish("channel_manager.shutdown", {})
         time.sleep(0.3)  # give children a moment to handle the event
         self._launcher.stop_all()
-        _publish(self._pub, "channel_manager.stopped", {})
+        bus.publish("channel_manager.stopped", {})
         log.info("All channel modules stopped.")
 
     # ------------------------------------------------------------------
@@ -207,187 +199,168 @@ class ChannelManagerSession:
 
 
 # ---------------------------------------------------------------------------
-# Main module class
+# Module-level session state
 # ---------------------------------------------------------------------------
 
-class ChannelManager:
-    def __init__(self) -> None:
-        self._ctx, self._pub = _make_pub()
-        self._session: ChannelManagerSession | None = None
-        self._stop_event = threading.Event()
-        self._pending_restart: str | None = None  # sdr_bytes_hex for restart
+_session: ChannelManagerSession | None = None
 
-    # ------------------------------------------------------------------
-    # Boot handshake (mirrors v2/main.py pattern)
-    # ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Boot protocol handlers
+# ---------------------------------------------------------------------------
 
-    def _announce_ready(self) -> None:
-        """Reply to system.readytostart with our priority, then wait for system.start."""
-        sub_ctx = zmq.Context()
-        sub = sub_ctx.socket(zmq.SUB)
-        sub.connect(BROKER_SUB_ADDR)
-        sub.setsockopt_string(zmq.SUBSCRIBE, "system.readytostart")
-        sub.setsockopt_string(zmq.SUBSCRIBE, "system.start")
+def on_system_readytostart() -> None:
+    """
+    Orchestrator is ready to begin the multi-step boot.
+    Announce this module's name and priority so main.py can build
+    the startup plan before issuing system.start messages.
+    """
+    log.info(f"system.readytostart received — announcing priority {PRIORITY}")
+    bus.publish("system.module_ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
 
-        # Wait for readytostart
-        while not self._stop_event.is_set():
-            if sub.poll(timeout=500):
-                frames = sub.recv_multipart()
-                topic = frames[0].decode()
-                if topic == "system.readytostart":
-                    _publish(self._pub, "system.module_ready",
-                             {"name": MODULE_NAME, "priority": PRIORITY})
-                    log.info("system.module_ready sent (priority=%d)", PRIORITY)
-                    break
 
-        # Wait for system.start at our priority level
-        deadline = time.monotonic() + 10.0
-        while not self._stop_event.is_set() and time.monotonic() < deadline:
-            if sub.poll(timeout=500):
-                frames = sub.recv_multipart()
-                topic = frames[0].decode()
-                if topic == "system.start":
-                    try:
-                        payload = json.loads(frames[1].decode())
-                    except Exception:
-                        payload = {}
-                    if payload.get("priority") == PRIORITY:
-                        _publish(self._pub, "system.ready",
-                                 {"name": MODULE_NAME, "priority": PRIORITY})
-                        log.info("system.ready sent (priority=%d)", PRIORITY)
-                        break
+def on_system_start(topic: str, payload: dict) -> None:
+    """
+    Orchestrator fires system.start for each priority level in order.
+    Only act when payload["priority"] matches this module's PRIORITY.
+    After completing init, publish system.ready so main.py can advance
+    to the next priority level.
+    """
+    if payload.get("priority") != PRIORITY:
+        return  # not our turn yet (or already past)
 
-        sub.close(linger=0)
-        sub_ctx.term()
+    log.info(f"system.start priority={PRIORITY} received — initialising...")
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info(f"system.ready published (priority={PRIORITY})")
 
-    # ------------------------------------------------------------------
-    # Bus listener thread
-    # ------------------------------------------------------------------
 
-    def _run_listener(self) -> None:
-        ctx = zmq.Context()
-        sub = ctx.socket(zmq.SUB)
-        sub.connect(BROKER_SUB_ADDR)
-        for topic in (
-            "oaa_control_channel.open_channels",
-            "channel_manager.module_ready",
-            "aa.session.shutdown",
-            "aa.session.restart",
-            "system.stop",
-        ):
-            sub.setsockopt_string(zmq.SUBSCRIBE, topic)
-
-        log.info("Listener ready")
-
-        while not self._stop_event.is_set():
-            if not sub.poll(timeout=500):
-                if self._session:
-                    self._session.check_crashes()
-                continue
-            try:
-                frames = sub.recv_multipart(flags=zmq.NOBLOCK)
-            except zmq.Again:
-                continue
-            if len(frames) < 2:
-                continue
-
-            topic = frames[0].decode()
-            try:
-                payload = json.loads(frames[1].decode())
-            except Exception:
-                payload = {}
-
-            if topic == "oaa_control_channel.open_channels":
-                self._on_open_channels(payload)
-
-            elif topic == "channel_manager.module_ready":
-                name = payload.get("name", "")
-                if self._session:
-                    self._session.on_module_ready(name)
-
-            elif topic in ("aa.session.shutdown", "aa.session.restart"):
-                log.info("%s received — initiating channel shutdown", topic)
-                if self._session:
-                    self._session.shutdown()
-                    self._session = None
-
-            elif topic == "system.stop":
-                log.info("system.stop received — exiting")
-                if self._session:
-                    self._session.shutdown()
-                    self._session = None
-                self._stop_event.set()
-
-        sub.close(linger=0)
-        ctx.term()
-
-    # ------------------------------------------------------------------
-    # open_channels handler (runs inside listener thread)
-    # ------------------------------------------------------------------
-
-    def _on_open_channels(self, payload: dict) -> None:
-        sdr_bytes_hex = payload.get("sdr_bytes_hex", "")
-        channels      = payload.get("channels", [])
-
-        if not sdr_bytes_hex or not channels:
-            log.error("open_channels: missing sdr_bytes_hex or channels — ignored")
-            return
-
-        # Kill any stale session
-        if self._session:
-            log.warning("New open_channels while session active — shutting down old session")
-            self._session.shutdown()
-
-        session = ChannelManagerSession(self._pub)
-        self._session = session
-
-        try:
-            session.start(sdr_bytes_hex, channels)
-        except FileNotFoundError as exc:
-            log.error("Session startup failed: %s", exc)
-            self._session = None
-            return
-        except KeyError as exc:
-            log.error("Session startup failed (registry): %s", exc)
-            self._session = None
-            return
-
-        # Wait for readiness in a dedicated thread to avoid blocking the listener
-        def _wait() -> None:
-            ok = session.wait_all_ready(sdr_bytes_hex)
-            if not ok:
-                log.error("Session startup timed out — shutting down partial session")
-                session.shutdown()
-                if self._session is session:
-                    self._session = None
-
-        threading.Thread(target=_wait, daemon=True, name="cm_wait_ready").start()
-
-    # ------------------------------------------------------------------
-    # Entry point
-    # ------------------------------------------------------------------
-
-    def run(self) -> None:
-        time.sleep(0.1)  # allow PUB socket to connect
-
-        # Attach bus logging
-        _bus = BusClient(module_name=MODULE_NAME)
-        _bus.start(blocking=False)
-        attach_bus(_bus)
-
-        self._announce_ready()
-
-        # Run listener in main thread
-        self._run_listener()
-
-        self._pub.close(linger=0)
-        self._ctx.term()
-        log.info("%s exited", MODULE_NAME)
+def on_system_stop(topic: str, payload: dict) -> None:
+    """Graceful shutdown — called for all modules simultaneously."""
+    global _session
+    log.info("system.stop — cleaning up...")
+    if _session:
+        _session.shutdown()
+        _session = None
+    bus.stop()
 
 
 # ---------------------------------------------------------------------------
-# Entrypoint
+# Topic handlers  (naming: on_<snake_case_topic>)
 # ---------------------------------------------------------------------------
+
+def on_oaa_control_channel_open_channels(topic: str, payload: dict) -> None:
+    """Start a new AA session: resolve channels, spawn subprocesses."""
+    global _session
+
+    sdr_bytes_hex = payload.get("sdr_bytes_hex", "")
+    channels      = payload.get("channels", [])
+
+    if not sdr_bytes_hex or not channels:
+        log.error("open_channels: missing sdr_bytes_hex or channels — ignored")
+        return
+
+    # Kill any stale session
+    if _session:
+        log.warning("New open_channels while session active — shutting down old session")
+        _session.shutdown()
+
+    session = ChannelManagerSession()
+    _session = session
+
+    try:
+        session.start(sdr_bytes_hex, channels)
+    except FileNotFoundError as exc:
+        log.error("Session startup failed: %s", exc)
+        _session = None
+        return
+    except KeyError as exc:
+        log.error("Session startup failed (registry): %s", exc)
+        _session = None
+        return
+
+    # Wait for readiness in a dedicated thread to avoid blocking the bus loop
+    def _wait() -> None:
+        global _session
+        ok = session.wait_all_ready(sdr_bytes_hex)
+        if not ok:
+            log.error("Session startup timed out — shutting down partial session")
+            session.shutdown()
+            if _session is session:
+                _session = None
+
+    threading.Thread(target=_wait, daemon=True, name="cm_wait_ready").start()
+
+
+def on_channel_manager_module_ready(topic: str, payload: dict) -> None:
+    """Track readiness of a spawned channel module child."""
+    name = payload.get("name", "")
+    if _session:
+        _session.on_module_ready(name)
+
+
+def on_aa_session_shutdown(topic: str, payload: dict) -> None:
+    """AA session ended cleanly — stop all channel modules."""
+    global _session
+    log.info("aa.session.shutdown received — initiating channel shutdown")
+    if _session:
+        _session.shutdown()
+        _session = None
+
+
+def on_aa_session_restart(topic: str, payload: dict) -> None:
+    """AA session restarting — stop all channel modules (new session will follow)."""
+    global _session
+    log.info("aa.session.restart received — initiating channel shutdown")
+    if _session:
+        _session.shutdown()
+        _session = None
+
+
+# ---------------------------------------------------------------------------
+# Crash monitor (runs in background thread)
+# ---------------------------------------------------------------------------
+
+def _crash_monitor() -> None:
+    """Periodically check for unexpected child process exits."""
+    while True:
+        time.sleep(CRASH_POLL_INTERVAL)
+        if _session:
+            _session.check_crashes()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def run() -> None:
+    # Boot protocol
+    bus.subscribe("system.readytostart", on_system_readytostart)
+    bus.subscribe("system.start",        on_system_start)
+    bus.subscribe("system.stop",         on_system_stop)
+
+    # Topic subscriptions
+    bus.subscribe("oaa_control_channel.open_channels",  on_oaa_control_channel_open_channels)
+    bus.subscribe("channel_manager.module_ready",       on_channel_manager_module_ready)
+    bus.subscribe("aa.session.shutdown",                on_aa_session_shutdown)
+    bus.subscribe("aa.session.restart",                 on_aa_session_restart)
+
+    # Start crash monitor
+    threading.Thread(target=_crash_monitor, daemon=True, name="cm_crash_monitor").start()
+
+    log.info("Module started, waiting for messages...")
+    bus_thread = bus.start(blocking=False)
+    time.sleep(0.05)
+    on_system_readytostart()
+    try:
+        bus_thread.join()
+    except KeyboardInterrupt:
+        pass  # gestito dal main via system.stop
+
 
 if __name__ == "__main__":
-    ChannelManager().run()
+    run()
