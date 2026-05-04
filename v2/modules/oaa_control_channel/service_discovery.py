@@ -394,9 +394,10 @@ def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
     Each dict contains at minimum:
         {"channel_id": <int>, "<oneof_field>": {}}
 
-    For av_channel the dict also includes "av_type" at the top level so
-    registry.resolve_module_type() can distinguish VIDEO from AUDIO without
-    needing protobuf enums.
+    For av_channel the dict exposes both "av_type" (AVStreamType int) and
+    "audio_type" (AudioType int, only when av_type == AUDIO) so that
+    registry.resolve_module_type() can distinguish VIDEO from the three
+    audio stream types without importing proto enums.
 
     This function is the bridge between handshake.py (which holds sdr_bytes)
     and channel_manager (which needs a JSON-serialisable channel list).
@@ -423,11 +424,14 @@ def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
         for field_name in _ONEOF_CHANNEL_FIELDS:
             if ch.HasField(field_name):
                 sub = getattr(ch, field_name)
-                # For av_channel expose av_type at the top level so
-                # registry.resolve_module_type() can distinguish video / audio
-                # without importing proto enums.
                 if field_name == "av_channel":
-                    entry["av_channel"] = {"av_type": sub.stream_type}
+                    # Expose stream_type (VIDEO vs AUDIO) and, for AUDIO
+                    # channels, also audio_type (MEDIA / SPEECH / SYSTEM)
+                    # so registry.resolve_module_type() can route correctly.
+                    av_dict: dict = {"av_type": sub.stream_type}
+                    if sub.stream_type == AVStreamType.AUDIO:
+                        av_dict["audio_type"] = sub.audio_type
+                    entry["av_channel"] = av_dict
                 else:
                     entry[field_name] = {}
                 break
