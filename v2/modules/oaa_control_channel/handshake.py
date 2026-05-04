@@ -5,9 +5,15 @@ Handshake sequence (HU speaks first):
 
   HU → Phone : VERSION_REQUEST          (0x0001)  ← sent immediately on tcp.session.connected
   Phone → HU : VERSION_RESPONSE         (0x0002)
-  HU → Phone : SSL_HANDSHAKE            (0x0003)  [TLS ClientHello via AACryptor]
-  Phone → HU : SSL_HANDSHAKE            (0x0003)  [TLS rounds until complete]
-  HU → Phone : AUTH_COMPLETE            (0x0006)  ← sent by HU once TLS is_active()
+  HU → Bus  : aa.handshake.start_tls    {}        ← tcp_server inits AACryptor + drives ClientHello
+  Bus → HU  : tcp.server.tls_handshake  {outgoing_hex}
+  HU → Phone : SSL_HANDSHAKE            (0x0003)  [TLS ClientHello]
+  Phone → HU : SSL_HANDSHAKE            (0x0003)  [TLS rounds]
+  HU → Bus  : aa.handshake.feed_input   {payload_hex}  ← tcp_server feeds cryptor + drives
+  Bus → HU  : tcp.server.tls_handshake  {outgoing_hex} | tcp.server.tls_handshake_completed {}
+  HU → Phone : SSL_HANDSHAKE            (0x0003)  [TLS response round]
+  ... repeat until tcp.server.tls_handshake_completed ...
+  HU → Phone : AUTH_COMPLETE            (0x0006)  ← sent on tls_handshake_completed
   Phone → HU : SERVICE_DISCOVERY_REQ   (0x0005)
   HU → Phone : SERVICE_DISCOVERY_RES   (0x0007)
   Phone → HU : CHANNEL_OPEN_REQ         (0x0008)  [one per channel]
@@ -18,10 +24,11 @@ Handshake sequence (HU speaks first):
 
 TLS note:
   AA uses TLS 1.2 in-band: SSL bytes are exchanged as AA frame payloads
-  on channel 0, msgId 0x0003.  AACryptor implements the memory-BIO pattern
-  of aasdk Cryptor.cpp (HU = TLS client, SSL_set_connect_state).
-  Post-handshake frames with encryptionType=Encrypted are
-  decrypted/encrypted via AACryptor.
+  on channel 0, msgId 0x0003.  AACryptor is now owned by tcp_server.
+  handshake.py is purely a protocol state machine — it delegates all
+  TLS operations to tcp_server via bus messages.
+  Post-handshake frames with encryptionType=Encrypted are decrypted by
+  tcp_server before being published on aa.frame.ch<N>.
 """
 
 from __future__ import annotations
@@ -57,7 +64,6 @@ from v2.protos.oaa.control.PingResponseMessage_pb2 import PingResponse
 
 from oaa_control_channel.frame_codec import encode_control_frame, decode_control_frame
 from oaa_control_channel.service_discovery import build_service_discovery_response
-from oaa_control_channel.aa_cryptor import AACryptor
 
 log = logging.getLogger("oaa_control_channel.handshake")
 
@@ -77,7 +83,7 @@ MSG_PING_REQUEST           = ControlMessage.Enum.PING_REQUEST
 MSG_PING_RESPONSE          = ControlMessage.Enum.PING_RESPONSE
 MSG_SHUTDOWN_REQUEST       = ControlMessage.Enum.SHUTDOWN_REQUEST
 MSG_SHUTDOWN_RESPONSE      = ControlMessage.Enum.SHUTDOWN_RESPONSE
-MSG_BYEBYE_RESPONSE        = ControlMessage.Enum.SHUTDOWN_RESPONSE # Assuming this is a typo and should be BYEBYE_RESPONSE if it exists, otherwise SHUTDOWN_RESPONSE is used.
+MSG_BYEBYE_RESPONSE        = ControlMessage.Enum.SHUTDOWN_RESPONSE
 
 # AA protocol version advertised by HU
 AA_VERSION_MAJOR = 1
@@ -98,8 +104,15 @@ class ControlChannelHandshake:
     """
     Drives the AA control channel (ch 0) handshake.
 
+    TLS is fully delegated to tcp_server via bus messages:
+      publish  aa.handshake.start_tls    {}               ← triggers AACryptor.init + ClientHello
+      publish  aa.handshake.feed_input   {payload_hex}    ← feeds SSL round bytes to cryptor
+      receive  on_tls_handshake_blob(outgoing)            ← forwards blob to phone as SSL_HANDSHAKE
+      receive  on_tls_complete()                          ← sends AUTH_COMPLETE to phone
+
     Args:
         send_fn        : callable(message_id: int, proto_body: bytes, encrypted: bool)
+        publish_fn     : callable(topic: str, payload: dict)  — bus.publish
         bt_mac         : local BT MAC address (for ServiceDiscovery)
         wifi_bssid     : local WiFi BSSID
         on_active_cb   : called when session becomes ACTIVE
@@ -109,19 +122,20 @@ class ControlChannelHandshake:
     def __init__(
         self,
         send_fn: Callable[[int, bytes, bool], None],
+        publish_fn: Callable[[str, dict], None],
         bt_mac: str = "00:00:00:00:00:00",
         wifi_bssid: str = "",
         on_active_cb: Callable[[], None] | None = None,
         on_shutdown_cb: Callable[[], None] | None = None,
     ):
         self._send         = send_fn
+        self._publish      = publish_fn
         self._bt_mac       = bt_mac
         self._wifi_bssid   = wifi_bssid
         self._on_active    = on_active_cb
         self._on_shutdown  = on_shutdown_cb
         self._state        = HandshakeState.IDLE
         self._open_channels: set[int] = set()
-        self._cryptor      = AACryptor()
 
     # ------------------------------------------------------------------
     # Public API
@@ -132,27 +146,21 @@ class ControlChannelHandshake:
         Send VERSION_REQUEST (msgId 0x0001) to the phone.
         Must be called immediately after TCP connect — the phone waits in
         silence until the HU speaks first.
-        Also initialises AACryptor so it is ready when 0x0003 arrives.
         """
         body = struct.pack(">HH", AA_VERSION_MAJOR, AA_VERSION_MINOR)
         self._send(MSG_VERSION_REQUEST, body, encrypted=False)
-        self._cryptor.init()
         self._state = HandshakeState.VERSION_SENT
         log.info(
-            "VERSION_REQUEST sent (v%d.%d) — AACryptor initialised, waiting for VERSION_RESPONSE",
+            "VERSION_REQUEST sent (v%d.%d) — waiting for VERSION_RESPONSE",
             AA_VERSION_MAJOR, AA_VERSION_MINOR,
         )
 
     def on_message(self, channel_id: int, flags: int, payload: bytes) -> None:
-        """Feed a raw payload from FrameRelay into the state machine."""
-        encrypted = bool(flags & 0x08)
-        if encrypted and self._cryptor.is_active():
-            try:
-                payload = self._cryptor.decrypt(payload)
-            except Exception as e:
-                log.error("decrypt failed: %s", e)
-                return
+        """Feed a raw payload from FrameRelay into the state machine.
 
+        Note: tcp_server decrypts encrypted frames before publishing,
+        so payload is always plaintext here.
+        """
         frame = decode_control_frame(channel_id, flags, payload)
         if frame is None:
             log.warning("on_message: malformed frame (payload too short)")
@@ -160,6 +168,7 @@ class ControlChannelHandshake:
 
         msg_id = frame.message_id
         body   = frame.body
+        encrypted = bool(flags & 0x08)
 
         log.debug("CH0 ← msg_id=0x%04x state=%s len=%d", msg_id, self._state.name, len(body))
 
@@ -178,6 +187,27 @@ class ControlChannelHandshake:
         else:
             log.debug("CH0: unhandled msg_id=0x%04x — ignoring", msg_id)
 
+    def on_tls_handshake_blob(self, outgoing_hex: str) -> None:
+        """Called by oaa_control_channel/main.py on tcp.server.tls_handshake.
+
+        Forwards TLS bytes from tcp_server's AACryptor to the phone
+        as an SSL_HANDSHAKE frame (msgId 0x0003).
+        """
+        outgoing = bytes.fromhex(outgoing_hex)
+        log.debug("TLS blob from tcp_server (%d bytes) — forwarding to phone", len(outgoing))
+        self._send(MSG_SSL_HANDSHAKE, outgoing, encrypted=False)
+
+    def on_tls_complete(self) -> None:
+        """Called by oaa_control_channel/main.py on tcp.server.tls_handshake_completed.
+
+        TLS is now active in tcp_server. Send AUTH_COMPLETE to the phone.
+        """
+        log.info("TLS handshake complete (tcp_server) — sending AUTH_COMPLETE")
+        auth = AuthCompleteIndication()
+        auth.status = 0  # STATUS_OK
+        self._send(MSG_AUTH_COMPLETE, auth.SerializeToString(), encrypted=False)
+        self._state = HandshakeState.AUTH_OK
+
     @property
     def state(self) -> HandshakeState:
         return self._state
@@ -189,43 +219,19 @@ class ControlChannelHandshake:
     def _on_version_response(self, body: bytes, encrypted: bool) -> None:
         if len(body) >= 4:
             p_major, p_minor = struct.unpack_from(">HH", body, 0)
-            log.info("VERSION_RESPONSE: phone=%d.%d — starting TLS handshake",
+            log.info("VERSION_RESPONSE: phone=%d.%d — requesting TLS init from tcp_server",
                      p_major, p_minor)
         else:
-            log.info("VERSION_RESPONSE received (no version body) — starting TLS handshake")
-        outgoing = self._cryptor.drive_handshake()
-        if outgoing:
-            self._send(MSG_SSL_HANDSHAKE, outgoing, encrypted=False)
-            log.debug("SSL_HANDSHAKE initial blob sent (%d bytes)", len(outgoing))
+            log.info("VERSION_RESPONSE received — requesting TLS init from tcp_server")
+        self._publish("aa.handshake.start_tls", {})
         self._state = HandshakeState.TLS_IN_PROGRESS
 
     def _on_ssl_handshake(self, body: bytes, encrypted: bool) -> None:
-        """
-        TLS handshake blob from phone — feed into AACryptor and send response.
-        When TLS is complete, send AUTH_COMPLETE immediately.
-        Mirrors Messenger::handleHandshakeData() + Messenger::driveHandshake().
-        """
-        log.info("SSL_HANDSHAKE blob received (%d bytes)", len(body))
-
-        self._cryptor.write_handshake_input(body)
-        outgoing = self._cryptor.drive_handshake()
-
-        log.info("drive_handshake result: %d bytes, active=%s",
-                len(outgoing), self._cryptor.is_active())
-
-        if outgoing:
-            log.info("SSL_HANDSHAKE response (%d bytes) — sending", len(outgoing))
-            self._send(MSG_SSL_HANDSHAKE, outgoing, encrypted=False)
-
-        if self._cryptor.is_active():
-            log.info("TLS handshake complete via AACryptor — sending AUTH_COMPLETE")
-            auth = AuthCompleteIndication()
-            auth.status = 0  # STATUS_OK
-            self._send(MSG_AUTH_COMPLETE, auth.SerializeToString(), encrypted=False)
-            self._state = HandshakeState.AUTH_OK
+        """TLS handshake blob from phone — relay to tcp_server for processing."""
+        log.info("SSL_HANDSHAKE blob from phone (%d bytes) — forwarding to tcp_server", len(body))
+        self._publish("aa.handshake.feed_input", {"payload_hex": body.hex()})
 
     def _on_auth_complete(self, body: bytes, encrypted: bool) -> None:
-        # Phone acknowledges AUTH_COMPLETE (rare, usually phone sends SERVICE_DISCOVERY_REQ next)
         log.info("AUTH_COMPLETE from phone — TLS session established")
         self._state = HandshakeState.AUTH_OK
 
