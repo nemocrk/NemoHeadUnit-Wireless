@@ -52,6 +52,7 @@ if str(_MODULES) not in sys.path:
 from shared.bus_client import BusClient              # noqa: E402
 from shared.logger import get_logger     # noqa: E402
 from shared.config_client import ConfigClient        # noqa: E402
+from shared.config_schema import field_bool, field_int, field_string  # noqa: E402
 
 from bluetooth.bluez_adapter import BluezAdapter   # noqa: E402
 from bluetooth.discovery import DiscoverySession   # noqa: E402
@@ -69,7 +70,7 @@ log = get_logger(MODULE_NAME, bus=bus)
 cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 
 # ---------------------------------------------------------------------------
-# Config defaults
+# Config defaults & schema
 # ---------------------------------------------------------------------------
 
 _DEFAULTS = {
@@ -77,6 +78,13 @@ _DEFAULTS = {
     "discoverable_timeout":    0,
     "discovery_duration_sec":  10,
     "adapter_name":            "NemoHeadUnit",
+}
+
+_SCHEMA = {
+    "discoverable":            field_bool(default=True),
+    "discoverable_timeout":    field_int(default=0, min=0),
+    "discovery_duration_sec":  field_int(default=10, min=1, max=120),
+    "adapter_name":            field_string(default="NemoHeadUnit"),
 }
 
 _config: dict = dict(_DEFAULTS)
@@ -185,7 +193,7 @@ def on_system_start(topic: str, payload: dict) -> None:
         bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
         return
 
-    cfg.get(defaults=_DEFAULTS)
+    cfg.get(defaults=_DEFAULTS, schema=_SCHEMA)
 
     _pairing = PairingAgent(
         adapter=_adapter,
