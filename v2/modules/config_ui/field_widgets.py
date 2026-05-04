@@ -15,6 +15,20 @@ _ScalarListEditor
     as a compact vertical list of _FieldWidget rows with add / delete buttons.
     Exposes:
         get_value() -> list
+
+_OneofWidget
+    Renders a ConfigFieldOneof field as a QComboBox branch selector +
+    collapsible body for the active branch sub-form.
+    Exposes:
+        get_value() -> scalar  (the value of the active branch directly,
+                                NOT wrapped in a {branch: value} dict)
+
+_OptionalMessageWidget
+    Renders a ConfigFieldMessage with optional=True as a checkbox that
+    enables/disables the nested sub-form.  When unchecked the field is
+    omitted from the payload (returns None).
+    Exposes:
+        get_value() -> dict | None
 """
 
 from __future__ import annotations
@@ -25,6 +39,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -35,7 +50,12 @@ from PyQt6.QtWidgets import (
 )
 
 if TYPE_CHECKING:
-    from shared.config_schema import ConfigFieldSchema, ConfigFieldList
+    from shared.config_schema import (
+        ConfigFieldList,
+        ConfigFieldMessage,
+        ConfigFieldOneof,
+        ConfigFieldSchema,
+    )
 
 _BOOL_TRUE = {"true", "1", "yes", "on"}
 
@@ -326,7 +346,6 @@ class _ScalarListEditor(QWidget):
         self._rows.append(fw)
         self._rows_vbox.addWidget(row)
 
-        # Delete by identity — no index arithmetic needed
         btn_del.clicked.connect(lambda _checked=False, w=row, f=fw: self._delete_row(w, f))
 
     def _delete_row(self, row_widget: QWidget, fw: "_FieldWidget") -> None:
@@ -345,3 +364,220 @@ class _ScalarListEditor(QWidget):
 
     def get_value(self) -> list:
         return [fw.get_value() for fw in self._rows]
+
+
+# ---------------------------------------------------------------------------
+# _OneofWidget — renders a ConfigFieldOneof as branch selector + body
+# ---------------------------------------------------------------------------
+
+class _OneofWidget(QWidget):
+    """
+    Widget for a ConfigFieldOneof field.
+
+    Shows a QComboBox to select the active branch; below it renders the
+    sub-form for that branch (rebuilt on every branch change).
+
+    get_value() returns the scalar or dict value of the active branch
+    directly — NOT wrapped in {branch_name: value}.
+
+    Parameters
+    ----------
+    field_schema : ConfigFieldOneof
+    raw_value    : the current value (scalar or dict matching the active branch)
+    """
+
+    def __init__(
+        self,
+        field_schema: "ConfigFieldOneof",
+        raw_value,
+        parent: "QWidget | None" = None,
+    ):
+        super().__init__(parent)
+        self._field_schema   = field_schema
+        self._active_collect = [None]   # list so closure can mutate
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(2)
+
+        # Branch selector
+        self._combo = QComboBox()
+        # First item is an empty placeholder so no branch is pre-selected
+        self._combo.addItem("— seleziona tipo —")
+        branch_names = list(field_schema.branches.keys())
+        self._combo.addItems(branch_names)
+        root.addWidget(self._combo)
+
+        # Body host
+        self._body_host = QWidget()
+        body_layout = QVBoxLayout(self._body_host)
+        body_layout.setContentsMargins(12, 4, 0, 4)
+        body_layout.setSpacing(2)
+        self._body_layout = body_layout
+        root.addWidget(self._body_host)
+
+        # Determine initial branch from raw_value — leave placeholder if None/empty
+        initial_branch = None
+        if raw_value is not None:
+            if isinstance(raw_value, dict):
+                for bn in branch_names:
+                    if bn in raw_value:
+                        initial_branch = bn
+                        break
+            # scalar value: cannot map to a branch name, leave placeholder
+        if initial_branch is None and field_schema.active_branch in branch_names:
+            # Only pre-select if there's an actual value
+            if raw_value is not None:
+                initial_branch = field_schema.active_branch
+
+        self._raw_value   = raw_value
+        self._branch_names = branch_names
+
+        if initial_branch:
+            self._combo.setCurrentText(initial_branch)
+            self._rebuild_body(initial_branch)
+        # else stays on placeholder, body stays empty
+
+        self._combo.currentTextChanged.connect(self._on_branch_changed)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _clear_body(self) -> None:
+        while self._body_layout.count():
+            item = self._body_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._active_collect[0] = None
+
+    def _rebuild_body(self, branch_name: str) -> None:
+        from v2.modules.config_ui.form_builder import build_form_for_schema
+
+        self._clear_body()
+        if branch_name not in self._branch_names:
+            return
+
+        branch_schema = self._field_schema.branches[branch_name]
+
+        # Extract branch value from raw_value
+        if isinstance(self._raw_value, dict):
+            branch_val = self._raw_value.get(branch_name)
+        else:
+            branch_val = self._raw_value  # scalar branch
+
+        body_widget = build_form_for_schema(branch_schema, branch_val)
+        self._body_layout.addWidget(body_widget)
+        self._active_collect[0] = body_widget
+
+    def _on_branch_changed(self, branch_name: str) -> None:
+        if branch_name == "— seleziona tipo —":
+            self._clear_body()
+            return
+        # When the user switches branch, forget the old raw value
+        self._raw_value = None
+        self._rebuild_body(branch_name)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def get_value(self):
+        """Return the value of the active branch as a plain scalar/dict."""
+        widget = self._active_collect[0]
+        if widget is None:
+            return None
+        if hasattr(widget, "get_value"):
+            return widget.get_value()
+        return None
+
+    def set_error(self, message: "str | None") -> None:
+        # No-op — errors on oneof fields are handled at the parent level
+        pass
+
+
+# ---------------------------------------------------------------------------
+# _OptionalMessageWidget — checkbox-gated nested message
+# ---------------------------------------------------------------------------
+
+class _OptionalMessageWidget(QWidget):
+    """
+    Widget for a ConfigFieldMessage with optional=True.
+
+    Renders as:
+        [ ✓ ] fieldname    ← QCheckBox toggles the sub-form visibility
+        ┌─────────────────┐
+        │  sub-form fields │   ← built by form_builder, visible only when checked
+        └─────────────────┘
+
+    get_value() returns:
+        dict   — when checkbox is checked (the sub-form values)
+        None   — when unchecked (field is omitted from payload)
+    """
+
+    def __init__(
+        self,
+        field_schema: "ConfigFieldMessage",
+        raw_value,
+        parent: "QWidget | None" = None,
+    ):
+        super().__init__(parent)
+        self._field_schema = field_schema
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # Checkbox row
+        chk_row = QWidget()
+        chk_layout = QHBoxLayout(chk_row)
+        chk_layout.setContentsMargins(0, 2, 0, 2)
+        chk_layout.setSpacing(6)
+        self._checkbox = QCheckBox("attivo")
+        self._checkbox.setStyleSheet("color: #aaa; font-size: 11px;")
+        chk_layout.addWidget(self._checkbox)
+        chk_layout.addStretch()
+        root.addWidget(chk_row)
+
+        # Body frame
+        self._frame = QFrame()
+        self._frame.setStyleSheet(
+            "QFrame { border: 1px solid #2d3f50; border-radius: 4px;"
+            " background: #111820; }"
+        )
+        frame_layout = QVBoxLayout(self._frame)
+        frame_layout.setContentsMargins(10, 6, 10, 6)
+        frame_layout.setSpacing(4)
+
+        from v2.modules.config_ui.form_builder import build_form_for_schema
+        self._body = build_form_for_schema(field_schema, raw_value or {})
+        frame_layout.addWidget(self._body)
+        root.addWidget(self._frame)
+
+        # Initial state: active if raw_value is not None
+        is_active = raw_value is not None
+        self._checkbox.setChecked(is_active)
+        self._frame.setVisible(is_active)
+
+        self._checkbox.toggled.connect(self._on_toggle)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _on_toggle(self, checked: bool) -> None:
+        self._frame.setVisible(checked)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def get_value(self):
+        if not self._checkbox.isChecked():
+            return None
+        if hasattr(self._body, "get_value"):
+            return self._body.get_value()
+        return None
+
+    def set_error(self, message: "str | None") -> None:
+        pass
