@@ -50,8 +50,8 @@ from shared.config_schema import (
     ConfigFieldSchema,
     schema_from_dict,
 )
-from v2.modules.config_ui.field_widgets import _FieldWidget
-from v2.modules.config_ui.form_builder import build_form_for_schema
+from config_ui.field_widgets import _FieldWidget
+from config_ui.form_builder import build_form_for_schema
 
 _BOOL_TRUE = {"true", "1", "yes", "on"}
 
@@ -232,7 +232,7 @@ class ModuleConfigTab(QWidget):
     # ------------------------------------------------------------------
 
     def _on_refresh(self) -> None:
-        from v2.modules.config_ui.main import _request_config
+        from config_ui.main import _request_config
         _request_config(self._module_name)
 
     def _collect_all_values(self) -> dict:
@@ -283,7 +283,7 @@ class ModuleConfigTab(QWidget):
         return errors
 
     def _on_save(self) -> None:
-        from v2.modules.config_ui.main import bus
+        from config_ui.main import bus
 
         # Clear previous errors
         for fw in self._fields.values():

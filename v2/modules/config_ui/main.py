@@ -64,7 +64,7 @@ from PyQt6.QtWidgets import (                                         # noqa: E4
 
 from shared.bus_client import BusClient              # noqa: E402
 from shared.logger import get_logger                 # noqa: E402
-from v2.modules.config_ui.module_tab import ModuleConfigTab  # noqa: E402
+from config_ui.module_tab import ModuleConfigTab  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity

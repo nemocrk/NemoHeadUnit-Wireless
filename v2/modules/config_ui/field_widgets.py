@@ -453,7 +453,7 @@ class _OneofWidget(QWidget):
         self._active_collect[0] = None
 
     def _rebuild_body(self, branch_name: str) -> None:
-        from v2.modules.config_ui.form_builder import build_form_for_schema
+        from config_ui.form_builder import build_form_for_schema
 
         self._clear_body()
         if branch_name not in self._branch_names:
@@ -554,7 +554,7 @@ class _OptionalMessageWidget(QWidget):
         frame_layout.setContentsMargins(10, 6, 10, 6)
         frame_layout.setSpacing(4)
 
-        from v2.modules.config_ui.form_builder import build_form_for_schema
+        from config_ui.form_builder import build_form_for_schema
         self._body = build_form_for_schema(field_schema, raw_value or {})
         frame_layout.addWidget(self._body)
         root.addWidget(self._frame)

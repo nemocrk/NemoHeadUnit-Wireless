@@ -191,11 +191,11 @@ class _ListEditor(QWidget):
         build_default_value() for full recursive support (messages,
         oneofs, nested lists, etc.).
         """
-        from v2.modules.config_ui.form_builder import build_default_value
+        from config_ui.form_builder import build_default_value
         return build_default_value(self._item_schema())
 
     def _append_item(self, value) -> None:
-        from v2.modules.config_ui.form_builder import build_form_for_schema
+        from config_ui.form_builder import build_form_for_schema
 
         self._item_count += 1
         idx    = self._item_count

@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from v2.modules.config_ui.field_widgets import (
+from config_ui.field_widgets import (
     _FieldWidget,
     _OneofWidget,
     _OptionalMessageWidget,
@@ -240,7 +240,7 @@ def build_form_for_schema(
             value = []
         item_schema = schema.item_schema
         if isinstance(item_schema, (ConfigFieldMessage, ConfigFieldOneof)):
-            from v2.modules.config_ui.list_editor import _ListEditor
+            from config_ui.list_editor import _ListEditor
             return _ListEditor(schema, value, parent)
         return _ScalarListEditor(schema, value, parent)
 
