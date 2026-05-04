@@ -12,8 +12,8 @@ ModuleConfigTab
 
 Depends on:
     field_widgets._FieldWidget
-    main._ListFieldInlineEditor  (legacy inline accordion — still in main.py)
-    main._request_config         (bus helper)
+    form_builder.build_form_for_schema  (all structured fields)
+    main._request_config                (bus helper)
 """
 
 from __future__ import annotations
@@ -51,6 +51,7 @@ from shared.config_schema import (
     schema_from_dict,
 )
 from v2.modules.config_ui.field_widgets import _FieldWidget
+from v2.modules.config_ui.form_builder import build_form_for_schema
 
 _BOOL_TRUE = {"true", "1", "yes", "on"}
 
@@ -73,16 +74,6 @@ def _schema_type_badge(field_schema) -> str:
     return f" <span style='color:#888; font-size:10px'>[{label}]</span>"
 
 
-def _structured_summary(value, field_schema) -> str:
-    if isinstance(value, list):
-        badge = _schema_type_badge(field_schema)
-        return f"{len(value)} elementi{badge}"
-    if isinstance(value, dict):
-        badge = _schema_type_badge(field_schema)
-        return f"{len(value)} campi{badge}"
-    return str(value)
-
-
 # ---------------------------------------------------------------------------
 # ModuleConfigTab
 # ---------------------------------------------------------------------------
@@ -101,10 +92,12 @@ class ModuleConfigTab(QWidget):
     def __init__(self, module_name: str, pid: int, status: str):
         super().__init__()
         self._module_name = module_name
-        self._original:      dict = {}
-        self._fields:        dict[str, _FieldWidget] = {}
-        self._list_editors:  dict = {}                  # key -> _ListFieldInlineEditor
-        self._schema:        dict = {}
+        self._original:       dict = {}
+        self._fields:         dict[str, _FieldWidget] = {}
+        # All structured editors (list / message / oneof) keyed by field name.
+        # Each value exposes get_value().
+        self._struct_editors: dict[str, QWidget] = {}
+        self._schema:         dict = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -153,19 +146,27 @@ class ModuleConfigTab(QWidget):
         self._btn_save.clicked.connect(self._on_save)
         root.addWidget(self._btn_save)
 
+        # --- validation error banner (hidden until needed) ---
+        self._error_banner = QLabel()
+        self._error_banner.setStyleSheet(
+            "color: #cc3333; background: #2a1010; border: 1px solid #cc3333;"
+            " border-radius: 4px; padding: 4px 8px; font-size: 11px;"
+        )
+        self._error_banner.setWordWrap(True)
+        self._error_banner.setVisible(False)
+        root.addWidget(self._error_banner)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def populate(self, config: dict, schema_raw: "dict | None" = None) -> None:
         """Clear and rebuild the form from *config* + optional *schema_raw*."""
-        # Import here to avoid circular dependency at module load time.
-        from v2.modules.config_ui.main import _ListFieldInlineEditor
-
         while self._form.rowCount():
             self._form.removeRow(0)
         self._fields.clear()
-        self._list_editors.clear()
+        self._struct_editors.clear()
+        self._error_banner.setVisible(False)
         self._original = dict(config)
 
         if schema_raw:
@@ -185,33 +186,25 @@ class ModuleConfigTab(QWidget):
         for key, value in sorted(config.items()):
             raw_schema = self._schema.get(key)
 
-            is_list_schema  = isinstance(raw_schema, ConfigFieldList)
-            is_bare_list    = raw_schema is None and isinstance(value, list)
-            is_other_struct = isinstance(raw_schema, (ConfigFieldMessage, ConfigFieldOneof))
-            is_bare_dict    = raw_schema is None and isinstance(value, dict)
+            is_structured = isinstance(raw_schema, _STRUCTURED_TYPES)
+            is_bare_list  = raw_schema is None and isinstance(value, list)
+            is_bare_dict  = raw_schema is None and isinstance(value, dict)
 
-            # ---- List field: inline accordion editor ----
-            if is_list_schema or is_bare_list:
+            # ---- Structured field (list / message / oneof / bare list|dict) ----
+            if is_structured or is_bare_list or is_bare_dict:
                 badge   = _schema_type_badge(raw_schema)
                 key_lbl = QLabel(f"<b>{key}</b>{badge}")
                 key_lbl.setTextFormat(Qt.TextFormat.RichText)
 
-                initial_val  = list(value) if isinstance(value, list) else []
-                field_schema = raw_schema if is_list_schema else None
-                editor = _ListFieldInlineEditor(field_schema, initial_val, self)
-                self._list_editors[key] = editor
+                editor = build_form_for_schema(
+                    raw_schema if is_structured else None,
+                    value,
+                    self._form_container,
+                )
+                self._struct_editors[key] = editor
 
                 self._form.addRow(key_lbl)
                 self._form.addRow(editor)
-                continue
-
-            # ---- Other structured (message/oneof/bare dict): read-only summary ----
-            if is_other_struct or is_bare_dict:
-                summary_lbl = QLabel(_structured_summary(value, raw_schema))
-                summary_lbl.setTextFormat(Qt.TextFormat.RichText)
-                summary_lbl.setStyleSheet("color: #888;")
-                badge = _schema_type_badge(raw_schema)
-                self._form.addRow(QLabel(f"{key}{badge}"), summary_lbl)
                 continue
 
             # ---- Scalar field ----
@@ -242,33 +235,76 @@ class ModuleConfigTab(QWidget):
         from v2.modules.config_ui.main import _request_config
         _request_config(self._module_name)
 
+    def _collect_all_values(self) -> dict:
+        """
+        Merge scalar fields and struct editors into a single dict.
+        Optional fields whose widget returns None are excluded.
+        """
+        result: dict = {}
+        for key, fw in self._fields.items():
+            val = fw.get_value()
+            if val is not None:
+                result[key] = val
+        for key, editor in self._struct_editors.items():
+            val = editor.get_value() if hasattr(editor, "get_value") else None
+            if val is not None:
+                result[key] = val
+        return result
+
+    def _validate(self, values: dict) -> list[str]:
+        """
+        Check required scalar fields for empty values.
+        Returns a list of human-readable error strings (empty = valid).
+        """
+        errors: list[str] = []
+        for key, fw in self._fields.items():
+            raw_schema = self._schema.get(key)
+            is_optional = getattr(raw_schema, "optional", False)
+            if is_optional:
+                continue
+            val = fw.get_value()
+            if val is None or str(val).strip() == "":
+                fw.set_error("Campo obbligatorio")
+                errors.append(f"'{key}': campo obbligatorio")
+        return errors
+
     def _on_save(self) -> None:
         from v2.modules.config_ui.main import bus
 
+        # Clear previous errors
         for fw in self._fields.values():
             fw.set_error(None)
+        self._error_banner.setVisible(False)
+
+        current = self._collect_all_values()
+
+        # Inline validation
+        errors = self._validate(current)
+        if errors:
+            self._error_banner.setText(
+                "Salvataggio bloccato. Campi obbligatori mancanti:\n"
+                + "\n".join(f"  • {e}" for e in errors)
+            )
+            self._error_banner.setVisible(True)
+            return
 
         changed: dict = {}
 
-        # Scalar fields
-        for key, fw in self._fields.items():
-            new_val = fw.get_value()
-            orig    = self._original.get(key)
+        for key, new_val in current.items():
+            orig = self._original.get(key)
             if isinstance(new_val, bool):
                 orig_bool = orig if isinstance(orig, bool) else (
                     str(orig).strip().lower() in _BOOL_TRUE
                 )
                 if new_val != orig_bool:
                     changed[key] = new_val
-            elif str(new_val) != str(orig if orig is not None else ""):
+            elif new_val != orig:
                 changed[key] = new_val
 
-        # List editors
-        for key, editor in self._list_editors.items():
-            new_val = editor.get_value()
-            orig    = self._original.get(key)
-            if new_val != orig:
-                changed[key] = new_val
+        # Also detect keys removed (optional fields now unchecked)
+        for key in list(self._original.keys()):
+            if key not in current and key in self._original:
+                changed[key] = None  # signal removal to backend
 
         if not changed:
             return
