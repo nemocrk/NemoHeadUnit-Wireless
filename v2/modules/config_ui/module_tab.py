@@ -95,7 +95,7 @@ class ModuleConfigTab(QWidget):
         self._original:       dict = {}
         self._fields:         dict[str, _FieldWidget] = {}
         # All structured editors (list / message / oneof) keyed by field name.
-        # Each value exposes get_value().
+        # Each value exposes get_value(); some expose validate().
         self._struct_editors: dict[str, QWidget] = {}
         self._schema:         dict = {}
 
@@ -253,10 +253,15 @@ class ModuleConfigTab(QWidget):
 
     def _validate(self, values: dict) -> list[str]:
         """
-        Check required scalar fields for empty values.
+        Check required scalar fields for empty values, then cascade
+        validate() into every struct editor that supports it
+        (e.g. _OptionalMessageWidget when its checkbox is checked).
+
         Returns a list of human-readable error strings (empty = valid).
         """
         errors: list[str] = []
+
+        # --- Scalar fields (top-level required check) ---
         for key, fw in self._fields.items():
             raw_schema = self._schema.get(key)
             is_optional = getattr(raw_schema, "optional", False)
@@ -266,6 +271,15 @@ class ModuleConfigTab(QWidget):
             if val is None or str(val).strip() == "":
                 fw.set_error("Campo obbligatorio")
                 errors.append(f"'{key}': campo obbligatorio")
+
+        # --- Struct editors: cascade validate() when available ---
+        for key, editor in self._struct_editors.items():
+            if not hasattr(editor, "validate"):
+                continue
+            sub_errors = editor.validate()
+            for e in sub_errors:
+                errors.append(f"'{key}' → {e}")
+
         return errors
 
     def _on_save(self) -> None:
@@ -278,7 +292,7 @@ class ModuleConfigTab(QWidget):
 
         current = self._collect_all_values()
 
-        # Inline validation
+        # Inline validation (scalar + cascaded struct)
         errors = self._validate(current)
         if errors:
             self._error_banner.setText(
@@ -301,7 +315,7 @@ class ModuleConfigTab(QWidget):
             elif new_val != orig:
                 changed[key] = new_val
 
-        # Also detect keys removed (optional fields now unchecked)
+        # Detect keys removed (optional fields now unchecked)
         for key in list(self._original.keys()):
             if key not in current and key in self._original:
                 changed[key] = None  # signal removal to backend
