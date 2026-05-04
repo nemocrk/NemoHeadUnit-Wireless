@@ -4,6 +4,49 @@ Registro delle sessioni di sviluppo, modifiche apportate e prossimi step.
 
 ---
 
+## 2026-05-04 — Graceful session restart: flusso completo SHUTDOWN → VERSION_REQUEST
+
+**What changed:**
+- `oaa_control_channel/service_discovery.py` — fix: tutti i builder privati ora restituiscono `ChannelDescriptor` (non `bytes`); rimosso `encode_proto` da ogni builder; `build_service_discovery_response` usa `resp.channels.add().MergeFrom(desc)` invece di `resp.channels.append(bytes)`
+- `tcp_server/main.py` — aggiunto `on_aa_session_restart`: invia `SHUTDOWN_REQUEST` (ch0 msgId 0x000D) al phone, attende `SHUTDOWN_RESPONSE` via `_shutdown_ack_event` (timeout 3s), chiama `cryptor.deinit()`, pubblica `aa.session.restarting`; aggiunto `on_ch0_frame`: subscriber su `aa.frame.ch0`, segnala `_shutdown_ack_event` quando riceve msgId 0x000E solo se `_restart_pending=True`; aggiunto flag `_restart_pending` per distinguere restart da disconnessione accidentale in `_on_session_closed`; aggiunte subscribe per `aa.session.restart` e `aa.frame.ch0`
+- `oaa_control_channel/main.py` — aggiunto `on_aa_session_restarting`: riceve `aa.session.restarting` da tcp_server, crea un nuovo `ControlChannelHandshake` con il `_cfg` già aggiornato, pubblica `aa.handshake.state=IDLE`, chiama `send_version_request()`; aggiunta subscribe per `aa.session.restarting`
+
+**Why:**
+Prima il restart di sessione (causato da un cambio di config) non aveva un flusso definito: `oaa_control_channel` pubblicava `aa.session.restart` ma nessuno gestiva la chiusura ordinata verso il phone né il reset del cryptor TLS. Ora il flusso è completo e deterministico: shutdown protocol → reset SSL → nuovo handshake sulla stessa connessione TCP.
+
+**Flusso restart completo:**
+
+```
+config.changed
+    │ oaa_control_channel: _cfg[key]=value, _handshake=None
+    ▼
+aa.session.restart
+    │ tcp_server: SHUTDOWN_REQUEST (ch0 0x000D) → phone
+    │ tcp_server: attende SHUTDOWN_RESPONSE (max 3s)
+    │ tcp_server: cryptor.deinit()
+    ▼
+aa.session.restarting
+    │ oaa_control_channel: _make_handshake() (cfg aggiornato)
+    ▼
+VERSION_REQUEST → phone  (handshake riparte sulla stessa TCP conn)
+```
+
+**Nuovi messaggi bus:**
+
+| Messaggio | Da | A | Payload |
+|---|---|---|---|
+| `aa.session.restart` | `oaa_control_channel` | `tcp_server` | `{}` |
+| `aa.session.restarting` | `tcp_server` | `oaa_control_channel` | `{}` |
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Aggiungere test unitari per `on_aa_session_restart` in `tcp_server` (ack ricevuto, timeout, cryptor reset)
+2. Aggiungere test unitari per `on_aa_session_restarting` in `oaa_control_channel` (nuovo handshake + version request)
+3. Aggiungere test unitari per `on_config_response` e `on_config_changed` in `oaa_control_channel/main.py`
+
+---
+
 ## 2026-05-04 — Config integration: service_discovery ora legge da config_manager
 
 **What changed:**
@@ -12,7 +55,7 @@ Registro delle sessioni di sviluppo, modifiche apportate e prossimi step.
 - `oaa_control_channel/main.py` — aggiunto `_cfg: dict` (inizializzato con `DEFAULTS`) e `_cfg_loaded: bool`; `on_system_start()` pubblica `config.get` con defaults (first-boot seeding); `on_config_response()` aggiorna `_cfg` e pubblica `system.ready` solo dopo la risposta; `on_config_changed()` aggiorna `_cfg`, azzera `_handshake`, pubblica `aa.session.shutdown` + `aa.session.restart`; aggiunte subscribe per `config.response` e `config.changed`; `_make_handshake()` passa `cfg=_cfg`
 
 **Why:**
-Tutte le impostazioni utente (nome HU, risoluzione video, DPI, sample rate audio, dimensioni touch, intervallo navigazione, dimensioni immagini nav) erano hardcoded in `service_discovery.py`. Ora sono persistite in `config/oaa_control_channel.yaml` tramite `config_manager`. Al boot il modulo chiede la config prima di pubblicare `system.ready` (pattern sincrono tramite bus). Se un valore cambia a runtime, la sessione attiva viene chiusa e `aa.session.restart` segnala a `tcp_server` di forzare la riconnessione, cosicché il prossimo handshake usi i nuovi valori.
+Tutte le impostazioni utente erano hardcoded in `service_discovery.py`. Ora sono persistite in `config/oaa_control_channel.yaml` tramite `config_manager`. Al boot il modulo chiede la config prima di pubblicare `system.ready`. Se un valore cambia a runtime, la sessione attiva viene chiusa e `aa.session.restart` segnala a `tcp_server` di gestire lo shutdown ordinato.
 
 **Nuovi messaggi bus:**
 
@@ -21,7 +64,6 @@ Tutte le impostazioni utente (nome HU, risoluzione video, DPI, sample rate audio
 | `config.get` | `oaa_control_channel` | `config_manager` | `{module, requester, defaults}` |
 | `config.response` | `config_manager` | `oaa_control_channel` | `{module, config, requester}` |
 | `config.changed` | `config_manager` | `oaa_control_channel` | `{module, key, value}` |
-| `aa.session.restart` | `oaa_control_channel` | `tcp_server` | `{}` |
 
 **Chiavi configurabili (oaa_control_channel.yaml):**
 
@@ -46,11 +88,6 @@ Tutte le impostazioni utente (nome HU, risoluzione video, DPI, sample rate audio
 
 **Status:** Completed
 
-**Next 1-3 steps:**
-1. Aggiungere `on_aa_session_restart` in `tcp_server/main.py` per chiudere la connessione TCP attiva quando riceve `aa.session.restart`
-2. Aggiornare i test di `oaa_control_channel/handshake.py` per passare `cfg={}` al costruttore
-3. Aggiungere test unitari per `on_config_response` e `on_config_changed` in `oaa_control_channel/main.py`
-
 ---
 
 ## 2026-05-04 — Refactor TLS: AACryptor ownership spostata in tcp_server
@@ -64,7 +101,7 @@ Tutte le impostazioni utente (nome HU, risoluzione video, DPI, sample rate audio
 - `oaa_control_channel/aa_cryptor.py` — eliminato
 
 **Why:**
-In precedenza `AACryptor` viveva in `oaa_control_channel`, che gestiva autonomamente sia la negoziazione TLS che il decrypt dei frame post-handshake. Questo impediva a `tcp_server` di decriptare i frame cifrati su canali diversi da ch0 senza dover delegare ogni tempo. Ora `tcp_server` possiede il cryptor, decripta i frame in ingresso prima di pubblicarli sul bus (payload sempre in chiaro per i subscriber), e gestisce il loop TLS tramite messaggi bus con `oaa_control_channel`.
+In precedenza `AACryptor` viveva in `oaa_control_channel`, che gestiva autonomamente sia la negoziazione TLS che il decrypt dei frame post-handshake. Questo impediva a `tcp_server` di decriptare i frame cifrati su canali diversi da ch0. Ora `tcp_server` possiede il cryptor, decripta i frame in ingresso prima di pubblicarli sul bus (payload sempre in chiaro per i subscriber), e gestisce il loop TLS tramite messaggi bus con `oaa_control_channel`.
 
 **Nuovi messaggi bus introdotti:**
 
@@ -76,8 +113,3 @@ In precedenza `AACryptor` viveva in `oaa_control_channel`, che gestiva autonomam
 | `tcp.server.tls_handshake_completed` | `tcp_server` | `oaa_control_channel` | `{}` |
 
 **Status:** Completed
-
-**Next 1-3 steps:**
-1. Aggiungere test unitari per `on_handshake_start_tls` e `on_handshake_feed_input` in `tcp_server`
-2. Aggiornare i test esistenti di `oaa_control_channel/handshake.py` (costruttore ora richiede `publish_fn`)
-3. Verificare che nessun altro modulo importi `AACryptor` da `oaa_control_channel`
