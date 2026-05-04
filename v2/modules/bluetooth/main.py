@@ -70,15 +70,9 @@ log = get_logger(MODULE_NAME, bus=bus)
 cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 
 # ---------------------------------------------------------------------------
-# Config defaults & schema
+# Config schema
 # ---------------------------------------------------------------------------
-
-_DEFAULTS = {
-    "discoverable":            True,
-    "discoverable_timeout":    0,
-    "discovery_duration_sec":  10,
-    "adapter_name":            "NemoHeadUnit",
-}
+# config_manager derives defaults from field.default — no separate _DEFAULTS needed.
 
 _SCHEMA = {
     "discoverable":            field_bool(default=True),
@@ -87,7 +81,8 @@ _SCHEMA = {
     "adapter_name":            field_string(default="NemoHeadUnit"),
 }
 
-_config: dict = dict(_DEFAULTS)
+# In-RAM config: seed from schema defaults.
+_config: dict = {k: v.default for k, v in _SCHEMA.items()}
 
 # ---------------------------------------------------------------------------
 # Module-level singletons
@@ -137,8 +132,8 @@ def _on_config_loaded(config: dict) -> None:
     if not config:
         log.info("No persisted config found — defaults seeded by config_manager.")
     else:
-        merged = dict(_DEFAULTS)
-        merged.update({k: v for k, v in config.items() if k in _DEFAULTS})
+        merged = {k: v.default for k, v in _SCHEMA.items()}
+        merged.update({k: v for k, v in config.items() if k in _SCHEMA and not isinstance(v, (dict, list))})
         _config = merged
         log.info(f"Config loaded: {_config}")
 
@@ -159,8 +154,11 @@ def _on_config_loaded(config: dict) -> None:
 
 
 def _on_config_changed(key: str, value) -> None:
-    if key not in _DEFAULTS:
+    if key not in _SCHEMA:
         log.warning(f"config.changed: unknown key '{key}' — ignoring")
+        return
+    if isinstance(value, (dict, list)):
+        log.warning(f"config.changed: structural value for '{key}' rejected")
         return
     _config[key] = value
     log.info(f"Config changed: {key} = {value!r}")
@@ -212,8 +210,9 @@ def on_system_start(topic: str, payload: dict) -> None:
         bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
         return
 
-    # system.ready is published in _on_config_loaded once the adapter is configured
-    cfg.get(defaults=_DEFAULTS, schema=_SCHEMA)
+    # system.ready is published in _on_config_loaded once the adapter is configured.
+    # schema= is sufficient: config_manager derives defaults from field.default.
+    cfg.get(schema=_SCHEMA)
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
