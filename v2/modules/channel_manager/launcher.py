@@ -7,9 +7,9 @@ Each channel module lives at:
 It is launched with CLI args so that no runtime config needs to
 circulate on the message bus:
 
-    python channel_{module_type}/main.py \
-        --module-name   channel_video_3 \
-        --channel-id    3 \
+    python channel_{module_type}/main.py \\
+        --module-name   channel_video_3 \\
+        --channel-id    3 \\
         --sdr-bytes-hex <hex>
 
 The launcher does NOT know about ZMQ — it is a pure process manager.
@@ -18,17 +18,26 @@ All readiness signalling happens via the bus (channel_manager.module_ready).
 
 from __future__ import annotations
 
-import logging
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-log = logging.getLogger("channel_manager.launcher")
+_HERE    = Path(__file__).parent        # v2/modules/channel_manager/
+_MODULES = _HERE.parent                 # v2/modules/
+_V2      = _MODULES.parent              # v2/
+
+if str(_V2) not in sys.path:
+    sys.path.insert(0, str(_V2))
+if str(_MODULES) not in sys.path:
+    sys.path.insert(0, str(_MODULES))
+
+from shared.logger import get_logger    # noqa: E402
+
+log = get_logger("channel_manager.launcher")
 
 # Root of the v2 tree: three parents up from this file
-_V2_ROOT        = Path(__file__).parent.parent.parent          # .../v2
-CHANNEL_MODULES = _V2_ROOT / "modules" / "channel_modules"
+CHANNEL_MODULES = _V2 / "modules" / "channel_modules"
 
 # How long to wait for a module to self-exit before SIGTERM
 GRACE_PERIOD = 5.0  # seconds
