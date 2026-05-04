@@ -56,10 +56,10 @@ if str(_V2) not in sys.path:
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
-from shared.bus_client import BusClient                                        # noqa: E402
-from shared.logger import get_logger                                           # noqa: E402
-from modules.channel_manager.registry import resolve_module_type, module_name  # noqa: E402
-from modules.channel_manager.launcher import Launcher                          # noqa: E402
+from shared.bus_client import BusClient                                                     # noqa: E402
+from shared.logger import get_logger                                                        # noqa: E402
+from modules.channel_manager.registry import resolve_module_type, module_name, SkipChannel  # noqa: E402
+from modules.channel_manager.launcher import Launcher                                       # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -102,6 +102,10 @@ class ChannelManagerSession:
         """
         Resolve channels → module_types, spawn subprocesses.
 
+        Channels whose descriptor key is recognised but has no module yet
+        (SkipChannel) are skipped with a warning.  Channels with a fully
+        unknown descriptor raise KeyError and abort session startup.
+
         Args:
             sdr_bytes_hex: hex-encoded ServiceDiscoveryResponse bytes.
             channels:      list of channel descriptor dicts from the SDR.
@@ -118,6 +122,9 @@ class ChannelManagerSession:
                 continue
             try:
                 mtype = resolve_module_type(ch_id, ch)
+            except SkipChannel as exc:
+                log.warning("Skipping channel: %s", exc)
+                continue
             except KeyError as exc:
                 log.error("Cannot resolve channel: %s — aborting session startup", exc)
                 raise
