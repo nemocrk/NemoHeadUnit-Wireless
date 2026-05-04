@@ -9,8 +9,10 @@ Module contract:
                 system.stop
                 rfcomm.handshake.completed  {device_address, phone_ip}
                 aa.frame.send               {channel_id, flags, payload_hex}
+                aa.frame.ch0                {channel_id, flags, payload_hex}  ← monitors SHUTDOWN_RESPONSE
                 aa.handshake.start_tls      {}                 ← oaa_control_channel triggers TLS init
                 aa.handshake.feed_input     {payload_hex}      ← SSL round bytes from phone
+                aa.session.restart          {}                 ← config changed, restart AA session
   Publishes   : system.module_ready          {name, priority}
                 system.ready                 {name, priority}
                 tcp.server.started          {host, port}
@@ -21,6 +23,8 @@ Module contract:
                 tcp.server.error            {error}
                 tcp.server.tls_handshake    {outgoing_hex}     ← TLS bytes to forward to phone
                 tcp.server.tls_handshake_completed  {}         ← TLS is_active(), AUTH_COMPLETE can be sent
+                aa.session.restarting       {}                 ← cryptor reset done, oaa_control_channel
+                                                                  should send VERSION_REQUEST
 
 Flow:
   1. Waits for rfcomm.handshake.completed — phone is now on the WiFi AP
@@ -34,8 +38,13 @@ Flow:
   7. On aa.handshake.feed_input → write_handshake_input() + drive_handshake():
        - if outgoing bytes → publish tcp.server.tls_handshake
        - if is_active()   → publish tcp.server.tls_handshake_completed
-  8. On socket close → publishes tcp.session.closed
-  9. On system.stop  → server + relay + cryptor shutdown
+  8. On aa.session.restart:
+       a. Send SHUTDOWN_REQUEST (ch0, msgId 0x000D) to phone
+       b. Wait for SHUTDOWN_RESPONSE on aa.frame.ch0 (msgId 0x000E)
+       c. deinit() cryptor (reset SSLObject)
+       d. Publish aa.session.restarting → oaa_control_channel sends VERSION_REQUEST
+  9. On socket close → publishes tcp.session.closed
+  10. On system.stop  → server + relay + cryptor shutdown
 
   TLS note: Android Auto negotiates encryption in-band on channel 0 (msgId 0x0003).
   The TCP socket is always plain. AACryptor is now owned by tcp_server.
@@ -89,8 +98,20 @@ _server_starting = False
 _server_lock = threading.Lock()
 _write_lock  = threading.Lock()   # protects socket writes from concurrent senders
 
+# Set to True while a graceful restart is in progress; prevents _on_session_closed
+# from treating the subsequent socket teardown as an unexpected disconnection.
+_restart_pending = False
+# Event signalled when SHUTDOWN_RESPONSE (msgId 0x000E) arrives on ch0.
+_shutdown_ack_event = threading.Event()
+
 # AA frame flags — encryption bit (bit 3)
 _FLAG_ENCRYPTED = 0x08
+
+# AA control-channel message IDs used by restart logic
+_MSG_SHUTDOWN_REQUEST  = 0x000D
+_MSG_SHUTDOWN_RESPONSE = 0x000E
+# How long (seconds) to wait for SHUTDOWN_RESPONSE before giving up
+_SHUTDOWN_ACK_TIMEOUT  = 3.0
 
 # ---------------------------------------------------------------------------
 # Boot protocol handlers
@@ -211,6 +232,85 @@ def on_handshake_feed_input(topic: str, payload: dict) -> None:
         bus.publish("tcp.server.tls_handshake", {"outgoing_hex": outgoing.hex()})
 
 
+def on_aa_session_restart(topic: str, payload: dict) -> None:
+    """Graceful AA session restart triggered by a config change.
+
+    Sequence:
+      1. Send SHUTDOWN_REQUEST (ch0, msgId 0x000D) to phone.
+      2. Wait up to _SHUTDOWN_ACK_TIMEOUT seconds for SHUTDOWN_RESPONSE (msgId 0x000E).
+         The ack is signalled by on_ch0_frame via _shutdown_ack_event.
+      3. deinit() the AACryptor (discards the SSL objects).
+      4. Publish aa.session.restarting — oaa_control_channel will call
+         send_version_request() to kick off a fresh handshake on the
+         existing TCP connection.
+    """
+    global _restart_pending
+
+    if _relay is None:
+        log.warning("on_aa_session_restart: no active session — ignoring")
+        return
+
+    log.info("aa.session.restart — sending SHUTDOWN_REQUEST to phone")
+    _restart_pending = True
+    _shutdown_ack_event.clear()
+
+    # Build SHUTDOWN_REQUEST: AA control frame on ch0, unencrypted
+    # Wire layout: [channel:1B][flags:1B][len:2B_BE][msg_id:2B_BE]
+    msg_id_bytes = struct.pack(">H", _MSG_SHUTDOWN_REQUEST)
+    frame = struct.pack(">BBH", 0, 0x00, len(msg_id_bytes)) + msg_id_bytes
+    try:
+        with _write_lock:
+            _relay.send_raw(frame)
+    except Exception as exc:
+        log.error("on_aa_session_restart: failed to send SHUTDOWN_REQUEST — %s", exc)
+        _restart_pending = False
+        return
+
+    # Wait for SHUTDOWN_RESPONSE from phone
+    acked = _shutdown_ack_event.wait(timeout=_SHUTDOWN_ACK_TIMEOUT)
+    if not acked:
+        log.warning(
+            "on_aa_session_restart: SHUTDOWN_RESPONSE not received within %.1fs — proceeding anyway",
+            _SHUTDOWN_ACK_TIMEOUT,
+        )
+    else:
+        log.info("on_aa_session_restart: SHUTDOWN_RESPONSE received")
+
+    # Reset the cryptor (discards SSL state without tearing down the TCP socket)
+    if _cryptor is not None:
+        _cryptor.deinit()
+        log.info("on_aa_session_restart: AACryptor reset")
+
+    _restart_pending = False
+
+    # Signal oaa_control_channel to re-run the handshake on the same TCP connection
+    log.info("on_aa_session_restart: publishing aa.session.restarting")
+    bus.publish("aa.session.restarting", {})
+
+
+def on_ch0_frame(topic: str, payload: dict) -> None:
+    """Monitor ch0 frames for SHUTDOWN_RESPONSE during a restart sequence.
+
+    Only acts when _restart_pending is True; all other ch0 frames are ignored
+    here (oaa_control_channel handles them via its own aa.frame.ch0 subscription).
+    """
+    if not _restart_pending:
+        return
+
+    try:
+        raw = bytes.fromhex(payload["payload_hex"])
+    except (KeyError, ValueError):
+        return
+
+    # Control frame body starts with a 2-byte big-endian message ID
+    if len(raw) < 2:
+        return
+
+    msg_id = struct.unpack_from(">H", raw, 0)[0]
+    if msg_id == _MSG_SHUTDOWN_RESPONSE:
+        _shutdown_ack_event.set()
+
+
 # ---------------------------------------------------------------------------
 # Server lifecycle
 # ---------------------------------------------------------------------------
@@ -296,6 +396,10 @@ def _on_frame(channel_id: int, flags: int, payload: bytes) -> None:
 
 
 def _on_session_closed() -> None:
+    if _restart_pending:
+        # Chiusura voluta dalla sequenza di restart — non è un errore
+        log.debug("_on_session_closed: called during restart sequence — ignoring")
+        return
     log.info("AA TCP session closed")
     bus.publish("tcp.session.closed", {})
     _teardown()
@@ -313,6 +417,8 @@ def run() -> None:
     bus.subscribe("aa.frame.send",              on_frame_send)
     bus.subscribe("aa.handshake.start_tls",     on_handshake_start_tls)
     bus.subscribe("aa.handshake.feed_input",    on_handshake_feed_input)
+    bus.subscribe("aa.session.restart",         on_aa_session_restart)
+    bus.subscribe("aa.frame.ch0",               on_ch0_frame)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
