@@ -2,12 +2,14 @@
 config_ui — list_editor
 
 _ListEditor
-    Accordion-based editor for list<struct> fields.
+    Accordion-based editor for list<struct|oneof> fields.
     Each item is a collapsible _AccordionItem containing a mini form built
     by form_builder.build_form_for_schema().
 
     Exposes:
         get_value() -> list[dict]
+
+Note: list<scalar> is handled by _ScalarListEditor in field_widgets.py.
 """
 
 from __future__ import annotations
@@ -83,6 +85,7 @@ class _AccordionItem(QWidget):
             "QPushButton:hover { color: #ff6666; }"
         )
         btn_del.clicked.connect(on_delete)
+        self._btn_del = btn_del
         hbox.addWidget(btn_del)
 
         root.addWidget(header)
@@ -108,7 +111,6 @@ class _AccordionItem(QWidget):
         self._frame.setVisible(self._expanded)
         arrow = "▼" if self._expanded else "▶"
         current = self._toggle_btn.text()
-        # Replace only the arrow prefix
         label = current.lstrip("▼▶ ")
         self._toggle_btn.setText(f"{arrow}  {label}")
 
@@ -116,12 +118,14 @@ class _AccordionItem(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
-    def get_value(self) -> dict:
+    def get_value(self):
         """
-        Delegate to the body widget’s get_value().
-        form_builder forms expose get_value() -> dict.
+        Delegate to the body widget's get_value().
+        form_builder forms expose get_value() -> dict or scalar.
         """
-        return self._body.get_value()
+        if hasattr(self._body, "get_value"):
+            return self._body.get_value()
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -130,12 +134,12 @@ class _AccordionItem(QWidget):
 
 class _ListEditor(QWidget):
     """
-    Accordion editor for list<struct> config fields.
+    Accordion editor for list<struct|oneof> config fields.
 
     Parameters
     ----------
-    field_schema  : ConfigFieldList (item_schema is a ConfigFieldMessage)
-    initial_value : list[dict]
+    field_schema  : ConfigFieldList (item_schema is ConfigFieldMessage or ConfigFieldOneof)
+    initial_value : list[dict | scalar]
     """
 
     def __init__(
@@ -181,34 +185,29 @@ class _ListEditor(QWidget):
             return self._field_schema.item_schema
         return None
 
-    def _default_item(self) -> dict:
-        schema = self._item_schema()
-        if schema is None:
-            return {}
-        try:
-            from shared.config_schema import ConfigFieldMessage
-            if isinstance(schema, ConfigFieldMessage):
-                return {k: f.default for k, f in schema.fields.items()}
-        except Exception:  # pragma: no cover
-            pass
-        return {}
+    def _default_item(self):
+        """
+        Returns a default value for a new list item by delegating to
+        build_default_value() for full recursive support (messages,
+        oneofs, nested lists, etc.).
+        """
+        from v2.modules.config_ui.form_builder import build_default_value
+        return build_default_value(self._item_schema())
 
-    def _append_item(self, value: dict) -> None:
+    def _append_item(self, value) -> None:
         from v2.modules.config_ui.form_builder import build_form_for_schema
 
         self._item_count += 1
-        idx   = self._item_count
+        idx    = self._item_count
         schema = self._item_schema()
         body   = build_form_for_schema(schema, value)
 
+        # Placeholder on_delete — will be replaced by _rewire_delete
         item = _AccordionItem(
             header_text=f"Elemento {idx}",
             body_widget=body,
-            on_delete=lambda _checked=False, w=None: None,  # replaced below
+            on_delete=lambda: None,
         )
-        # Wire delete after creation to capture the correct `item` reference
-        item._toggle_btn  # noqa — ensure widget exists before closure
-        # Re-wire delete button properly
         self._rewire_delete(item)
 
         self._items.append(item)
@@ -216,20 +215,17 @@ class _ListEditor(QWidget):
 
     def _rewire_delete(self, item: _AccordionItem) -> None:
         """
-        Find the × Rimuovi button in item’s header and reconnect its signal.
+        Reconnect the delete button that was wired to a no-op placeholder
+        in _AccordionItem.__init__.
         """
-        # The button was created inside _AccordionItem.__init__ with a no-op.
-        # Find it by text and reconnect.
-        for btn in item.findChildren(QPushButton):
-            if "×" in btn.text() and "Rimuovi" in btn.text():
-                try:
-                    btn.clicked.disconnect()
-                except RuntimeError:
-                    pass
-                btn.clicked.connect(
-                    lambda _checked=False, i=item: self._delete_item(i)
-                )
-                break
+        btn = item._btn_del
+        try:
+            btn.clicked.disconnect()
+        except RuntimeError:
+            pass
+        btn.clicked.connect(
+            lambda _checked=False, i=item: self._delete_item(i)
+        )
 
     def _delete_item(self, item: _AccordionItem) -> None:
         if item in self._items:
