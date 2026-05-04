@@ -21,14 +21,15 @@ Module contract:
 Configuration keys (v2/config/hostapd_helper.yaml):
   interface         str    default: wlan0
   ssid              str    default: AndroidAutoAP
-  hw_mode           str    default: a  (a=5GHz, g=2.4GHz)
-  channel           int    default: 36
+  hw_mode           enum   default: a  (a=5GHz, g=2.4GHz)
+  channel           int    default: 36  (min=1, max=196)
   ap_password       str    default: "" (empty = random per session)
   subnet            str    default: 10.0.0
   gateway_ip        str    default: 10.0.0.1
   dhcp_range_start  str    default: 10.0.0.10
   dhcp_range_end    str    default: 10.0.0.50
-  monitor_timeout   int    default: 30
+  country_code      str    default: IT
+  monitor_timeout   int    default: 30  (min=5, max=120)
 
 Flow:
   1. bluetooth.rfcomm.connected  → start APManager (create AP)
@@ -58,6 +59,7 @@ if str(_MODULES) not in sys.path:
 from shared.bus_client import BusClient              # noqa: E402
 from shared.logger import get_logger     # noqa: E402
 from shared.config_client import ConfigClient        # noqa: E402
+from shared.config_schema import field_enum, field_int, field_string  # noqa: E402
 
 from hostapd_helper.ap_manager import APManager, APConfig   # noqa: E402
 from hostapd_helper.ap_monitor import APMonitor             # noqa: E402
@@ -74,7 +76,7 @@ log = get_logger(MODULE_NAME, bus=bus)
 cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 
 # ---------------------------------------------------------------------------
-# Config defaults
+# Config defaults & schema
 # ---------------------------------------------------------------------------
 
 _DEFAULTS = {
@@ -89,6 +91,20 @@ _DEFAULTS = {
     "dhcp_range_end":   "10.0.0.50",
     "country_code":     "IT",
     "monitor_timeout":  30,
+}
+
+_SCHEMA = {
+    "interface":        field_string(default="wlan0"),
+    "ssid":             field_string(default="AndroidAutoAP"),
+    "hw_mode":          field_enum(default="a", choices=["a", "g"]),
+    "channel":          field_int(default=36, min=1, max=196),
+    "ap_password":      field_string(default=""),
+    "subnet":           field_string(default="10.0.0"),
+    "gateway_ip":       field_string(default="10.0.0.1"),
+    "dhcp_range_start": field_string(default="10.0.0.10"),
+    "dhcp_range_end":   field_string(default="10.0.0.50"),
+    "country_code":     field_string(default="IT"),
+    "monitor_timeout":  field_int(default=30, min=5, max=120),
 }
 
 _config: dict = dict(_DEFAULTS)
@@ -156,7 +172,7 @@ def on_system_start(topic: str, payload: dict) -> None:
         return
 
     log.info(f"system.start priority={PRIORITY} — initialising hostapd_helper")
-    cfg.get(defaults=_DEFAULTS)
+    cfg.get(defaults=_DEFAULTS, schema=_SCHEMA)
 
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
