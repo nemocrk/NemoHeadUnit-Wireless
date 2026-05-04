@@ -47,6 +47,9 @@ Rules:
     If no YAML exists yet AND a "defaults" dict is provided in the payload,
     the defaults are persisted atomically and returned in the same response
     (first-boot seeding, no extra round-trip needed).
+    If no YAML exists yet AND no "defaults" are provided but a schema is
+    registered, scalar defaults are derived from schema field.default values
+    and seeded the same way (schema-first seeding).
   - If a "schema" dict is provided in config.get, it is stored in RAM and
     echoed verbatim in every subsequent config.response for that module.
     The schema is NOT persisted to disk — modules re-register it on every boot.
@@ -140,6 +143,21 @@ def _schema_dict_for_response(module: str) -> dict | None:
     return schema_to_dict(schema)
 
 
+def _defaults_from_schema(module: str) -> dict:
+    """Derive a defaults dict from scalar ConfigFieldSchema entries.
+
+    Structured nodes (ConfigFieldMessage / ConfigFieldList / ConfigFieldOneof)
+    are skipped — only plain ConfigFieldSchema entries with a non-None .default
+    are included.
+    """
+    schema = _schemas.get(module, {})
+    return {
+        k: v.default
+        for k, v in schema.items()
+        if isinstance(v, ConfigFieldSchema) and v.default is not None
+    }
+
+
 # ---------------------------------------------------------------------------
 # Bus handlers
 # ---------------------------------------------------------------------------
@@ -164,17 +182,33 @@ def on_config_get(topic: str, payload: dict):
 
     config = _load_config(module)
 
-    if not config and isinstance(defaults, dict) and defaults:
-        if _save_config(module, defaults):
-            config = dict(defaults)
-            log.info(
-                f"config.get for '{module}' (requester='{requester}'): "
-                f"no YAML found — seeded {len(config)} defaults."
-            )
+    if not config:
+        # --- Determine seeding source ---
+        # Priority 1: explicit defaults= payload (legacy / mixed pattern)
+        # Priority 2: scalar defaults derived from the registered schema
+        #             (schema-first pattern — no defaults= needed)
+        if isinstance(defaults, dict) and defaults:
+            seed = defaults
+            seed_source = f"explicit defaults= ({len(seed)} keys)"
         else:
-            log.warning(
-                f"config.get for '{module}': failed to seed defaults — "
-                "returning empty config."
+            seed = _defaults_from_schema(module)
+            seed_source = f"schema field.default ({len(seed)} keys)" if seed else None
+
+        if seed:
+            if _save_config(module, seed):
+                config = seed
+                log.info(
+                    f"config.get for '{module}' (requester='{requester}'): "
+                    f"no YAML found — seeded from {seed_source}."
+                )
+            else:
+                log.warning(
+                    f"config.get for '{module}': failed to seed defaults — "
+                    "returning empty config."
+                )
+        else:
+            log.info(
+                f"config.get for '{module}' (requester='{requester}') → 0 keys (no defaults)"
             )
     else:
         log.info(
