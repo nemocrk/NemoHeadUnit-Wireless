@@ -41,13 +41,13 @@ Widget selection by schema type
   float (with bounds) → QSlider (horizontal, ×100 int mapping) + value label
   enum                → QComboBox
   bool                → QCheckBox
-  list/message/oneof  → read-only QLabel summary ("N elementi [LIST]");  not editable
+  list                → read-only QLabel + "Modifica" button → opens _StructuredFieldDialog
+  message/oneof       → rendered recursively inside _StructuredFieldDialog
   (no schema, scalar) → QLineEdit  (backward-compatible fallback)
-  (no schema, list)   → read-only QLabel summary (inferred from value type)
+  (no schema, list)   → read-only QLabel summary + "Modifica" button
 """
 
 import sys
-import threading
 from pathlib import Path
 import time
 
@@ -64,7 +64,8 @@ from PyQt6.QtWidgets import (                                         # noqa: E4
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTabWidget, QLabel, QLineEdit, QScrollArea,
     QFormLayout, QStatusBar, QFrame, QMessageBox, QComboBox,
-    QSlider, QSpinBox, QDoubleSpinBox, QCheckBox,
+    QSlider, QCheckBox, QGroupBox, QDialog, QDialogButtonBox,
+    QSizePolicy,
 )
 
 from shared.bus_client import BusClient              # noqa: E402
@@ -95,7 +96,7 @@ def _request_config(module: str):
 
 
 # ---------------------------------------------------------------------------
-# Typed field widget factory
+# Typed field widget factory  (scalar only)
 # ---------------------------------------------------------------------------
 
 _BOOL_TRUE = {"true", "1", "yes", "on"}
@@ -103,13 +104,9 @@ _BOOL_TRUE = {"true", "1", "yes", "on"}
 
 class _FieldWidget(QWidget):
     """
-    Container that wraps the appropriate Qt widget for a config field and
-    exposes a uniform get_value() / set_value() interface.
-
-    Accepts only ConfigFieldSchema (scalar) or None for field_schema.
-    Structured nodes (ConfigFieldMessage / ConfigFieldList / ConfigFieldOneof)
-    must NOT be passed here — they are rendered as a read-only QLabel by
-    ModuleConfigTab.populate() before this class is instantiated.
+    Container for a single scalar config field.
+    Accepts ConfigFieldSchema or None (falls back to QLineEdit).
+    Structured nodes must NOT be passed here.
     """
 
     def __init__(self, key: str, raw_value, field_schema: "ConfigFieldSchema | None"):
@@ -134,12 +131,10 @@ class _FieldWidget(QWidget):
             self._build_int(raw_value, field_schema.min, field_schema.max)
         elif field_schema.type == "float":
             self._build_float(raw_value, field_schema.min, field_schema.max)
-        else:  # string or unknown scalar
+        else:
             self._build_string(str(raw_value) if raw_value is not None else "")
 
         self._layout.addWidget(self._error_lbl)
-
-    # ---- builders --------------------------------------------------------
 
     def _build_string(self, value: str):
         self._widget_type = "lineedit"
@@ -149,7 +144,6 @@ class _FieldWidget(QWidget):
 
     def _build_bool(self, value):
         self._widget_type = "checkbox"
-        # Accept bool, int, or string truthy values
         if isinstance(value, bool):
             checked = value
         elif isinstance(value, int):
@@ -173,9 +167,7 @@ class _FieldWidget(QWidget):
             int_val = int(value)
         except (TypeError, ValueError):
             int_val = 0
-
         if min_v is not None and max_v is not None:
-            # Slider mode
             self._widget_type = "int_slider"
             self._slider = QSlider(Qt.Orientation.Horizontal)
             self._slider.setMinimum(int(min_v))
@@ -184,13 +176,10 @@ class _FieldWidget(QWidget):
             self._val_lbl = QLabel(str(int_val))
             self._val_lbl.setMinimumWidth(36)
             self._val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight)
-            self._slider.valueChanged.connect(
-                lambda v: self._val_lbl.setText(str(v))
-            )
+            self._slider.valueChanged.connect(lambda v: self._val_lbl.setText(str(v)))
             self._layout.addWidget(self._slider, stretch=1)
             self._layout.addWidget(self._val_lbl)
         else:
-            # LineEdit + −/+ buttons
             self._widget_type = "int_step"
             self._edit = QLineEdit(str(int_val))
             self._edit.setFixedWidth(80)
@@ -199,7 +188,7 @@ class _FieldWidget(QWidget):
             for btn in (btn_minus, btn_plus):
                 btn.setFixedWidth(28)
             btn_minus.clicked.connect(lambda: self._step_int(-1))
-            btn_plus.clicked.connect(lambda:  self._step_int(+1))
+            btn_plus.clicked.connect(lambda: self._step_int(+1))
             self._layout.addWidget(btn_minus)
             self._layout.addWidget(self._edit)
             self._layout.addWidget(btn_plus)
@@ -209,9 +198,7 @@ class _FieldWidget(QWidget):
             float_val = float(value)
         except (TypeError, ValueError):
             float_val = 0.0
-
         if min_v is not None and max_v is not None:
-            # Slider mode (×100 mapping for 2-decimal precision)
             self._widget_type = "float_slider"
             self._float_min = float(min_v)
             self._float_max = float(max_v)
@@ -228,7 +215,6 @@ class _FieldWidget(QWidget):
             self._layout.addWidget(self._slider, stretch=1)
             self._layout.addWidget(self._val_lbl)
         else:
-            # LineEdit + −/+ buttons (step 0.1)
             self._widget_type = "float_step"
             self._edit = QLineEdit(f"{float_val:.2f}")
             self._edit.setFixedWidth(80)
@@ -237,24 +223,17 @@ class _FieldWidget(QWidget):
             for btn in (btn_minus, btn_plus):
                 btn.setFixedWidth(28)
             btn_minus.clicked.connect(lambda: self._step_float(-0.1))
-            btn_plus.clicked.connect(lambda:  self._step_float(+0.1))
+            btn_plus.clicked.connect(lambda: self._step_float(+0.1))
             self._layout.addWidget(btn_minus)
             self._layout.addWidget(self._edit)
             self._layout.addWidget(btn_plus)
 
-    # ---- slider <-> float helpers ----------------------------------------
-
     def _float_to_slider(self, v: float) -> int:
         span = self._float_max - self._float_min
-        if span == 0:
-            return 0
-        return round((v - self._float_min) / span * 100)
+        return 0 if span == 0 else round((v - self._float_min) / span * 100)
 
     def _slider_to_float(self, pos: int) -> float:
-        span = self._float_max - self._float_min
-        return self._float_min + pos / 100 * span
-
-    # ---- step helpers ----------------------------------------------------
+        return self._float_min + pos / 100 * (self._float_max - self._float_min)
 
     def _step_int(self, delta: int):
         try:
@@ -270,19 +249,12 @@ class _FieldWidget(QWidget):
             v = delta
         self._edit.setText(f"{v:.2f}")
 
-    # ---- public interface ------------------------------------------------
-
     def get_value(self):
         wt = self._widget_type
-        if wt == "checkbox":
-            return self._checkbox.isChecked()  # returns Python bool
-        if wt == "combobox":
-            return self._combo.currentText()
-        if wt == "int_slider":
-            return self._slider.value()
-        if wt == "float_slider":
-            return self._slider_to_float(self._slider.value())
-        # lineedit, int_step, float_step
+        if wt == "checkbox":    return self._checkbox.isChecked()
+        if wt == "combobox":    return self._combo.currentText()
+        if wt == "int_slider":  return self._slider.value()
+        if wt == "float_slider": return self._slider_to_float(self._slider.value())
         return self._edit.text()
 
     def set_error(self, message: str | None):
@@ -294,38 +266,252 @@ class _FieldWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Recursive message editor  (_MessageForm)
+# ---------------------------------------------------------------------------
+
+def _build_message_form(parent_layout: QVBoxLayout, schema: "ConfigFieldMessage", value: dict):
+    """
+    Populate *parent_layout* with widgets for all fields in a ConfigFieldMessage.
+    Returns a callable collect() -> dict that harvests current values.
+    Special handling for ConfigFieldOneof: renders a branch-selector QComboBox
+    and shows/hides the active branch sub-form dynamically.
+    """
+    form   = QFormLayout()
+    form.setSpacing(4)
+    form.setContentsMargins(0, 0, 0, 0)
+    collectors: list  = []   # list of (key, callable) — callable returns value
+    value = value or {}
+
+    for field_name, field_node in schema.fields.items():
+        field_val = value.get(field_name)
+
+        if isinstance(field_node, ConfigFieldSchema):
+            w = _FieldWidget(field_name, field_val, field_node)
+            form.addRow(QLabel(field_name), w)
+            collectors.append((field_name, w.get_value))
+
+        elif isinstance(field_node, ConfigFieldOneof):
+            # Branch selector
+            branch_combo = QComboBox()
+            branch_names = list(field_node.branches.keys())
+            branch_combo.addItems(branch_names)
+
+            # Determine current branch from value keys
+            current_branch = field_node.active_branch
+            if isinstance(field_val, dict):
+                for bn in branch_names:
+                    if bn in field_val:
+                        current_branch = bn
+                        break
+            if current_branch in branch_names:
+                branch_combo.setCurrentText(current_branch)
+
+            form.addRow(QLabel(f"{field_name} (tipo)"), branch_combo)
+
+            # Sub-form container for the active branch
+            branch_container = QWidget()
+            branch_vbox = QVBoxLayout(branch_container)
+            branch_vbox.setContentsMargins(12, 0, 0, 0)
+            branch_vbox.setSpacing(2)
+
+            branch_collectors: dict[str, list] = {}   # branch_name -> collectors
+            branch_widgets:    dict[str, QWidget] = {}
+
+            for bn, branch_schema in field_node.branches.items():
+                bw = QWidget()
+                bv = QVBoxLayout(bw)
+                bv.setContentsMargins(0, 0, 0, 0)
+                bv.setSpacing(2)
+                if isinstance(branch_schema, ConfigFieldMessage):
+                    branch_val = (field_val or {}).get(bn, {})
+                    bc = _build_message_form(bv, branch_schema, branch_val)
+                    branch_collectors[bn] = bc
+                else:
+                    # Scalar oneof branch
+                    sv = (field_val or {}).get(bn)
+                    scalar_w = _FieldWidget(bn, sv, branch_schema if isinstance(branch_schema, ConfigFieldSchema) else None)
+                    bv.addWidget(scalar_w)
+                    branch_collectors[bn] = scalar_w.get_value
+                bw.setVisible(bn == current_branch)
+                branch_vbox.addWidget(bw)
+                branch_widgets[bn] = bw
+
+            def _on_branch_changed(idx, _branch_widgets=branch_widgets, _branch_combo=branch_combo):
+                selected = _branch_combo.currentText()
+                for bn2, bw2 in _branch_widgets.items():
+                    bw2.setVisible(bn2 == selected)
+
+            branch_combo.currentIndexChanged.connect(_on_branch_changed)
+            form.addRow("", branch_container)
+
+            def _collect_oneof(_branch_combo=branch_combo, _branch_collectors=branch_collectors):
+                bn = _branch_combo.currentText()
+                c  = _branch_collectors.get(bn)
+                if c is None:
+                    return {}
+                val = c() if callable(c) else c
+                return {bn: val}
+
+            collectors.append((field_name, _collect_oneof))
+
+        elif isinstance(field_node, ConfigFieldMessage):
+            # Nested message — recurse into a sub-group
+            grp = QGroupBox(field_name)
+            grp_vbox = QVBoxLayout(grp)
+            grp_vbox.setContentsMargins(6, 6, 6, 6)
+            sub_collect = _build_message_form(grp_vbox, field_node, field_val or {})
+            form.addRow(grp)
+            collectors.append((field_name, sub_collect))
+
+        elif isinstance(field_node, ConfigFieldList):
+            # Nested repeated field — show count label (deep nesting not yet supported)
+            count = len(field_val) if isinstance(field_val, list) else 0
+            lbl = QLabel(f"{count} elementi")
+            lbl.setStyleSheet("color: #888;")
+            form.addRow(QLabel(field_name), lbl)
+            _frozen = field_val
+            collectors.append((field_name, lambda fv=_frozen: fv))
+
+        else:
+            # Unknown node — show as plain string
+            w = _FieldWidget(field_name, str(field_val) if field_val is not None else "", None)
+            form.addRow(QLabel(field_name), w)
+            collectors.append((field_name, w.get_value))
+
+    parent_layout.addLayout(form)
+
+    def collect() -> dict:
+        result = {}
+        for key, fn in collectors:
+            result[key] = fn() if callable(fn) else fn
+        return result
+
+    return collect
+
+
+# ---------------------------------------------------------------------------
+# Structured field dialog  (_StructuredFieldDialog)
+# ---------------------------------------------------------------------------
+
+class _StructuredFieldDialog(QDialog):
+    """
+    Modal dialog for editing a ConfigFieldList value.
+
+    Each list item is displayed in a collapsible QGroupBox.
+    The item schema (ConfigFieldMessage) is used to render typed sub-widgets.
+    On Accept, get_value() returns the updated list of dicts.
+    """
+
+    def __init__(self, key: str, value: list, field_schema: "ConfigFieldList", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Modifica: {key}")
+        self.setMinimumSize(640, 480)
+        self.setSizeGripEnabled(True)
+
+        self._key          = key
+        self._value        = list(value) if isinstance(value, list) else []
+        self._field_schema = field_schema
+        self._item_collectors: list = []   # one callable per list item
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        root.addWidget(QLabel(
+            f"<b>{key}</b> — {len(self._value)} elementi. "
+            "Le modifiche sono applicate al salvataggio."
+        ))
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        self._items_layout = QVBoxLayout(scroll_widget)
+        self._items_layout.setSpacing(6)
+        self._items_layout.setContentsMargins(4, 4, 4, 4)
+        scroll.setWidget(scroll_widget)
+        root.addWidget(scroll, stretch=1)
+
+        self._populate_items()
+
+        # Add stretch so items pack to top
+        self._items_layout.addStretch(1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def _populate_items(self):
+        self._item_collectors.clear()
+        item_schema = self._field_schema.item_schema
+
+        for idx, item_value in enumerate(self._value):
+            # Build a meaningful group title
+            title = self._item_title(idx, item_value)
+            grp = QGroupBox(title)
+            grp.setCheckable(False)
+            grp_vbox = QVBoxLayout(grp)
+            grp_vbox.setContentsMargins(8, 8, 8, 8)
+            grp_vbox.setSpacing(4)
+
+            if isinstance(item_schema, ConfigFieldMessage):
+                collect = _build_message_form(grp_vbox, item_schema, item_value or {})
+            else:
+                # Scalar list
+                w = _FieldWidget(str(idx), item_value, item_schema if isinstance(item_schema, ConfigFieldSchema) else None)
+                grp_vbox.addWidget(w)
+                collect = w.get_value
+
+            self._item_collectors.append(collect)
+            self._items_layout.addWidget(grp)
+
+    def _item_title(self, idx: int, item: dict) -> str:
+        """Build a short human-readable title for a list item group box."""
+        if not isinstance(item, dict):
+            return f"Elemento {idx}"
+        ch_id = item.get("channel_id")
+        if ch_id is not None:
+            # Detect channel type from oneof key
+            type_keys = [
+                k for k in item
+                if k not in ("channel_id",) and isinstance(item.get(k), dict)
+            ]
+            ch_type = type_keys[0].replace("_channel", "").replace("_", " ").title() if type_keys else ""
+            return f"Canale {ch_id}  —  {ch_type}" if ch_type else f"Canale {ch_id}"
+        return f"Elemento {idx}"
+
+    def get_value(self) -> list:
+        """Return the current (possibly edited) list value."""
+        result = []
+        for collect in self._item_collectors:
+            result.append(collect() if callable(collect) else collect)
+        return result
+
+
+# ---------------------------------------------------------------------------
 # Per-module tab widget
 # ---------------------------------------------------------------------------
 
 def _schema_type_badge(field_schema) -> str:
-    """Return a human-readable HTML badge string for a schema node.
-
-    Works for both ConfigFieldSchema (scalar) and structured nodes
-    (ConfigFieldMessage / ConfigFieldList / ConfigFieldOneof) which only
-    expose a class name, not a .type attribute.
-    """
     if field_schema is None:
         return ""
     if isinstance(field_schema, ConfigFieldSchema):
         label = field_schema.type.upper()
     else:
-        # Structured node — use the class name, strip "ConfigField" prefix
         label = type(field_schema).__name__.replace("ConfigField", "").upper()
     return f" <span style='color:#888; font-size:10px'>[{label}]</span>"
 
 
-def _structured_summary(key: str, value, field_schema) -> str:
-    """Return a short human-readable summary for a structured config value.
-
-    Used in the read-only QLabel shown for ConfigFieldList / ConfigFieldMessage /
-    ConfigFieldOneof entries (and for list/dict values with no schema).
-    """
-    badge = _schema_type_badge(field_schema)
+def _structured_summary(value, field_schema) -> str:
     if isinstance(value, list):
+        badge = _schema_type_badge(field_schema)
         return f"{len(value)} elementi{badge}"
     if isinstance(value, dict):
+        badge = _schema_type_badge(field_schema)
         return f"{len(value)} campi{badge}"
-    return f"{value}{badge}"
+    return str(value)
 
 
 class ModuleConfigTab(QWidget):
@@ -334,7 +520,9 @@ class ModuleConfigTab(QWidget):
         self._module_name = module_name
         self._original: dict = {}
         self._fields:   dict[str, _FieldWidget] = {}
-        self._schema:   dict = {}   # key → AnyFieldSchema (or empty)
+        self._structured_values: dict[str, list] = {}  # key -> current list/dict value
+        self._structured_schemas: dict[str, "ConfigFieldList"] = {}
+        self._schema:   dict = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -381,26 +569,13 @@ class ModuleConfigTab(QWidget):
         root.addWidget(self._btn_save)
 
     def populate(self, config: dict, schema_raw: dict | None = None):
-        """
-        Rebuild the form with typed widgets.
-
-        Parameters
-        ----------
-        config     : {key: value} dict from config.response
-        schema_raw : optional plain-dict schema from config.response["schema"]
-
-        Scalar fields (ConfigFieldSchema) get an interactive widget.
-        Structured nodes (ConfigFieldList / ConfigFieldMessage / ConfigFieldOneof)
-        and bare list/dict values with no schema are rendered as a read-only
-        QLabel summary (e.g. "11 elementi [LIST]") and excluded from self._fields
-        so they are never accidentally sent via config.set.
-        """
         while self._form.rowCount():
             self._form.removeRow(0)
         self._fields.clear()
+        self._structured_values.clear()
+        self._structured_schemas.clear()
         self._original = dict(config)
 
-        # Parse schema if provided
         if schema_raw:
             try:
                 self._schema = schema_from_dict(schema_raw)
@@ -416,29 +591,73 @@ class ModuleConfigTab(QWidget):
             return
 
         for key, value in sorted(config.items()):
-            raw_schema = self._schema.get(key)  # may be None or any schema node
+            raw_schema = self._schema.get(key)
 
-            # Structured schema nodes and bare list/dict values — read-only summary.
-            is_structured_schema = isinstance(raw_schema, _STRUCTURED_TYPES)
-            is_bare_collection   = raw_schema is None and isinstance(value, (list, dict))
+            is_list_schema   = isinstance(raw_schema, ConfigFieldList)
+            is_bare_list     = raw_schema is None and isinstance(value, list)
+            is_other_struct  = isinstance(raw_schema, (ConfigFieldMessage, ConfigFieldOneof))
+            is_bare_dict     = raw_schema is None and isinstance(value, dict)
 
-            if is_structured_schema or is_bare_collection:
-                summary = _structured_summary(key, value, raw_schema)
-                lbl_value = QLabel(summary)
-                lbl_value.setTextFormat(Qt.TextFormat.RichText)
-                lbl_value.setStyleSheet("color: #888;")
+            if is_list_schema or is_bare_list:
+                # Editable list: summary label + "Modifica" button
+                summary_text = _structured_summary(value, raw_schema)
+                summary_lbl  = QLabel(summary_text)
+                summary_lbl.setTextFormat(Qt.TextFormat.RichText)
+                summary_lbl.setStyleSheet("color: #888;")
+
+                btn_edit = QPushButton("Modifica…")
+                btn_edit.setFixedWidth(90)
+
+                if is_list_schema:
+                    self._structured_schemas[key] = raw_schema
+
+                self._structured_values[key] = list(value) if isinstance(value, list) else []
+
+                def _make_edit_handler(_key=key, _summary_lbl=summary_lbl):
+                    def _open_editor():
+                        schema = self._structured_schemas.get(_key)
+                        current_val = self._structured_values.get(_key, [])
+                        if schema is None:
+                            # No schema — show raw JSON editor
+                            import json
+                            dlg = _RawJsonDialog(_key, current_val, self)
+                        else:
+                            dlg = _StructuredFieldDialog(_key, current_val, schema, self)
+                        if dlg.exec() == QDialog.DialogCode.Accepted:
+                            new_val = dlg.get_value()
+                            self._structured_values[_key] = new_val
+                            count = len(new_val) if isinstance(new_val, list) else 0
+                            _summary_lbl.setText(f"{count} elementi")
+                    return _open_editor
+
+                btn_edit.clicked.connect(_make_edit_handler(key, summary_lbl))
+
+                row_widget = QWidget()
+                row_hbox   = QHBoxLayout(row_widget)
+                row_hbox.setContentsMargins(0, 0, 0, 0)
+                row_hbox.setSpacing(6)
+                row_hbox.addWidget(summary_lbl, stretch=1)
+                row_hbox.addWidget(btn_edit)
+
                 badge = _schema_type_badge(raw_schema)
                 lbl_key = QLabel(f"{key}{badge}")
                 lbl_key.setTextFormat(Qt.TextFormat.RichText)
-                self._form.addRow(lbl_key, lbl_value)
-                # NOT added to self._fields — never sent via config.set
+                self._form.addRow(lbl_key, row_widget)
                 continue
 
-            # Scalar field — interactive widget
+            if is_other_struct or is_bare_dict:
+                # Non-editable structured node — read-only summary
+                summary_lbl = QLabel(_structured_summary(value, raw_schema))
+                summary_lbl.setTextFormat(Qt.TextFormat.RichText)
+                summary_lbl.setStyleSheet("color: #888;")
+                badge = _schema_type_badge(raw_schema)
+                self._form.addRow(QLabel(f"{key}{badge}"), summary_lbl)
+                continue
+
+            # Scalar field
             scalar_schema = raw_schema if isinstance(raw_schema, ConfigFieldSchema) else None
             widget = _FieldWidget(key, value, scalar_schema)
             self._fields[key] = widget
-
             badge = _schema_type_badge(raw_schema)
             label = QLabel(f"{key}{badge}")
             label.setTextFormat(Qt.TextFormat.RichText)
@@ -447,7 +666,6 @@ class ModuleConfigTab(QWidget):
         self._btn_save.setEnabled(True)
 
     def mark_error(self, key: str, reason: str):
-        """Show inline error badge on the field that failed validation."""
         widget = self._fields.get(key)
         if widget:
             widget.set_error(reason)
@@ -460,21 +678,27 @@ class ModuleConfigTab(QWidget):
         _request_config(self._module_name)
 
     def _on_save(self):
-        # Clear previous errors
         for fw in self._fields.values():
             fw.set_error(None)
 
         changed = {}
+
+        # Scalar fields
         for key, fw in self._fields.items():
             new_val = fw.get_value()
             orig    = self._original.get(key)
-            # Bool: compare as bool to avoid True vs "True" mismatch
             if isinstance(new_val, bool):
                 orig_bool = orig if isinstance(orig, bool) else str(orig).strip().lower() in _BOOL_TRUE
                 if new_val != orig_bool:
                     changed[key] = new_val
             elif str(new_val) != str(orig if orig is not None else ""):
                 changed[key] = new_val
+
+        # Structured list fields
+        for key, current_val in self._structured_values.items():
+            orig = self._original.get(key)
+            if current_val != orig:
+                changed[key] = current_val
 
         if not changed:
             return
@@ -490,6 +714,39 @@ class ModuleConfigTab(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Raw JSON fallback dialog (list fields without schema)
+# ---------------------------------------------------------------------------
+
+class _RawJsonDialog(QDialog):
+    """Fallback editor for list values that have no ConfigFieldList schema."""
+
+    def __init__(self, key: str, value, parent=None):
+        super().__init__(parent)
+        import json
+        self.setWindowTitle(f"Modifica raw: {key}")
+        self.setMinimumSize(480, 320)
+        self._value = value
+        root = QVBoxLayout(self)
+        root.addWidget(QLabel(f"<b>{key}</b> — JSON raw (modifica con cautela)"))
+        self._edit = QLineEdit()
+        self._edit.setText(json.dumps(value, ensure_ascii=False))
+        root.addWidget(self._edit)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def get_value(self):
+        import json
+        try:
+            return json.loads(self._edit.text())
+        except Exception:
+            return self._value
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
@@ -501,7 +758,6 @@ class ConfigWindow(QMainWindow):
         self._build_ui()
 
     def apply_default_geometry(self, app: QApplication) -> None:
-        """Bottom-left quarter of the primary screen."""
         screen = app.primaryScreen().availableGeometry()
         w = screen.width() // 2
         h = screen.height() // 2
@@ -517,13 +773,10 @@ class ConfigWindow(QMainWindow):
 
         toolbar = QHBoxLayout()
         toolbar.setContentsMargins(8, 6, 8, 0)
-
         self._btn_refresh_all = QPushButton("↻ Aggiorna lista moduli")
         self._btn_refresh_all.clicked.connect(self._on_refresh_all)
         toolbar.addWidget(self._btn_refresh_all)
-
         toolbar.addStretch()
-
         self._btn_shutdown = QPushButton("⏻  Spegni sistema")
         self._btn_shutdown.setStyleSheet(
             "QPushButton { color: #cc3333; font-weight: bold; }"
@@ -532,7 +785,6 @@ class ConfigWindow(QMainWindow):
         self._btn_shutdown.setMinimumHeight(32)
         self._btn_shutdown.clicked.connect(self._on_shutdown_clicked)
         toolbar.addWidget(self._btn_shutdown)
-
         root.addLayout(toolbar)
 
         self._tab_widget = QTabWidget()
@@ -614,24 +866,16 @@ def _invoke(slot: str, *args):
 
 def on_system_readytostart() -> None:
     log.info(f"system.readytostart received — announcing priority {PRIORITY}")
-    bus.publish("system.module_ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
+    bus.publish("system.module_ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
 def on_system_start(topic: str, payload: dict) -> None:
     if payload.get("priority") != PRIORITY:
         return
-
     log.info(f"system.start priority={PRIORITY} — requesting module list")
     _invoke("set_status", "Sistema pronto. Recupero lista moduli…")
     bus.publish("system.get_modules", {})
-
-    bus.publish("system.ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
+    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info("system.ready published — config_ui online")
 
 
@@ -639,9 +883,6 @@ def on_system_stop(topic: str, payload: dict) -> None:
     log.info("system.stop received")
     _invoke("set_status", "Sistema in arresto…")
     bus.stop()
-    # _app.quit() must be called from the Qt main thread.
-    # Using invokeMethod with QueuedConnection ensures it is dispatched
-    # onto the event loop, regardless of which thread receives system.stop.
     if _app:
         QMetaObject.invokeMethod(_app, "quit", Qt.ConnectionType.QueuedConnection)
 
@@ -650,10 +891,7 @@ def on_modules_response(topic: str, payload: dict) -> None:
     modules = payload.get("modules", [])
     log.info(f"system.modules_response: {len(modules)} moduli")
     for m in modules:
-        name   = m.get("name", "")
-        pid    = int(m.get("pid", 0))
-        status = m.get("status", "unknown")
-        _invoke("add_or_update_module_tab", name, pid, status)
+        _invoke("add_or_update_module_tab", m.get("name", ""), int(m.get("pid", 0)), m.get("status", "unknown"))
     _invoke("set_status", f"{len(modules)} modulo/i trovato/i.")
 
 
@@ -663,7 +901,7 @@ def on_config_response(topic: str, payload: dict) -> None:
         return
     module     = payload.get("module", "")
     config     = payload.get("config", {})
-    schema_raw = payload.get("schema")   # may be None
+    schema_raw = payload.get("schema")
     log.info(f"config.response for '{module}': {len(config)} chiavi, schema={'sì' if schema_raw else 'no'}")
     _invoke(
         "populate_module_config",
@@ -701,7 +939,7 @@ def run() -> None:
 
     _app = QApplication(sys.argv)
     _window = ConfigWindow()
-    _window.apply_default_geometry(_app)  # bottom-left quarter
+    _window.apply_default_geometry(_app)
     _window.show()
 
     log.info("config_ui window open")
