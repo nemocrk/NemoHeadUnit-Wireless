@@ -8,8 +8,12 @@ Then follow these steps:
   1. Set MODULE_NAME to your module name (must match the folder name)
   2. Set PRIORITY (see Boot Protocol below)
   3. Fill in the contract docstring
-  4. Declare config keys in _DEFAULTS and their types in _SCHEMA
-     (remove both if the module has no configuration)
+  4. Declare config schema in _SCHEMA using the field_* helpers.
+     _SCHEMA drives three things:
+       - first-boot seeding of default values (config_manager reads field.default)
+       - config_ui widget rendering (typed widgets: QSpinBox, QComboBox, …)
+       - runtime validation of config.set calls
+     Remove _SCHEMA (and all cfg references) if the module has no configuration.
   5. Implement on_system_start, on_system_stop and your topic handlers
   6. Add subscriptions in run()
   7. Keep ALL internal logic inside this folder
@@ -107,29 +111,22 @@ log = get_logger(MODULE_NAME, bus=bus)
 cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 
 # ---------------------------------------------------------------------------
-# STEP 3: Config defaults and schema
+# STEP 3: Config schema
 # ---------------------------------------------------------------------------
-# _DEFAULTS: raw values persisted to YAML on first boot.
-# _SCHEMA:   describes the type and constraints of each key so that
-#            config_ui renders the correct widget and config_manager
-#            validates incoming config.set calls.
+# _SCHEMA describes type, default value and UI constraints for every config key.
 #
-# Every key in _DEFAULTS should have a matching entry in _SCHEMA.
-# Remove both _DEFAULTS and _SCHEMA (and all cfg references) if the
-# module has no configuration.
+# config_manager reads field.default to seed YAML on first boot.
+# config_ui reads _SCHEMA to render the correct widget (QSpinBox, QComboBox, …).
+# config_manager validates incoming config.set calls against _SCHEMA types.
+#
+# Remove _SCHEMA (and all cfg references) if the module has no configuration.
 #
 # Available helpers:
 #   field_string(default)                     → free-text QLineEdit
-#   field_int(default, min=None, max=None)    → QLineEdit+±  or  Slider
-#   field_float(default, min=None, max=None)  → QLineEdit+±  or  Slider
+#   field_int(default, min=None, max=None)    → QSpinBox
+#   field_float(default, min=None, max=None)  → QDoubleSpinBox
 #   field_enum(default, choices=[...])        → QComboBox
 #   field_bool(default)                       → QCheckBox
-
-_DEFAULTS = {
-    # "my_key":  "default_value",
-    # "timeout": 10,
-    # "enabled": True,
-}
 
 _SCHEMA = {
     # "my_key":  field_string(default="default_value"),
@@ -138,7 +135,9 @@ _SCHEMA = {
     # "enabled": field_bool(default=True),
 }
 
-_config: dict = dict(_DEFAULTS)
+# In-RAM config: seed from schema defaults so code can read _config before
+# config.response arrives.
+_config: dict = {k: v.default for k, v in _SCHEMA.items()}
 
 # ---------------------------------------------------------------------------
 # STEP 4: ConfigClient callbacks
@@ -149,16 +148,20 @@ def _on_config_loaded(config: dict) -> None:
     if not config:
         log.info("No persisted config found — defaults seeded by config_manager.")
         return
-    merged = dict(_DEFAULTS)
-    merged.update({k: v for k, v in config.items() if k in _DEFAULTS})
+    # Merge only scalar keys present in _SCHEMA; ignore unknown / structural keys.
+    merged = {k: v.default for k, v in _SCHEMA.items()}
+    merged.update({k: v for k, v in config.items() if k in _SCHEMA and not isinstance(v, (dict, list))})
     _config = merged
     log.info(f"Config loaded: {_config}")
     # TODO: apply config to live state if needed
 
 
 def _on_config_changed(key: str, value) -> None:
-    if key not in _DEFAULTS:
+    if key not in _SCHEMA:
         log.warning(f"config.changed: unknown key '{key}' — ignoring")
+        return
+    if isinstance(value, (dict, list)):
+        log.warning(f"config.changed: structural value for '{key}' rejected")
         return
     _config[key] = value
     log.info(f"Config changed: {key} = {value!r}")
@@ -194,9 +197,9 @@ def on_system_start(topic: str, payload: dict) -> None:
 
     log.info(f"system.start priority={PRIORITY} received — initialising...")
 
-    # Request config from config_manager, passing both defaults (for first-boot
-    # seeding) and schema (for config_ui typed widgets + validation).
-    cfg.get(defaults=_DEFAULTS, schema=_SCHEMA)
+    # Request config from config_manager.
+    # schema= is sufficient: config_manager derives defaults from field.default.
+    cfg.get(schema=_SCHEMA)
 
     # Signal that this module is fully initialised.
     bus.publish("system.ready", {
