@@ -1,67 +1,87 @@
 """
-registry.py — static mapping: channel descriptor → module_type.
+registry.py — resolve a channel descriptor dict → module_type string.
 
-Each entry maps a channel_id (as declared in the ServiceDiscoveryResponse)
-to the module_type string used to derive the subprocess name and path:
+Routing logic
+-------------
+Each channel dict (as produced by service_discovery.channels_from_sdr_bytes)
+has the shape::
 
-  module_name  = channel_{module_type}_{channel_id}
-  script_path  = v2/modules/channel_modules/channel_{module_type}/main.py
+    {"channel_id": <int>, "<descriptor_key>": { ... }}
 
-For av_channel the mapping is driven by av_channel.av_type:
-  AV_TYPE_VIDEO  → "video"
-  AV_TYPE_AUDIO  → "audio"
+For av_channel the dict also carries:
+    "av_type"    — AVStreamType int  (VIDEO=1, AUDIO=2)
+    "audio_type" — AudioType int     (MEDIA=1, SPEECH=4, SYSTEM=3)
+                   only present when av_type == AUDIO
 
-For all other channels it is a direct 1-to-1 mapping by channel_id.
+Routing is done on the *descriptor key* (the oneof field name) rather than
+on channel_id, because channel_id values can vary across AA protocol versions
+and phone manufacturers.
 
-WIP note: not all module_types have a corresponding channel_module yet.
-If a script_path does not exist on disk channel_manager will raise and
-abort session startup rather than silently ignoring the channel.
+Module-type → subprocess mapping
+---------------------------------
+  module_type     script path
+  ----------      ------------
+  video           v2/modules/channel_modules/channel_video/main.py
+  audio           v2/modules/channel_modules/channel_audio/main.py  (3 instances)
+  input           v2/modules/channel_modules/channel_input/main.py
+  sensor          v2/modules/channel_modules/channel_sensor/main.py
+
+All other descriptor keys (av_input_channel, bluetooth_channel,
+navigation_channel, media_info_channel, wifi_channel, phone_status_channel)
+are not yet implemented — resolve_module_type() raises SkipChannel so
+channel_manager can skip them with a warning instead of aborting.
+
+Public API
+----------
+  resolve_module_type(channel_id, channel_descriptor) → str
+      Raises KeyError   — unknown / unresolvable av_type combination
+      Raises SkipChannel — known but not-yet-implemented channel type
+
+  module_name(module_type, channel_id) → str
+      Returns the canonical subprocess name, e.g. channel_video_3.
 """
 
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# AV sub-type constants (mirrors AVChannelMessage.AVType proto enum)
-# ---------------------------------------------------------------------------
-
-AV_TYPE_VIDEO  = 1
-AV_TYPE_AUDIO  = 3
 
 # ---------------------------------------------------------------------------
-# Audio stream-type constants (mirrors AudioStreamType proto enum)
+# Sentinel exception — "known but not yet implemented"
 # ---------------------------------------------------------------------------
 
-AUDIO_TYPE_MEDIA   = 1
-AUDIO_TYPE_GUIDANCE = 2  # nav guidance
-AUDIO_TYPE_SYSTEM  = 3
-AUDIO_TYPE_SPEECH  = 4   # voice recognition
+class SkipChannel(Exception):
+    """Raised when a channel is recognised but has no module yet.
+
+    channel_manager catches this and logs a warning instead of aborting.
+    """
+
 
 # ---------------------------------------------------------------------------
-# Direct channel_id → module_type table (non-AV channels)
-#
-# channel_id values below mirror the SEMANTIC_DEFAULTS in service_discovery.py
+# AVStreamType constants  (mirrors AVStreamTypeEnum proto)
 # ---------------------------------------------------------------------------
 
-# Channels whose module_type is determined purely by channel_id:
-_DIRECT: dict[int, str] = {
-    # ch 0  — control channel, handled by oaa_control_channel itself
-    # ch 1  — input
-    1:  "input",
-    # ch 2  — sensor
-    2:  "sensor",
-    # ch 7  — media playback status
-    7:  "media_status",
-    # ch 8  — Bluetooth channel (different from the bluetooth *pairing* module)
-    8:  "bluetooth",
-    # ch 9  — navigation
-    9:  "navigation",
-    # ch 10 — media playback control
-    10: "media_playback",
-    # ch 11 — phone
-    11: "phone",
-    # ch 12 — notification
-    12: "notification",
-}
+AV_STREAM_VIDEO = 1   # AVStreamType.VIDEO
+AV_STREAM_AUDIO = 2   # AVStreamType.AUDIO
+
+# ---------------------------------------------------------------------------
+# AudioType constants  (mirrors AudioTypeEnum proto)
+# ---------------------------------------------------------------------------
+
+AUDIO_TYPE_MEDIA   = 1   # AudioType.MEDIA
+AUDIO_TYPE_SYSTEM  = 3   # AudioType.SYSTEM
+AUDIO_TYPE_SPEECH  = 4   # AudioType.SPEECH
+
+# ---------------------------------------------------------------------------
+# Descriptor keys that are known but not yet implemented
+# ---------------------------------------------------------------------------
+
+_SKIP_KEYS: frozenset[str] = frozenset({
+    "av_input_channel",
+    "bluetooth_channel",
+    "navigation_channel",
+    "media_info_channel",
+    "wifi_channel",
+    "phone_status_channel",
+})
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -72,32 +92,62 @@ def resolve_module_type(channel_id: int, channel_descriptor: dict) -> str:
     Return the module_type string for a given channel.
 
     Args:
-        channel_id:           numeric channel id from the SDR channels list.
-        channel_descriptor:   the channel dict as it appears in the SDR
-                              (e.g. {"av_channel": {"av_type": 1, ...}}).
+        channel_id:          numeric channel id from the SDR channels list.
+        channel_descriptor:  the channel dict as produced by
+                             service_discovery.channels_from_sdr_bytes(), e.g.
+                             {"av_channel": {"av_type": 1}} or
+                             {"av_channel": {"av_type": 2, "audio_type": 1}} or
+                             {"input_channel": {}}.
 
     Returns:
-        module_type string (e.g. "video", "audio", "navigation").
+        module_type string: one of "video", "audio", "input", "sensor".
 
     Raises:
-        KeyError: if the channel_id cannot be resolved to a module_type.
+        SkipChannel: channel type is known but has no module yet.
+        KeyError:    channel type is unrecognised or av_type/audio_type is
+                     outside the expected range.
     """
-    # AV channels are identified by the presence of "av_channel" key
+    # --- AV channels ---
     if "av_channel" in channel_descriptor:
-        av_type = channel_descriptor["av_channel"].get("av_type")
-        if av_type == AV_TYPE_VIDEO:
+        av = channel_descriptor["av_channel"]
+        av_type = av.get("av_type")
+
+        if av_type == AV_STREAM_VIDEO:
             return "video"
-        if av_type == AV_TYPE_AUDIO:
-            return "audio"
+
+        if av_type == AV_STREAM_AUDIO:
+            audio_type = av.get("audio_type")
+            if audio_type == AUDIO_TYPE_MEDIA:
+                return "audio"
+            if audio_type == AUDIO_TYPE_SPEECH:
+                return "audio"
+            if audio_type == AUDIO_TYPE_SYSTEM:
+                return "audio"
+            raise KeyError(
+                f"ch{channel_id}: unknown audio_type={audio_type!r} "
+                f"in av_channel descriptor"
+            )
+
         raise KeyError(
             f"ch{channel_id}: unknown av_type={av_type!r} in av_channel descriptor"
         )
 
-    if channel_id in _DIRECT:
-        return _DIRECT[channel_id]
+    # --- Direct descriptor-key mappings ---
+    if "input_channel" in channel_descriptor:
+        return "input"
+
+    if "sensor_channel" in channel_descriptor:
+        return "sensor"
+
+    # --- Known but not-yet-implemented channels ---
+    for skip_key in _SKIP_KEYS:
+        if skip_key in channel_descriptor:
+            raise SkipChannel(
+                f"ch{channel_id}: {skip_key!r} has no module yet — skipping"
+            )
 
     raise KeyError(
-        f"ch{channel_id}: no module_type mapping found for descriptor "
+        f"ch{channel_id}: no module_type mapping found for descriptor keys "
         f"{list(channel_descriptor.keys())!r}"
     )
 
@@ -106,6 +156,7 @@ def module_name(module_type: str, channel_id: int) -> str:
     """Return the canonical MODULE_NAME for a channel subprocess.
 
     Pattern: channel_{module_type}_{channel_id}
-    Example: channel_video_3, channel_audio_4, channel_navigation_9
+    Examples: channel_video_3, channel_audio_4, channel_audio_5,
+              channel_audio_6, channel_input_1, channel_sensor_2.
     """
     return f"channel_{module_type}_{channel_id}"
