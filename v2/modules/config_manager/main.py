@@ -14,15 +14,20 @@ Module contract:
                 system.stop
                 config.get      → {"module": "<name>",
                                     "requester": "<who>" (optional),
-                                    "defaults": {<key>: <value>, ...} (optional)}
+                                    "defaults": {<key>: <value>, ...} (optional),
+                                    "schema": {<key>: {type, ...}, ...} (optional)}
                 config.set      → {"module": "<name>", "key": "<k>", "value": <v>}
   Publishes   : system.module_ready → {name, priority}
                 system.ready      → {name, priority}
                 config.response   → {"module": "<name>", "config": {<key>: <value>, ...},
-                                      "requester": "<who>" (echoed, empty string if absent)}
+                                      "requester": "<who>" (echoed, empty string if absent),
+                                      "schema": {<key>: {type, ...}, ...} (echoed if registered)}
                 config.changed    → {"module": "<name>", "key": "<k>", "value": <v>}
+                config.error      → {"module": "<name>", "key": "<k>", "value": <v>,
+                                      "reason": "<human-readable message>"}
 
   State       : private — YAML files under CONFIG_DIR (one file per module)
+                         — in-RAM schema registry (_schemas dict, re-populated at boot)
 ---
 
 YAML layout  (CONFIG_DIR/<module_name>.yaml):
@@ -31,13 +36,17 @@ YAML layout  (CONFIG_DIR/<module_name>.yaml):
     ...
 
 Rules:
-  - The module never enforces a schema; it stores whatever key/value the
-    caller sends.
-  - config.set only persists and notifies — it does NOT validate the value.
+  - The module stores whatever key/value the caller sends, UNLESS a schema
+    has been registered for that module and key — in which case the value
+    is validated (and coerced) before persisting. On failure, config.error
+    is published and the value is NOT persisted.
   - config.get returns the full config dict for the requested module.
     If no YAML exists yet AND a "defaults" dict is provided in the payload,
     the defaults are persisted atomically and returned in the same response
     (first-boot seeding, no extra round-trip needed).
+  - If a "schema" dict is provided in config.get, it is stored in RAM and
+    echoed verbatim in every subsequent config.response for that module.
+    The schema is NOT persisted to disk — modules re-register it on every boot.
   - The optional "requester" field in config.get is echoed verbatim in
     config.response so subscribers can filter responses meant for them.
 """
@@ -57,8 +66,9 @@ if str(_MODULES) not in sys.path:
 
 import yaml  # noqa: E402
 
-from shared.bus_client import BusClient              # noqa: E402
-from shared.logger import get_logger     # noqa: E402
+from shared.bus_client import BusClient                          # noqa: E402
+from shared.logger import get_logger                             # noqa: E402
+from shared.config_schema import schema_from_dict, validate_value  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity & paths
@@ -71,6 +81,9 @@ bus = BusClient(module_name=MODULE_NAME)
 log = get_logger(MODULE_NAME, bus=bus)
 
 CONFIG_DIR = _V2 / "config"
+
+# In-RAM schema registry: module_name → {key → ConfigFieldSchema}
+_schemas: dict[str, dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +119,14 @@ def _save_config(module: str, data: dict) -> bool:
         return False
 
 
+def _schema_dict_for_response(module: str) -> dict | None:
+    """Return the serialised schema for *module*, or None if not registered."""
+    schema = _schemas.get(module)
+    if not schema:
+        return None
+    return {k: v.to_dict() for k, v in schema.items()}
+
+
 # ---------------------------------------------------------------------------
 # Bus handlers
 # ---------------------------------------------------------------------------
@@ -114,10 +135,19 @@ def on_config_get(topic: str, payload: dict):
     module    = payload.get("module")
     requester = payload.get("requester", "")
     defaults  = payload.get("defaults")
+    raw_schema = payload.get("schema")  # plain dict from bus payload
 
     if not module:
         log.warning("config.get received without 'module' field — ignoring.")
         return
+
+    # Store/update schema in RAM if provided
+    if isinstance(raw_schema, dict) and raw_schema:
+        try:
+            _schemas[module] = schema_from_dict(raw_schema)
+            log.info(f"Schema registered for '{module}': {list(raw_schema.keys())}")
+        except Exception as exc:
+            log.error(f"Failed to parse schema for '{module}': {exc}")
 
     config = _load_config(module)
 
@@ -138,11 +168,16 @@ def on_config_get(topic: str, payload: dict):
             f"config.get for '{module}' (requester='{requester}') → {len(config)} keys"
         )
 
-    bus.publish("config.response", {
+    response: dict = {
         "module":    module,
         "config":    config,
         "requester": requester,
-    })
+    }
+    schema_payload = _schema_dict_for_response(module)
+    if schema_payload is not None:
+        response["schema"] = schema_payload
+
+    bus.publish("config.response", response)
 
 
 def on_config_set(topic: str, payload: dict):
@@ -153,6 +188,24 @@ def on_config_set(topic: str, payload: dict):
     if not module or key is None:
         log.warning(f"config.set missing 'module' or 'key': {payload} — ignoring.")
         return
+
+    # Validate against schema if registered
+    schema = _schemas.get(module)
+    if schema and key in schema:
+        try:
+            value = validate_value(schema[key], value)
+        except ValueError as exc:
+            reason = str(exc)
+            log.warning(
+                f"config.set validation failed for '{module}'.{key} = {value!r}: {reason}"
+            )
+            bus.publish("config.error", {
+                "module": module,
+                "key":    key,
+                "value":  payload.get("value"),
+                "reason": reason,
+            })
+            return
 
     data = _load_config(module)
     data[key] = value
