@@ -489,7 +489,7 @@ class _AccordionItem(QWidget):
         # ---- body ----
         self._body = QWidget()
         self._body.setStyleSheet(
-            "QWidget { background: #1e1e1e; border: 1px solid #333;"
+            "QWidget { border: 1px solid #333;"
             " border-top: none; border-radius: 0 0 4px 4px; }"
         )
         body_layout = QVBoxLayout(self._body)
@@ -1008,6 +1008,8 @@ def on_config_response(topic: str, payload: dict) -> None:
     config     = payload.get("config", {})
     schema_raw = payload.get("schema")
     log.info(f"config.response for '{module}': {len(config)} chiavi, schema={'si' if schema_raw else 'no'}")
+    log.info(f"config.response for '{module}': {json.dumps(config)}")
+    log.info(f"config.response for '{module}': {json.dumps(schema_raw) if schema_raw else ''}")
     _invoke(
         "populate_module_config",
         module,
