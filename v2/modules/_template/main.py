@@ -8,7 +8,8 @@ Then follow these steps:
   1. Set MODULE_NAME to your module name (must match the folder name)
   2. Set PRIORITY (see Boot Protocol below)
   3. Fill in the contract docstring
-  4. Declare config keys in _DEFAULTS (remove if no config needed)
+  4. Declare config keys in _DEFAULTS and their types in _SCHEMA
+     (remove both if the module has no configuration)
   5. Implement on_system_start, on_system_stop and your topic handlers
   6. Add subscriptions in run()
   7. Keep ALL internal logic inside this folder
@@ -59,7 +60,7 @@ Module contract (fill this in):
 
 Path layout (auto-configured below):
   v2/
-  ├── shared/           ← BusClient, ConfigClient, logger
+  ├── shared/           ← BusClient, ConfigClient, logger, config_schema
   └── modules/
       └── <module>/     ← THIS file lives here
           └── main.py
@@ -67,6 +68,7 @@ Path layout (auto-configured below):
 sys.path includes:
   v2/          → from shared.bus_client import BusClient
                → from shared.config_client import ConfigClient
+               → from shared.config_schema import field_int, field_enum, ...
   v2/modules/  → from <module_name>.subfile import Foo
 """
 
@@ -85,7 +87,10 @@ if str(_MODULES) not in sys.path:
 
 from shared.bus_client import BusClient        # noqa: E402
 from shared.config_client import ConfigClient  # noqa: E402
-from shared.logger import get_logger  # noqa: E402
+from shared.logger import get_logger           # noqa: E402
+from shared.config_schema import (             # noqa: E402
+    field_string, field_int, field_float, field_enum,
+)
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -98,22 +103,37 @@ MODULE_NAME = "_template"  # ← STEP 1: change to your module name
 PRIORITY: int = 1          # ← STEP 2: set your priority level
 
 bus = BusClient(module_name=MODULE_NAME)
-log = get_logger(MODULE_NAME, bus=bus)  # optional bus forwarding for this module's logs
+log = get_logger(MODULE_NAME, bus=bus)
 cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 
 # ---------------------------------------------------------------------------
-# STEP 3: Config defaults
+# STEP 3: Config defaults and schema
 # ---------------------------------------------------------------------------
-# Declare every key your module reads from config_manager.
-# These values are used immediately at startup; config_manager will override
-# them once it responds to the config.get request.
+# _DEFAULTS: raw values persisted to YAML on first boot.
+# _SCHEMA:   describes the type and constraints of each key so that
+#            config_ui renders the correct widget and config_manager
+#            validates incoming config.set calls.
 #
-# Remove _DEFAULTS and all cfg references if your module has no configuration.
+# Every key in _DEFAULTS should have a matching entry in _SCHEMA.
+# Remove both _DEFAULTS and _SCHEMA (and all cfg references) if the
+# module has no configuration.
+#
+# Available helpers:
+#   field_string(default)                     → free-text QLineEdit
+#   field_int(default, min=None, max=None)    → QLineEdit+±  or  Slider
+#   field_float(default, min=None, max=None)  → QLineEdit+±  or  Slider
+#   field_enum(default, choices=[...]         → QComboBox
 
 _DEFAULTS = {
-    # "my_key": "default_value",
+    # "my_key":  "default_value",
     # "timeout": 10,
-    # "enabled": True,
+    # "enabled": "on",
+}
+
+_SCHEMA = {
+    # "my_key":  field_string(default="default_value"),
+    # "timeout": field_int(default=10, min=1, max=300),
+    # "enabled": field_enum(default="on", choices=["off", "on"]),
 }
 
 _config: dict = dict(_DEFAULTS)
@@ -125,8 +145,6 @@ _config: dict = dict(_DEFAULTS)
 def _on_config_loaded(config: dict) -> None:
     global _config
     if not config:
-        # First boot: no YAML yet. config_manager already seeded the defaults
-        # (passed via cfg.get(defaults=_DEFAULTS)) — nothing more to do here.
         log.info("No persisted config found — defaults seeded by config_manager.")
         return
     merged = dict(_DEFAULTS)
@@ -174,9 +192,9 @@ def on_system_start(topic: str, payload: dict) -> None:
 
     log.info(f"system.start priority={PRIORITY} received — initialising...")
 
-    # TODO: initialise resources, start background threads, etc.
-    # Call cfg.get(defaults=_DEFAULTS) here if config is needed before
-    # signalling ready (config_manager is guaranteed online at priority >= 1).
+    # Request config from config_manager, passing both defaults (for first-boot
+    # seeding) and schema (for config_ui typed widgets + validation).
+    cfg.get(defaults=_DEFAULTS, schema=_SCHEMA)
 
     # Signal that this module is fully initialised.
     bus.publish("system.ready", {
