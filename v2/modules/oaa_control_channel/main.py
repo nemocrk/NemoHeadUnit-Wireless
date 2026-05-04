@@ -14,6 +14,7 @@ Module contract:
                 aa.frame.ch0             {channel_id, flags, payload_hex}
                 tcp.server.tls_handshake            {outgoing_hex}  ← forward TLS blob to phone
                 tcp.server.tls_handshake_completed  {}              ← send AUTH_COMPLETE
+                aa.session.restarting    {}  ← tcp_server reset cryptor, send VERSION_REQUEST
   Publishes   : system.module_ready      {name, priority}
                 system.ready             {name, priority}
                 config.get               {module, requester, defaults}  ← pre-load on boot
@@ -26,13 +27,20 @@ Module contract:
                 aa.handshake.state       {state}          ← debug / UI
 
 Handshake flow (end-to-end):
-  1. On tcp.session.connected: reset handshake SM, send VERSION_REQUEST (HU speaks first)
-  2. On aa.frame.ch0:          feed frame to ControlChannelHandshake
+  1. On tcp.session.connected:    reset handshake SM, send VERSION_REQUEST (HU speaks first)
+  2. On aa.frame.ch0:             feed frame to ControlChannelHandshake
   3. Handshake replies via aa.frame.send → tcp_server writes back to socket
   4. TLS delegated to tcp_server: handshake publishes aa.handshake.start_tls / feed_input,
      tcp_server replies tcp.server.tls_handshake / tls_handshake_completed
   5. On ACTIVE:  publish aa.session.active
   6. On tcp.session.closed: publish aa.session.shutdown + reset
+
+Restart flow (config change):
+  1. on_config_changed() updates _cfg, publishes aa.session.restart
+  2. tcp_server sends SHUTDOWN_REQUEST to phone, waits for ack, deinit() cryptor,
+     publishes aa.session.restarting
+  3. on_aa_session_restarting() creates a fresh ControlChannelHandshake (with updated _cfg)
+     and immediately sends VERSION_REQUEST on the existing TCP connection
 
 Config flow:
   1. on_system_start() publishes config.get with DEFAULTS (first-boot seeding)
@@ -40,8 +48,7 @@ Config flow:
   3. system.ready is published only after _cfg is populated
   4. build_service_discovery_response() reads from _cfg at handshake time
   5. On config.changed for this module: update _cfg, close active session,
-     publish aa.session.restart so tcp_server drops the TCP connection.
-     The phone will reconnect and the next handshake uses the new values.
+     publish aa.session.restart so tcp_server drives the graceful shutdown.
 """
 
 import sys
@@ -152,9 +159,9 @@ def on_config_response(topic: str, payload: dict) -> None:
 def on_config_changed(topic: str, payload: dict) -> None:
     """A config value for this module changed at runtime.
 
-    Update the in-memory dict and trigger a session restart so the
-    next handshake uses the new values.  The phone will reconnect
-    automatically.
+    Update the in-memory dict and trigger a graceful session restart so the
+    next handshake uses the new values.  tcp_server drives the shutdown/restart
+    sequence and eventually publishes aa.session.restarting.
     """
     global _cfg, _handshake
 
@@ -194,6 +201,21 @@ def on_tcp_session_closed(topic: str, payload: dict) -> None:
     _handshake = None
     bus.publish("aa.session.shutdown", {})
     bus.publish("aa.handshake.state", {"state": "DISCONNECTED"})
+
+
+def on_aa_session_restarting(topic: str, payload: dict) -> None:
+    """tcp_server completed the graceful shutdown sequence and reset the cryptor.
+
+    The TCP connection is still open.  Create a fresh ControlChannelHandshake
+    (picks up the already-updated _cfg) and immediately send VERSION_REQUEST
+    to kick off a new AA handshake on the existing socket.
+    """
+    global _handshake
+    log.info("aa.session.restarting — rebuilding handshake with updated config")
+    _handshake = _make_handshake()
+    bus.publish("aa.handshake.state", {"state": "IDLE"})
+    _handshake.send_version_request()
+    log.info("VERSION_REQUEST sent — waiting for VERSION_RESPONSE")
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +298,7 @@ def run() -> None:
     bus.subscribe("aa.frame.ch0",                       on_frame_ch0)
     bus.subscribe("tcp.server.tls_handshake",           on_tls_handshake)
     bus.subscribe("tcp.server.tls_handshake_completed", on_tls_handshake_completed)
+    bus.subscribe("aa.session.restarting",              on_aa_session_restarting)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
