@@ -20,11 +20,33 @@ PROTO_ROOT = REPO_ROOT / "v2" / "protos"
 if str(PROTO_ROOT) not in sys.path:
     sys.path.insert(0, str(PROTO_ROOT))
 
-# Mappa i codici numerici dei tipi Protobuf in stringhe leggibili (es. 14 -> ENUM)
+# Tipi di campo Protobuf (mappa i codici numerici in stringhe leggibili)
 FIELD_TYPE_NAMES = {
-    v: k.replace("TYPE_", "")
-    for k, v in _descriptor.FieldDescriptor.__dict__.items()
-    if isinstance(k, str) and k.startswith("TYPE_")
+    _descriptor.FieldDescriptor.TYPE_DOUBLE: "DOUBLE",
+    _descriptor.FieldDescriptor.TYPE_FLOAT: "FLOAT",
+    _descriptor.FieldDescriptor.TYPE_INT64: "INT64",
+    _descriptor.FieldDescriptor.TYPE_UINT64: "UINT64",
+    _descriptor.FieldDescriptor.TYPE_INT32: "INT32",
+    _descriptor.FieldDescriptor.TYPE_FIXED64: "FIXED64",
+    _descriptor.FieldDescriptor.TYPE_FIXED32: "FIXED32",
+    _descriptor.FieldDescriptor.TYPE_BOOL: "BOOL",
+    _descriptor.FieldDescriptor.TYPE_STRING: "STRING",
+    _descriptor.FieldDescriptor.TYPE_GROUP: "GROUP",
+    _descriptor.FieldDescriptor.TYPE_MESSAGE: "MESSAGE",
+    _descriptor.FieldDescriptor.TYPE_BYTES: "BYTES",
+    _descriptor.FieldDescriptor.TYPE_UINT32: "UINT32",
+    _descriptor.FieldDescriptor.TYPE_ENUM: "ENUM",
+    _descriptor.FieldDescriptor.TYPE_SFIXED32: "SFIXED32",
+    _descriptor.FieldDescriptor.TYPE_SFIXED64: "SFIXED64",
+    _descriptor.FieldDescriptor.TYPE_SINT32: "SINT32",
+    _descriptor.FieldDescriptor.TYPE_SINT64: "SINT64",
+}
+
+# Label dei campi (1=OPTIONAL, 2=REQUIRED, 3=REPEATED)
+FIELD_LABEL_NAMES = {
+    _descriptor.FieldDescriptor.LABEL_OPTIONAL: "OPTIONAL",
+    _descriptor.FieldDescriptor.LABEL_REQUIRED: "REQUIRED",
+    _descriptor.FieldDescriptor.LABEL_REPEATED: "REPEATED",
 }
 
 def print_message_details_recursive(descriptor, indent=2, visited=None):
@@ -40,13 +62,22 @@ def print_message_details_recursive(descriptor, indent=2, visited=None):
 
     for field in descriptor.fields:
         type_str = FIELD_TYPE_NAMES.get(field.type, str(field.type))
+
+        # Risoluzione della label del campo evitando il DeprecationWarning.
+        # Nelle versioni recenti di Protobuf si consiglia l'uso di is_repeated o is_required.
+        if hasattr(field, 'is_repeated'):
+            label_str = "REPEATED" if field.is_repeated else ("REQUIRED" if field.is_required else "OPTIONAL")
+        else:
+            # Fallback legacy per versioni molto vecchie di protobuf
+            label_str = FIELD_LABEL_NAMES.get(field.label, str(field.label))
+
         type_info = ""
         if field.message_type:
             type_info = f" -> {field.message_type.full_name}"
         elif field.enum_type:
             type_info = f" -> {field.enum_type.full_name}"
 
-        print(f"{' ' * indent}├── {field.name} (number={field.number}, type={type_str}{type_info})")
+        print(f"{' ' * indent}├── {field.name} (number={field.number}, type={type_str}{type_info}, label={label_str})")
 
         # Se è un Enum, mostra i valori
         if field.enum_type:
