@@ -41,8 +41,9 @@ Widget selection by schema type
   float (with bounds) → QSlider (horizontal, ×100 int mapping) + value label
   enum                → QComboBox
   bool                → QCheckBox
-  message/list/oneof  → QLineEdit (read-only, raw value; deep editing not yet supported)
-  (no schema)         → QLineEdit  (backward-compatible fallback)
+  list/message/oneof  → read-only QLabel summary ("N elementi [LIST]");  not editable
+  (no schema, scalar) → QLineEdit  (backward-compatible fallback)
+  (no schema, list)   → read-only QLabel summary (inferred from value type)
 """
 
 import sys
@@ -69,9 +70,14 @@ from PyQt6.QtWidgets import (                                         # noqa: E4
 from shared.bus_client import BusClient              # noqa: E402
 from shared.logger import get_logger                 # noqa: E402
 from shared.config_schema import (                   # noqa: E402
+    ConfigFieldList,
+    ConfigFieldMessage,
+    ConfigFieldOneof,
     ConfigFieldSchema,
     schema_from_dict,
 )
+
+_STRUCTURED_TYPES = (ConfigFieldList, ConfigFieldMessage, ConfigFieldOneof)
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -102,8 +108,8 @@ class _FieldWidget(QWidget):
 
     Accepts only ConfigFieldSchema (scalar) or None for field_schema.
     Structured nodes (ConfigFieldMessage / ConfigFieldList / ConfigFieldOneof)
-    must be normalised to None by the caller — they are rendered as a
-    read-only QLineEdit showing the raw value until deep editing is supported.
+    must NOT be passed here — they are rendered as a read-only QLabel by
+    ModuleConfigTab.populate() before this class is instantiated.
     """
 
     def __init__(self, key: str, raw_value, field_schema: "ConfigFieldSchema | None"):
@@ -308,6 +314,20 @@ def _schema_type_badge(field_schema) -> str:
     return f" <span style='color:#888; font-size:10px'>[{label}]</span>"
 
 
+def _structured_summary(key: str, value, field_schema) -> str:
+    """Return a short human-readable summary for a structured config value.
+
+    Used in the read-only QLabel shown for ConfigFieldList / ConfigFieldMessage /
+    ConfigFieldOneof entries (and for list/dict values with no schema).
+    """
+    badge = _schema_type_badge(field_schema)
+    if isinstance(value, list):
+        return f"{len(value)} elementi{badge}"
+    if isinstance(value, dict):
+        return f"{len(value)} campi{badge}"
+    return f"{value}{badge}"
+
+
 class ModuleConfigTab(QWidget):
     def __init__(self, module_name: str, pid: int, status: str):
         super().__init__()
@@ -369,11 +389,11 @@ class ModuleConfigTab(QWidget):
         config     : {key: value} dict from config.response
         schema_raw : optional plain-dict schema from config.response["schema"]
 
-        Structured schema nodes (ConfigFieldMessage / ConfigFieldList /
-        ConfigFieldOneof) are detected via isinstance(ConfigFieldSchema) check.
-        They receive field_schema=None so _FieldWidget falls back to a plain
-        QLineEdit, and their badge is derived from the class name instead of
-        the .type attribute (which only ConfigFieldSchema exposes).
+        Scalar fields (ConfigFieldSchema) get an interactive widget.
+        Structured nodes (ConfigFieldList / ConfigFieldMessage / ConfigFieldOneof)
+        and bare list/dict values with no schema are rendered as a read-only
+        QLabel summary (e.g. "11 elementi [LIST]") and excluded from self._fields
+        so they are never accidentally sent via config.set.
         """
         while self._form.rowCount():
             self._form.removeRow(0)
@@ -398,10 +418,24 @@ class ModuleConfigTab(QWidget):
         for key, value in sorted(config.items()):
             raw_schema = self._schema.get(key)  # may be None or any schema node
 
-            # _FieldWidget only understands scalar ConfigFieldSchema.
-            # Structured nodes (Message / List / Oneof) fall back to QLineEdit.
-            scalar_schema = raw_schema if isinstance(raw_schema, ConfigFieldSchema) else None
+            # Structured schema nodes and bare list/dict values — read-only summary.
+            is_structured_schema = isinstance(raw_schema, _STRUCTURED_TYPES)
+            is_bare_collection   = raw_schema is None and isinstance(value, (list, dict))
 
+            if is_structured_schema or is_bare_collection:
+                summary = _structured_summary(key, value, raw_schema)
+                lbl_value = QLabel(summary)
+                lbl_value.setTextFormat(Qt.TextFormat.RichText)
+                lbl_value.setStyleSheet("color: #888;")
+                badge = _schema_type_badge(raw_schema)
+                lbl_key = QLabel(f"{key}{badge}")
+                lbl_key.setTextFormat(Qt.TextFormat.RichText)
+                self._form.addRow(lbl_key, lbl_value)
+                # NOT added to self._fields — never sent via config.set
+                continue
+
+            # Scalar field — interactive widget
+            scalar_schema = raw_schema if isinstance(raw_schema, ConfigFieldSchema) else None
             widget = _FieldWidget(key, value, scalar_schema)
             self._fields[key] = widget
 
