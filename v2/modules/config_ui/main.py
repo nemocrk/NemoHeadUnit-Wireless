@@ -41,6 +41,7 @@ Widget selection by schema type
   float (with bounds) → QSlider (horizontal, ×100 int mapping) + value label
   enum                → QComboBox
   bool                → QCheckBox
+  message/list/oneof  → QLineEdit (read-only, raw value; deep editing not yet supported)
   (no schema)         → QLineEdit  (backward-compatible fallback)
 """
 
@@ -67,7 +68,10 @@ from PyQt6.QtWidgets import (                                         # noqa: E4
 
 from shared.bus_client import BusClient              # noqa: E402
 from shared.logger import get_logger                 # noqa: E402
-from shared.config_schema import schema_from_dict    # noqa: E402
+from shared.config_schema import (                   # noqa: E402
+    ConfigFieldSchema,
+    schema_from_dict,
+)
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -95,9 +99,14 @@ class _FieldWidget(QWidget):
     """
     Container that wraps the appropriate Qt widget for a config field and
     exposes a uniform get_value() / set_value() interface.
+
+    Accepts only ConfigFieldSchema (scalar) or None for field_schema.
+    Structured nodes (ConfigFieldMessage / ConfigFieldList / ConfigFieldOneof)
+    must be normalised to None by the caller — they are rendered as a
+    read-only QLineEdit showing the raw value until deep editing is supported.
     """
 
-    def __init__(self, key: str, raw_value, field_schema=None):
+    def __init__(self, key: str, raw_value, field_schema: "ConfigFieldSchema | None"):
         super().__init__()
         self._key    = key
         self._schema = field_schema
@@ -119,7 +128,7 @@ class _FieldWidget(QWidget):
             self._build_int(raw_value, field_schema.min, field_schema.max)
         elif field_schema.type == "float":
             self._build_float(raw_value, field_schema.min, field_schema.max)
-        else:  # string or unknown
+        else:  # string or unknown scalar
             self._build_string(str(raw_value) if raw_value is not None else "")
 
         self._layout.addWidget(self._error_lbl)
@@ -282,13 +291,30 @@ class _FieldWidget(QWidget):
 # Per-module tab widget
 # ---------------------------------------------------------------------------
 
+def _schema_type_badge(field_schema) -> str:
+    """Return a human-readable HTML badge string for a schema node.
+
+    Works for both ConfigFieldSchema (scalar) and structured nodes
+    (ConfigFieldMessage / ConfigFieldList / ConfigFieldOneof) which only
+    expose a class name, not a .type attribute.
+    """
+    if field_schema is None:
+        return ""
+    if isinstance(field_schema, ConfigFieldSchema):
+        label = field_schema.type.upper()
+    else:
+        # Structured node — use the class name, strip "ConfigField" prefix
+        label = type(field_schema).__name__.replace("ConfigField", "").upper()
+    return f" <span style='color:#888; font-size:10px'>[{label}]</span>"
+
+
 class ModuleConfigTab(QWidget):
     def __init__(self, module_name: str, pid: int, status: str):
         super().__init__()
         self._module_name = module_name
         self._original: dict = {}
         self._fields:   dict[str, _FieldWidget] = {}
-        self._schema:   dict = {}   # key → ConfigFieldSchema (or empty)
+        self._schema:   dict = {}   # key → AnyFieldSchema (or empty)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
@@ -342,6 +368,12 @@ class ModuleConfigTab(QWidget):
         ----------
         config     : {key: value} dict from config.response
         schema_raw : optional plain-dict schema from config.response["schema"]
+
+        Structured schema nodes (ConfigFieldMessage / ConfigFieldList /
+        ConfigFieldOneof) are detected via isinstance(ConfigFieldSchema) check.
+        They receive field_schema=None so _FieldWidget falls back to a plain
+        QLineEdit, and their badge is derived from the class name instead of
+        the .type attribute (which only ConfigFieldSchema exposes).
         """
         while self._form.rowCount():
             self._form.removeRow(0)
@@ -364,13 +396,17 @@ class ModuleConfigTab(QWidget):
             return
 
         for key, value in sorted(config.items()):
-            field_schema = self._schema.get(key)  # may be None
-            widget = _FieldWidget(key, value, field_schema)
+            raw_schema = self._schema.get(key)  # may be None or any schema node
+
+            # _FieldWidget only understands scalar ConfigFieldSchema.
+            # Structured nodes (Message / List / Oneof) fall back to QLineEdit.
+            scalar_schema = raw_schema if isinstance(raw_schema, ConfigFieldSchema) else None
+
+            widget = _FieldWidget(key, value, scalar_schema)
             self._fields[key] = widget
-            type_badge = ""
-            if field_schema:
-                type_badge = f" <span style='color:#888; font-size:10px'>[{field_schema.type.upper()}]</span>"
-            label = QLabel(f"{key}{type_badge}")
+
+            badge = _schema_type_badge(raw_schema)
+            label = QLabel(f"{key}{badge}")
             label.setTextFormat(Qt.TextFormat.RichText)
             self._form.addRow(label, widget)
 
