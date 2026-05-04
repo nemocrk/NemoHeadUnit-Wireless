@@ -449,3 +449,97 @@ python -c "from v2.modules.channel_modules.sensor.main import SensorModule; prin
 python v2/bus_broker.py &
 python v2/modules/channel_modules/sensor/main.py
 ```
+
+---
+
+## 2026-05-04 - channel_manager registry rewrite + service_discovery fix
+
+**What changed:**
+
+Riscritti `registry.py` e `main.py` di `channel_manager`, e fix chirurgico a
+`service_discovery.py` di `oaa_control_channel`.
+
+### 1. `service_discovery.py` — `channels_from_sdr_bytes` fix
+
+`av_channel` dict ora espone anche `audio_type` (intero `AudioType`) quando
+`stream_type == AUDIO`, oltre al precedente `av_type`:
+
+```python
+# Prima
+entry["av_channel"] = {"av_type": sub.stream_type}
+
+# Dopo
+av_dict = {"av_type": sub.stream_type}
+if sub.stream_type == AVStreamType.AUDIO:
+    av_dict["audio_type"] = sub.audio_type
+entry["av_channel"] = av_dict
+```
+
+Senza questo fix `registry.resolve_module_type()` non poteva distinguere i tre
+stream audio (MEDIA / SPEECH / SYSTEM).
+
+### 2. `registry.py` — riscrittura completa
+
+**Problemi corretti:**
+- `AV_TYPE_VIDEO = 1` e `AV_TYPE_AUDIO = 3` erano invertiti rispetto ai valori
+  reali di `AVStreamType` (VIDEO=1, AUDIO=2) e `AudioType` (MEDIA=1, SYSTEM=3, SPEECH=4)
+- Il routing era basato su `channel_id` numerico anziché sulla chiave descriptor,
+  rendendo il codice fragile a variazioni di canale tra telefoni/versioni AA
+- `KeyError` abortiva la sessione anche per canali noti ma senza module ancora
+
+**Nuovo comportamento:**
+- Routing su **chiave descriptor** (`av_channel`, `input_channel`, `sensor_channel`, ...)
+- Costanti corrette: `AV_STREAM_VIDEO=1`, `AV_STREAM_AUDIO=2`, `AUDIO_TYPE_MEDIA=1`,
+  `AUDIO_TYPE_SYSTEM=3`, `AUDIO_TYPE_SPEECH=4`
+- Tutti e tre gli audio `av_channel` (MEDIA/SPEECH/SYSTEM) → `module_type="audio"`,
+  producendo 3 istanze separate: `channel_audio_4`, `channel_audio_5`, `channel_audio_6`
+- Nuova eccezione `SkipChannel` per canali non ancora implementati
+  (`av_input_channel`, `bluetooth_channel`, `navigation_channel`,
+  `media_info_channel`, `wifi_channel`, `phone_status_channel`)
+
+### 3. `channel_manager/main.py` — gestione `SkipChannel`
+
+- Importa `SkipChannel` da `registry`
+- In `ChannelManagerSession.start()`: cattura `SkipChannel` con `log.warning + continue`
+  invece di propagare l'errore e abortire la sessione
+
+**Why:**
+- I valori invertiti avrebbero fatto sì che i canali audio venissero erroneamente
+  risolti come `video` e il canale video come `audio`
+- Il routing per `channel_id` numerico è fragile: il pattern corretto è leggere
+  la chiave top-level del descriptor, che rispecchia il tipo semantico del canale
+- Un canale senza module ancora non deve bloccare l'intera sessione AA
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Creare `v2/modules/channel_modules/audio/main.py` (3 istanze: MEDIA, SPEECH, SYSTEM)
+2. Aggiungere test unitari per `registry.resolve_module_type()` con fixture SDR reale
+3. Aggiungere test per `channels_from_sdr_bytes` verificando che `audio_type` sia
+   correttamente esposto per tutti e tre i canali audio
+
+**Commit map:**
+
+| File | Commit | Descrizione |
+|---|---|---|
+| `v2/modules/oaa_control_channel/service_discovery.py` | [81cc925](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/81cc9256f2ccfefa8f2bf62e8193255458e3def6) | Espone `audio_type` in `channels_from_sdr_bytes` |
+| `v2/modules/channel_manager/registry.py` | [bbfee3a](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/bbfee3aea79792f152c0c56d513d39b67616475b) | Riscrittura completa: descriptor-key routing, costanti corrette, `SkipChannel` |
+| `v2/modules/channel_manager/main.py` | [b062ee4](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/b062ee41f767ea76ca1eb5bdc3451fe2f51e59fc) | Cattura `SkipChannel` con warning invece di abort |
+
+**Verification commands:**
+```bash
+# Import smoke test
+python -c "from v2.modules.channel_manager.registry import resolve_module_type, SkipChannel; print('OK')"
+
+# Verifica mapping audio
+python -c "
+from v2.modules.channel_manager.registry import resolve_module_type
+assert resolve_module_type(3, {'av_channel': {'av_type': 1}}) == 'video'
+assert resolve_module_type(4, {'av_channel': {'av_type': 2, 'audio_type': 1}}) == 'audio'
+assert resolve_module_type(5, {'av_channel': {'av_type': 2, 'audio_type': 4}}) == 'audio'
+assert resolve_module_type(6, {'av_channel': {'av_type': 2, 'audio_type': 3}}) == 'audio'
+assert resolve_module_type(1, {'input_channel': {}}) == 'input'
+assert resolve_module_type(2, {'sensor_channel': {}}) == 'sensor'
+print('All assertions OK')
+"
+```
