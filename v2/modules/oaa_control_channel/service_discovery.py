@@ -22,22 +22,22 @@ Channels advertised:
    14  — WiFi
 
 Configuration keys (all under module "oaa_control_channel"):
-    hu.name                  — HU name shown on phone
-    hu.make                  — manufacturer string
-    hu.model                 — model string
-    hu.sw_version            — SW version string
-    video.resolution         — VideoResolution enum name (e.g. "VIDEO_1280x720")
-    video.fps                — VideoFPS enum name (e.g. "_30")
-    video.dpi                — integer DPI
-    touch.width              — touch surface width in pixels
-    touch.height             — touch surface height in pixels
-    audio.media.sample_rate  — media audio sample rate (Hz)
+    hu.name                   — HU name shown on phone
+    hu.make                   — manufacturer string
+    hu.model                  — model string
+    hu.sw_version             — SW version string
+    video.resolution          — VideoResolution enum name (e.g. "VIDEO_1280x720")
+    video.fps                 — VideoFPS enum name (e.g. "_30")
+    video.dpi                 — integer DPI
+    touch.width               — touch surface width in pixels
+    touch.height              — touch surface height in pixels
+    audio.media.sample_rate   — media audio sample rate (Hz)
     audio.media.channel_count — media audio channel count
-    audio.speech.sample_rate — speech audio sample rate (Hz)
-    audio.system.sample_rate — system audio sample rate (Hz)
-    nav.min_interval_ms      — navigation minimum interval (ms)
-    nav.image.width          — navigation image width (px)
-    nav.image.height         — navigation image height (px)
+    audio.speech.sample_rate  — speech audio sample rate (Hz)
+    audio.system.sample_rate  — system audio sample rate (Hz)
+    nav.min_interval_ms       — navigation minimum interval (ms)
+    nav.image.width           — navigation image width (px)
+    nav.image.height          — navigation image height (px)
 
 Protocol constants (NOT configurable — changing them breaks AA compatibility):
     channel_id values, supported_keycodes, BluetoothPairingMethod.PIN,
@@ -58,7 +58,7 @@ for _p in (_REPO_ROOT, _PROTO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from shared.proto_utils import encode_proto  # noqa: E402
+from shared.proto_utils import encode_proto  # noqa: E402  — used only in build_service_discovery_response
 
 # Control / discovery
 from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (
@@ -111,22 +111,22 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 DEFAULTS: dict = {
-    "hu.name":                   "NemoHeadUnit",
-    "hu.make":                   "Nemo",
-    "hu.model":                  "NemoHeadUnit-Wireless",
-    "hu.sw_version":             "2.0",
-    "video.resolution":          "VIDEO_1280x720",
-    "video.fps":                 "_30",
-    "video.dpi":                 140,
-    "touch.width":               1280,
-    "touch.height":              720,
-    "audio.media.sample_rate":   48000,
-    "audio.media.channel_count": 2,
-    "audio.speech.sample_rate":  48000,
-    "audio.system.sample_rate":  16000,
-    "nav.min_interval_ms":       500,
-    "nav.image.width":           64,
-    "nav.image.height":          64,
+    "hu.name":                    "NemoHeadUnit",
+    "hu.make":                    "Nemo",
+    "hu.model":                   "NemoHeadUnit-Wireless",
+    "hu.sw_version":              "2.0",
+    "video.resolution":           "VIDEO_1280x720",
+    "video.fps":                  "_30",
+    "video.dpi":                  140,
+    "touch.width":                1280,
+    "touch.height":               720,
+    "audio.media.sample_rate":    48000,
+    "audio.media.channel_count":  2,
+    "audio.speech.sample_rate":   48000,
+    "audio.system.sample_rate":   16000,
+    "nav.min_interval_ms":        500,
+    "nav.image.width":            64,
+    "nav.image.height":           64,
 }
 
 
@@ -135,9 +135,9 @@ DEFAULTS: dict = {
 # ---------------------------------------------------------------------------
 
 def build_service_discovery_response(
-    cfg:          dict,
-    bt_mac:       str = "00:00:00:00:00:00",
-    wifi_bssid:   str = "",
+    cfg:        dict,
+    bt_mac:     str = "00:00:00:00:00:00",
+    wifi_bssid: str = "",
 ) -> bytes:
     """Return the serialised ServiceDiscoveryResponse protobuf bytes.
 
@@ -158,7 +158,7 @@ def build_service_discovery_response(
     resp.sw_version       = cfg.get("hu.sw_version", DEFAULTS["hu.sw_version"])
     resp.can_play_native_media_during_vr = True
 
-    for descriptor_bytes in [
+    descriptors = [
         _build_video_descriptor(cfg),
         _build_media_audio_descriptor(cfg),
         _build_speech_audio_descriptor(cfg),
@@ -170,20 +170,23 @@ def build_service_discovery_response(
         _build_av_input_descriptor(),
         _build_navigation_descriptor(cfg),
         _build_media_status_descriptor(),
-    ]:
-        resp.channels.append(descriptor_bytes)
-
+    ]
     if _HAS_PHONE_STATUS:
-        resp.channels.append(_build_phone_status_descriptor())
+        descriptors.append(_build_phone_status_descriptor())
+
+    for desc in descriptors:
+        resp.channels.add().MergeFrom(desc)
 
     return encode_proto(resp)
 
 
 # ---------------------------------------------------------------------------
 # Channel descriptor builders (mirror ServiceDiscoveryBuilder.cpp)
+# Each builder returns a ChannelDescriptor (not bytes) so resp.channels.add()
+# can MergeFrom it directly.
 # ---------------------------------------------------------------------------
 
-def _build_video_descriptor(cfg: dict) -> bytes:
+def _build_video_descriptor(cfg: dict) -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 3  # protocol constant
     av = desc.av_channel
@@ -200,49 +203,49 @@ def _build_video_descriptor(cfg: dict) -> bytes:
     cfg_pb.dpi              = int(cfg.get("video.dpi", DEFAULTS["video.dpi"]))
     cfg_pb.codec            = MediaCodecType.MEDIA_CODEC_VIDEO_H264_BP  # protocol constant
 
-    return encode_proto(desc)
+    return desc
 
 
-def _build_media_audio_descriptor(cfg: dict) -> bytes:
+def _build_media_audio_descriptor(cfg: dict) -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 4  # protocol constant
     av = desc.av_channel
     av.stream_type = AVStreamType.AUDIO   # protocol constant
     av.audio_type  = AudioType.MEDIA      # protocol constant
     ac = av.audio_configs.add()
-    ac.sample_rate    = int(cfg.get("audio.media.sample_rate",   DEFAULTS["audio.media.sample_rate"]))
-    ac.bit_depth      = 16  # protocol constant
-    ac.channel_count  = int(cfg.get("audio.media.channel_count", DEFAULTS["audio.media.channel_count"]))
-    return encode_proto(desc)
+    ac.sample_rate   = int(cfg.get("audio.media.sample_rate",   DEFAULTS["audio.media.sample_rate"]))
+    ac.bit_depth     = 16  # protocol constant
+    ac.channel_count = int(cfg.get("audio.media.channel_count", DEFAULTS["audio.media.channel_count"]))
+    return desc
 
 
-def _build_speech_audio_descriptor(cfg: dict) -> bytes:
+def _build_speech_audio_descriptor(cfg: dict) -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 5  # protocol constant
     av = desc.av_channel
     av.stream_type = AVStreamType.AUDIO   # protocol constant
     av.audio_type  = AudioType.SPEECH     # protocol constant
     ac = av.audio_configs.add()
-    ac.sample_rate    = int(cfg.get("audio.speech.sample_rate", DEFAULTS["audio.speech.sample_rate"]))
-    ac.bit_depth      = 16  # protocol constant
-    ac.channel_count  = 1   # protocol constant — speech is always mono
-    return encode_proto(desc)
+    ac.sample_rate   = int(cfg.get("audio.speech.sample_rate", DEFAULTS["audio.speech.sample_rate"]))
+    ac.bit_depth     = 16  # protocol constant
+    ac.channel_count = 1   # protocol constant — speech is always mono
+    return desc
 
 
-def _build_system_audio_descriptor(cfg: dict) -> bytes:
+def _build_system_audio_descriptor(cfg: dict) -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 6  # protocol constant
     av = desc.av_channel
     av.stream_type = AVStreamType.AUDIO   # protocol constant
     av.audio_type  = AudioType.SYSTEM     # protocol constant
     ac = av.audio_configs.add()
-    ac.sample_rate    = int(cfg.get("audio.system.sample_rate", DEFAULTS["audio.system.sample_rate"]))
-    ac.bit_depth      = 16  # protocol constant
-    ac.channel_count  = 1   # protocol constant — system is always mono
-    return encode_proto(desc)
+    ac.sample_rate   = int(cfg.get("audio.system.sample_rate", DEFAULTS["audio.system.sample_rate"]))
+    ac.bit_depth     = 16  # protocol constant
+    ac.channel_count = 1   # protocol constant — system is always mono
+    return desc
 
 
-def _build_input_descriptor(cfg: dict) -> bytes:
+def _build_input_descriptor(cfg: dict) -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 1  # protocol constant
     inp = desc.input_channel
@@ -251,10 +254,10 @@ def _build_input_descriptor(cfg: dict) -> bytes:
     ts.height = int(cfg.get("touch.height", DEFAULTS["touch.height"]))
     for kc in [3, 4, 84, 85, 86, 87, 88, 126, 127, 219, 231]:  # protocol constant
         inp.supported_keycodes.append(kc)
-    return encode_proto(desc)
+    return desc
 
 
-def _build_sensor_descriptor() -> bytes:
+def _build_sensor_descriptor() -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 2  # protocol constant
     sc = desc.sensor_channel
@@ -264,27 +267,27 @@ def _build_sensor_descriptor() -> bytes:
         SensorType.PARKING_BRAKE,
     ]:  # protocol constants
         sc.sensors.add().type = st
-    return encode_proto(desc)
+    return desc
 
 
-def _build_bluetooth_descriptor(bt_mac: str) -> bytes:
+def _build_bluetooth_descriptor(bt_mac: str) -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 8  # protocol constant
     bt = desc.bluetooth_channel
     bt.adapter_address = bt_mac
     bt.supported_pairing_methods.append(BluetoothPairingMethod.PIN)  # protocol constant
-    return encode_proto(desc)
+    return desc
 
 
-def _build_wifi_descriptor(bssid: str) -> bytes:
+def _build_wifi_descriptor(bssid: str) -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 14  # protocol constant
     wf = desc.wifi_channel
     wf.bssid = bssid
-    return encode_proto(desc)
+    return desc
 
 
-def _build_av_input_descriptor() -> bytes:
+def _build_av_input_descriptor() -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 7  # protocol constant
     av = desc.av_input_channel
@@ -293,30 +296,30 @@ def _build_av_input_descriptor() -> bytes:
     ac.sample_rate   = 16000  # protocol constant — AVInput is always 16kHz mono
     ac.bit_depth     = 16     # protocol constant
     ac.channel_count = 1      # protocol constant
-    return encode_proto(desc)
+    return desc
 
 
-def _build_navigation_descriptor(cfg: dict) -> bytes:
+def _build_navigation_descriptor(cfg: dict) -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 9  # protocol constant
     nav = desc.navigation_channel
-    nav.minimum_interval_ms = int(cfg.get("nav.min_interval_ms", DEFAULTS["nav.min_interval_ms"]))
-    nav.type = NavigationType.TURN_BY_TURN  # protocol constant
-    nav.image_options.width              = int(cfg.get("nav.image.width",  DEFAULTS["nav.image.width"]))
-    nav.image_options.height             = int(cfg.get("nav.image.height", DEFAULTS["nav.image.height"]))
-    nav.image_options.colour_depth_bits  = 32  # protocol constant
-    return encode_proto(desc)
+    nav.minimum_interval_ms             = int(cfg.get("nav.min_interval_ms", DEFAULTS["nav.min_interval_ms"]))
+    nav.type                            = NavigationType.TURN_BY_TURN  # protocol constant
+    nav.image_options.width             = int(cfg.get("nav.image.width",  DEFAULTS["nav.image.width"]))
+    nav.image_options.height            = int(cfg.get("nav.image.height", DEFAULTS["nav.image.height"]))
+    nav.image_options.colour_depth_bits = 32  # protocol constant
+    return desc
 
 
-def _build_media_status_descriptor() -> bytes:
+def _build_media_status_descriptor() -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 10  # protocol constant
     desc.media_info_channel.SetInParent()  # empty — just advertise support
-    return encode_proto(desc)
+    return desc
 
 
-def _build_phone_status_descriptor() -> bytes:
+def _build_phone_status_descriptor() -> ChannelDescriptor:
     desc = ChannelDescriptor()
     desc.channel_id = 11  # protocol constant
     desc.phone_status_channel.SetInParent()
-    return encode_proto(desc)
+    return desc
