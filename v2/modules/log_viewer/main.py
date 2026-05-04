@@ -257,8 +257,11 @@ def on_system_stop(topic: str, payload: dict) -> None:
     log.info("system.stop — log_viewer exiting")
     _invoke("set_status", "Sistema in arresto…")
     bus.stop()
+    # _app.quit() must be called from the Qt main thread.
+    # Using invokeMethod with QueuedConnection ensures it is dispatched
+    # onto the event loop, regardless of which thread receives system.stop.
     if _app:
-        _app.quit()
+        QMetaObject.invokeMethod(_app, "quit", Qt.ConnectionType.QueuedConnection)
 
 
 def on_log_entry(topic: str, payload: dict) -> None:
