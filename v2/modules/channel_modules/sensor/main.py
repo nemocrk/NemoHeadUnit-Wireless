@@ -15,28 +15,27 @@ Module contract:
                 aa.frame.ch<channel_id>    raw bytes (ChannelOpenRequest, SensorStartRequest)
                 aa.session.active         {}
                 aa.session.shutdown       {}
-                sensor.driving_status     {status: int}   ← from vehicle integration
+                sensor.driving_status     {status: int}   <- from vehicle integration
                 sensor.night_mode         {night_mode: bool}
                 sensor.gps                {latitude, longitude, bearing, speed, ...}
-  Publishes   : channel_manager.module_module_ready       {name, priority}
-                channel_manager.module_ready              {name, priority}
+  Publishes   : channel_manager.module_ready              {name, priority}
                 aa.frame.send             {channel_id, flags, payload_hex}
-                                            ← ChannelOpenResponse
-                                            ← SensorStartResponse
-                                            ← SensorEventIndication (SensorBatch)
+                                            <- ChannelOpenResponse
+                                            <- SensorStartResponse
+                                            <- SensorEventIndication (SensorBatch)
                 sensor.state              {state}  IDLE | OPEN
 
 Flow:
   1. BaseChannelModule parses CLI and populates self.CHANNEL_ID and
      self.channel_config from --channel-id / --sdr-bytes-hex.
-  2. channel_manager.module_ready is published lazily by base once _init_done, config_loaded
-     and channel_config is not None.
+  2. channel_manager.module_ready is published lazily by base once _init_done,
+     config_loaded and channel_config is not None.
   3. On aa.frame.ch<channel_id>:
-       - ChannelOpenRequest   → reply ChannelOpenResponse (STATUS_SUCCESS)
-       - SensorStartRequest   → reply SensorStartResponse (STATUS_SUCCESS)
+       - ChannelOpenRequest   -> reply ChannelOpenResponse (STATUS_SUCCESS)
+       - SensorStartRequest   -> reply SensorStartResponse (STATUS_SUCCESS)
                                 + immediate SensorEventIndication for:
-                                    SENSOR_DRIVING_STATUS_DATA → DRIVE_STATUS_UNRESTRICTED
-                                    SENSOR_NIGHT_MODE          → night_mode = False
+                                    SENSOR_DRIVING_STATUS_DATA -> DRIVE_STATUS_UNRESTRICTED
+                                    SENSOR_NIGHT_MODE          -> night_mode = False
   4. On sensor.driving_status / sensor.night_mode / sensor.gps: build and send
      SensorEventIndication (SensorBatch) if channel is OPEN.
   5. On aa.session.shutdown: reset to IDLE.
@@ -55,6 +54,11 @@ DrivingStatus wire values:
   DRIVE_STATUS_LIMIT_MESS_LEN = 16
   DRIVE_STATUS_FULLY_RESTRICTED = 31
 
+GPS fields (payload keys):
+  latitude, longitude, bearing, speed — passed through as-is (int or float).
+  altitude, accuracy                  — optional, included when present.
+  timestamp                           — optional unix ms, included when present.
+
 No proto dependency — all encoding is hand-rolled.
 """
 
@@ -62,7 +66,6 @@ from __future__ import annotations
 
 import struct
 import sys
-import time
 from pathlib import Path
 
 _HERE         = Path(__file__).parent
@@ -75,15 +78,11 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS):
         sys.path.insert(0, str(_p))
 
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
+from shared.proto_utils import encode_aa_frame, decode_aa_frame    # noqa: E402
 
 # ---------------------------------------------------------------------------
-# AA frame constants
+# AA message IDs
 # ---------------------------------------------------------------------------
-
-_FLAG_FIRST     = 0x01
-_FLAG_LAST      = 0x02
-_FLAG_ENCRYPTED = 0x08
-_FLAG_FULL      = _FLAG_FIRST | _FLAG_LAST | _FLAG_ENCRYPTED  # 0x0B
 
 _MSG_CHANNEL_OPEN_REQUEST      = 0x8003
 _MSG_CHANNEL_OPEN_RESPONSE     = 0x8005
@@ -169,6 +168,8 @@ class SensorModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def on_channel_open(self, channel_id: int, descriptor: dict) -> None:
+        # State is set to OPEN only upon ChannelOpenRequest from the phone,
+        # consistent with the video module pattern.
         self.log.info("Sensor channel %d open (descriptor: %s)", channel_id, descriptor)
 
     def on_channel_close(self, channel_id: int) -> None:
@@ -177,7 +178,7 @@ class SensorModule(BaseChannelModule):
         self.log.info("Sensor channel %d closed", channel_id)
 
     def on_frame(self, channel_id: int, data: bytes) -> None:
-        result = self._decode_frame(data)
+        result = decode_aa_frame(data)
         if result is None:
             self.log.error("on_frame: malformed payload — dropping")
             return
@@ -198,39 +199,29 @@ class SensorModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def _handle_channel_open_request(self, body: bytes) -> None:
-        proto_body = b"\x08\x00"
-        frame = self._encode_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, proto_body)
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, b"\x08\x00")
         self.bus.publish("aa.frame.send", frame)
         self._set_state("OPEN")
-        self.log.info("ChannelOpenRequest → ChannelOpenResponse sent (STATUS_SUCCESS)")
+        self.log.info("ChannelOpenRequest -> ChannelOpenResponse sent (STATUS_SUCCESS)")
 
     def _handle_sensor_start_request(self, body: bytes) -> None:
         sensor_type = _parse_sensor_start_request(body)
         self.log.info("SensorStartRequest sensor_type=%d", sensor_type)
         self._started_sensors.add(sensor_type)
 
-        resp_body = b"\x08\x00"
-        frame = self._encode_frame(self.CHANNEL_ID, _MSG_SENSOR_START_RESPONSE, resp_body)
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_SENSOR_START_RESPONSE, b"\x08\x00")
         self.bus.publish("aa.frame.send", frame)
         self.log.debug("SensorStartResponse sent for sensor_type=%d", sensor_type)
 
-        batch_bytes = self._build_default_sensor_batch(sensor_type)
+        batch_bytes = _build_default_sensor_batch(sensor_type)
         if batch_bytes:
-            frame = self._encode_frame(
+            frame = encode_aa_frame(
                 self.CHANNEL_ID, _MSG_SENSOR_EVENT_INDICATION, batch_bytes
             )
             self.bus.publish("aa.frame.send", frame)
             self.log.info(
                 "Initial SensorEventIndication sent for sensor_type=%d", sensor_type
             )
-
-    @staticmethod
-    def _build_default_sensor_batch(sensor_type: int) -> bytes:
-        if sensor_type == SENSOR_DRIVING_STATUS:
-            return _bytes_field(1, _varint_field(1, DRIVE_STATUS_UNRESTRICTED))
-        if sensor_type == SENSOR_NIGHT_MODE:
-            return _bytes_field(4, _bool_field(1, False))
-        return b""
 
     # ------------------------------------------------------------------
     # Outgoing sensor updates  (bus events from vehicle integration)
@@ -257,10 +248,10 @@ class SensorModule(BaseChannelModule):
             self.log.debug("on_sensor_gps: channel not ready — dropping")
             return
 
-        lat  = int(float(payload.get("latitude",  0)) * 1e7)
-        lon  = int(float(payload.get("longitude", 0)) * 1e7)
-        bear = int(float(payload.get("bearing",   0)) * 1e6)
-        spd  = int(float(payload.get("speed",     0)) * 1e3)
+        lat  = int(payload.get("latitude",  0))
+        lon  = int(payload.get("longitude", 0))
+        bear = int(payload.get("bearing",   0))
+        spd  = int(payload.get("speed",     0))
 
         gps_data = (
             _sfixed32_field(1, lat)
@@ -269,9 +260,9 @@ class SensorModule(BaseChannelModule):
             + _sfixed32_field(4, spd)
         )
         if "altitude" in payload:
-            gps_data += _sfixed32_field(5, int(float(payload["altitude"]) * 1e3))
+            gps_data += _sfixed32_field(5, int(payload["altitude"]))
         if "accuracy" in payload:
-            gps_data += _sfixed32_field(6, int(float(payload["accuracy"]) * 1e3))
+            gps_data += _sfixed32_field(6, int(payload["accuracy"]))
         if "timestamp" in payload:
             gps_data += _int64_field(7, int(payload["timestamp"]))
 
@@ -281,7 +272,7 @@ class SensorModule(BaseChannelModule):
         )
 
     def _send_sensor_event(self, batch_bytes: bytes) -> None:
-        frame = self._encode_frame(
+        frame = encode_aa_frame(
             self.CHANNEL_ID, _MSG_SENSOR_EVENT_INDICATION, batch_bytes
         )
         self.bus.publish("aa.frame.send", frame)
@@ -291,29 +282,11 @@ class SensorModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def _set_state(self, new_state: str) -> None:
+        if self._state == new_state:
+            return
         self._state = new_state
         self.bus.publish("sensor.state", {"state": new_state})
-        self.log.info("sensor.state → %s", new_state)
-
-    # ------------------------------------------------------------------
-    # Frame encode / decode helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _encode_frame(channel_id: int, message_id: int, proto_body: bytes) -> dict:
-        payload = struct.pack(">H", message_id) + proto_body
-        return {
-            "channel_id":  channel_id,
-            "flags":       _FLAG_FULL,
-            "payload_hex": payload.hex(),
-        }
-
-    @staticmethod
-    def _decode_frame(data: bytes) -> tuple[int, bytes] | None:
-        if len(data) < 2:
-            return None
-        message_id = struct.unpack_from(">H", data, 0)[0]
-        return message_id, data[2:]
+        self.log.info("sensor.state -> %s", new_state)
 
     # ------------------------------------------------------------------
     # run() override
@@ -326,6 +299,23 @@ class SensorModule(BaseChannelModule):
         self.bus.subscribe("sensor.night_mode",        self.on_sensor_night_mode)
         self.bus.subscribe("sensor.gps",               self.on_sensor_gps)
         super().run()
+
+
+# ---------------------------------------------------------------------------
+# Module-level default sensor batch helper
+# ---------------------------------------------------------------------------
+
+def _build_default_sensor_batch(sensor_type: int) -> bytes:
+    """Return the initial SensorBatch bytes for a freshly started sensor_type.
+
+    Only SENSOR_DRIVING_STATUS and SENSOR_NIGHT_MODE send an initial batch;
+    SENSOR_LOCATION (and any unknown type) returns empty bytes.
+    """
+    if sensor_type == SENSOR_DRIVING_STATUS:
+        return _bytes_field(1, _varint_field(1, DRIVE_STATUS_UNRESTRICTED))
+    if sensor_type == SENSOR_NIGHT_MODE:
+        return _bytes_field(4, _bool_field(1, False))
+    return b""
 
 
 # ---------------------------------------------------------------------------
