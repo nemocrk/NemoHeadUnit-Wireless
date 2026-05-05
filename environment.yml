@@ -35,10 +35,16 @@ dependencies:
   # -----------------------------------------------------------------------
   # Media (optional — GStreamer Python bindings)
   # Install system GStreamer plugins separately:
-  #   sudo apt install gstreamer1.0-plugins-{base,good,bad,ugly} \\
+  #   sudo apt install gstreamer1.0-plugins-{base,good,bad,ugly} \
   #                    gstreamer1.0-libav gstreamer1.0-tools
   # -----------------------------------------------------------------------
   - gst-python            # gi.repository.Gst bindings (conda-forge)
+
+  # -----------------------------------------------------------------------
+  # Audio backend (channel_modules/audio)
+  # -----------------------------------------------------------------------
+  - av>=12.0              # PyAV — FFmpeg bindings for AAC-LC ADTS decoding
+  - pyalsaaudio>=0.10     # ALSA PCM output (Linux only)
 
   # -----------------------------------------------------------------------
   # Configuration persistence
