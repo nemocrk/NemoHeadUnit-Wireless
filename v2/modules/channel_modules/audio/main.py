@@ -3,7 +3,8 @@ NemoHeadUnit-Wireless v2 — channel_modules/audio
 
 Single-channel audio module.  One process instance per audio channel
 (MEDIA / SPEECH / SYSTEM).  All channel parameters are supplied by the
-orchestrator (channel_manager) at launch via CLI arguments:
+orchestrator (channel_manager) at launch via CLI arguments parsed by
+BaseChannelModule:
 
     python -m channel_modules.audio.main \\
         --module-name  channel_audio_4 \\
@@ -13,10 +14,8 @@ orchestrator (channel_manager) at launch via CLI arguments:
 Module contract:
   Name        : <--module-name>   (e.g. channel_audio_4)
   Priority    : 1
-  Channel ID  : <--channel-id>    (e.g. 4 for MediaAudio)
-  SDR bytes   : <--sdr-bytes-hex> hex-encoded ServiceDiscoveryResponse
-                used at _init() to extract sample_rate / bit_depth /
-                channel_count / codec for this channel_id.
+  Channel ID  : <--channel-id>    (populated into self.CHANNEL_ID by base)
+  SDR bytes   : <--sdr-bytes-hex> parsed by base into self.channel_config
   Subscribes  : system.readytostart
                 system.start
                 system.stop
@@ -33,24 +32,25 @@ Module contract:
   Config keys : audio_device  enum  "default"  sounddevice output device name
 
 Flow:
-  1. On system.start: cfg.get(schema) triggers config load + _init().
-  2. _init(): call _apply_audio_config(_SDR_BYTES_HEX) to read codec params,
-     open sounddevice RawOutputStream, open pyav codec context if AAC-LC ADTS.
-  3. BaseChannelModule handles oaa.channel.open/close and oaa.frame.<id>.
-  4. on_frame(): decode AA frame header, dispatch by message_id, write PCM.
-  5. on_config_changed("audio_device"): re-open stream on the fly.
-  6. on_aa_session_shutdown: reset state to IDLE.
+  1. BaseChannelModule parses CLI and populates self.channel_config from SDR.
+  2. On system.start: cfg.get(schema) triggers config load + _init().
+  3. _init(): read codec params from self.channel_config, open sounddevice
+     RawOutputStream, open pyav codec context if AAC-LC ADTS.
+  4. BaseChannelModule handles oaa.channel.open/close and oaa.frame.<id>.
+  5. on_frame(): decode AA frame header, dispatch by message_id, write PCM.
+  6. on_config_changed("audio_device"): re-open stream on the fly.
+  7. on_aa_session_shutdown: reset state to IDLE.
 
 Readiness:
   system.ready is emitted lazily by BaseChannelModule._try_publish_ready()
-  once _init_done AND _config_loaded AND _is_ready() are all True.
-  _is_ready() returns True only when the sounddevice stream is open,
-  so channel_manager never unblocks the phone before audio is operational.
+  once _init_done AND _config_loaded AND _is_ready() AND channel_config is
+  not None are all True.  _is_ready() returns True only when the sounddevice
+  stream is open, so channel_manager never unblocks the phone before audio
+  is operational.
 """
 
 from __future__ import annotations
 
-import argparse
 import struct
 import sys
 from pathlib import Path
@@ -69,24 +69,7 @@ import sounddevice as sd                       # noqa: E402  (python-sounddevice
 import av                                      # noqa: E402  (PyAV / FFmpeg)
 
 from shared.config_schema import field_enum    # noqa: E402
-from shared.proto_utils import channel_config_from_sdr  # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
-
-# ---------------------------------------------------------------------------
-# CLI parsing — executed at import time so MODULE_NAME / CHANNEL_ID are
-# available as class attributes before BaseChannelModule.__init__ runs.
-# ---------------------------------------------------------------------------
-
-_parser = argparse.ArgumentParser(add_help=False)
-_parser.add_argument("--module-name",   default="channel_audio")
-_parser.add_argument("--channel-id",    type=int, default=4)
-_parser.add_argument("--sdr-bytes-hex", default="",
-                     help="Hex-encoded ServiceDiscoveryResponse bytes")
-_args, _ = _parser.parse_known_args()
-
-_MODULE_NAME:   str = _args.module_name
-_CHANNEL_ID:    int = _args.channel_id
-_SDR_BYTES_HEX: str = _args.sdr_bytes_hex
 
 # ---------------------------------------------------------------------------
 # AA media frame constants
@@ -119,16 +102,18 @@ class AudioModule(BaseChannelModule):
     Single-channel OAA audio module with sounddevice (PortAudio) output.
 
     One process per channel; all parameters (channel_id, SDR bytes) are
-    provided via CLI by channel_manager at spawn time.
-    Codec parameters are read from --sdr-bytes-hex in _init().
+    provided via CLI by channel_manager at spawn time and parsed by
+    BaseChannelModule into self.CHANNEL_ID and self.channel_config.
+    Codec parameters are read from self.channel_config in _init().
     AAC-LC ADTS frames are decoded via pyav before writing PCM to the stream.
     Audio errors are logged but do not crash the module.
 
-    system.ready is gated on the sounddevice stream being open (_is_ready).
+    system.ready is gated on the sounddevice stream being open (_is_ready)
+    AND on self.channel_config being populated (base hard-fail guard).
     """
 
-    MODULE_NAME: str = _MODULE_NAME
-    CHANNEL_ID:  int = _CHANNEL_ID
+    MODULE_NAME: str = "channel_audio"   # overridden by --module-name CLI
+    CHANNEL_ID:  int = -1                 # overridden by --channel-id CLI
     PRIORITY:    int = 1
 
     # ------------------------------------------------------------------
@@ -150,7 +135,7 @@ class AudioModule(BaseChannelModule):
     def __init__(self) -> None:
         super().__init__()
 
-        # Audio params — populated from SDR in _init()
+        # Audio params — populated from self.channel_config in _init()
         self._sample_rate:   int = 48000
         self._bit_depth:     int = 16
         self._channel_count: int = 2
@@ -180,20 +165,35 @@ class AudioModule(BaseChannelModule):
 
     def _init(self) -> None:
         """
-        Apply audio config from SDR bytes (supplied at launch via CLI).
+        Read audio params from self.channel_config (populated by base from SDR).
         Opens sounddevice RawOutputStream and pyav codec context.
-        NOTE: audio_device may still be schema default if config_manager
-        hasn't responded yet; on_config_loaded re-opens the stream with
-        the persisted device and then triggers _try_publish_ready().
+        Falls back to defaults when channel_config is None (base will also
+        block system.ready in that case, so this path is defensive only).
         """
-        if _SDR_BYTES_HEX:
-            self._apply_audio_config(_SDR_BYTES_HEX)
+        cfg = self.channel_config
+        if cfg is not None:
+            configs = cfg.get("av_channel", {}).get("audio_configs", [])
+            if configs:
+                c = configs[0]
+                self._sample_rate   = c.get("sample_rate",   self._sample_rate)
+                self._bit_depth     = c.get("bit_depth",     self._bit_depth)
+                self._channel_count = c.get("channel_count", self._channel_count)
+                self._codec         = c.get("codec",         self._codec)
+                self.log.info(
+                    "Audio config ch=%d: rate=%d depth=%d channels=%d codec=%s",
+                    self.CHANNEL_ID, self._sample_rate, self._bit_depth,
+                    self._channel_count, self._codec,
+                )
+            else:
+                self.log.warning(
+                    "_init: channel_id=%d has no audio_configs in SDR — using defaults",
+                    self.CHANNEL_ID,
+                )
         else:
             self.log.warning(
-                "_init: --sdr-bytes-hex not provided — "
-                "using default audio params (48kHz 16bit stereo AAC)"
+                "_init: channel_config is None — using default audio params"
             )
-            self._open_av_codec()  # open with defaults
+        self._open_av_codec()
         self._open_stream()
 
     def _cleanup(self) -> None:
@@ -220,7 +220,7 @@ class AudioModule(BaseChannelModule):
             self._open_stream()
 
     # ------------------------------------------------------------------
-    # Session lifecycle (shutdown only — config already set from CLI)
+    # Session lifecycle
     # ------------------------------------------------------------------
 
     def on_aa_session_shutdown(self, topic: str, payload: dict) -> None:
@@ -315,36 +315,6 @@ class AudioModule(BaseChannelModule):
     # Audio pipeline
     # ------------------------------------------------------------------
 
-    def _apply_audio_config(self, sdr_bytes_hex: str) -> None:
-        """Read sample_rate / bit_depth / channel_count / codec from SDR hex."""
-        ch = channel_config_from_sdr(sdr_bytes_hex, self.CHANNEL_ID)
-        if ch is None:
-            self.log.warning(
-                "_apply_audio_config: channel_id=%d not found in SDR — using defaults",
-                self.CHANNEL_ID,
-            )
-            self._open_av_codec()
-            return
-        configs = ch.get("av_channel", {}).get("audio_configs", [])
-        if not configs:
-            self.log.warning(
-                "_apply_audio_config: channel_id=%d has no audio_configs — using defaults",
-                self.CHANNEL_ID,
-            )
-            self._open_av_codec()
-            return
-        cfg = configs[0]
-        self._sample_rate   = cfg.get("sample_rate",   self._sample_rate)
-        self._bit_depth     = cfg.get("bit_depth",     self._bit_depth)
-        self._channel_count = cfg.get("channel_count", self._channel_count)
-        self._codec         = cfg.get("codec",         self._codec)
-        self.log.info(
-            "Audio config ch=%d: rate=%d depth=%d channels=%d codec=%s",
-            self.CHANNEL_ID, self._sample_rate, self._bit_depth,
-            self._channel_count, self._codec,
-        )
-        self._open_av_codec()
-
     def _open_av_codec(self) -> None:
         """Open pyav codec context if codec is AAC, close it otherwise."""
         self._close_av_codec()
@@ -379,14 +349,12 @@ class AudioModule(BaseChannelModule):
         """Open (or re-open) a sounddevice RawOutputStream with current audio params."""
         self._close_stream()
         device = self._config.get("audio_device", "default")
-        # sounddevice dtype string from bit depth
         dtype = {
             8:  "int8",
             16: "int16",
             24: "int24",
             32: "int32",
         }.get(self._bit_depth, "int16")
-        # "default" → let sounddevice pick; otherwise pass device name as string
         sd_device = None if device == "default" else device
         try:
             self._stream = sd.RawOutputStream(
