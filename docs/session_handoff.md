@@ -378,3 +378,55 @@ di `BaseChannelModule`.
 python -c "from v2.modules.channel_modules.input.main import InputModule; print('OK')"
 python -c "from v2.modules.channel_modules.sensor.main import SensorModule; print('OK')"
 ```
+
+---
+
+## 2026-05-05 - video/main.py refactor + proto_utils shared frame helpers
+
+**What changed:**
+
+### 1. `v2/shared/proto_utils.py`
+- Aggiunti `encode_aa_frame(channel_id, message_id, proto_body) → dict` e
+  `decode_aa_frame(data) → (message_id, body) | None` come funzioni pubbliche.
+- Aggiunti `_FLAG_FIRST`, `_FLAG_LAST`, `_FLAG_ENCRYPTED`, `_FLAG_FULL` come
+  costanti di modulo (rimosse dalle classi che le duplicavano).
+- Aggiornato docstring Public API.
+
+### 2. `v2/modules/channel_modules/video/main.py`
+- Rimossi `_encode_frame`, `_decode_frame` module-level e i `_FLAG_*` duplicati.
+- Importati `encode_aa_frame`, `decode_aa_frame` da `shared.proto_utils`.
+- `on_frame()` ora usa `decode_aa_frame`.
+- Tutti gli handler (`_handle_setup_request`, `_handle_open_request`,
+  `_handle_video_focus_request`, `_send_video_focus_indication`, `_send_media_ack`)
+  ora usano `encode_aa_frame`.
+- Rimosso il commento `# TODO` residuo da `_handle_start_indication`.
+
+**Why:**
+- `encode_aa_frame`/`decode_aa_frame` erano duplicati in ogni modulo channel.
+  Centralizzarli in `proto_utils` rispetta il DRY e li rende testabili in
+  isolamento con un unico test suite.
+- I `_FLAG_*` costanti erano ridondanti e definiti in modo identico in video
+  e negli altri moduli channel.
+
+**Status:** Completed
+
+**Commit map:**
+
+| File | Commit |
+|---|---|
+| `v2/shared/proto_utils.py` | [1b20dd6](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/1b20dd66ffdc0f02f9b13cd7de3c6fb8b86c28c9) |
+| `v2/modules/channel_modules/video/main.py` | [1b69a16](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/1b69a16af54f749855a6a4f4908b678ba7f4ef86) |
+
+**Next 1-3 steps:**
+1. Migrare `input/main.py` e `sensor/main.py` (e `audio/main.py` se necessario)
+   a usare `encode_aa_frame`/`decode_aa_frame` rimuovendo i loro duplicati locali
+2. Aggiungere test unitari per `encode_aa_frame` e `decode_aa_frame` in
+   `tests/v2/test_proto_utils.py`
+3. Verificare l'import chain: `python -c "from shared.proto_utils import encode_aa_frame, decode_aa_frame; print('OK')"`
+
+**Verification commands:**
+```bash
+python -c "from shared.proto_utils import encode_aa_frame, decode_aa_frame; print('OK')"
+python -c "from v2.modules.channel_modules.video.main import VideoModule; print('OK')"
+python -m pytest tests/v2/ -v
+```
