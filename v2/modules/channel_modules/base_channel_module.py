@@ -13,8 +13,17 @@ Boot protocol (inherited from v2 template convention):
   main → system.readytostart
   module → system.module_ready  {name, priority}
   main → system.start {priority: N}
-  module → system.ready         {name, priority}
+  module → system.ready         {name, priority}   ← emitted lazily
   main → system.stop
+
+system.ready is emitted only when ALL of the following are true:
+  1. _init() has completed
+  2. on_config_loaded() has been called (persisted config applied)
+  3. _is_ready() returns True (default: True)
+
+Subclasses that manage an external resource (stream, pipeline, socket)
+can override _is_ready() to gate readiness on that resource being open.
+All other logic stays in BaseChannelModule — no override needed.
 
 ---
 Channel lifecycle (OAA-specific):
@@ -37,6 +46,7 @@ Subclass responsibilities:
   - Implement on_frame(channel_id, data)
   - Optionally override get_schema() to expose config keys
   - Optionally override on_config_loaded() / on_config_changed()
+  - Optionally override _is_ready() to gate system.ready on a resource
 """
 
 from __future__ import annotations
@@ -113,6 +123,11 @@ class BaseChannelModule(ABC):
 
         self._channel_open: bool = False
 
+        # Readiness tracking — system.ready is emitted lazily
+        self._init_done:       bool = False
+        self._config_loaded:   bool = False
+        self._ready_published: bool = False
+
     # ------------------------------------------------------------------
     # Config schema — override to expose config keys
     # ------------------------------------------------------------------
@@ -134,14 +149,16 @@ class BaseChannelModule(ABC):
         schema = self.get_schema()
         if not config:
             self.log.info("No persisted config — schema defaults in use.")
-            return
-        merged = {k: v.default for k, v in schema.items()}
-        merged.update({
-            k: v for k, v in config.items()
-            if k in schema and not isinstance(v, (dict, list))
-        })
-        self._config = merged
-        self.log.info(f"Config loaded: {self._config}")
+        else:
+            merged = {k: v.default for k, v in schema.items()}
+            merged.update({
+                k: v for k, v in config.items()
+                if k in schema and not isinstance(v, (dict, list))
+            })
+            self._config = merged
+            self.log.info(f"Config loaded: {self._config}")
+        self._config_loaded = True
+        self._try_publish_ready()
 
     def on_config_changed(self, key: str, value: Any) -> None:
         """Called when a single config key is updated at runtime."""
@@ -154,6 +171,48 @@ class BaseChannelModule(ABC):
             return
         self._config[key] = value
         self.log.info(f"Config changed: {key} = {value!r}")
+
+    # ------------------------------------------------------------------
+    # Readiness gate
+    # ------------------------------------------------------------------
+
+    def _is_ready(self) -> bool:
+        """Return True when the module's external resource is open and ready.
+
+        Override in subclasses that manage a resource (audio stream, video
+        pipeline, socket…) to gate system.ready on that resource being open.
+        The default returns True (suitable for modules with no external resource).
+
+        Example::
+
+            def _is_ready(self) -> bool:
+                return self._stream is not None
+        """
+        return True
+
+    def _try_publish_ready(self) -> None:
+        """Emit system.ready if all readiness conditions are met.
+
+        Conditions:
+          - _init() completed  (_init_done)
+          - on_config_loaded() called  (_config_loaded)
+            OR module has no schema (config_manager will never respond)
+          - _is_ready() returns True
+
+        Safe to call multiple times — emits at most once per session.
+        """
+        if self._ready_published:
+            return
+        has_schema = bool(self.get_schema())
+        config_ok  = (not has_schema) or self._config_loaded
+        if not (self._init_done and config_ok and self._is_ready()):
+            return
+        self._ready_published = True
+        self.bus.publish("system.ready", {
+            "name":     self.MODULE_NAME,
+            "priority": self.PRIORITY,
+        })
+        self.log.info(f"system.ready published (priority={self.PRIORITY})")
 
     # ------------------------------------------------------------------
     # Boot protocol handlers (v2 convention)
@@ -174,11 +233,8 @@ class BaseChannelModule(ABC):
         if schema:
             self.cfg.get(schema=schema)
         self._init()
-        self.bus.publish("system.ready", {
-            "name":     self.MODULE_NAME,
-            "priority": self.PRIORITY,
-        })
-        self.log.info(f"system.ready published (priority={self.PRIORITY})")
+        self._init_done = True
+        self._try_publish_ready()
 
     def _on_system_stop(self, topic: str, payload: dict) -> None:
         self.log.info("system.stop — cleaning up...")
