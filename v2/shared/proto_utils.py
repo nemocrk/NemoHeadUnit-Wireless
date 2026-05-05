@@ -8,6 +8,8 @@ encode_proto(msg) → bytes
 proto_to_dict(msg) → dict
 dict_to_proto(msg, data) → None
 schema_from_proto_message(descriptor) → dict[str, AnyFieldSchema]
+channels_from_sdr_bytes(sdr_bytes_hex) → list[dict]
+audio_config_from_sdr_bytes(sdr_bytes_hex, channel_id) → dict | None
 
 schema_from_proto_message
 -------------------------
@@ -36,11 +38,30 @@ Keys must match proto field names exactly.
 Enum values are accepted as string names (e.g. "VIDEO_1280x720") and
 resolved via the field's enum_type descriptor.
 Repeated fields expect a list of values or dicts.
+
+channels_from_sdr_bytes
+-----------------------
+Parse a hex-encoded ServiceDiscoveryResponse and return the channel list
+as plain dicts.  Each dict contains at minimum:
+    {"channel_id": <int>, "<oneof_field>": {}}
+For av_channel the dict exposes "av_type" (AVStreamType int) and, for
+AUDIO channels, "audio_type" (AudioType int) so that consumers can
+distinguish VIDEO from the three audio stream types without importing
+proto enums.
+
+audio_config_from_sdr_bytes
+---------------------------
+Convenience wrapper: given a hex-encoded SDR and a channel_id, returns
+a dict with keys sample_rate, bit_depth, channel_count, codec (string
+enum name) for the first audio_config entry of that channel, or None if
+the channel is not found / has no audio_config.
 """
 
 from __future__ import annotations
 
 import logging
+import sys
+from pathlib import Path
 from typing import Any, Type, TypeVar
 
 from google.protobuf import descriptor as _descriptor
@@ -275,8 +296,136 @@ def schema_from_proto_message(
 
 
 # ---------------------------------------------------------------------------
+# SDR channel helpers
+# ---------------------------------------------------------------------------
+
+# Oneof field names present in ChannelDescriptor
+_ONEOF_CHANNEL_FIELDS = (
+    "av_channel",
+    "sensor_channel",
+    "input_channel",
+    "bluetooth_channel",
+    "wifi_channel",
+    "navigation_channel",
+    "media_info_channel",
+    "av_input_channel",
+    "phone_status_channel",
+)
+
+
+def channels_from_sdr_bytes(sdr_bytes_hex: str) -> list[dict]:
+    """Parse a hex-encoded ServiceDiscoveryResponse and return the channel list
+    as plain dicts.
+
+    Each dict contains at minimum:
+        {"channel_id": <int>, "<oneof_field>": {}}
+
+    For av_channel the dict exposes:
+        "av_type"    — AVStreamType int  (VIDEO vs AUDIO)
+        "audio_type" — AudioType int     (MEDIA / SPEECH / SYSTEM, only when av_type == AUDIO)
+        "audio_configs" — list of dicts with keys:
+                         sample_rate, bit_depth, channel_count, codec (enum name string)
+
+    Args:
+        sdr_bytes_hex: hex string of the serialised ServiceDiscoveryResponse.
+
+    Returns:
+        List of channel dicts, one per ChannelDescriptor in the SDR.
+        Returns an empty list on parse errors.
+    """
+    # Lazy imports: proto classes only available when protos are compiled.
+    try:
+        _repo_root = Path(__file__).parent.parent.parent
+        _proto_root = _repo_root / "v2" / "protos"
+        for _p in (_repo_root, _proto_root):
+            if str(_p) not in sys.path:
+                sys.path.insert(0, str(_p))
+
+        from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (  # noqa: PLC0415
+            ServiceDiscoveryResponse,
+        )
+        from v2.protos.oaa.av.AVStreamTypeEnum_pb2 import AVStreamType  # noqa: PLC0415
+    except ImportError as exc:
+        log.error("channels_from_sdr_bytes: proto import failed — %s", exc)
+        return []
+
+    try:
+        sdr_bytes = bytes.fromhex(sdr_bytes_hex)
+        resp = ServiceDiscoveryResponse()
+        resp.ParseFromString(sdr_bytes)
+    except Exception as exc:
+        log.error("channels_from_sdr_bytes: parse error — %s", exc)
+        return []
+
+    result: list[dict] = []
+    for ch in resp.channels:
+        entry: dict = {"channel_id": ch.channel_id}
+
+        for field_name in _ONEOF_CHANNEL_FIELDS:
+            if ch.HasField(field_name):
+                sub = getattr(ch, field_name)
+                if field_name == "av_channel":
+                    av_dict: dict = {"av_type": sub.stream_type}
+                    if sub.stream_type == AVStreamType.AUDIO:
+                        av_dict["audio_type"] = sub.audio_type
+                        av_dict["audio_configs"] = [
+                            {
+                                "sample_rate":   ac.sample_rate,
+                                "bit_depth":     ac.bit_depth,
+                                "channel_count": ac.channel_count,
+                                "codec":         _enum_name(ac, "codec"),
+                            }
+                            for ac in sub.audio_configs
+                        ]
+                    entry["av_channel"] = av_dict
+                else:
+                    entry[field_name] = {}
+                break
+
+        result.append(entry)
+
+    return result
+
+
+def audio_config_from_sdr_bytes(sdr_bytes_hex: str, channel_id: int) -> dict | None:
+    """Return the first audio_config dict for *channel_id* from the SDR, or None.
+
+    The returned dict has keys:
+        sample_rate   (int)  — e.g. 48000
+        bit_depth     (int)  — e.g. 16
+        channel_count (int)  — e.g. 2
+        codec         (str)  — e.g. "MEDIA_CODEC_AUDIO_AAC_LC_ADTS"
+
+    Args:
+        sdr_bytes_hex: hex string of the serialised ServiceDiscoveryResponse.
+        channel_id:    the integer channel ID to look up.
+
+    Returns:
+        dict with audio config fields, or None if not found.
+    """
+    for ch in channels_from_sdr_bytes(sdr_bytes_hex):
+        if ch.get("channel_id") != channel_id:
+            continue
+        av = ch.get("av_channel", {})
+        configs = av.get("audio_configs", [])
+        if configs:
+            return configs[0]
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+def _enum_name(msg: Any, field_name: str) -> str:
+    """Return the string enum name for *field_name* in *msg*, or empty string."""
+    try:
+        field_desc = msg.DESCRIPTOR.fields_by_name[field_name]
+        value_int = getattr(msg, field_name)
+        return field_desc.enum_type.values_by_number[value_int].name
+    except (KeyError, AttributeError):
+        return ""
+
 
 def _scalar_field(field_desc: _descriptor.FieldDescriptor) -> AnyFieldSchema:
     """Map a scalar (non-message) proto field to a ConfigFieldSchema."""
@@ -339,12 +488,8 @@ def _coerce_scalar(field_desc: Any, value: Any) -> Any:
 
     if field_desc.type in _INT_TYPES:
         if isinstance(value, str):
-            # Gestione del caso in cui la configurazione sia una stringa (letterale)
-            # ma il campo proto sia tecnicamente un intero.
             if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
                 return int(value)
-            # Nota: Se arriviamo qui con una stringa non numerica per un campo int,
-            # setattr solleverà l'errore che viene poi loggato da dict_to_proto.
         return int(value)
 
     if field_desc.type in _FLOAT_TYPES:
