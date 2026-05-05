@@ -59,7 +59,9 @@ GPS fields (payload keys):
   altitude, accuracy                  — optional, included when present.
   timestamp                           — optional unix ms, included when present.
 
-No proto dependency — all encoding is hand-rolled.
+No proto dependency for SensorBatch encoding — all SensorEventIndication payload
+encoding is hand-rolled.  Control/sensor handshake messages (ChannelOpenResponse,
+SensorStartResponse) use real proto objects.
 """
 
 from __future__ import annotations
@@ -80,15 +82,24 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS):
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 from shared.proto_utils import encode_aa_frame, decode_aa_frame    # noqa: E402
 
+# Proto — control
+from v2.protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
+from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessageIdsEnum      # noqa: E402
+
+# Proto — sensor
+from v2.protos.oaa.sensor.SensorChannelMessageIdsEnum_pb2 import SensorChannelMessageIdsEnum  # noqa: E402
+from v2.protos.oaa.sensor.SensorStartResponseMessage_pb2 import SensorStartResponse           # noqa: E402
+from v2.protos.oaa.sensor.SensorStatusEnum_pb2 import SensorStatus                            # noqa: E402
+
 # ---------------------------------------------------------------------------
 # AA message IDs
 # ---------------------------------------------------------------------------
 
-_MSG_CHANNEL_OPEN_REQUEST      = 0x8003
-_MSG_CHANNEL_OPEN_RESPONSE     = 0x8005
-_MSG_SENSOR_START_REQUEST      = 0x8009
-_MSG_SENSOR_START_RESPONSE     = 0x800A
-_MSG_SENSOR_EVENT_INDICATION   = 0x0001
+_MSG_CHANNEL_OPEN_REQUEST      = ControlMessageIdsEnum.CHANNEL_OPEN_REQUEST
+_MSG_CHANNEL_OPEN_RESPONSE     = ControlMessageIdsEnum.CHANNEL_OPEN_RESPONSE
+_MSG_SENSOR_START_REQUEST      = SensorChannelMessageIdsEnum.SENSOR_START_REQUEST
+_MSG_SENSOR_START_RESPONSE     = SensorChannelMessageIdsEnum.SENSOR_START_RESPONSE
+_MSG_SENSOR_EVENT_INDICATION   = SensorChannelMessageIdsEnum.SENSOR_EVENT
 
 # ---------------------------------------------------------------------------
 # SensorType wire values
@@ -199,7 +210,9 @@ class SensorModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def _handle_channel_open_request(self, body: bytes) -> None:
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, b"\x08\x00")
+        resp = ChannelOpenResponse()
+        resp.status = 0  # STATUS_SUCCESS
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self.bus.publish("aa.frame.send", frame)
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest -> ChannelOpenResponse sent (STATUS_SUCCESS)")
@@ -209,7 +222,9 @@ class SensorModule(BaseChannelModule):
         self.log.info("SensorStartRequest sensor_type=%d", sensor_type)
         self._started_sensors.add(sensor_type)
 
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_SENSOR_START_RESPONSE, b"\x08\x00")
+        resp = SensorStartResponse()
+        resp.status = SensorStatus.Enum.OK
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_SENSOR_START_RESPONSE, resp.SerializeToString())
         self.bus.publish("aa.frame.send", frame)
         self.log.debug("SensorStartResponse sent for sensor_type=%d", sensor_type)
 
@@ -320,6 +335,7 @@ def _build_default_sensor_batch(sensor_type: int) -> bytes:
 
 # ---------------------------------------------------------------------------
 # Minimal hand-rolled protobuf helpers  (no proto dependency)
+# Used only for SensorEventIndication / SensorBatch payload encoding.
 # ---------------------------------------------------------------------------
 
 def _encode_varint(value: int) -> bytes:
