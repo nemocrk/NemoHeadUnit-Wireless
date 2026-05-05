@@ -5,11 +5,23 @@ Public API
 ----------
 decode_proto(proto_class, raw_bytes) → Message | None
 encode_proto(msg) → bytes
+parse_media_with_timestamp(body) → tuple[int, bytes]
 proto_to_dict(msg) → dict
 dict_to_proto(msg, data) → None
 schema_from_proto_message(descriptor) → dict[str, AnyFieldSchema]
 channels_from_sdr_bytes(sdr_bytes_hex) → list[dict]
 channel_config_from_sdr(sdr_bytes_hex, channel_id) → dict | None
+
+parse_media_with_timestamp
+--------------------------
+Manual protobuf parser for AV_MEDIA_WITH_TIMESTAMP_INDICATION frames.
+No generated pb2 class exists for this message (neither in openauto-prodigy
+nor in this project): the phone sends a raw fixed64 timestamp prefix followed
+by the codec payload, without a formal .proto definition.  All open-source
+implementations parse this manually.
+
+Returns (timestamp_us, audio_or_video_data).
+Used by both audio and video channel modules.
 
 schema_from_proto_message
 -------------------------
@@ -59,6 +71,7 @@ channels_from_sdr_bytes(), or None if the channel is not found.
 from __future__ import annotations
 
 import logging
+import struct
 import sys
 from pathlib import Path
 from typing import Any, Type, TypeVar
@@ -137,6 +150,61 @@ def encode_proto(msg: Message) -> bytes:
     except Exception as exc:  # pragma: no cover
         log.error("encode_proto(%s): serialisation failed — %s", type(msg).__name__, exc)
         return b""
+
+
+def parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
+    """Parse an AV_MEDIA_WITH_TIMESTAMP_INDICATION frame body.
+
+    No generated pb2 class exists for this message.  The phone sends:
+        field 1 (wire type 1, fixed64) — timestamp in microseconds
+        field 2 (wire type 2, bytes)   — codec payload (AAC / H.264 / PCM)
+
+    This format is consistent across all known Android Auto implementations
+    (openauto, openauto-prodigy, aasdk).  The timestamp is extracted as an
+    informational value; the codec payload is what callers actually need.
+
+    Used by both AudioModule and VideoModule.
+
+    Args:
+        body: raw frame body after the 2-byte message_id header has been
+              stripped by the channel frame dispatcher.
+
+    Returns:
+        (timestamp_us, payload) where timestamp_us is the phone-side
+        presentation timestamp in microseconds, and payload is the raw
+        codec data to pass to the decoder.
+        Returns (0, b"") on malformed input.
+    """
+    ts_us: int  = 0
+    data:  bytes = b""
+    pos:   int  = 0
+
+    while pos < len(body):
+        if pos >= len(body):
+            break
+        tag_byte     = body[pos]; pos += 1
+        field_number = tag_byte >> 3
+        wire_type    = tag_byte & 0x07
+
+        if field_number == 1 and wire_type == 1:          # fixed64 — timestamp
+            if pos + 8 > len(body):
+                break
+            ts_us = struct.unpack_from("<Q", body, pos)[0]
+            pos += 8
+
+        elif field_number == 2 and wire_type == 2:        # bytes — codec payload
+            length, pos = _read_varint(body, pos)
+            if length is None:
+                break
+            data = body[pos: pos + length]
+            pos += length
+
+        else:                                             # skip unknown fields
+            pos = _skip_field(body, pos, wire_type)
+            if pos is None:
+                break
+
+    return ts_us, data
 
 
 def proto_to_dict(msg: Message) -> dict:
@@ -422,6 +490,42 @@ def _enum_name(msg: Any, field_name: str) -> str:
         return field_desc.enum_type.values_by_number[value_int].name
     except (KeyError, AttributeError):
         return ""
+
+
+def _read_varint(buf: bytes, pos: int) -> tuple[int | None, int]:
+    """Read a protobuf varint from *buf* at *pos*.
+
+    Returns (value, new_pos) on success, or (None, pos) on truncated input.
+    Used internally by parse_media_with_timestamp and any manual proto parsers.
+    """
+    result = 0
+    shift  = 0
+    while pos < len(buf):
+        b = buf[pos]; pos += 1
+        result |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return result, pos
+        shift += 7
+        if shift >= 64:
+            return None, pos
+    return None, pos
+
+
+def _skip_field(buf: bytes, pos: int, wire_type: int) -> int | None:
+    """Advance *pos* past an unknown field of *wire_type*.  Returns new pos or None."""
+    if wire_type == 0:    # varint
+        _, pos = _read_varint(buf, pos)
+        return pos
+    if wire_type == 1:    # 64-bit
+        return pos + 8 if pos + 8 <= len(buf) else None
+    if wire_type == 2:    # length-delimited
+        length, pos = _read_varint(buf, pos)
+        if length is None:
+            return None
+        return pos + length if pos + length <= len(buf) else None
+    if wire_type == 5:    # 32-bit
+        return pos + 4 if pos + 4 <= len(buf) else None
+    return None           # wire types 3/4 are deprecated; treat as unrecoverable
 
 
 def _scalar_field(field_desc: _descriptor.FieldDescriptor) -> AnyFieldSchema:
