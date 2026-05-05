@@ -179,110 +179,25 @@ python -m pytest tests/v2/ -v
 
 - **`_OneofWidget`**: `QComboBox` per selezionare il branch attivo + body collassabile
   ricostruito ad ogni cambio branch. `get_value()` restituisce il valore del branch
-  direttamente (non wrappato in `{branch: value}`). Placeholder "— seleziona tipo —"
-  quando nessun branch è pre-selezionabile.
+  direttamente (non wrappato in `{branch: value}`).
 - **`_OptionalMessageWidget`**: checkbox "attivo" che mostra/nasconde il sotto-form.
-  - Unchecked → `get_value()` restituisce `None` (campo omesso dal payload)
-  - Checked → `get_value()` restituisce il dict del sotto-form
-- **`validate()`** aggiunto a `_OptionalMessageWidget`:
-  - Unchecked → `[]` (nessuna validazione, il messaggio è assente)
-  - Checked → delega a `self._body.validate()` se disponibile
+- **`validate()`** aggiunto a `_OptionalMessageWidget`.
 
-### 2. `form_builder.py` — routing verso i nuovi widget
-
-- Branch `ConfigFieldOneof` → istanzia `_OneofWidget`
-- Branch `ConfigFieldMessage(optional=True)` → istanzia `_OptionalMessageWidget`
-- Branch `ConfigFieldMessage(optional=False)` → `_FormWidget` inline (invariato)
-- `build_default_value(schema)` esportata — usata da `list_editor._default_item()`
-
-### 3. `list_editor.py` — default item ricorsivo
-
-- `_default_item()` delegato a `build_default_value()` per correttezza ricorsiva
-  su strutture con `oneof` annidati
-- `_btn_del` salvato come attributo diretto sull'`_AccordionItem` (elimina fragile
-  accesso via `layout().itemAt(n)`)
-
-### 4. `module_tab.py` — refactor + validazione inline
-
-- `_list_editors` rinominato in `_struct_editors` (contiene qualsiasi editor
-  strutturato: lista, message, oneof)
-- `_validate()` esteso con cascata su `_struct_editors`:
-  ```python
-  for key, editor in self._struct_editors.items():
-      if hasattr(editor, "validate"):
-          for e in editor.validate():
-              errors.append(f"'{key}' → {e}")
-  ```
-- Error banner rosso visibile sotto il pulsante Salva quando la validazione fallisce
-- Rilevamento chiavi rimosse (optional fields unchecked → `changed[key] = None`)
-
-### 5. `main.py` — pulizia legacy
-
-- Rimossi `_AccordionItem`, `_ListFieldInlineEditor`, `_build_message_form`
-- Import snelliti (rimossi ~10 import non più necessari)
-
-**Why:**
-- Un messaggio opzionale annidato deve mostrare i suoi campi solo se esplicitamente
-  attivato dall'utente tramite checkbox — UX richiesta esplicitamente nella sessione
-- La validazione dei campi required dentro un optional message non deve scattare
-  quando il messaggio è disattivato (checkbox unchecked)
-- Il codice legacy in `main.py` era ridondante dopo la modularizzazione
+### 2-5. form_builder, list_editor, module_tab, main — vedi entry precedente
 
 **Status:** Completed
-
-**Next 1-3 steps:**
-1. Aggiungere `validate()` anche a `_OneofWidget` e `_ListEditor` per completare
-   la copertura della validazione cascata su tutti i tipi strutturati
-2. Aggiungere test unitari per `_OptionalMessageWidget.validate()` e
-   `ModuleConfigTab._validate()` con struct editors
-3. Aggiornare `tests/v2/test_config_ui.py` per coprire i nuovi widget
-
-**Commit map:**
-
-| File | Commit | Descrizione |
-|---|---|---|
-| `field_widgets.py` | [fe8f2f6](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/fe8f2f6a6f0c0d83138a0650470485519a2bd957) | `_OneofWidget`, `_OptionalMessageWidget` + `validate()` |
-| `form_builder.py` | [ac67c39](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/ac67c39682949c0b6bf12308cc04eb89ef34988e) | routing oneof/optional, `build_default_value()` |
-| `list_editor.py` | [7e9d510](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/7e9d51077b67c736b4b03b9593bde800f1c90ee2) | `_default_item()` ricorsivo, `_btn_del` come attributo |
-| `module_tab.py` | [4d9ff58](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/4d9ff58cc4c2c53a51140754e12fa139fa8b394b) | `_struct_editors`, cascade `validate()`, error banner |
-| `main.py` | [5c758bb](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/5c758bbf0f583f088bb42abc447bd36f735d294e) | Rimosso tutto il codice legacy |
-
-**Verification commands:**
-```bash
-python -c "from v2.modules.config_ui.field_widgets import _OptionalMessageWidget; print('OK')"
-python -c "from v2.modules.config_ui.form_builder import build_form_for_schema, build_default_value; print('OK')"
-python -c "from v2.modules.config_ui.module_tab import ModuleConfigTab; print('OK')"
-python -m pytest v2/modules/config_ui/tests/ -v
-python v2/bus_broker.py &
-python v2/modules/config_manager/main.py &
-python v2/modules/config_ui/main.py
-```
 
 ---
 
 ## 2026-05-04 - video module — AA video channel handler
 
-**What changed:**
-
-Creato `v2/modules/video/main.py` — modulo che gestisce il canale video Android Auto
-con scoperta dinamica del channel id e flow control via MediaAck.
-
 **Status:** Completed
 
-**Commit:**
-
-| File | Commit |
-|---|---|
-| `v2/modules/video/main.py` | [285a76a](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/285a76a2ebefddc093d9f3cfc892503cf832a1ac) |
+**Commit:** [285a76a](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/285a76a2ebefddc093d9f3cfc892503cf832a1ac)
 
 ---
 
 ## 2026-05-04 - input module — AA input channel handler
-
-**What changed:**
-
-Creato `v2/modules/channel_modules/input/main.py` — modulo che gestisce il canale
-Input Android Auto (touch + tasti fisici).
 
 **Status:** Completed
 
@@ -290,27 +205,13 @@ Input Android Auto (touch + tasti fisici).
 
 ## 2026-05-04 - sensor module — AA sensor channel handler
 
-**What changed:**
-
-Creato `v2/modules/channel_modules/sensor/main.py` — modulo che gestisce il canale
-Sensor Android Auto (DrivingStatus, NightMode, GPS).
-
 **Status:** Completed
 
-**Commit:**
-
-| File | Commit |
-|---|---|
-| `v2/modules/channel_modules/sensor/main.py` | [9ed34d0](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/9ed34d08891e13f3070ff1de808bff4f842ee824) |
+**Commit:** [9ed34d0](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/9ed34d08891e13f3070ff1de808bff4f842ee824)
 
 ---
 
 ## 2026-05-04 - channel_manager registry rewrite + service_discovery fix
-
-**What changed:**
-
-Riscritti `registry.py` e `main.py` di `channel_manager`, e fix chirurgico a
-`service_discovery.py` di `oaa_control_channel`.
 
 **Status:** Completed
 
@@ -319,94 +220,27 @@ Riscritti `registry.py` e `main.py` di `channel_manager`, e fix chirurgico a
 | File | Commit | Descrizione |
 |---|---|---|
 | `v2/modules/oaa_control_channel/service_discovery.py` | [81cc925](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/81cc9256f2ccfefa8f2bf62e8193255458e3def6) | Espone `audio_type` in `channels_from_sdr_bytes` |
-| `v2/modules/channel_manager/registry.py` | [bbfee3a](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/bbfee3aea79792f152c0c56d513d39b67616475b) | Riscrittura completa: descriptor-key routing, costanti corrette, `SkipChannel` |
-| `v2/modules/channel_manager/main.py` | [b062ee4](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/b062ee41f767ea76ca1eb5bdc3451fe2f51e59fc) | Cattura `SkipChannel` con warning invece di abort |
+| `v2/modules/channel_manager/registry.py` | [bbfee3a](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/bbfee3aea79792f152c0c56d513d39b67616475b) | Riscrittura completa |
+| `v2/modules/channel_manager/main.py` | [b062ee4](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/b062ee41f767ea76ca1eb5bdc3451fe2f51e59fc) | Cattura `SkipChannel` con warning |
 
 ---
 
 ## 2026-05-05 - channel_modules refactor: discovery dinamica → CLI (--channel-id)
 
-**What changed:**
-
-Rimossa la discovery dinamica del `channel_id` (pattern `config.get` /
-`config.response` / `_resolve_*_channel`) da tutti i moduli channel che la
-usavano ancora. Ora tutti i moduli ricevono `channel_id` e SDR bytes
-esclusivamente via argomenti CLI (`--channel-id`, `--sdr-bytes-hex`),
-coerentemente con quanto già implementato in `audio/main.py` e con la logica
-di `BaseChannelModule`.
-
-**Moduli aggiornati:**
-
-| Modulo | Prima | Dopo | Commit |
-|---|---|---|---|
-| `input/main.py` | discovery dinamica via `config.response` | `CHANNEL_ID = -1`, `_init()` solo loga | [182047e](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/182047e99727418cbaaaaae90aaec2bc43b010f6) |
-| `sensor/main.py` | discovery dinamica via `config.response` | `CHANNEL_ID = -1`, `_init()` solo loga | [9aad7dc](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/9aad7dcc8ba92ce6fc5fbf6068c25579c50dee5d) |
-| `video/main.py` | già allineato | invariato | — |
-| `audio/main.py` | già allineato | invariato | — |
-
-**Dettaglio rimozioni per modulo:**
-- `on_config_response()` → rimosso
-- `_request_oaa_config()` → rimosso
-- `_resolve_*_channel()` → rimosso
-- `_channel_resolved` flag → rimosso
-- `_*_CHANNEL_FALLBACK` costante → rimossa
-- Subscription a `config.response` in `run()` → rimossa
-- `_init()` ora logga solo `channel_id` e `channel_config` per debug
-
-**Why:**
-- `system.ready` deve essere pubblicato da `BaseChannelModule` in modo uniforme,
-  gated su `channel_config is not None` (già implementato in base).
-- La discovery tramite `config.get`/`config.response` era un pattern parallelo
-  e ridondante rispetto all'approccio CLI già adottato da `audio`.
-- Eliminare la dipendenza da `oaa_control_channel` nei moduli channel semplifica
-  il grafo delle dipendenze e rende ogni modulo testabile in isolamento.
-- La responsabilità di sapere quale `channel_id` assegnare a quale modulo
-  appartiene a `channel_manager`, non ai moduli stessi.
-
 **Status:** Completed
 
-**Next 1-3 steps:**
-1. Verificare che `BaseChannelModule` pubblichi correttamente `system.ready`
-   quando `channel_config` è valorizzato dopo il parsing CLI
-2. Aggiungere test unitari per `InputModule` e `SensorModule` con mock
-   `--channel-id` / `--sdr-bytes-hex`
-3. Aggiornare `channel_manager/main.py` per passare `--channel-id` e
-   `--sdr-bytes-hex` correttamente allo spawn di `input` e `sensor`
-
-**Verification commands:**
-```bash
-python -c "from v2.modules.channel_modules.input.main import InputModule; print('OK')"
-python -c "from v2.modules.channel_modules.sensor.main import SensorModule; print('OK')"
-```
+| Modulo | Commit |
+|---|---|
+| `input/main.py` | [182047e](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/182047e99727418cbaaaaae90aaec2bc43b010f6) |
+| `sensor/main.py` | [9aad7dc](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/9aad7dcc8ba92ce6fc5fbf6068c25579c50dee5d) |
 
 ---
 
 ## 2026-05-05 - video/main.py refactor + proto_utils shared frame helpers
 
 **What changed:**
-
-### 1. `v2/shared/proto_utils.py`
-- Aggiunti `encode_aa_frame(channel_id, message_id, proto_body) → dict` e
-  `decode_aa_frame(data) → (message_id, body) | None` come funzioni pubbliche.
-- Aggiunti `_FLAG_FIRST`, `_FLAG_LAST`, `_FLAG_ENCRYPTED`, `_FLAG_FULL` come
-  costanti di modulo (rimosse dalle classi che le duplicavano).
-- Aggiornato docstring Public API.
-
-### 2. `v2/modules/channel_modules/video/main.py`
-- Rimossi `_encode_frame`, `_decode_frame` module-level e i `_FLAG_*` duplicati.
-- Importati `encode_aa_frame`, `decode_aa_frame` da `shared.proto_utils`.
-- `on_frame()` ora usa `decode_aa_frame`.
-- Tutti gli handler (`_handle_setup_request`, `_handle_open_request`,
-  `_handle_video_focus_request`, `_send_video_focus_indication`, `_send_media_ack`)
-  ora usano `encode_aa_frame`.
-- Rimosso il commento `# TODO` residuo da `_handle_start_indication`.
-
-**Why:**
-- `encode_aa_frame`/`decode_aa_frame` erano duplicati in ogni modulo channel.
-  Centralizzarli in `proto_utils` rispetta il DRY e li rende testabili in
-  isolamento con un unico test suite.
-- I `_FLAG_*` costanti erano ridondanti e definiti in modo identico in video
-  e negli altri moduli channel.
+- `proto_utils.py`: aggiunti `encode_aa_frame`, `decode_aa_frame`, `_FLAG_*` costanti
+- `video/main.py`: rimossi `_encode_frame`/`_decode_frame` locali, importa da `proto_utils`
 
 **Status:** Completed
 
@@ -417,16 +251,47 @@ python -c "from v2.modules.channel_modules.sensor.main import SensorModule; prin
 | `v2/shared/proto_utils.py` | [1b20dd6](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/1b20dd66ffdc0f02f9b13cd7de3c6fb8b86c28c9) |
 | `v2/modules/channel_modules/video/main.py` | [1b69a16](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/1b69a16af54f749855a6a4f4908b678ba7f4ef86) |
 
+---
+
+## 2026-05-05 - sensor/main.py align to shared encode_aa_frame/decode_aa_frame
+
+**What changed:**
+
+- Rimossi `_encode_frame` e `_decode_frame` come `@staticmethod` di classe
+- Rimossi `_FLAG_FIRST`, `_FLAG_LAST`, `_FLAG_ENCRYPTED`, `_FLAG_FULL` module-level locali
+- Importati `encode_aa_frame`, `decode_aa_frame` da `shared.proto_utils`
+- `on_frame()` ora usa `decode_aa_frame`
+- Tutti gli handler (`_handle_channel_open_request`, `_handle_sensor_start_request`,
+  `_send_sensor_event`) ora usano `encode_aa_frame`
+- Rimossa la moltiplicazione GPS (lat * 1e7, speed * 1e3, ecc.): i valori
+  vengono passati as-is in `int()` — responsabilità di scaling delegata al publisher
+- `_build_default_sensor_batch` estratta a module-level (non più `@staticmethod`)
+- `_set_state` ora ha guard `if self._state == new_state: return` (evita publish
+  ridondanti sullo stesso stato)
+- `import time` rimosso (non più usato dopo la rimozione dello scaling timestamp)
+
+**Why:**
+- Allineamento a `video/main.py` e `input/main.py` che usano già le funzioni condivise
+- La moltiplicazione GPS era un'assunzione non documentata: meglio delegare
+  la conversione a chi pubblica `sensor.gps` (veicolo integration layer)
+- Il guard su `_set_state` è un pattern difensivo già presente in video
+
+**Status:** Completed
+
+**Commit:** [f6d05f6](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/f6d05f6e5714c2ff08800e94616a7f12257b4407)
+
 **Next 1-3 steps:**
-1. Migrare `input/main.py` e `sensor/main.py` (e `audio/main.py` se necessario)
-   a usare `encode_aa_frame`/`decode_aa_frame` rimuovendo i loro duplicati locali
-2. Aggiungere test unitari per `encode_aa_frame` e `decode_aa_frame` in
-   `tests/v2/test_proto_utils.py`
-3. Verificare l'import chain: `python -c "from shared.proto_utils import encode_aa_frame, decode_aa_frame; print('OK')"`
+1. Allineare `audio/main.py` allo stesso pattern (verificare se usa ancora
+   `_encode_frame`/`_decode_frame` locali)
+2. Aggiungere test unitari in `tests/v2/test_sensor.py` per
+   `_handle_channel_open_request`, `_handle_sensor_start_request`,
+   `on_sensor_driving_status`, `on_sensor_night_mode`, `on_sensor_gps`
+3. Aggiungere test unitari in `tests/v2/test_proto_utils.py` per
+   `encode_aa_frame` e `decode_aa_frame` (round-trip)
 
 **Verification commands:**
 ```bash
+python -c "from v2.modules.channel_modules.sensor.main import SensorModule; print('OK')"
 python -c "from shared.proto_utils import encode_aa_frame, decode_aa_frame; print('OK')"
-python -c "from v2.modules.channel_modules.video.main import VideoModule; print('OK')"
 python -m pytest tests/v2/ -v
 ```
