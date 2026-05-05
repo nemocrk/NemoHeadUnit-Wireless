@@ -29,7 +29,7 @@ Module contract (fill in before shipping):
                 aa.session.shutdown {}
                 # TODO: add module-specific subscriptions
   Publishes   : channel_manager.module_ready  {name, priority}
-                aa.frame.send        {channel_id, flags, payload_hex}
+                aa.frame.send        bytes  (via BaseChannelModule.send_frame)
                 <module>.state       {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
                 # TODO: add module-specific publications
   Config keys : # TODO: document config keys added in get_schema()
@@ -63,6 +63,13 @@ AA channel lifecycle (frames dispatched by on_frame):
   AV_MEDIA_INDICATION            → (channel-type specific)
   AV_MEDIA_WITH_TIMESTAMP        → (channel-type specific)
   aa.session.shutdown → clear session_id          state → IDLE
+
+---
+Outgoing frame pattern:
+  Use self.send_frame(message_id, proto_body) for ALL outgoing AA frames.
+  Never call encode_aa_frame() + bus.publish("aa.frame.send") directly.
+  BaseChannelModule.send_frame() handles channel_id and encrypted flag
+  consistently for all post-handshake channel traffic.
 """
 
 from __future__ import annotations
@@ -72,7 +79,7 @@ from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# sys.path bootstrap — identical to audio / video
+# sys.path bootstrap — identical to audio / video / input / sensor
 # ---------------------------------------------------------------------------
 _HERE         = Path(__file__).parent          # v2/modules/channel_modules/_template/
 _CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
@@ -89,7 +96,6 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
 # ---------------------------------------------------------------------------
 from shared.config_schema import field_int                       # noqa: E402
 from shared.proto_utils import (                                 # noqa: E402
-    encode_aa_frame,
     decode_aa_frame,
     parse_media_with_timestamp,
 )
@@ -137,6 +143,12 @@ class TemplateModule(BaseChannelModule):
 
     Replace every occurrence of "Template" / "_template" with your module name.
     Read the class-level docstring in base_channel_module.py before starting.
+
+    Outgoing frame convention:
+      Use self.send_frame(message_id, proto_body) for ALL outgoing AA frames.
+      Never encode manually with encode_aa_frame() + bus.publish("aa.frame.send").
+      BaseChannelModule.send_frame() is the single authoritative point that
+      sets channel_id and the encrypted flag for all post-handshake traffic.
 
     Required class attributes (set at class level, not in __init__):
       MODULE_NAME — overridden by --module-name CLI
@@ -324,9 +336,7 @@ class TemplateModule(BaseChannelModule):
         resp.media_status = AVChannelSetupStatus.Enum.OK
         resp.max_unacked  = max_unacked
         resp.configs.append(0)
-        self.bus.publish("aa.frame.send", encode_aa_frame(
-            self.CHANNEL_ID, _MSG_AV_CHANNEL_SETUP_RESPONSE, resp.SerializeToString(),
-        ))
+        self.send_frame(_MSG_AV_CHANNEL_SETUP_RESPONSE, resp.SerializeToString())
         self._set_state("SETUP")
         self.log.info(
             "AVChannelSetupRequest ch=%d → AVChannelSetupResponse sent (max_unacked=%d)",
@@ -338,9 +348,7 @@ class TemplateModule(BaseChannelModule):
         """Send ChannelOpenResponse and transition to OPEN."""
         resp = ChannelOpenResponse()
         resp.status = 0  # STATUS_SUCCESS
-        self.bus.publish("aa.frame.send", encode_aa_frame(
-            self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString(),
-        ))
+        self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)
 
@@ -424,9 +432,7 @@ class TemplateModule(BaseChannelModule):
         ack = AVMediaAckIndication()
         ack.session_id = self._session_id
         ack.ack_count  = 1
-        self.bus.publish("aa.frame.send", encode_aa_frame(
-            self.CHANNEL_ID, _MSG_AV_CHANNEL_MEDIA_ACK, ack.SerializeToString(),
-        ))
+        self.send_frame(_MSG_AV_CHANNEL_MEDIA_ACK, ack.SerializeToString())
         self.log.debug("MediaAck sent ch=%d session_id=%d", self.CHANNEL_ID, self._session_id)
 
     # ------------------------------------------------------------------
