@@ -65,15 +65,11 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS):
         sys.path.insert(0, str(_p))
 
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
+from shared.proto_utils import encode_aa_frame, decode_aa_frame    # noqa: E402
 
 # ---------------------------------------------------------------------------
-# AA frame constants
+# AA message IDs
 # ---------------------------------------------------------------------------
-
-_FLAG_FIRST     = 0x01
-_FLAG_LAST      = 0x02
-_FLAG_ENCRYPTED = 0x08
-_FLAG_FULL      = _FLAG_FIRST | _FLAG_LAST | _FLAG_ENCRYPTED  # 0x0B
 
 _MSG_CHANNEL_OPEN_REQUEST   = 0x8003
 _MSG_CHANNEL_OPEN_RESPONSE  = 0x8005
@@ -194,7 +190,7 @@ class InputModule(BaseChannelModule):
 
     def on_frame(self, channel_id: int, data: bytes) -> None:
         """Dispatch incoming frame by AA message_id."""
-        result = self._decode_frame(data)
+        result = decode_aa_frame(data)
         if result is None:
             self.log.error("on_frame: malformed payload — dropping")
             return
@@ -215,8 +211,7 @@ class InputModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def _handle_channel_open_request(self, body: bytes) -> None:
-        proto_body = b"\x08\x00"
-        frame = self._encode_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, proto_body)
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, b"\x08\x00")
         self.bus.publish("aa.frame.send", frame)
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest → ChannelOpenResponse sent (STATUS_SUCCESS)")
@@ -237,8 +232,7 @@ class InputModule(BaseChannelModule):
         else:
             self._bound_keycodes = supported
 
-        proto_body = b"\x08\x00"
-        frame = self._encode_frame(self.CHANNEL_ID, _MSG_KEY_BINDING_RESPONSE, proto_body)
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_KEY_BINDING_RESPONSE, b"\x08\x00")
         self.bus.publish("aa.frame.send", frame)
         self._set_state("BOUND")
         self.log.info(
@@ -265,7 +259,7 @@ class InputModule(BaseChannelModule):
             self.log.warning("on_input_touch: empty pointers list — dropping")
             return
         report_bytes = _build_input_report_touch(action, pointers, action_index, disp_channel_id)
-        frame = self._encode_frame(self.CHANNEL_ID, _MSG_INPUT_REPORT, report_bytes)
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_INPUT_REPORT, report_bytes)
         self.bus.publish("aa.frame.send", frame)
         self.log.debug("TouchEvent sent action=%d pointers=%s", action, pointers)
 
@@ -282,7 +276,7 @@ class InputModule(BaseChannelModule):
             self.log.debug("on_input_key: keycode=%d not bound — dropping", keycode)
             return
         report_bytes = _build_input_report_key(keycode, down, metastate, longpress, disp_channel_id)
-        frame = self._encode_frame(self.CHANNEL_ID, _MSG_INPUT_REPORT, report_bytes)
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_INPUT_REPORT, report_bytes)
         self.bus.publish("aa.frame.send", frame)
         self.log.debug("KeyEvent sent keycode=%d down=%s", keycode, down)
 
@@ -313,26 +307,6 @@ class InputModule(BaseChannelModule):
         self._state = new_state
         self.bus.publish("input.state", {"state": new_state})
         self.log.info("input.state → %s", new_state)
-
-    # ------------------------------------------------------------------
-    # Frame encode / decode helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _encode_frame(channel_id: int, message_id: int, proto_body: bytes) -> dict:
-        payload = struct.pack(">H", message_id) + proto_body
-        return {
-            "channel_id":  channel_id,
-            "flags":       _FLAG_FULL,
-            "payload_hex": payload.hex(),
-        }
-
-    @staticmethod
-    def _decode_frame(data: bytes) -> tuple[int, bytes] | None:
-        if len(data) < 2:
-            return None
-        message_id = struct.unpack_from(">H", data, 0)[0]
-        return message_id, data[2:]
 
     # ------------------------------------------------------------------
     # run() override
