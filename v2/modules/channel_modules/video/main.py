@@ -16,7 +16,7 @@ Module contract:
                 aa.session.active        {}
                 aa.session.shutdown      {}
   Publishes   : channel_manager.module_ready             {name, priority}
-                aa.frame.send            {channel_id, flags, payload_hex}
+                aa.frame.send            bytes  (via BaseChannelModule.send_frame)
                 video.frame              {channel_id, ts_us, data_b64, codec}
                 video.state              {state}  IDLE | SETUP | OPEN | PLAYING | STOPPED
 
@@ -58,13 +58,13 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# sys.path bootstrap — identical to audio / video
+# sys.path bootstrap
 # ---------------------------------------------------------------------------
-_HERE         = Path(__file__).parent          # v2/modules/channel_modules/_template/
-_CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
-_MODULES      = _CHANNEL_MODS.parent           # v2/modules/
-_V2           = _MODULES.parent                # v2/
-_PROTOS       = _V2 / "protos"                 # v2/protos/
+_HERE         = Path(__file__).parent
+_CHANNEL_MODS = _HERE.parent
+_MODULES      = _CHANNEL_MODS.parent
+_V2           = _MODULES.parent
+_PROTOS       = _V2 / "protos"
 
 for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
     if str(_p) not in sys.path:
@@ -73,7 +73,6 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
 from shared.config_schema import field_int                                                  # noqa: E402
 from shared.proto_utils import (
     parse_media_with_timestamp,
-    encode_aa_frame,
     decode_aa_frame,
 )                                                                                           # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule                           # noqa: E402
@@ -127,9 +126,9 @@ class VideoModule(BaseChannelModule):
     Handles the full AVChannel handshake (Setup → Open → Start → media frames)
     and publishes decoded NAL data on video.frame for video_ui.
 
-    channel_id and SDR bytes are provided at spawn time via CLI by
-    channel_manager and parsed by BaseChannelModule into self.CHANNEL_ID
-    and self.channel_config.
+    All outgoing AA frames are sent via self.send_frame(message_id, proto_body)
+    which is provided by BaseChannelModule and always sets the encrypted flag
+    consistently for post-handshake channel traffic.
 
     codec lifecycle:
       self._codec_sdr  — codec negotiated in SDR, read in _init().
@@ -262,9 +261,7 @@ class VideoModule(BaseChannelModule):
         resp.media_status = AVChannelSetupStatus.Enum.OK
         resp.max_unacked  = max_unacked
         resp.configs.append(0)
-        self.bus.publish("aa.frame.send", encode_aa_frame(
-            self.CHANNEL_ID, _MSG_AV_CHANNEL_SETUP_RESPONSE, resp.SerializeToString(),
-        ))
+        self.send_frame(_MSG_AV_CHANNEL_SETUP_RESPONSE, resp.SerializeToString())
         self._set_state("SETUP")
         self.log.info(
             "AVChannelSetupRequest ch=%d → AVChannelSetupResponse sent (max_unacked=%d)",
@@ -277,9 +274,7 @@ class VideoModule(BaseChannelModule):
         """Reply ChannelOpenResponse (proto)."""
         resp = ChannelOpenResponse()
         resp.status = 0  # STATUS_SUCCESS
-        self.bus.publish("aa.frame.send", encode_aa_frame(
-            self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString(),
-        ))
+        self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)
 
@@ -374,9 +369,7 @@ class VideoModule(BaseChannelModule):
         msg = VideoFocusIndication()
         msg.focus_mode  = VideoFocusMode.Enum.PROJECTED
         msg.unrequested = unrequested
-        self.bus.publish("aa.frame.send", encode_aa_frame(
-            self.CHANNEL_ID, _MSG_VIDEO_FOCUS_INDICATION, msg.SerializeToString(),
-        ))
+        self.send_frame(_MSG_VIDEO_FOCUS_INDICATION, msg.SerializeToString())
         self.log.debug(
             "VideoFocusIndication ch=%d focus=PROJECTED unrequested=%s",
             self.CHANNEL_ID, unrequested,
@@ -390,9 +383,7 @@ class VideoModule(BaseChannelModule):
         ack = AVMediaAckIndication()
         ack.session_id = self._session_id
         ack.ack_count  = 1
-        self.bus.publish("aa.frame.send", encode_aa_frame(
-            self.CHANNEL_ID, _MSG_AV_CHANNEL_MEDIA_ACK, ack.SerializeToString(),
-        ))
+        self.send_frame(_MSG_AV_CHANNEL_MEDIA_ACK, ack.SerializeToString())
         self.log.debug("MediaAck sent ch=%d session_id=%d", self.CHANNEL_ID, self._session_id)
 
     # ------------------------------------------------------------------
