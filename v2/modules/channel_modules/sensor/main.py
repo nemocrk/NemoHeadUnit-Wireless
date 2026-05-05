@@ -70,12 +70,16 @@ import struct
 import sys
 from pathlib import Path
 
-_HERE         = Path(__file__).parent
-_CHANNEL_MODS = _HERE.parent
-_MODULES      = _CHANNEL_MODS.parent
-_V2           = _MODULES.parent
+# ---------------------------------------------------------------------------
+# sys.path bootstrap — identical to audio / video
+# ---------------------------------------------------------------------------
+_HERE         = Path(__file__).parent          # v2/modules/channel_modules/_template/
+_CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
+_MODULES      = _CHANNEL_MODS.parent           # v2/modules/
+_V2           = _MODULES.parent                # v2/
+_PROTOS       = _V2 / "protos"                 # v2/protos/
 
-for _p in (_V2, _MODULES, _CHANNEL_MODS):
+for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
@@ -83,23 +87,23 @@ from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 from shared.proto_utils import encode_aa_frame, decode_aa_frame    # noqa: E402
 
 # Proto — control
-from v2.protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
-from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessageIdsEnum      # noqa: E402
+from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
+from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage             # noqa: E402
 
 # Proto — sensor
-from v2.protos.oaa.sensor.SensorChannelMessageIdsEnum_pb2 import SensorChannelMessageIdsEnum  # noqa: E402
-from v2.protos.oaa.sensor.SensorStartResponseMessage_pb2 import SensorStartResponse           # noqa: E402
-from v2.protos.oaa.sensor.SensorStatusEnum_pb2 import SensorStatus                            # noqa: E402
+from oaa.sensor.SensorChannelMessageIdsEnum_pb2 import SensorChannelMessage         # noqa: E402
+from oaa.sensor.SensorStartResponseMessage_pb2 import SensorStartResponse           # noqa: E402
+from oaa.common.StatusEnum_pb2 import SensorStatus                                  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# AA message IDs
+# AA message 
 # ---------------------------------------------------------------------------
 
-_MSG_CHANNEL_OPEN_REQUEST      = ControlMessageIdsEnum.CHANNEL_OPEN_REQUEST
-_MSG_CHANNEL_OPEN_RESPONSE     = ControlMessageIdsEnum.CHANNEL_OPEN_RESPONSE
-_MSG_SENSOR_START_REQUEST      = SensorChannelMessageIdsEnum.SENSOR_START_REQUEST
-_MSG_SENSOR_START_RESPONSE     = SensorChannelMessageIdsEnum.SENSOR_START_RESPONSE
-_MSG_SENSOR_EVENT_INDICATION   = SensorChannelMessageIdsEnum.SENSOR_EVENT
+_MSG_CHANNEL_OPEN_REQUEST      = ControlMessage.CHANNEL_OPEN_REQUEST
+_MSG_CHANNEL_OPEN_RESPONSE     = ControlMessage.CHANNEL_OPEN_RESPONSE
+_MSG_SENSOR_START_REQUEST      = SensorChannelMessage.SENSOR_START_REQUEST
+_MSG_SENSOR_START_RESPONSE     = SensorChannelMessage.SENSOR_START_RESPONSE
+_MSG_SENSOR_EVENT_INDICATION   = SensorChannelMessage.SENSOR_EVENT
 
 # ---------------------------------------------------------------------------
 # SensorType wire values

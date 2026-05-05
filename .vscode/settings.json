@@ -7,5 +7,8 @@
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true,
     "git.autoStash": true,
-    "git.postCommitCommand": "sync"
+    "git.postCommitCommand": "sync",
+    "python.analysis.extraPaths": [
+        "./v2/protos"
+    ]
 }

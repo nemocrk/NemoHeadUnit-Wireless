@@ -65,12 +65,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
-_HERE         = Path(__file__).parent          # v2/modules/channel_modules/audio/
+# ---------------------------------------------------------------------------
+# sys.path bootstrap — identical to audio / video
+# ---------------------------------------------------------------------------
+_HERE         = Path(__file__).parent          # v2/modules/channel_modules/_template/
 _CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
 _MODULES      = _CHANNEL_MODS.parent           # v2/modules/
 _V2           = _MODULES.parent                # v2/
+_PROTOS       = _V2 / "protos"                 # v2/protos/
 
-for _p in (_V2, _MODULES, _CHANNEL_MODS):
+for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
@@ -88,32 +92,32 @@ from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 # ---------------------------------------------------------------------------
 # Proto imports — generated from v2/protos/oaa/
 # ---------------------------------------------------------------------------
-from v2.protos.oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessageIdsEnum           # noqa: E402
-from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessageIdsEnum          # noqa: E402
-from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecTypeEnum                     # noqa: E402
-from v2.protos.oaa.av.AVChannelSetupResponseMessage_pb2 import AVChannelSetupResponse      # noqa: E402
-from v2.protos.oaa.av.AVChannelSetupStatusEnum_pb2 import AVChannelSetupStatus             # noqa: E402
-from v2.protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse       # noqa: E402
-from v2.protos.oaa.av.AVChannelStartIndicationMessage_pb2 import AVChannelStartIndication  # noqa: E402
-from v2.protos.oaa.av.AVMediaAckIndicationMessage_pb2 import AVMediaAckIndication          # noqa: E402
+from oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessage                  # noqa: E402
+from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage             # noqa: E402
+from oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType                         # noqa: E402
+from oaa.av.AVChannelSetupResponseMessage_pb2 import AVChannelSetupResponse      # noqa: E402
+from oaa.av.AVChannelSetupStatusEnum_pb2 import AVChannelSetupStatus             # noqa: E402
+from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse       # noqa: E402
+from oaa.av.AVChannelStartIndicationMessage_pb2 import AVChannelStartIndication  # noqa: E402
+from oaa.av.AVMediaAckIndicationMessage_pb2 import AVMediaAckIndication          # noqa: E402
 
 # ---------------------------------------------------------------------------
 # AA message ID constants
 # ---------------------------------------------------------------------------
 
-_MSG_AV_CHANNEL_SETUP_REQUEST                      = AVChannelMessageIdsEnum.SETUP_REQUEST
-_MSG_AV_CHANNEL_SETUP_RESPONSE                     = AVChannelMessageIdsEnum.SETUP_RESPONSE
-_MSG_CHANNEL_OPEN_REQUEST                          = ControlMessageIdsEnum.CHANNEL_OPEN_REQUEST
-_MSG_CHANNEL_OPEN_RESPONSE                         = ControlMessageIdsEnum.CHANNEL_OPEN_RESPONSE
-_MSG_AV_CHANNEL_START_INDICATION                   = AVChannelMessageIdsEnum.START_INDICATION
-_MSG_AV_CHANNEL_STOP_INDICATION                    = AVChannelMessageIdsEnum.STOP_INDICATION
-_MSG_AV_CHANNEL_AV_MEDIA_INDICATION                = AVChannelMessageIdsEnum.AV_MEDIA_INDICATION
-_MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION = AVChannelMessageIdsEnum.AV_MEDIA_WITH_TIMESTAMP_INDICATION
-_MSG_AV_CHANNEL_MEDIA_ACK                          = AVChannelMessageIdsEnum.AV_MEDIA_ACK_INDICATION
+_MSG_AV_CHANNEL_SETUP_REQUEST                      = AVChannelMessage.SETUP_REQUEST
+_MSG_AV_CHANNEL_SETUP_RESPONSE                     = AVChannelMessage.SETUP_RESPONSE
+_MSG_CHANNEL_OPEN_REQUEST                          = ControlMessage.CHANNEL_OPEN_REQUEST
+_MSG_CHANNEL_OPEN_RESPONSE                         = ControlMessage.CHANNEL_OPEN_RESPONSE
+_MSG_AV_CHANNEL_START_INDICATION                   = AVChannelMessage.START_INDICATION
+_MSG_AV_CHANNEL_STOP_INDICATION                    = AVChannelMessage.STOP_INDICATION
+_MSG_AV_CHANNEL_AV_MEDIA_INDICATION                = AVChannelMessage.AV_MEDIA_INDICATION
+_MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION = AVChannelMessage.AV_MEDIA_WITH_TIMESTAMP_INDICATION
+_MSG_AV_CHANNEL_MEDIA_ACK                          = AVChannelMessage.AV_MEDIA_ACK_INDICATION
 
-_CODEC_PCM         = MediaCodecTypeEnum.MEDIA_CODEC_AUDIO_PCM
-_CODEC_AAC         = MediaCodecTypeEnum.MEDIA_CODEC_AUDIO_AAC
-_CODEC_AAC_LC_ADTS = MediaCodecTypeEnum.MEDIA_CODEC_AUDIO_AAC_LC_ADTS
+_CODEC_PCM         = MediaCodecType.MEDIA_CODEC_AUDIO_PCM
+_CODEC_AAC         = MediaCodecType.MEDIA_CODEC_AUDIO_AAC
+_CODEC_AAC_LC_ADTS = MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC_ADTS
 
 # Codecs that require pyav decoding
 _AAC_CODECS = (_CODEC_AAC, _CODEC_AAC_LC_ADTS)

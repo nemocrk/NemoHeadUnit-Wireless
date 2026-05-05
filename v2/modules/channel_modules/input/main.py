@@ -55,12 +55,16 @@ import time
 from pathlib import Path
 from typing import List, Tuple
 
-_HERE         = Path(__file__).parent          # v2/modules/channel_modules/input/
+# ---------------------------------------------------------------------------
+# sys.path bootstrap — identical to audio / video
+# ---------------------------------------------------------------------------
+_HERE         = Path(__file__).parent          # v2/modules/channel_modules/_template/
 _CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
 _MODULES      = _CHANNEL_MODS.parent           # v2/modules/
 _V2           = _MODULES.parent                # v2/
+_PROTOS       = _V2 / "protos"                 # v2/protos/
 
-for _p in (_V2, _MODULES, _CHANNEL_MODS):
+for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
@@ -68,23 +72,23 @@ from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 from shared.proto_utils import encode_aa_frame, decode_aa_frame    # noqa: E402
 
 # Proto — control
-from v2.protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
-from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessageIdsEnum      # noqa: E402
+from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
+from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage             # noqa: E402
 
 # Proto — input
-from v2.protos.oaa.input.InputChannelMessageIdsEnum_pb2 import InputChannelMessageIdsEnum      # noqa: E402
-from v2.protos.oaa.input.InputBindingResponseMessage_pb2 import InputBindingResponse           # noqa: E402
+from oaa.input.InputChannelMessageIdsEnum_pb2 import InputChannelMessage             # noqa: E402
+from oaa.input.InputBindingResponseMessage_pb2 import InputBindingResponse           # noqa: E402
 
 # ---------------------------------------------------------------------------
 # AA message IDs
 # ---------------------------------------------------------------------------
+    
+_MSG_CHANNEL_OPEN_REQUEST   = ControlMessage.CHANNEL_OPEN_REQUEST
+_MSG_CHANNEL_OPEN_RESPONSE  = ControlMessage.CHANNEL_OPEN_RESPONSE
 
-_MSG_CHANNEL_OPEN_REQUEST   = ControlMessageIdsEnum.CHANNEL_OPEN_REQUEST
-_MSG_CHANNEL_OPEN_RESPONSE  = ControlMessageIdsEnum.CHANNEL_OPEN_RESPONSE
-
-_MSG_KEY_BINDING_REQUEST    = InputChannelMessageIdsEnum.KEY_BINDING_REQUEST
-_MSG_KEY_BINDING_RESPONSE   = InputChannelMessageIdsEnum.KEY_BINDING_RESPONSE
-_MSG_INPUT_REPORT           = InputChannelMessageIdsEnum.INPUT_EVENT_INDICATION
+_MSG_KEY_BINDING_REQUEST    = InputChannelMessage.KEY_BINDING_REQUEST
+_MSG_KEY_BINDING_RESPONSE   = InputChannelMessage.KEY_BINDING_RESPONSE
+_MSG_INPUT_REPORT           = InputChannelMessage.INPUT_EVENT_INDICATION
 
 # ---------------------------------------------------------------------------
 # Keycodes (Android KeyEvent constants — wire values, no proto dependency)

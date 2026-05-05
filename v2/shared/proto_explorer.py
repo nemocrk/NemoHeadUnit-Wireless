@@ -73,9 +73,19 @@ def print_message_details_recursive(descriptor, indent=2, visited=None):
 
         type_info = ""
         if field.message_type:
-            type_info = f" -> {field.message_type.full_name}"
+            # Get the Python module path from the proto file
+            proto_file = field.message_type.file.name
+            module_path = proto_file.replace('/', '.').replace('.proto', '_pb2')
+            class_name = field.message_type.full_name.split('.')[-1]
+            python_location = f"{module_path}.{class_name}"
+            type_info = f" -> {field.message_type.full_name} (from {python_location})"
         elif field.enum_type:
-            type_info = f" -> {field.enum_type.full_name}"
+            # Get the Python module path from the proto file
+            proto_file = field.enum_type.file.name
+            module_path = proto_file.replace('/', '.').replace('.proto', '_pb2')
+            enum_name = field.enum_type.full_name.split('.')[-1]
+            python_location = f"{module_path}.{enum_name}"
+            type_info = f" -> {field.enum_type.full_name} (from {python_location})"
 
         print(f"{' ' * indent}├── {field.name} (number={field.number}, type={type_str}{type_info}, label={label_str})")
 
