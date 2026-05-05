@@ -295,3 +295,45 @@ python -c "from v2.modules.channel_modules.sensor.main import SensorModule; prin
 python -c "from shared.proto_utils import encode_aa_frame, decode_aa_frame; print('OK')"
 python -m pytest tests/v2/ -v
 ```
+
+---
+
+## 2026-05-05 - channel_modules/_template — Reference implementation
+
+**What changed:**
+
+Creato `v2/modules/channel_modules/_template/main.py` come modulo di riferimento
+per le future implementazioni di channel module.
+
+**Why:**
+- `audio/main.py` e `video/main.py` sono ora stabili e usano i proto reali:
+  fonte di verità ideale per estrarre i pattern comuni.
+- Avere un template esplicito riduce il rischio di deviazioni architetturali
+  nei prossimi moduli (es. handshake AVChannel non standard, ACK mancante,
+  session_id non inizializzato).
+
+**Cosa include il template:**
+
+| Sezione | Dettaglio |
+|---|---|
+| sys.path bootstrap | Identico a `audio` / `video` |
+| Proto import | Blocco completo AV shared (`AVChannelSetupResponse`, `ChannelOpenResponse`, `AVChannelStartIndication`, `AVMediaAckIndication`) |
+| `_MSG_*` aliases | Tutti i message ID comuni + slot `# TODO` per quelli channel-specific |
+| Handshake completo | `_handle_setup_request` → `_handle_open_request` → `_handle_start_indication` → `_handle_stop_indication` |
+| `_send_media_ack()` | Pattern fire-and-forget identico a `audio` / `video` |
+| `_is_ready()` | Gate lazy readiness su risorsa esterna (documentato) |
+| `on_config_loaded()` | Note sul race condition async bus (vedi `audio`) |
+| `_handle_media_with_timestamp()` | Guard `session_id == 0` copiato da `video` |
+| `_set_state()` | Guard `if self._state == new_state` + publish su bus |
+| `run()` | Override con `aa.session.shutdown` + slot per subscriptions aggiuntive |
+
+**Status:** Completed
+
+**Commit:** [a91cd4d](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/a91cd4d869cc6af3241c0ef48b5b6e320f42a7bd)
+
+**Next 1-3 steps:**
+1. Usare `_template` come base per il prossimo channel module da implementare
+2. Verificare che `audio/main.py` non usi ancora `_encode_frame`/`_decode_frame` locali
+   (allineamento pendente da entry precedente)
+3. Aggiungere un test smoke in `tests/v2/test_template.py` che verifica
+   l'importabilità e l'istanziazione di `TemplateModule` senza bus attivo
