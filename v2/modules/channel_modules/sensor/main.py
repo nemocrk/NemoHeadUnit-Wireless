@@ -19,7 +19,7 @@ Module contract:
                 sensor.night_mode         {night_mode: bool}
                 sensor.gps                {latitude, longitude, bearing, speed, ...}
   Publishes   : channel_manager.module_ready              {name, priority}
-                aa.frame.send             {channel_id, flags, payload_hex}
+                aa.frame.send             bytes  (via BaseChannelModule.send_frame)
                                             <- ChannelOpenResponse
                                             <- SensorStartResponseMessage
                                             <- SensorEventIndication (SensorBatch)
@@ -71,20 +71,20 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# sys.path bootstrap — identical to audio / video
+# sys.path bootstrap — identical to audio / video / input
 # ---------------------------------------------------------------------------
-_HERE         = Path(__file__).parent          # v2/modules/channel_modules/_template/
-_CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
-_MODULES      = _CHANNEL_MODS.parent           # v2/modules/
-_V2           = _MODULES.parent                # v2/
-_PROTOS       = _V2 / "protos"                 # v2/protos/
+_HERE         = Path(__file__).parent
+_CHANNEL_MODS = _HERE.parent
+_MODULES      = _CHANNEL_MODS.parent
+_V2           = _MODULES.parent
+_PROTOS       = _V2 / "protos"
 
 for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
-from shared.proto_utils import encode_aa_frame, decode_aa_frame    # noqa: E402
+from shared.proto_utils import decode_aa_frame                     # noqa: E402
 
 # Proto — control
 from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
@@ -96,7 +96,7 @@ from oaa.sensor.SensorStartResponseMessage_pb2 import SensorStartResponseMessage
 from oaa.common.StatusEnum_pb2 import Status                                        # noqa: E402
 
 # ---------------------------------------------------------------------------
-# AA message 
+# AA message IDs
 # ---------------------------------------------------------------------------
 
 _MSG_CHANNEL_OPEN_REQUEST      = ControlMessage.CHANNEL_OPEN_REQUEST
@@ -133,6 +133,10 @@ class SensorModule(BaseChannelModule):
     Handles ChannelOpenRequest and SensorStartRequest from the phone,
     then sends SensorEventIndication (SensorBatch) whenever sensor data
     is published on the bus by the vehicle integration layer.
+
+    All outgoing AA frames are sent via self.send_frame(message_id, proto_body)
+    which is provided by BaseChannelModule and always sets the encrypted flag
+    consistently for post-handshake channel traffic.
 
     channel_id and SDR bytes are provided at spawn time via CLI by
     channel_manager and parsed by BaseChannelModule into self.CHANNEL_ID
@@ -183,8 +187,6 @@ class SensorModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def on_channel_open(self, channel_id: int, descriptor: dict) -> None:
-        # State is set to OPEN only upon ChannelOpenRequest from the phone,
-        # consistent with the video module pattern.
         self.log.info("Sensor channel %d open (descriptor: %s)", channel_id, descriptor)
 
     def on_channel_close(self, channel_id: int) -> None:
@@ -216,8 +218,7 @@ class SensorModule(BaseChannelModule):
     def _handle_channel_open_request(self, body: bytes) -> None:
         resp = ChannelOpenResponse()
         resp.status = 0  # STATUS_SUCCESS
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
-        self.bus.publish("aa.frame.send", frame)
+        self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest -> ChannelOpenResponse sent (STATUS_SUCCESS)")
 
@@ -228,16 +229,12 @@ class SensorModule(BaseChannelModule):
 
         resp = SensorStartResponseMessage()
         resp.status = Status.OK
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_SENSOR_START_RESPONSE, resp.SerializeToString())
-        self.bus.publish("aa.frame.send", frame)
+        self.send_frame(_MSG_SENSOR_START_RESPONSE, resp.SerializeToString())
         self.log.debug("SensorStartResponseMessage sent for sensor_type=%d", sensor_type)
 
         batch_bytes = _build_default_sensor_batch(sensor_type)
         if batch_bytes:
-            frame = encode_aa_frame(
-                self.CHANNEL_ID, _MSG_SENSOR_EVENT_INDICATION, batch_bytes
-            )
-            self.bus.publish("aa.frame.send", frame)
+            self.send_frame(_MSG_SENSOR_EVENT_INDICATION, batch_bytes)
             self.log.info(
                 "Initial SensorEventIndication sent for sensor_type=%d", sensor_type
             )
@@ -291,10 +288,7 @@ class SensorModule(BaseChannelModule):
         )
 
     def _send_sensor_event(self, batch_bytes: bytes) -> None:
-        frame = encode_aa_frame(
-            self.CHANNEL_ID, _MSG_SENSOR_EVENT_INDICATION, batch_bytes
-        )
-        self.bus.publish("aa.frame.send", frame)
+        self.send_frame(_MSG_SENSOR_EVENT_INDICATION, batch_bytes)
 
     # ------------------------------------------------------------------
     # State helper
