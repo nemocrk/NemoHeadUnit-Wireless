@@ -26,20 +26,24 @@ Module contract:
                 aa.frame.ch<ch_id>    raw bytes
                 aa.session.shutdown  {}
   Publishes   : channel_manager.module_ready  {name, priority}
-                channel_manager.module_ready         {name, priority}
                 aa.frame.send        {channel_id, flags, payload_hex}
                 audio.state          {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
-  Config keys : audio_device  enum  "default"  sounddevice output device name
+  Config keys : audio_device   enum  "default"  sounddevice output device name
+                max_unacked    int   1           AVChannelSetupResponse.max_unacked
 
 Flow:
   1. BaseChannelModule parses CLI and populates self.channel_config from SDR.
   2. On channel_manager.module_start: cfg.get(schema) triggers config load + _init().
-  3. _init(): read codec params from self.channel_config, open sounddevice
-     RawOutputStream, open pyav codec context if AAC-LC ADTS.
+     NOTE: on_config_loaded() may arrive before OR after _init() completes (async bus).
+     _open_stream() is therefore called both at end of _init() and at end of
+     on_config_loaded() (guarded by _init_done) to guarantee the stream is always
+     opened with the most up-to-date params.
+  3. _init(): read codec params from self.channel_config, open pyav codec context
+     if needed, open sounddevice RawOutputStream.
   4. BaseChannelModule handles aa.channel.open/close and aa.frame.ch<channel_id>.
   5. on_frame(): decode AA frame header, dispatch by message_id, write PCM.
-  6. on_config_changed("audio_device"): re-open stream on the fly.
-  7. on_aa_session_shutdown: reset state to IDLE.
+  6. on_config_changed("audio_device" | "max_unacked"): re-open stream on the fly.
+  7. on_aa_session_shutdown: reset state + session_id to IDLE.
 
 Readiness:
   channel_manager.module_ready is emitted lazily by BaseChannelModule._try_publish_ready()
@@ -47,6 +51,12 @@ Readiness:
   not None are all True.  _is_ready() returns True only when the sounddevice
   stream is open, so channel_manager never unblocks the phone before audio
   is operational.
+
+Codec support:
+  MEDIA_CODEC_AUDIO_PCM          — raw PCM, written directly to sounddevice
+  MEDIA_CODEC_AUDIO_AAC          — AAC, decoded via pyav before writing
+  MEDIA_CODEC_AUDIO_AAC_LC_ADTS  — AAC-LC ADTS, decoded via pyav before writing
+  Unknown codecs                 — logged as error, audio data dropped
 """
 
 from __future__ import annotations
@@ -68,11 +78,20 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS):
 import sounddevice as sd                       # noqa: E402  (python-sounddevice)
 import av                                      # noqa: E402  (PyAV / FFmpeg)
 
-from shared.config_schema import field_enum    # noqa: E402
+from shared.config_schema import field_enum, field_int  # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
-from v2.protos.oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessageIdsEnum  # noqa: E402
-from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessageIdsEnum  # noqa: E402
-from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecTypeEnum  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Proto imports — generated from v2/protos/oaa/
+# ---------------------------------------------------------------------------
+from v2.protos.oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessageIdsEnum           # noqa: E402
+from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessageIdsEnum          # noqa: E402
+from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecTypeEnum                     # noqa: E402
+from v2.protos.oaa.av.AVChannelSetupResponseMessage_pb2 import AVChannelSetupResponse      # noqa: E402
+from v2.protos.oaa.av.AVChannelSetupStatusEnum_pb2 import AVChannelSetupStatus             # noqa: E402
+from v2.protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse       # noqa: E402
+from v2.protos.oaa.av.AVChannelStartIndicationMessage_pb2 import AVChannelStartIndication  # noqa: E402
+from v2.protos.oaa.av.AVMediaAckIndicationMessage_pb2 import AVMediaAckIndication          # noqa: E402
 
 # ---------------------------------------------------------------------------
 # AA media frame constants
@@ -83,19 +102,22 @@ _FLAG_LAST      = 0x02
 _FLAG_ENCRYPTED = 0x08
 _FLAG_FULL      = _FLAG_FIRST | _FLAG_LAST | _FLAG_ENCRYPTED  # 0x0B
 
-_MSG_AV_CHANNEL_SETUP_REQUEST   = AVChannelMessageIdsEnum.SETUP_REQUEST
-_MSG_AV_CHANNEL_SETUP_RESPONSE  = AVChannelMessageIdsEnum.SETUP_RESPONSE
-_MSG_CHANNEL_OPEN_REQUEST = ControlMessageIdsEnum.CHANNEL_OPEN_REQUEST
-_MSG_CHANNEL_OPEN_RESPONSE = ControlMessageIdsEnum.CHANNEL_OPEN_RESPONSE
-_MSG_AV_CHANNEL_START_INDICATION = AVChannelMessageIdsEnum.START_INDICATION
-_MSG_AV_CHANNEL_STOP_INDICATION = AVChannelMessageIdsEnum.STOP_INDICATION
-_MSG_AV_CHANNEL_AV_MEDIA_INDICATION = AVChannelMessageIdsEnum.AV_MEDIA_INDICATION 
-_MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION = AVChannelMessageIdsEnum.AV_MEDIA_WITH_TIMESTAMP_INDICATION 
-_MSG_AV_CHANNEL_MEDIA_ACK                  = AVChannelMessageIdsEnum.AV_MEDIA_ACK_INDICATION 
+_MSG_AV_CHANNEL_SETUP_REQUEST                    = AVChannelMessageIdsEnum.SETUP_REQUEST
+_MSG_AV_CHANNEL_SETUP_RESPONSE                   = AVChannelMessageIdsEnum.SETUP_RESPONSE
+_MSG_CHANNEL_OPEN_REQUEST                        = ControlMessageIdsEnum.CHANNEL_OPEN_REQUEST
+_MSG_CHANNEL_OPEN_RESPONSE                       = ControlMessageIdsEnum.CHANNEL_OPEN_RESPONSE
+_MSG_AV_CHANNEL_START_INDICATION                 = AVChannelMessageIdsEnum.START_INDICATION
+_MSG_AV_CHANNEL_STOP_INDICATION                  = AVChannelMessageIdsEnum.STOP_INDICATION
+_MSG_AV_CHANNEL_AV_MEDIA_INDICATION              = AVChannelMessageIdsEnum.AV_MEDIA_INDICATION
+_MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION = AVChannelMessageIdsEnum.AV_MEDIA_WITH_TIMESTAMP_INDICATION
+_MSG_AV_CHANNEL_MEDIA_ACK                        = AVChannelMessageIdsEnum.AV_MEDIA_ACK_INDICATION
 
-_CODEC_AAC = MediaCodecTypeEnum.MEDIA_CODEC_AUDIO_AAC
+_CODEC_PCM         = MediaCodecTypeEnum.MEDIA_CODEC_AUDIO_PCM
+_CODEC_AAC         = MediaCodecTypeEnum.MEDIA_CODEC_AUDIO_AAC
 _CODEC_AAC_LC_ADTS = MediaCodecTypeEnum.MEDIA_CODEC_AUDIO_AAC_LC_ADTS
-_CODEC_PCM = MediaCodecTypeEnum.MEDIA_CODEC_AUDIO_PCM
+
+# Codecs that require pyav decoding
+_AAC_CODECS = (_CODEC_AAC, _CODEC_AAC_LC_ADTS)
 
 # ---------------------------------------------------------------------------
 # AudioModule
@@ -109,12 +131,20 @@ class AudioModule(BaseChannelModule):
     One process per channel; all parameters (channel_id, SDR bytes) are
     provided via CLI by channel_manager at spawn time and parsed by
     BaseChannelModule into self.CHANNEL_ID and self.channel_config.
-    Codec parameters are read from self.channel_config in _init().
-    AAC-LC ADTS frames are decoded via pyav before writing PCM to the stream.
-    Audio errors are logged but do not crash the module.
 
-    channel_manager.module_ready is gated on the sounddevice stream being open (_is_ready)
-    AND on self.channel_config being populated (base hard-fail guard).
+    Codec parameters are read from self.channel_config in _init().
+    AAC / AAC-LC ADTS frames are decoded via pyav before writing PCM to
+    the sounddevice stream.  PCM frames are written directly.
+
+    session_id lifecycle:
+      - Set to 0 at construction and on channel close / session shutdown.
+      - Populated from AVChannelStartIndication.session on StartIndication.
+      - Used in every AVMediaAckIndication sent to the phone.
+
+    max_unacked:
+      - Configurable via config key "max_unacked" (default 1).
+      - Sent to the phone in AVChannelSetupResponse.
+      - Controls how many unacknowledged media frames the phone may send.
     """
 
     MODULE_NAME: str = "channel_audio"   # overridden by --module-name CLI
@@ -131,6 +161,11 @@ class AudioModule(BaseChannelModule):
                 default="default",
                 choices=_list_audio_devices(),
             ),
+            "max_unacked": field_int(
+                default=1,
+                min_value=1,
+                max_value=16,
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -144,7 +179,7 @@ class AudioModule(BaseChannelModule):
         self._sample_rate:   int = 48000
         self._bit_depth:     int = 16
         self._channel_count: int = 2
-        self._codec:         str = _CODEC_AAC
+        self._codec:         int = _CODEC_AAC
 
         # Runtime state
         self._state:      str = "IDLE"
@@ -165,15 +200,18 @@ class AudioModule(BaseChannelModule):
         return self._stream is not None
 
     # ------------------------------------------------------------------
-    # _init hook — called by BaseChannelModule._on_channel_manager_module_start after cfg.get
+    # _init hook — called by BaseChannelModule after cfg.get() is dispatched
     # ------------------------------------------------------------------
 
     def _init(self) -> None:
         """
         Read audio params from self.channel_config (populated by base from SDR).
-        Opens sounddevice RawOutputStream and pyav codec context.
-        Falls back to defaults when channel_config is None (base will also
-        block channel_manager.module_ready in that case, so this path is defensive only).
+        Opens pyav codec context and sounddevice RawOutputStream.
+
+        NOTE: on_config_loaded() may arrive before or after _init() due to
+        async bus delivery.  _open_stream() is called here with SDR params,
+        and again in on_config_loaded() (guarded by _init_done) so the stream
+        is always opened/reopened with the correct persisted device.
         """
         cfg = self.channel_config
         if cfg is not None:
@@ -195,9 +233,8 @@ class AudioModule(BaseChannelModule):
                     self.CHANNEL_ID,
                 )
         else:
-            self.log.warning(
-                "_init: channel_config is None — using default audio params"
-            )
+            self.log.warning("_init: channel_config is None — using default audio params")
+
         self._open_av_codec()
         self._open_stream()
 
@@ -212,17 +249,21 @@ class AudioModule(BaseChannelModule):
 
     def on_config_loaded(self, config: dict) -> None:
         # super() merges config into self._config, sets _config_loaded=True
-        # and calls _try_publish_ready() — which checks _is_ready() after
-        # we re-open the stream below.
+        # and calls _try_publish_ready().
         super().on_config_loaded(config)
-        self._open_stream()  # reopen with persisted device
-        self._try_publish_ready()  # re-check now that stream may be open
+        # Reopen stream with persisted device only after _init() has set
+        # the correct sample_rate / channels from SDR.
+        if self._init_done:
+            self._open_stream()
+        self._try_publish_ready()
 
     def on_config_changed(self, key: str, value: Any) -> None:
         super().on_config_changed(key, value)
         if key == "audio_device":
             self.log.info("audio_device changed to %r — reopening stream", value)
             self._open_stream()
+        elif key == "max_unacked":
+            self.log.info("max_unacked changed to %r", value)
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -242,13 +283,14 @@ class AudioModule(BaseChannelModule):
         self.log.info("Channel %d open", channel_id)
 
     def on_channel_close(self, channel_id: int) -> None:
+        self._session_id = 0
         self._set_state("IDLE")
-        self.log.info("Channel %d closed", channel_id)
+        self.log.info("Channel %d closed — session_id reset", channel_id)
 
     def on_frame(self, channel_id: int, data: bytes) -> None:
         """Dispatch incoming frame by AA message_id."""
         result = _decode_frame_header(data)
-        self.log.info(f"Decoded frame header on ch={channel_id}: {result}")
+        self.log.debug("Decoded frame header on ch=%d: %s", channel_id, result)
         if result is None:
             self.log.error("on_frame: malformed payload on ch=%d — dropping", channel_id)
             return
@@ -262,8 +304,7 @@ class AudioModule(BaseChannelModule):
         elif message_id == _MSG_AV_CHANNEL_START_INDICATION:
             self._handle_start_indication(body)
         elif message_id == _MSG_AV_CHANNEL_STOP_INDICATION:
-            self.log.info("AVChannelStopIndication on ch=%d", channel_id)
-            self._set_state("STOPPED")
+            self._handle_stop_indication(body)
         elif message_id == _MSG_AV_CHANNEL_AV_MEDIA_INDICATION:
             self._handle_media(body)
         elif message_id == _MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION:
@@ -279,33 +320,59 @@ class AudioModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def _handle_setup_request(self, body: bytes) -> None:
-        proto_body = b"\x08\x00\x10\x01"
-        frame = _encode_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_SETUP_RESPONSE, proto_body)
+        max_unacked = self._config.get("max_unacked", 1)
+        resp = AVChannelSetupResponse()
+        resp.media_status = AVChannelSetupStatus.Enum.OK
+        resp.max_unacked  = max_unacked
+        resp.configs.append(0)
+        frame = _encode_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_SETUP_RESPONSE, resp.SerializeToString())
         self.bus.publish("aa.frame.send", frame)
         self._set_state("SETUP")
-        self.log.info("AVChannelSetupRequest ch=%d → AVChannelSetupResponse sent", self.CHANNEL_ID)
+        self.log.info(
+            "AVChannelSetupRequest ch=%d → AVChannelSetupResponse sent (max_unacked=%d)",
+            self.CHANNEL_ID, max_unacked,
+        )
 
     def _handle_open_request(self, body: bytes) -> None:
-        proto_body = b"\x08\x00"
-        frame = _encode_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, proto_body)
+        resp = ChannelOpenResponse()
+        resp.status = 0  # STATUS_SUCCESS
+        frame = _encode_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self.bus.publish("aa.frame.send", frame)
         self._set_state("OPEN")
-        self.log.info("AVChannelOpenRequest ch=%d → AVChannelOpenResponse sent", self.CHANNEL_ID)
+        self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)
 
     def _handle_start_indication(self, body: bytes) -> None:
+        """
+        Parse AVChannelStartIndication to extract session_id.
+        The phone sends this before the first media frame; session_id
+        must be stored here so ACKs are valid from the very first frame.
+        """
+        try:
+            msg = AVChannelStartIndication()
+            msg.ParseFromString(body)
+            self._session_id = msg.session
+            self.log.info(
+                "AVChannelStartIndication ch=%d session_id=%d — state → PLAYING",
+                self.CHANNEL_ID, self._session_id,
+            )
+        except Exception as exc:
+            self.log.warning(
+                "AVChannelStartIndication parse error ch=%d — %s (session_id remains %d)",
+                self.CHANNEL_ID, exc, self._session_id,
+            )
         self._set_state("PLAYING")
-        self.log.info("AVChannelStartIndication on ch=%d — state set to PLAYING", self.CHANNEL_ID)
-        # TODO: is there any other action needed here?  The phone may start sending media frames immediately after this, but we should be ready for that already after the OpenResponse.
+
+    def _handle_stop_indication(self, body: bytes) -> None:
+        self._session_id = 0
+        self._set_state("STOPPED")
+        self.log.info("AVChannelStopIndication ch=%d — session_id reset, state → STOPPED", self.CHANNEL_ID)
 
     def _handle_media_with_timestamp(self, body: bytes) -> None:
-        ts_us, encoded = _parse_media_with_timestamp(body)
-        session_id     = _parse_session_id(body) or self._session_id
-        if session_id:
-            self._session_id = session_id
-
         if self._state not in ("OPEN", "PLAYING"):
             self._set_state("PLAYING")
-
+        # body: field1=timestamp (fixed64), field2=audio data (bytes)
+        ts_us, encoded = _parse_media_with_timestamp(body)
+        self.log.debug("MediaWithTimestamp ch=%d ts_us=%d len=%d", self.CHANNEL_ID, ts_us, len(encoded))
         self._send_media_ack()
         self._write_audio(encoded)
 
@@ -316,11 +383,10 @@ class AudioModule(BaseChannelModule):
         self._write_audio(body)
 
     def _send_media_ack(self) -> None:
-        proto_body = (
-            _encode_varint_field(1, self._session_id)
-            + _encode_varint_field(2, 1)
-        )
-        frame = _encode_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_MEDIA_ACK, proto_body)
+        ack = AVMediaAckIndication()
+        ack.session_id = self._session_id
+        ack.ack_count  = 1
+        frame = _encode_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_MEDIA_ACK, ack.SerializeToString())
         self.bus.publish("aa.frame.send", frame)
         self.log.debug("MediaAck sent ch=%d session_id=%d", self.CHANNEL_ID, self._session_id)
 
@@ -329,9 +395,9 @@ class AudioModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def _open_av_codec(self) -> None:
-        """Open pyav codec context if codec is AAC, close it otherwise."""
+        """Open pyav codec context for AAC / AAC-LC ADTS; close it for PCM."""
         self._close_av_codec()
-        if self._codec != _CODEC_AAC:
+        if self._codec not in _AAC_CODECS:
             self.log.info("Codec %s — no pyav decoder needed", self._codec)
             return
         try:
@@ -342,8 +408,8 @@ class AudioModule(BaseChannelModule):
             self._av_codec_ctx = ctx
             self._av_codec     = codec
             self.log.info(
-                "pyav AAC decoder opened: rate=%d channels=%d",
-                self._sample_rate, self._channel_count,
+                "pyav AAC decoder opened: rate=%d channels=%d codec_enum=%s",
+                self._sample_rate, self._channel_count, self._codec,
             )
         except Exception as exc:
             self.log.error("_open_av_codec: failed — %s", exc)
@@ -396,10 +462,21 @@ class AudioModule(BaseChannelModule):
             self._stream = None
 
     def _write_audio(self, encoded: bytes) -> None:
-        """Decode (if AAC) and write raw PCM bytes to sounddevice stream."""
+        """Decode (if AAC / AAC-LC ADTS) and write raw PCM bytes to sounddevice stream."""
         if not encoded:
             return
-        pcm = self._decode_aac(encoded) if self._codec == _CODEC_AAC else encoded
+
+        if self._codec in _AAC_CODECS:
+            pcm = self._decode_aac(encoded)
+        elif self._codec == _CODEC_PCM:
+            pcm = encoded
+        else:
+            self.log.error(
+                "_write_audio: unsupported codec %s on ch=%d — dropping frame",
+                self._codec, self.CHANNEL_ID,
+            )
+            return
+
         if not pcm or self._stream is None:
             return
         try:
@@ -408,7 +485,7 @@ class AudioModule(BaseChannelModule):
             self.log.warning("sounddevice write error ch=%d — %s", self.CHANNEL_ID, exc)
 
     def _decode_aac(self, adts_frame: bytes) -> bytes:
-        """Decode a single AAC-LC ADTS frame to interleaved signed-16 PCM."""
+        """Decode a single AAC / AAC-LC ADTS frame to interleaved signed-16 PCM."""
         if self._av_codec_ctx is None:
             return b""
         try:
@@ -469,10 +546,11 @@ def _list_audio_devices() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Proto frame helpers  (no proto dependency — manual varint)
+# Frame helpers  (proto-free, low-level AA framing only)
 # ---------------------------------------------------------------------------
 
 def _decode_frame_header(data: bytes) -> tuple[int, bytes] | None:
+    """Extract (message_id, body) from a raw AA frame."""
     if len(data) < 2:
         return None
     message_id = struct.unpack_from(">H", data, 0)[0]
@@ -480,6 +558,7 @@ def _decode_frame_header(data: bytes) -> tuple[int, bytes] | None:
 
 
 def _encode_frame(channel_id: int, message_id: int, proto_body: bytes) -> dict:
+    """Wrap a serialized proto body into an aa.frame.send payload dict."""
     payload = struct.pack(">H", message_id) + proto_body
     return {
         "channel_id":  channel_id,
@@ -502,22 +581,13 @@ def _read_varint(buf: bytes, pos: int) -> tuple[int | None, int]:
     return None, pos
 
 
-def _encode_varint(value: int) -> bytes:
-    out = []
-    while value > 0x7F:
-        out.append((value & 0x7F) | 0x80)
-        value >>= 7
-    out.append(value)
-    return bytes(out)
-
-
-def _encode_varint_field(field_number: int, value: int) -> bytes:
-    tag = (field_number << 3) | 0x00
-    return _encode_varint(tag) + _encode_varint(value)
-
-
 def _parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
-    """Manual proto parse: field 1=timestamp (fixed64), field 2=data (bytes)."""
+    """Manual proto parse: field 1=timestamp (fixed64), field 2=data (bytes).
+
+    Used only for AV_MEDIA_WITH_TIMESTAMP_INDICATION where the timestamp
+    prefix must be stripped before passing audio data to the decoder.
+    All other proto messages use generated pb2 classes directly.
+    """
     ts_us = 0
     data  = b""
     pos   = 0
@@ -550,31 +620,6 @@ def _parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
             else:
                 break
     return ts_us, data
-
-
-def _parse_session_id(body: bytes) -> int | None:
-    """Extract proto field 3 (varint) = session_id from MediaWithTimestamp."""
-    pos = 0
-    while pos < len(body):
-        tag_byte     = body[pos]; pos += 1
-        field_number = tag_byte >> 3
-        wire_type    = tag_byte & 0x07
-        if field_number == 3 and wire_type == 0:
-            val, _ = _read_varint(body, pos)
-            return val
-        if wire_type == 0:
-            _, pos = _read_varint(body, pos)
-        elif wire_type == 1:
-            pos += 8
-        elif wire_type == 2:
-            length, pos = _read_varint(body, pos)
-            if length:
-                pos += (length or 0)
-        elif wire_type == 5:
-            pos += 4
-        else:
-            break
-    return None
 
 
 # ---------------------------------------------------------------------------
