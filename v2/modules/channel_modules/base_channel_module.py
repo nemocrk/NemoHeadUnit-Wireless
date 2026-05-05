@@ -1,5 +1,5 @@
 """
-base_channel_module.py — Abstract base class for OAA channel modules.
+base_channel_module.py — Abstract base class for AA channel modules.
 
 All modules under v2/modules/channel_modules/ (video, audio, input, sensor)
 must subclass BaseChannelModule and implement its abstract methods.
@@ -10,13 +10,13 @@ so that concrete channel modules only need to implement channel-specific logic.
 ---
 Boot protocol (inherited from v2 template convention):
 
-  main → system.readytostart
-  module → system.module_ready  {name, priority}
-  main → system.start {priority: N}
-  module → system.ready         {name, priority}   ← emitted lazily
-  main → system.stop
+  main → channel_manager.module_readytostart
+  module → channel_manager.module_ready  {name, priority}
+  main → channel_manager.module_start {priority: N}
+  module → channel_manager.module_ready         {name, priority}   ← emitted lazily
+  main → channel_manager.module_stop
 
-system.ready is emitted only when ALL of the following are true:
+channel_manager.module_ready is emitted only when ALL of the following are true:
   1. _init() has completed
   2. on_config_loaded() has been called (persisted config applied)
   3. _is_ready() returns True (default: True)
@@ -30,20 +30,20 @@ All other logic stays in BaseChannelModule — no override needed.
 CLI arguments (parsed at import time):
 
   --module-name    str   module name override (default: MODULE_NAME class attr)
-  --channel-id     int   OAA channel id (required for all channel modules)
+  --channel-id     int   AA channel id (required for all channel modules)
   --sdr-bytes-hex  str   hex-encoded ServiceDiscoveryResponse bytes
                          used to populate self.channel_config
 
 ---
-Channel lifecycle (OAA-specific):
+Channel lifecycle (AA-specific):
 
-  oaa_control_channel → oaa.channel.open  {channel_id, av_type?, ...}
+  aa_control_channel → aa.channel.open  {channel_id, av_type?, ...}
        module calls: on_channel_open(channel_id, descriptor)
 
-  oaa_control_channel → oaa.channel.close {channel_id}
+  aa_control_channel → aa.channel.close {channel_id}
        module calls: on_channel_close(channel_id)
 
-  bus (binary frame) → oaa.frame.<channel_id>  raw bytes
+  bus (binary frame) → aa.frame.ch<channel_id>  raw bytes
        module calls: on_frame(channel_id, data)
 
 ---
@@ -56,7 +56,7 @@ Subclass responsibilities:
   - Implement on_frame(channel_id, data)
   - Optionally override get_schema() to expose config keys
   - Optionally override on_config_loaded() / on_config_changed()
-  - Optionally override _is_ready() to gate system.ready on a resource
+  - Optionally override _is_ready() to gate channel_manager.module_ready on a resource
 """
 
 from __future__ import annotations
@@ -98,11 +98,11 @@ _CLI_ARGS, _ = _cli_parser.parse_known_args()
 
 
 class BaseChannelModule(ABC):
-    """Abstract base for all OAA channel modules.
+    """Abstract base for all AA channel modules.
 
     Concrete subclasses must define:
         MODULE_NAME : str   — matches the folder name (e.g. "video")
-        CHANNEL_ID  : int   — fallback OAA channel number if --channel-id not given
+        CHANNEL_ID  : int   — fallback AA channel number if --channel-id not given
         PRIORITY    : int   — boot priority level (default 1 = services)
 
     After __init__:
@@ -171,7 +171,7 @@ class BaseChannelModule(ABC):
 
         self._channel_open: bool = False
 
-        # Readiness tracking — system.ready is emitted lazily
+        # Readiness tracking — channel_manager.module_ready is emitted lazily
         self._init_done:       bool = False
         self._config_loaded:   bool = False
         self._ready_published: bool = False
@@ -228,7 +228,7 @@ class BaseChannelModule(ABC):
         """Return True when the module's external resource is open and ready.
 
         Override in subclasses that manage a resource (audio stream, video
-        pipeline, socket…) to gate system.ready on that resource being open.
+        pipeline, socket…) to gate channel_manager.module_ready on that resource being open.
         The default returns True (suitable for modules with no external resource).
 
         Example::
@@ -239,7 +239,7 @@ class BaseChannelModule(ABC):
         return True
 
     def _try_publish_ready(self) -> None:
-        """Emit system.ready if all readiness conditions are met.
+        """Emit channel_manager.module_ready if all readiness conditions are met.
 
         Conditions:
           - _init() completed  (_init_done)
@@ -267,27 +267,27 @@ class BaseChannelModule(ABC):
         if not (self._init_done and config_ok and self._is_ready()):
             return
         self._ready_published = True
-        self.bus.publish("system.ready", {
+        self.bus.publish("channel_manager.module_ready", {
             "name":     self.MODULE_NAME,
             "priority": self.PRIORITY,
         })
-        self.log.info(f"system.ready published (priority={self.PRIORITY})")
+        self.log.info(f"channel_manager.module_ready published (priority={self.PRIORITY})")
 
     # ------------------------------------------------------------------
     # Boot protocol handlers (v2 convention)
     # ------------------------------------------------------------------
 
-    def _on_system_readytostart(self) -> None:
-        self.log.info(f"system.readytostart — announcing priority {self.PRIORITY}")
-        self.bus.publish("system.module_ready", {
+    def _on_channel_manager_module_readytostart(self) -> None:
+        self.log.info(f"channel_manager.module_ready — announcing priority {self.PRIORITY}")
+        self.bus.publish("channel_manager.module_ready", {
             "name":     self.MODULE_NAME,
             "priority": self.PRIORITY,
         })
 
-    def _on_system_start(self, topic: str, payload: dict) -> None:
+    def _on_channel_manager_module_start(self, topic: str, payload: dict) -> None:
         if payload.get("priority") != self.PRIORITY:
             return
-        self.log.info(f"system.start priority={self.PRIORITY} — initialising...")
+        self.log.info(f"channel_manager.module_start priority={self.PRIORITY} — initialising...")
         schema = self.get_schema()
         if schema:
             self.cfg.get(schema=schema)
@@ -295,36 +295,37 @@ class BaseChannelModule(ABC):
         self._init_done = True
         self._try_publish_ready()
 
-    def _on_system_stop(self, topic: str, payload: dict) -> None:
-        self.log.info("system.stop — cleaning up...")
+    def _on_channel_manager_module_stop(self, topic: str, payload: dict) -> None:
+        self.log.info("channel_manager.module_stop — cleaning up...")
         self._cleanup()
         self.bus.stop()
 
     # ------------------------------------------------------------------
-    # OAA channel lifecycle bus handlers
+    # AA channel lifecycle bus handlers
     # ------------------------------------------------------------------
 
-    def _on_oaa_channel_open(self, topic: str, payload: dict) -> None:
+    def _on_aa_channel_open(self, topic: str, payload: dict) -> None:
         if payload.get("channel_id") != self.CHANNEL_ID:
             return
         self._channel_open = True
         self.log.info(f"Channel {self.CHANNEL_ID} open — descriptor: {payload}")
         self.on_channel_open(self.CHANNEL_ID, payload)
 
-    def _on_oaa_channel_close(self, topic: str, payload: dict) -> None:
+    def _on_aa_channel_close(self, topic: str, payload: dict) -> None:
         if payload.get("channel_id") != self.CHANNEL_ID:
             return
         self._channel_open = False
         self.log.info(f"Channel {self.CHANNEL_ID} closed")
         self.on_channel_close(self.CHANNEL_ID)
 
-    def _on_oaa_frame(self, topic: str, data: bytes) -> None:
+    def _on_aa_frame(self, topic: str, data: bytes) -> None:
         """Receive a raw binary frame from the bus.
 
-        The topic carries the channel id (oaa.frame.<channel_id>), but
+        The topic carries the channel id (aa.frame.ch<channel_id>), but
         since we subscribe to our specific topic the channel_id here is
         always self.CHANNEL_ID.
         """
+        self.log.info(f"Received frame on channel {self.CHANNEL_ID}: {len(data)} bytes")
         if not self._channel_open:
             return
         self.on_frame(self.CHANNEL_ID, data)
@@ -335,19 +336,19 @@ class BaseChannelModule(ABC):
 
     @abstractmethod
     def on_channel_open(self, channel_id: int, descriptor: dict) -> None:
-        """Called when the OAA control channel opens this channel.
+        """Called when the AA control channel opens this channel.
 
         Args:
-            channel_id:  OAA channel number (always == self.CHANNEL_ID).
+            channel_id:  AA channel number (always == self.CHANNEL_ID).
             descriptor:  parsed channel descriptor dict from the SDR.
         """
 
     @abstractmethod
     def on_channel_close(self, channel_id: int) -> None:
-        """Called when the OAA control channel closes this channel.
+        """Called when the AA control channel closes this channel.
 
         Args:
-            channel_id:  OAA channel number.
+            channel_id:  AA channel number.
         """
 
     @abstractmethod
@@ -355,7 +356,7 @@ class BaseChannelModule(ABC):
         """Called for every binary frame received on this channel.
 
         Args:
-            channel_id:  OAA channel number.
+            channel_id:  AA channel number.
             data:        raw frame bytes (H.264 NAL unit, PCM block, etc.).
         """
 
@@ -364,13 +365,13 @@ class BaseChannelModule(ABC):
     # ------------------------------------------------------------------
 
     def _init(self) -> None:
-        """Called once during system.start, after config is requested.
+        """Called once during channel_manager.module_start, after config is requested.
 
         Override for one-time resource allocation (pipelines, sockets, etc.).
         """
 
     def _cleanup(self) -> None:
-        """Called on system.stop before bus.stop().
+        """Called on channel_manager.module_stop before bus.stop().
 
         Override to flush state, close pipelines, release resources.
         """
@@ -389,17 +390,17 @@ class BaseChannelModule(ABC):
             self.cfg.register()
 
         # Boot protocol
-        self.bus.subscribe("system.readytostart", self._on_system_readytostart)
-        self.bus.subscribe("system.start",        self._on_system_start)
-        self.bus.subscribe("system.stop",         self._on_system_stop)
+        self.bus.subscribe("channel_manager.module_start",        self._on_channel_manager_module_start)
+        self.bus.subscribe("channel_manager.module_stop",         self._on_channel_manager_module_stop)
 
-        # OAA channel lifecycle
-        self.bus.subscribe("oaa.channel.open",  self._on_oaa_channel_open)
-        self.bus.subscribe("oaa.channel.close", self._on_oaa_channel_close)
+        # AA channel lifecycle
+        self.bus.subscribe("aa.channel.open",  self._on_aa_channel_open)
+        self.bus.subscribe("aa.channel.close", self._on_aa_channel_close)
 
-        # Raw frame topic: oaa.frame.<channel_id>
-        frame_topic = f"oaa.frame.{self.CHANNEL_ID}"
-        self.bus.subscribe(frame_topic, self._on_oaa_frame)
+        # Raw frame topic: aa.frame.ch<channel_id>
+        frame_topic = f"aa.frame.ch{self.CHANNEL_ID}"
+        self.bus.subscribe(frame_topic, self._on_aa_frame)
+        self.log.info(f"Subscribed to {frame_topic} for raw frame data")
 
         self.log.info(
             f"{self.MODULE_NAME} started "
@@ -408,7 +409,7 @@ class BaseChannelModule(ABC):
         )
         bus_thread = self.bus.start(blocking=False)
         time.sleep(0.05)
-        self._on_system_readytostart()
+        self._on_channel_manager_module_readytostart()
         try:
             bus_thread.join()
         except KeyboardInterrupt:

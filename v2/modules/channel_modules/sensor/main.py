@@ -7,19 +7,19 @@ Module contract:
   Channel ID  : supplied via --channel-id CLI arg (parsed by BaseChannelModule)
   SDR bytes   : supplied via --sdr-bytes-hex CLI arg, parsed by base into
                 self.channel_config.
-  Subscribes  : system.readytostart
-                system.start
-                system.stop
-                oaa.channel.open          {channel_id, ...}
-                oaa.channel.close         {channel_id}
-                oaa.frame.<channel_id>    raw bytes (ChannelOpenRequest, SensorStartRequest)
+  Subscribes  : channel_manager.module_readytostart
+                channel_manager.module_start
+                channel_manager.module_stop
+                aa.channel.open          {channel_id, ...}
+                aa.channel.close         {channel_id}
+                aa.frame.ch<channel_id>    raw bytes (ChannelOpenRequest, SensorStartRequest)
                 aa.session.active         {}
                 aa.session.shutdown       {}
                 sensor.driving_status     {status: int}   ← from vehicle integration
                 sensor.night_mode         {night_mode: bool}
                 sensor.gps                {latitude, longitude, bearing, speed, ...}
-  Publishes   : system.module_ready       {name, priority}
-                system.ready              {name, priority}
+  Publishes   : channel_manager.module_module_ready       {name, priority}
+                channel_manager.module_ready              {name, priority}
                 aa.frame.send             {channel_id, flags, payload_hex}
                                             ← ChannelOpenResponse
                                             ← SensorStartResponse
@@ -29,9 +29,9 @@ Module contract:
 Flow:
   1. BaseChannelModule parses CLI and populates self.CHANNEL_ID and
      self.channel_config from --channel-id / --sdr-bytes-hex.
-  2. system.ready is published lazily by base once _init_done, config_loaded
+  2. channel_manager.module_ready is published lazily by base once _init_done, config_loaded
      and channel_config is not None.
-  3. On oaa.frame.<channel_id>:
+  3. On aa.frame.ch<channel_id>:
        - ChannelOpenRequest   → reply ChannelOpenResponse (STATUS_SUCCESS)
        - SensorStartRequest   → reply SensorStartResponse (STATUS_SUCCESS)
                                 + immediate SensorEventIndication for:
@@ -114,7 +114,7 @@ DRIVE_STATUS_FULLY_RESTRICTED = 31
 
 class SensorModule(BaseChannelModule):
     """
-    OAA Sensor channel module.
+    AA Sensor channel module.
 
     Handles ChannelOpenRequest and SensorStartRequest from the phone,
     then sends SensorEventIndication (SensorBatch) whenever sensor data
@@ -122,7 +122,7 @@ class SensorModule(BaseChannelModule):
 
     channel_id and SDR bytes are provided at spawn time via CLI by
     channel_manager and parsed by BaseChannelModule into self.CHANNEL_ID
-    and self.channel_config.  system.ready is hard-blocked by base if
+    and self.channel_config.  channel_manager.module_ready is hard-blocked by base if
     channel_config is None.
     """
 

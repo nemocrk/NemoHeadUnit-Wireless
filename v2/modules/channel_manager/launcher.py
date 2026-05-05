@@ -69,7 +69,7 @@ class ChannelProcess:
         Raises:
             FileNotFoundError: if channel_module script does not exist on disk.
         """
-        script = CHANNEL_MODULES / f"channel_{self.module_type}" / "main.py"
+        script = CHANNEL_MODULES / f"{self.module_type}" / "main.py"
         if not script.exists():
             raise FileNotFoundError(
                 f"channel_manager: no script for module_type='{self.module_type}' "

@@ -393,6 +393,7 @@ def _on_frame(channel_id: int, flags: int, payload: bytes) -> None:
     }
     bus.publish("aa.frame.received", frame_data)
     bus.publish(f"aa.frame.ch{channel_id}", frame_data)
+    log.info(f"_on_frame: published aa.frame.received and aa.frame.ch{channel_id} for ch={channel_id}, flags=0x{flags:02X}, payload_len={len(payload)}")
 
 
 def _on_session_closed() -> None:

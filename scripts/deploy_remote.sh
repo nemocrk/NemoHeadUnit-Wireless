@@ -121,21 +121,21 @@ echo ""
 # ---------------------------------------------------------------------------
 # Step 4: Conda environment + avvio
 # ---------------------------------------------------------------------------
-#echo "[4/5] Creating/updating Conda environment (py314)..."
-#ssh "$REMOTE" bash <<'ENDSSH'
-#set -euo pipefail
-#eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
-#cd ~/NemoHeadUnit-Wireless
-#if conda env list | grep -q '^py314'; then
+# echo "[4/5] Creating/updating Conda environment (py314)..."
+# ssh "$REMOTE" bash <<'ENDSSH'
+# set -euo pipefail
+# eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
+# cd ~/NemoHeadUnit-Wireless
+# if conda env list | grep -q '^py314'; then
 #  echo "[INFO] Environment exists, updating..."
 #  conda env update -f environment.yml --prune
-#else
+# else
 #  echo "[INFO] Creating environment..."
 #  conda env create -f environment.yml
-#fi
-#echo "[OK] Conda environment ready."
-#ENDSSH
-#echo ""
+# fi
+# echo "[OK] Conda environment ready."
+# ENDSSH
+# echo ""
 
 # ---------------------------------------------------------------------------
 # Step 5: Avvio automatico main.py (output live + tee log remoto)

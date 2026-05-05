@@ -7,16 +7,16 @@ Module contract:
   Channel ID  : supplied via --channel-id CLI arg (parsed by BaseChannelModule)
   SDR bytes   : supplied via --sdr-bytes-hex CLI arg, parsed by base into
                 self.channel_config (used for future codec negotiation).
-  Subscribes  : system.readytostart
-                system.start
-                system.stop
-                oaa.channel.open         {channel_id, av_type?, ...}  ← from BaseChannelModule
-                oaa.channel.close        {channel_id}                 ← from BaseChannelModule
-                oaa.frame.<channel_id>   raw bytes                    ← from BaseChannelModule
+  Subscribes  : channel_manager.module_readytostart
+                channel_manager.module_start
+                channel_manager.module_stop
+                aa.channel.open         {channel_id, av_type?, ...}  ← from BaseChannelModule
+                aa.channel.close        {channel_id}                 ← from BaseChannelModule
+                aa.frame.ch<channel_id>   raw bytes                    ← from BaseChannelModule
                 aa.session.active        {}
                 aa.session.shutdown      {}
-  Publishes   : system.module_ready      {name, priority}
-                system.ready             {name, priority}
+  Publishes   : channel_manager.module_module_ready      {name, priority}
+                channel_manager.module_ready             {name, priority}
                 aa.frame.send            {channel_id, flags, payload_hex}  ← MediaAck
                 video.frame              {channel_id, session_id, ts_us, data_b64}
                 video.state              {state}  IDLE | SETUP | OPEN | PLAYING | STOPPED
@@ -24,10 +24,10 @@ Module contract:
 Flow:
   1. BaseChannelModule parses CLI and populates self.CHANNEL_ID and
      self.channel_config from --channel-id / --sdr-bytes-hex.
-  2. system.ready is published lazily by base once _init_done, config_loaded
+  2. channel_manager.module_ready is published lazily by base once _init_done, config_loaded
      and channel_config is not None.
-  3. On oaa.channel.open (channel_id matches): record channel open.
-  4. On oaa.frame.<channel_id>: decode AA media frame, dispatch by message_id:
+  3. On aa.channel.open (channel_id matches): record channel open.
+  4. On aa.frame.ch<channel_id>: decode AA media frame, dispatch by message_id:
        - AVChannelSetupRequest   → reply AVChannelSetupResponse, video.state=SETUP
        - AVChannelOpenRequest    → reply AVChannelOpenResponse,  video.state=OPEN
        - MediaWithTimestamp      → send MediaAck, publish video.frame (for video_ui)
@@ -56,6 +56,10 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS):
         sys.path.insert(0, str(_p))
 
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
+from v2.protos.oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessageIdsEnum  # noqa: E402
+from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessageIdsEnum  # noqa: E402
+from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecTypeEnum  # noqa: E402
+
 
 # ---------------------------------------------------------------------------
 # AA media frame constants
@@ -66,13 +70,20 @@ _FLAG_LAST      = 0x02
 _FLAG_ENCRYPTED = 0x08
 _FLAG_FULL      = _FLAG_FIRST | _FLAG_LAST | _FLAG_ENCRYPTED  # 0x0B
 
-_MSG_AV_CHANNEL_SETUP_REQUEST   = 0x8000
-_MSG_AV_CHANNEL_SETUP_RESPONSE  = 0x8001
-_MSG_AV_CHANNEL_OPEN_REQUEST    = 0x8003
-_MSG_AV_CHANNEL_OPEN_RESPONSE   = 0x8005
-_MSG_AV_CHANNEL_STOP_INDICATION = 0x8004
-_MSG_MEDIA_WITH_TIMESTAMP       = 0x0001
-_MSG_MEDIA_ACK                  = 0x0002
+_MSG_AV_CHANNEL_SETUP_REQUEST   = AVChannelMessageIdsEnum.SETUP_REQUEST
+_MSG_AV_CHANNEL_SETUP_RESPONSE  = AVChannelMessageIdsEnum.SETUP_RESPONSE
+_MSG_CHANNEL_OPEN_REQUEST = ControlMessageIdsEnum.CHANNEL_OPEN_REQUEST
+_MSG_CHANNEL_OPEN_RESPONSE = ControlMessageIdsEnum.CHANNEL_OPEN_RESPONSE
+_MSG_AV_CHANNEL_START_INDICATION = AVChannelMessageIdsEnum.START_INDICATION
+_MSG_AV_CHANNEL_STOP_INDICATION = AVChannelMessageIdsEnum.STOP_INDICATION
+_MSG_AV_CHANNEL_AV_MEDIA_INDICATION = AVChannelMessageIdsEnum.AV_MEDIA_INDICATION 
+_MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION = AVChannelMessageIdsEnum.AV_MEDIA_WITH_TIMESTAMP_INDICATION 
+_MSG_AV_CHANNEL_MEDIA_ACK                  = AVChannelMessageIdsEnum.AV_MEDIA_ACK_INDICATION 
+
+_CODEC_H264_BP = MediaCodecTypeEnum.MEDIA_CODEC_VIDEO_H264_BP
+_CODEC_VP9    = MediaCodecTypeEnum.MEDIA_CODEC_VIDEO_VP9
+_CODEC_AV1    = MediaCodecTypeEnum.MEDIA_CODEC_VIDEO_AV1
+_CODEC_H265   = MediaCodecTypeEnum.MEDIA_CODEC_VIDEO_H265
 
 
 # ---------------------------------------------------------------------------
@@ -81,14 +92,14 @@ _MSG_MEDIA_ACK                  = 0x0002
 
 class VideoModule(BaseChannelModule):
     """
-    OAA Video channel module.
+    AA Video channel module.
 
     Handles AVChannelSetup / Open handshake and MediaWithTimestamp frames.
     Publishes decoded H.264 NAL data on video.frame for video_ui.
 
     channel_id and SDR bytes are provided at spawn time via CLI by
     channel_manager and parsed by BaseChannelModule into self.CHANNEL_ID
-    and self.channel_config.  system.ready is hard-blocked by base if
+    and self.channel_config.  channel_manager.module_ready is hard-blocked by base if
     channel_config is None.
     """
 
@@ -106,7 +117,7 @@ class VideoModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def _init(self) -> None:
-        """Log resolved channel info; system.ready is handled by base."""
+        """Log resolved channel info; channel_manager.module_ready is handled by base."""
         self.log.info(
             "VideoModule _init: channel_id=%d channel_config=%s",
             self.CHANNEL_ID,
@@ -153,13 +164,17 @@ class VideoModule(BaseChannelModule):
 
         if message_id == _MSG_AV_CHANNEL_SETUP_REQUEST:
             self._handle_setup_request(body)
-        elif message_id == _MSG_AV_CHANNEL_OPEN_REQUEST:
+        elif message_id == _MSG_CHANNEL_OPEN_REQUEST:
             self._handle_open_request(body)
-        elif message_id == _MSG_MEDIA_WITH_TIMESTAMP:
-            self._handle_media_with_timestamp(body)
+        elif message_id == _MSG_AV_CHANNEL_START_INDICATION:
+            self._handle_start_indication(body)
         elif message_id == _MSG_AV_CHANNEL_STOP_INDICATION:
-            self.log.info("AVChannelStopIndication received")
+            self.log.info("AVChannelStopIndication on ch=%d", channel_id)
             self._set_state("STOPPED")
+        elif message_id == _MSG_AV_CHANNEL_AV_MEDIA_INDICATION:
+            self._handle_media(body)
+        elif message_id == _MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION:
+            self._handle_media_with_timestamp(body)
         else:
             self.log.debug("Unhandled video msg_id=0x%04x len=%d", message_id, len(body))
 
@@ -178,10 +193,15 @@ class VideoModule(BaseChannelModule):
     def _handle_open_request(self, body: bytes) -> None:
         """Reply AVChannelOpenResponse (status=OK)."""
         proto_body = b"\x08\x00"
-        frame = self._encode_media_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_OPEN_RESPONSE, proto_body)
+        frame = self._encode_media_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, proto_body)
         self.bus.publish("aa.frame.send", frame)
         self._set_state("OPEN")
         self.log.info("AVChannelOpenRequest → AVChannelOpenResponse sent")
+
+    def _handle_start_indication(self, body: bytes) -> None:
+        self.log.info("AVChannelStartIndication received (body len=%d)", len(body))
+        self._set_state("PLAYING")
+        #TODO: Something more to do here?
 
     def _handle_media_with_timestamp(self, body: bytes) -> None:
         """Parse MediaWithTimestamp, send MediaAck, publish video.frame."""
@@ -236,7 +256,7 @@ class VideoModule(BaseChannelModule):
     def _send_media_ack(self) -> None:
         proto_body = (_encode_varint_field(1, self._session_id)
                       + _encode_varint_field(2, 1))
-        frame = self._encode_media_frame(self.CHANNEL_ID, _MSG_MEDIA_ACK, proto_body)
+        frame = self._encode_media_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_MEDIA_ACK, proto_body)
         self.bus.publish("aa.frame.send", frame)
 
     # ------------------------------------------------------------------

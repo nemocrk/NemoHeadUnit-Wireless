@@ -7,18 +7,18 @@ Module contract:
   Channel ID  : supplied via --channel-id CLI arg (parsed by BaseChannelModule)
   SDR bytes   : supplied via --sdr-bytes-hex CLI arg, parsed by base into
                 self.channel_config.
-  Subscribes  : system.readytostart
-                system.start
-                system.stop
-                oaa.channel.open          {channel_id, ...}
-                oaa.channel.close         {channel_id}
-                oaa.frame.<channel_id>    raw bytes  (ChannelOpenRequest, KeyBindingRequest)
+  Subscribes  : channel_manager.module_readytostart
+                channel_manager.module_start
+                channel_manager.module_stop
+                aa.channel.open          {channel_id, ...}
+                aa.channel.close         {channel_id}
+                aa.frame.ch<channel_id>    raw bytes  (ChannelOpenRequest, KeyBindingRequest)
                 aa.session.active         {}
                 aa.session.shutdown       {}
                 input.touch               {action, pointers, action_index?, disp_channel_id?}
                 input.key                 {keycode, down, metastate?, longpress?, disp_channel_id?}
-  Publishes   : system.module_ready       {name, priority}
-                system.ready              {name, priority}
+  Publishes   : channel_manager.module_ready       {name, priority}
+                channel_manager.module_ready              {name, priority}
                 aa.frame.send             {channel_id, flags, payload_hex}  ← ChannelOpenResponse,
                                                                                KeyBindingResponse,
                                                                                InputReport
@@ -27,9 +27,9 @@ Module contract:
 Flow:
   1. BaseChannelModule parses CLI and populates self.CHANNEL_ID and
      self.channel_config from --channel-id / --sdr-bytes-hex.
-  2. system.ready is published lazily by base once _init_done, config_loaded
+  2. channel_manager.module_ready is published lazily by base once _init_done, config_loaded
      and channel_config is not None.
-  3. On oaa.frame.<channel_id>:
+  3. On aa.frame.ch<channel_id>:
        - ChannelOpenRequest   → reply ChannelOpenResponse (STATUS_SUCCESS)
        - KeyBindingRequest    → negotiate keycodes, reply KeyBindingResponse
   4. On input.touch / input.key (from UI layer): build InputReport and send
@@ -125,7 +125,7 @@ ACTION_MOVED  = 2
 
 class InputModule(BaseChannelModule):
     """
-    OAA Input channel module.
+    AA Input channel module.
 
     Receives ChannelOpenRequest and KeyBindingRequest from the phone,
     then relays InputReports (touch + key events) published on the bus
@@ -133,7 +133,7 @@ class InputModule(BaseChannelModule):
 
     channel_id and SDR bytes are provided at spawn time via CLI by
     channel_manager and parsed by BaseChannelModule into self.CHANNEL_ID
-    and self.channel_config.  system.ready is hard-blocked by base if
+    and self.channel_config.  channel_manager.module_ready is hard-blocked by base if
     channel_config is None.
     """
 

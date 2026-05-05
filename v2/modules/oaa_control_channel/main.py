@@ -254,6 +254,26 @@ def on_frame_ch0(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Channel manager integration
+# ---------------------------------------------------------------------------
+
+def on_channel_ready(topic: str, payload: dict) -> None:
+    global _handshake
+    if _handshake is None:
+        log.warning("channel_manager.channels_ready received but no active handshake — dropping")
+        return
+
+    try:
+        sdr_bytes_hex = payload["sdr_bytes_hex"]
+    except (KeyError, ValueError) as exc:
+        log.error("on_channel_ready: malformed payload — %s", exc)
+        return
+
+    _handshake.on_channels_ready(sdr_bytes_hex)
+    bus.publish("aa.handshake.state", {"state": _handshake.state.name})
+
+
+# ---------------------------------------------------------------------------
 # TLS delegation handlers (from tcp_server)
 # ---------------------------------------------------------------------------
 
@@ -314,6 +334,7 @@ def run() -> None:
     bus.subscribe("tcp.server.tls_handshake",           on_tls_handshake)
     bus.subscribe("tcp.server.tls_handshake_completed", on_tls_handshake_completed)
     bus.subscribe("aa.session.restarting",              on_aa_session_restarting)
+    bus.subscribe("channel_manager.channels_ready",     on_channel_ready)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)

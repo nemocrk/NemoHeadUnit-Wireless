@@ -9,8 +9,8 @@ has the shape::
     {"channel_id": <int>, "<descriptor_key>": { ... }}
 
 For av_channel the dict also carries:
-    "av_type"    — AVStreamType int  (VIDEO=1, AUDIO=2)
-    "audio_type" — AudioType int     (MEDIA=1, SPEECH=4, SYSTEM=3)
+    "av_channel"    — AVStreamType int  (VIDEO=3, AUDIO=1)
+    "audio_type" — AudioType int     (MEDIA=3, SPEECH=1, SYSTEM=2, ALARM=4)
                    only present when av_type == AUDIO
 
 Routing is done on the *descriptor key* (the oneof field name) rather than
@@ -59,16 +59,17 @@ class SkipChannel(Exception):
 # AVStreamType constants  (mirrors AVStreamTypeEnum proto)
 # ---------------------------------------------------------------------------
 
-AV_STREAM_VIDEO = 1   # AVStreamType.VIDEO
-AV_STREAM_AUDIO = 2   # AVStreamType.AUDIO
+AV_STREAM_AUDIO = 1   # AVStreamType.AUDIO
+AV_STREAM_VIDEO = 3   # AVStreamType.VIDEO
 
 # ---------------------------------------------------------------------------
 # AudioType constants  (mirrors AudioTypeEnum proto)
 # ---------------------------------------------------------------------------
 
-AUDIO_TYPE_MEDIA   = 1   # AudioType.MEDIA
-AUDIO_TYPE_SYSTEM  = 3   # AudioType.SYSTEM
-AUDIO_TYPE_SPEECH  = 4   # AudioType.SPEECH
+AUDIO_TYPE_SPEECH  = 1   # AudioType.SPEECH
+AUDIO_TYPE_SYSTEM  = 2   # AudioType.SYSTEM
+AUDIO_TYPE_MEDIA   = 3   # AudioType.MEDIA
+AUDIO_TYPE_ALARM   = 4   # AudioType.ALARM
 
 # ---------------------------------------------------------------------------
 # Descriptor keys that are known but not yet implemented
@@ -145,6 +146,11 @@ def resolve_module_type(channel_id: int, channel_descriptor: dict) -> str:
             raise SkipChannel(
                 f"ch{channel_id}: {skip_key!r} has no module yet — skipping"
             )
+
+    if list(channel_descriptor.keys()) == ["channel_id"]:
+        raise SkipChannel(
+            f"ch{channel_id}: no descriptor field set — skipping"
+        )
 
     raise KeyError(
         f"ch{channel_id}: no module_type mapping found for descriptor keys "
