@@ -72,9 +72,8 @@ from v2.protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResp
 from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessageIdsEnum      # noqa: E402
 
 # Proto — input
-from v2.protos.oaa.input.InputChannelMessageIdsEnum_pb2 import InputChannelMessageIdsEnum  # noqa: E402
-from v2.protos.oaa.input.KeyBindingResponseMessage_pb2 import KeyBindingResponse            # noqa: E402
-from v2.protos.oaa.input.InputStatusEnum_pb2 import InputStatus                             # noqa: E402
+from v2.protos.oaa.input.InputChannelMessageIdsEnum_pb2 import InputChannelMessageIdsEnum      # noqa: E402
+from v2.protos.oaa.input.InputBindingResponseMessage_pb2 import InputBindingResponse           # noqa: E402
 
 # ---------------------------------------------------------------------------
 # AA message IDs
@@ -243,13 +242,13 @@ class InputModule(BaseChannelModule):
         else:
             self._bound_keycodes = supported
 
-        resp = KeyBindingResponse()
-        resp.status = InputStatus.Enum.OK
+        resp = InputBindingResponse()
+        resp.status = 0  # STATUS_SUCCESS (int32, no enum in proto)
         frame = encode_aa_frame(self.CHANNEL_ID, _MSG_KEY_BINDING_RESPONSE, resp.SerializeToString())
         self.bus.publish("aa.frame.send", frame)
         self._set_state("BOUND")
         self.log.info(
-            "KeyBindingRequest → KeyBindingResponse sent (%d keycodes bound)",
+            "KeyBindingRequest → InputBindingResponse sent (%d keycodes bound)",
             len(self._bound_keycodes),
         )
 
