@@ -229,7 +229,7 @@ class VideoModule(BaseChannelModule):
         """Dispatch incoming raw frame bytes by AA message_id."""
         result = decode_aa_frame(data)
         if result is None:
-            self.log.error("on_frame: malformed payload — dropping")
+            self.log.error("on_frame: malformed payload — dropping (len=%d)", len(data))
             return
 
         message_id, body = result
@@ -249,7 +249,7 @@ class VideoModule(BaseChannelModule):
         elif message_id == _MSG_VIDEO_FOCUS_REQUEST:
             self._handle_video_focus_request(body)
         else:
-            self.log.debug("Unhandled video msg_id=0x%04x len=%d", message_id, len(body))
+            self.log.warning("Unhandled video msg_id=0x%04x len=%d", message_id, len(body))
 
     # ------------------------------------------------------------------
     # AA message handlers
@@ -289,8 +289,9 @@ class VideoModule(BaseChannelModule):
             msg = AVChannelStartIndication()
             msg.ParseFromString(body)
             self._session_id = msg.session
+            self._set_state("PLAYING")
             self.log.info(
-                "AVChannelStartIndication ch=%d session_id=%d — state → PLAYING",
+                "AVChannelStartIndication ch=%d session_id=%d → PLAYING (no response sent)",
                 self.CHANNEL_ID, self._session_id,
             )
         except Exception as exc:
@@ -298,14 +299,13 @@ class VideoModule(BaseChannelModule):
                 "AVChannelStartIndication parse error ch=%d — %s (session_id remains %d)",
                 self.CHANNEL_ID, exc, self._session_id,
             )
-        self._set_state("PLAYING")
 
     def _handle_stop_indication(self, body: bytes) -> None:
         """Reset session_id and transition to STOPPED."""
         self._session_id = 0
         self._set_state("STOPPED")
         self.log.info(
-            "AVChannelStopIndication ch=%d — session_id reset, state → STOPPED",
+            "AVChannelStopIndication ch=%d → STOPPED (session_id reset, no response sent)",
             self.CHANNEL_ID,
         )
 
@@ -321,7 +321,7 @@ class VideoModule(BaseChannelModule):
             codec_raw = struct.unpack_from(">H", body, 0)[0]
             self._codec = codec_raw
             self.log.info(
-                "AV_MEDIA_INDICATION (codec config) ch=%d codec=0x%04x (codec_sdr=%s)",
+                "AV_MEDIA_INDICATION ch=%d codec updated to 0x%04x (was %s)",
                 self.CHANNEL_ID, codec_raw, self._codec_sdr,
             )
         else:
@@ -333,8 +333,8 @@ class VideoModule(BaseChannelModule):
     def _handle_media_with_timestamp(self, body: bytes) -> None:
         """Parse MediaWithTimestamp, ACK immediately, publish video.frame."""
         if self._session_id == 0:
-            self.log.debug(
-                "MediaWithTimestamp ch=%d dropped — session_id not yet set (waiting for StartIndication)",
+            self.log.warning(
+                "MediaWithTimestamp ch=%d dropped — session_id==0 (waiting for StartIndication)",
                 self.CHANNEL_ID,
             )
             return
@@ -344,7 +344,7 @@ class VideoModule(BaseChannelModule):
 
         ts_us, data = parse_media_with_timestamp(body)
         self.log.debug(
-            "MediaWithTimestamp ch=%d ts_us=%d len=%d codec=%s",
+            "MediaWithTimestamp ch=%d ts_us=%d len=%d codec=%s — sending ACK + publishing frame",
             self.CHANNEL_ID, ts_us, len(data), self._codec,
         )
 

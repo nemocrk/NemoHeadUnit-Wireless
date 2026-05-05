@@ -93,6 +93,8 @@ class ChannelManagerSession:
         self._ready:    set[str] = set()
         self._lock      = threading.Lock()
         self._all_ready = threading.Event()
+        self._all_started_channels: list[dict] = []
+        self._all_active_channels: list[dict] = []
 
     # ------------------------------------------------------------------
     # Start
@@ -136,6 +138,11 @@ class ChannelManagerSession:
                 "channel_id":    ch_id,
                 "sdr_bytes_hex": sdr_bytes_hex,
             })
+            self._all_started_channels.append({
+                "module_name":   mname,
+                "module_type":   mtype,
+                "channel_id":    ch_id,
+            })
 
         started = self._launcher.start_all(launch_list)
         with self._lock:
@@ -159,6 +166,7 @@ class ChannelManagerSession:
                 log.debug("on_module_ready: unexpected name=%r — ignored", name)
                 return
             self._ready.add(name)
+            self._all_active_channels.append(next(ch for ch in self._all_started_channels if ch["module_name"] == name))
             pending = self._expected - self._ready
             log.info("module_ready: %s (%d/%d)", name, len(self._ready), len(self._expected))
             if not pending:
@@ -174,6 +182,9 @@ class ChannelManagerSession:
         timeout = CHILDREN_READY_TIMEOUT * max(n, 1)
         if self._all_ready.wait(timeout=timeout):
             log.info("All %d channel module(s) ready — publishing channels_ready", n)
+            for active_channel in self._all_active_channels:
+                log.info(f"Active channel: id={active_channel['channel_id']} module={active_channel['module_name']} type={active_channel['module_type']}")
+                bus.publish("aa.channel.open", active_channel)
             bus.publish("channel_manager.channels_ready", {"sdr_bytes_hex": sdr_bytes_hex})
             return True
 
@@ -192,6 +203,11 @@ class ChannelManagerSession:
     def shutdown(self) -> None:
         """Orderly shutdown: signal children, wait, then publish stopped."""
         log.info("Shutting down channel modules...")
+        for active_channel in self._all_active_channels:
+            log.info(f"Active channel: id={active_channel['channel_id']} module={active_channel['module_name']} type={active_channel['module_type']}")
+            bus.publish("aa.channel.close", active_channel)
+        self._all_active_channels.clear()
+        self._all_started_channels.clear()
         bus.publish("channel_manager.shutdown", {})
         time.sleep(0.3)  # give children a moment to handle the event
         self._launcher.stop_all()

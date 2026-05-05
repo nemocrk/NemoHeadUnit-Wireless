@@ -318,17 +318,26 @@ class BaseChannelModule(ABC):
         self.log.info(f"Channel {self.CHANNEL_ID} closed")
         self.on_channel_close(self.CHANNEL_ID)
 
-    def _on_aa_frame(self, topic: str, data: bytes) -> None:
-        """Receive a raw binary frame from the bus.
+    def _on_aa_frame(self, topic: str, payload: dict) -> None:
+        """Receive a frame dict from the bus.
 
         The topic carries the channel id (aa.frame.ch<channel_id>), but
         since we subscribe to our specific topic the channel_id here is
         always self.CHANNEL_ID.
         """
+        try:
+            channel_id  = int(payload["channel_id"])
+            flags       = int(payload["flags"])
+            data        = bytes.fromhex(payload["payload_hex"])
+        except (KeyError, ValueError) as exc:
+            self.log.error("_on_aa_frame: malformed payload — %s", exc)
+            return
+
         self.log.info(f"Received frame on channel {self.CHANNEL_ID}: {len(data)} bytes")
         if not self._channel_open:
+            self.log.warning(f"Frame dropped — channel {self.CHANNEL_ID} not open yet")
             return
-        self.on_frame(self.CHANNEL_ID, data)
+        self.on_frame(self.CHANNEL_ID, data['payload_hex'])
 
     # ------------------------------------------------------------------
     # Abstract interface — MUST be implemented by subclasses

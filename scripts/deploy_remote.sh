@@ -147,4 +147,4 @@ exec ssh -t "$REMOTE" \
   "source ~/miniconda3/etc/profile.d/conda.sh && \
    conda activate py314 && \
    cd ~/NemoHeadUnit-Wireless/v2 && \
-   DISPLAY=:0 DBUS_SYSTEM_BUS_ADDRESS=\"unix:path=/run/dbus/system_bus_socket\" python -m main"
+   DEBUG=1 DISPLAY=:0 DBUS_SYSTEM_BUS_ADDRESS=\"unix:path=/run/dbus/system_bus_socket\" python -m main"

@@ -15,6 +15,7 @@ Bus forwarding (optional, call once from main.py or any entry point):
 """
 
 import logging
+import os
 import time
 import subprocess
 import threading
@@ -23,6 +24,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from shared.bus_client import BusClient
+
+# Global default level — set by DEBUG environment variable
+_GLOBAL_LOG_LEVEL = logging.DEBUG if os.getenv("DEBUG") else logging.INFO
 
 V2_LOG_FORMAT = "%(asctime)s [%(levelname)s] {%(name)s} %(message)s"
 V2_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -174,7 +178,9 @@ class Logger:
 
     def __init__(self, name: str, level: int = logging.INFO) -> None:
         self.name   = name
-        self.level  = level
+        # Use global default level if DEBUG env var is set, otherwise use provided level
+        effective_level = _GLOBAL_LOG_LEVEL if os.getenv("DEBUG") else level
+        self.level  = effective_level
         self.logger = logging.getLogger(name)
         self.logger.setLevel(self.level)
         self.logger.propagate = False

@@ -55,7 +55,7 @@ class BusClient:
             topic.encode(),
             json.dumps(payload).encode(),
         ])
-        self.log.debug(f"Published [{topic}]: {payload}")
+        #self.log.debug(f"Published [{topic}]: {payload}")
 
     def start(self, blocking: bool = True):
         """Start the receive loop. Set blocking=False to run in a thread."""
