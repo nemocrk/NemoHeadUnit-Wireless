@@ -2,14 +2,14 @@
 NemoHeadUnit-Wireless v2 — channel_modules/input
 
 Module contract:
-  Name        : input
+  Name        : input  (overridden by --module-name)
   Priority    : 1
-  Channel ID  : resolved at boot from oaa_control_channel config
-                (stream_type == "INPUT")  fallback: 6
+  Channel ID  : supplied via --channel-id CLI arg (parsed by BaseChannelModule)
+  SDR bytes   : supplied via --sdr-bytes-hex CLI arg, parsed by base into
+                self.channel_config.
   Subscribes  : system.readytostart
                 system.start
                 system.stop
-                config.response           {module, config, requester}
                 oaa.channel.open          {channel_id, ...}
                 oaa.channel.close         {channel_id}
                 oaa.frame.<channel_id>    raw bytes  (ChannelOpenRequest, KeyBindingRequest)
@@ -18,23 +18,23 @@ Module contract:
                 input.touch               {action, pointers, action_index?, disp_channel_id?}
                 input.key                 {keycode, down, metastate?, longpress?, disp_channel_id?}
   Publishes   : system.module_ready       {name, priority}
-                system.ready             {name, priority}
-                aa.frame.send            {channel_id, flags, payload_hex}  ← ChannelOpenResponse,
-                                                                              KeyBindingResponse,
-                                                                              InputReport
-                input.state              {state}  IDLE | OPEN | BOUND
+                system.ready              {name, priority}
+                aa.frame.send             {channel_id, flags, payload_hex}  ← ChannelOpenResponse,
+                                                                               KeyBindingResponse,
+                                                                               InputReport
+                input.state               {state}  IDLE | OPEN | BOUND
 
 Flow:
-  1. On system.start: request oaa_control_channel config to discover INPUT channel id.
-  2. On config.response: find channel with av_channel.stream_type == "INPUT",
-     extract channel_id; fallback = 6.
-  3. Publish system.ready once resolved.
-  4. On oaa.frame.<channel_id>:
+  1. BaseChannelModule parses CLI and populates self.CHANNEL_ID and
+     self.channel_config from --channel-id / --sdr-bytes-hex.
+  2. system.ready is published lazily by base once _init_done, config_loaded
+     and channel_config is not None.
+  3. On oaa.frame.<channel_id>:
        - ChannelOpenRequest   → reply ChannelOpenResponse (STATUS_SUCCESS)
        - KeyBindingRequest    → negotiate keycodes, reply KeyBindingResponse
-  5. On input.touch / input.key (from UI layer): build InputReport and send
+  4. On input.touch / input.key (from UI layer): build InputReport and send
      via aa.frame.send.
-  6. On aa.session.shutdown: reset to IDLE, clear channel reference.
+  5. On aa.session.shutdown: reset to IDLE, clear channel reference.
 
 Input report encoding:
   All outgoing AA frames use the minimal hand-rolled protobuf encoder
@@ -75,16 +75,12 @@ _FLAG_LAST      = 0x02
 _FLAG_ENCRYPTED = 0x08
 _FLAG_FULL      = _FLAG_FIRST | _FLAG_LAST | _FLAG_ENCRYPTED  # 0x0B
 
-# Control channel messages (shared with video/audio setup protocol)
 _MSG_CHANNEL_OPEN_REQUEST   = 0x8003
 _MSG_CHANNEL_OPEN_RESPONSE  = 0x8005
 
-# Input-specific messages
 _MSG_KEY_BINDING_REQUEST    = 0x8009
 _MSG_KEY_BINDING_RESPONSE   = 0x800A
 _MSG_INPUT_REPORT           = 0x0001
-
-_INPUT_CHANNEL_FALLBACK = 6
 
 # ---------------------------------------------------------------------------
 # Keycodes (Android KeyEvent constants — wire values, no proto dependency)
@@ -118,7 +114,6 @@ _DEFAULT_KEYCODES: List[int] = [
     KEYCODE_VOLUME_MUTE, KEYCODE_VOICE_ASSIST,
 ]
 
-# PointerAction constants (TouchEvent.PointerAction wire values)
 ACTION_DOWN   = 0
 ACTION_UP     = 1
 ACTION_MOVED  = 2
@@ -135,76 +130,33 @@ class InputModule(BaseChannelModule):
     Receives ChannelOpenRequest and KeyBindingRequest from the phone,
     then relays InputReports (touch + key events) published on the bus
     by the UI layer.
+
+    channel_id and SDR bytes are provided at spawn time via CLI by
+    channel_manager and parsed by BaseChannelModule into self.CHANNEL_ID
+    and self.channel_config.  system.ready is hard-blocked by base if
+    channel_config is None.
     """
 
-    MODULE_NAME = "input"
-    CHANNEL_ID  = _INPUT_CHANNEL_FALLBACK  # overwritten after config.response
+    MODULE_NAME = "input"   # overridden by --module-name CLI
+    CHANNEL_ID  = -1         # overridden by --channel-id CLI
     PRIORITY    = 1
 
     def __init__(self) -> None:
         super().__init__()
-        self._channel_resolved = False
         self._state            = "IDLE"   # IDLE | OPEN | BOUND
         self._bound_keycodes: set = set()
         self._channel_open_flag  = False
-
-    # ------------------------------------------------------------------
-    # Channel discovery
-    # ------------------------------------------------------------------
-
-    def _request_oaa_config(self) -> None:
-        self.bus.publish("config.get", {
-            "module":    "oaa_control_channel",
-            "requester": self.MODULE_NAME,
-        })
-        self.log.info("Requested oaa_control_channel config for INPUT channel discovery")
-
-    def on_config_response(self, topic: str, payload: dict) -> None:
-        if payload.get("module") != "oaa_control_channel":
-            return
-        if payload.get("requester") != self.MODULE_NAME:
-            return
-
-        channels  = payload.get("config", {}).get("channels", [])
-        resolved  = self._resolve_input_channel(channels)
-
-        if resolved is not None:
-            self.CHANNEL_ID = resolved
-            self.log.info("INPUT channel resolved: channel_id=%d", self.CHANNEL_ID)
-        else:
-            self.CHANNEL_ID = _INPUT_CHANNEL_FALLBACK
-            self.log.warning(
-                "INPUT channel not found in config — fallback channel_id=%d",
-                self.CHANNEL_ID,
-            )
-
-        if not self._channel_resolved:
-            self._channel_resolved = True
-            frame_topic = f"oaa.frame.{self.CHANNEL_ID}"
-            self.bus.subscribe(frame_topic, self._on_oaa_frame)
-            self.log.info("Subscribed to %s", frame_topic)
-            self.bus.publish("system.ready", {
-                "name":     self.MODULE_NAME,
-                "priority": self.PRIORITY,
-            })
-            self.log.info("system.ready published (priority=%d)", self.PRIORITY)
-
-    @staticmethod
-    def _resolve_input_channel(channels: list) -> int | None:
-        for ch in channels:
-            av = ch.get("av_channel", {})
-            if av.get("stream_type") == "INPUT":
-                cid = ch.get("channel_id")
-                if cid is not None:
-                    return int(cid)
-        return None
 
     # ------------------------------------------------------------------
     # _init / _cleanup hooks
     # ------------------------------------------------------------------
 
     def _init(self) -> None:
-        self._request_oaa_config()
+        self.log.info(
+            "InputModule _init: channel_id=%d channel_config=%s",
+            self.CHANNEL_ID,
+            self.channel_config,
+        )
 
     def _cleanup(self) -> None:
         self._set_state("IDLE")
@@ -263,7 +215,6 @@ class InputModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def _handle_channel_open_request(self, body: bytes) -> None:
-        # ChannelOpenResponse: message_status field=1, wire=0, value=0 (STATUS_SUCCESS)
         proto_body = b"\x08\x00"
         frame = self._encode_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, proto_body)
         self.bus.publish("aa.frame.send", frame)
@@ -271,7 +222,6 @@ class InputModule(BaseChannelModule):
         self.log.info("ChannelOpenRequest → ChannelOpenResponse sent (STATUS_SUCCESS)")
 
     def _handle_key_binding_request(self, body: bytes) -> None:
-        """Parse requested keycodes, accept all supported ones, reply KeyBindingResponse."""
         requested = _parse_key_binding_request(body)
         supported = set(_DEFAULT_KEYCODES)
 
@@ -285,10 +235,8 @@ class InputModule(BaseChannelModule):
                     len(rejected), sorted(rejected),
                 )
         else:
-            # No keycodes specified — bind all defaults
             self._bound_keycodes = supported
 
-        # KeyBindingResponse: status field=1, value=0 (STATUS_SUCCESS)
         proto_body = b"\x08\x00"
         frame = self._encode_frame(self.CHANNEL_ID, _MSG_KEY_BINDING_RESPONSE, proto_body)
         self.bus.publish("aa.frame.send", frame)
@@ -299,126 +247,63 @@ class InputModule(BaseChannelModule):
         )
 
     # ------------------------------------------------------------------
-    # Outgoing input reports  (called via bus events from UI layer)
+    # Outgoing input reports
     # ------------------------------------------------------------------
 
     def on_input_touch(self, topic: str, payload: dict) -> None:
-        """
-        Bus handler for input.touch.
-
-        Expected payload::
-            {
-              "action":         int  (0=DOWN, 1=UP, 2=MOVED),
-              "pointers":       [[x, y, pointer_id], ...],
-              "action_index":   int  (optional, default 0),
-              "disp_channel_id": int (optional, default 0),
-            }
-        """
         if self._state not in ("OPEN", "BOUND"):
             self.log.debug("on_input_touch: channel not open — dropping")
             return
-
         action          = int(payload.get("action", ACTION_DOWN))
         raw_pointers    = payload.get("pointers", [])
         action_index    = int(payload.get("action_index", 0))
         disp_channel_id = int(payload.get("disp_channel_id", 0))
-
         pointers: List[Tuple[int, int, int]] = [
             (int(p[0]), int(p[1]), int(p[2])) for p in raw_pointers
         ]
-
         if not pointers:
             self.log.warning("on_input_touch: empty pointers list — dropping")
             return
-
-        report_bytes = _build_input_report_touch(
-            action, pointers, action_index, disp_channel_id
-        )
+        report_bytes = _build_input_report_touch(action, pointers, action_index, disp_channel_id)
         frame = self._encode_frame(self.CHANNEL_ID, _MSG_INPUT_REPORT, report_bytes)
         self.bus.publish("aa.frame.send", frame)
-        self.log.debug(
-            "TouchEvent sent action=%d pointers=%s", action, pointers
-        )
+        self.log.debug("TouchEvent sent action=%d pointers=%s", action, pointers)
 
     def on_input_key(self, topic: str, payload: dict) -> None:
-        """
-        Bus handler for input.key.
-
-        Expected payload::
-            {
-              "keycode":         int,
-              "down":            bool  (True = key down),
-              "metastate":       int   (optional, default 0),
-              "longpress":       bool  (optional, default False),
-              "disp_channel_id": int   (optional, default 0),
-            }
-        """
         if self._state not in ("OPEN", "BOUND"):
             self.log.debug("on_input_key: channel not open — dropping")
             return
-
         keycode         = int(payload.get("keycode", 0))
         down            = bool(payload.get("down", True))
         metastate       = int(payload.get("metastate", 0))
         longpress       = bool(payload.get("longpress", False))
         disp_channel_id = int(payload.get("disp_channel_id", 0))
-
         if self._bound_keycodes and keycode not in self._bound_keycodes:
-            self.log.debug(
-                "on_input_key: keycode=%d not bound — dropping", keycode
-            )
+            self.log.debug("on_input_key: keycode=%d not bound — dropping", keycode)
             return
-
-        report_bytes = _build_input_report_key(
-            keycode, down, metastate, longpress, disp_channel_id
-        )
+        report_bytes = _build_input_report_key(keycode, down, metastate, longpress, disp_channel_id)
         frame = self._encode_frame(self.CHANNEL_ID, _MSG_INPUT_REPORT, report_bytes)
         self.bus.publish("aa.frame.send", frame)
-        self.log.debug(
-            "KeyEvent sent keycode=%d down=%s", keycode, down
-        )
+        self.log.debug("KeyEvent sent keycode=%d down=%s", keycode, down)
 
     # ------------------------------------------------------------------
-    # Convenience helpers (callable directly by other modules / tests)
+    # Convenience helpers
     # ------------------------------------------------------------------
 
-    def send_touch_down(self, x: int, y: int, pointer_id: int = 0,
-                        disp_channel_id: int = 0) -> None:
-        self.on_input_touch("", {
-            "action": ACTION_DOWN,
-            "pointers": [[x, y, pointer_id]],
-            "disp_channel_id": disp_channel_id,
-        })
+    def send_touch_down(self, x: int, y: int, pointer_id: int = 0, disp_channel_id: int = 0) -> None:
+        self.on_input_touch("", {"action": ACTION_DOWN, "pointers": [[x, y, pointer_id]], "disp_channel_id": disp_channel_id})
 
-    def send_touch_up(self, x: int, y: int, pointer_id: int = 0,
-                      disp_channel_id: int = 0) -> None:
-        self.on_input_touch("", {
-            "action": ACTION_UP,
-            "pointers": [[x, y, pointer_id]],
-            "disp_channel_id": disp_channel_id,
-        })
+    def send_touch_up(self, x: int, y: int, pointer_id: int = 0, disp_channel_id: int = 0) -> None:
+        self.on_input_touch("", {"action": ACTION_UP, "pointers": [[x, y, pointer_id]], "disp_channel_id": disp_channel_id})
 
-    def send_touch_move(self, x: int, y: int, pointer_id: int = 0,
-                        disp_channel_id: int = 0) -> None:
-        self.on_input_touch("", {
-            "action": ACTION_MOVED,
-            "pointers": [[x, y, pointer_id]],
-            "disp_channel_id": disp_channel_id,
-        })
+    def send_touch_move(self, x: int, y: int, pointer_id: int = 0, disp_channel_id: int = 0) -> None:
+        self.on_input_touch("", {"action": ACTION_MOVED, "pointers": [[x, y, pointer_id]], "disp_channel_id": disp_channel_id})
 
-    def send_key_down(self, keycode: int, metastate: int = 0,
-                      disp_channel_id: int = 0) -> None:
-        self.on_input_key("", {
-            "keycode": keycode, "down": True,
-            "metastate": metastate, "disp_channel_id": disp_channel_id,
-        })
+    def send_key_down(self, keycode: int, metastate: int = 0, disp_channel_id: int = 0) -> None:
+        self.on_input_key("", {"keycode": keycode, "down": True, "metastate": metastate, "disp_channel_id": disp_channel_id})
 
-    def send_key_up(self, keycode: int, metastate: int = 0,
-                    disp_channel_id: int = 0) -> None:
-        self.on_input_key("", {
-            "keycode": keycode, "down": False,
-            "metastate": metastate, "disp_channel_id": disp_channel_id,
-        })
+    def send_key_up(self, keycode: int, metastate: int = 0, disp_channel_id: int = 0) -> None:
+        self.on_input_key("", {"keycode": keycode, "down": False, "metastate": metastate, "disp_channel_id": disp_channel_id})
 
     # ------------------------------------------------------------------
     # State helper
@@ -454,7 +339,6 @@ class InputModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        self.bus.subscribe("config.response",     self.on_config_response)
         self.bus.subscribe("aa.session.active",   self.on_aa_session_active)
         self.bus.subscribe("aa.session.shutdown", self.on_aa_session_shutdown)
         self.bus.subscribe("input.touch",         self.on_input_touch)
@@ -508,98 +392,42 @@ def _bool_field(field_number: int, value: bool) -> bytes:
     return _varint_field(field_number, 1 if value else 0)
 
 
-# ---------------------------------------------------------------------------
-# InputReport builders
-# ---------------------------------------------------------------------------
-
 def _now_us() -> int:
     return int(time.time_ns() // 1000)
 
 
-def _build_touch_event(
-    action: int,
-    pointers: List[Tuple[int, int, int]],
-    action_index: int = 0,
-) -> bytes:
-    """
-    TouchEvent proto:
-      field 1 (varint) = action
-      field 2 (varint) = action_index
-      field 3 (bytes)  = pointer_data (repeated)
-        PointerData:
-          field 1 (varint) = x
-          field 2 (varint) = y
-          field 3 (varint) = pointer_id
-    """
-    body = _varint_field(1, action)
-    body += _varint_field(2, action_index)
+def _build_touch_event(action: int, pointers: List[Tuple[int, int, int]], action_index: int = 0) -> bytes:
+    body = _varint_field(1, action) + _varint_field(2, action_index)
     for x, y, pid in pointers:
         pd = _varint_field(1, x) + _varint_field(2, y) + _varint_field(3, pid)
         body += _bytes_field(3, pd)
     return body
 
 
-def _build_key_event(
-    keycode: int,
-    down: bool,
-    metastate: int = 0,
-    longpress: bool = False,
-) -> bytes:
-    """
-    KeyEvent.Key proto (wrapped in KeyEvent):
-      KeyEvent.keys (field 1, bytes):
-        Key:
-          field 1 (varint) = keycode
-          field 2 (bool)   = down
-          field 3 (varint) = metastate
-          field 4 (bool)   = longpress
-    """
+def _build_key_event(keycode: int, down: bool, metastate: int = 0, longpress: bool = False) -> bytes:
     key = (
         _varint_field(1, keycode)
         + _bool_field(2, down)
         + _varint_field(3, metastate)
         + _bool_field(4, longpress)
     )
-    return _bytes_field(1, key)   # KeyEvent.keys
+    return _bytes_field(1, key)
 
 
-def _build_input_report_touch(
-    action: int,
-    pointers: List[Tuple[int, int, int]],
-    action_index: int = 0,
-    disp_channel_id: int = 0,
-) -> bytes:
-    """
-    InputReport proto:
-      field 1 (fixed64) = timestamp_us
-      field 2 (bytes)   = touch_event
-      field 5 (varint)  = disp_channel_id  (optional)
-    """
+def _build_input_report_touch(action: int, pointers: List[Tuple[int, int, int]], action_index: int = 0, disp_channel_id: int = 0) -> bytes:
     ts    = _now_us()
     touch = _build_touch_event(action, pointers, action_index)
-    body  = _field(1, 1, struct.pack("<Q", ts))   # fixed64
+    body  = _field(1, 1, struct.pack("<Q", ts))
     body += _bytes_field(2, touch)
     if disp_channel_id:
         body += _varint_field(5, disp_channel_id)
     return body
 
 
-def _build_input_report_key(
-    keycode: int,
-    down: bool,
-    metastate: int = 0,
-    longpress: bool = False,
-    disp_channel_id: int = 0,
-) -> bytes:
-    """
-    InputReport proto:
-      field 1 (fixed64) = timestamp_us
-      field 3 (bytes)   = key_event
-      field 5 (varint)  = disp_channel_id  (optional)
-    """
+def _build_input_report_key(keycode: int, down: bool, metastate: int = 0, longpress: bool = False, disp_channel_id: int = 0) -> bytes:
     ts  = _now_us()
     key = _build_key_event(keycode, down, metastate, longpress)
-    body  = _field(1, 1, struct.pack("<Q", ts))   # fixed64
+    body  = _field(1, 1, struct.pack("<Q", ts))
     body += _bytes_field(3, key)
     if disp_channel_id:
         body += _varint_field(5, disp_channel_id)
@@ -607,16 +435,9 @@ def _build_input_report_key(
 
 
 def _parse_key_binding_request(body: bytes) -> set:
-    """
-    KeyBindingRequest proto:
-      field 1 (repeated varint) = keycodes
-    Returns set of requested keycode ints.
-    """
     result = set()
     pos = 0
     while pos < len(body):
-        if pos >= len(body):
-            break
         tag_byte     = body[pos]; pos += 1
         field_number = tag_byte >> 3
         wire_type    = tag_byte & 0x07
@@ -625,7 +446,6 @@ def _parse_key_binding_request(body: bytes) -> set:
             if val is not None:
                 result.add(val)
         else:
-            # skip unknown
             if wire_type == 0:
                 _, pos = _read_varint(body, pos)
             elif wire_type == 1:
