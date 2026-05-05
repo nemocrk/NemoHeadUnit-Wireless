@@ -79,6 +79,7 @@ import sounddevice as sd                       # noqa: E402  (python-sounddevice
 import av                                      # noqa: E402  (PyAV / FFmpeg)
 
 from shared.config_schema import field_enum, field_int  # noqa: E402
+from shared.proto_utils import parse_media_with_timestamp  # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -371,7 +372,7 @@ class AudioModule(BaseChannelModule):
         if self._state not in ("OPEN", "PLAYING"):
             self._set_state("PLAYING")
         # body: field1=timestamp (fixed64), field2=audio data (bytes)
-        ts_us, encoded = _parse_media_with_timestamp(body)
+        ts_us, encoded = parse_media_with_timestamp(body)
         self.log.debug("MediaWithTimestamp ch=%d ts_us=%d len=%d", self.CHANNEL_ID, ts_us, len(encoded))
         self._send_media_ack()
         self._write_audio(encoded)
@@ -565,61 +566,6 @@ def _encode_frame(channel_id: int, message_id: int, proto_body: bytes) -> dict:
         "flags":       _FLAG_FULL,
         "payload_hex": payload.hex(),
     }
-
-
-def _read_varint(buf: bytes, pos: int) -> tuple[int | None, int]:
-    result = 0
-    shift  = 0
-    while pos < len(buf):
-        b = buf[pos]; pos += 1
-        result |= (b & 0x7F) << shift
-        if not (b & 0x80):
-            return result, pos
-        shift += 7
-        if shift >= 64:
-            return None, pos
-    return None, pos
-
-
-def _parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
-    """Manual proto parse: field 1=timestamp (fixed64), field 2=data (bytes).
-
-    Used only for AV_MEDIA_WITH_TIMESTAMP_INDICATION where the timestamp
-    prefix must be stripped before passing audio data to the decoder.
-    All other proto messages use generated pb2 classes directly.
-    """
-    ts_us = 0
-    data  = b""
-    pos   = 0
-    while pos < len(body):
-        tag_byte     = body[pos]; pos += 1
-        field_number = tag_byte >> 3
-        wire_type    = tag_byte & 0x07
-        if field_number == 1 and wire_type == 1:
-            if pos + 8 > len(body):
-                break
-            ts_us = struct.unpack_from("<Q", body, pos)[0]
-            pos += 8
-        elif field_number == 2 and wire_type == 2:
-            length, pos = _read_varint(body, pos)
-            if length is None:
-                break
-            data = body[pos: pos + length]
-            pos += length
-        else:
-            if wire_type == 0:
-                _, pos = _read_varint(body, pos)
-            elif wire_type == 1:
-                pos += 8
-            elif wire_type == 2:
-                length, pos = _read_varint(body, pos)
-                if length:
-                    pos += length
-            elif wire_type == 5:
-                pos += 4
-            else:
-                break
-    return ts_us, data
 
 
 # ---------------------------------------------------------------------------
