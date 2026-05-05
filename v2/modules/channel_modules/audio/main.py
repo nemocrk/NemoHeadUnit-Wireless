@@ -116,11 +116,11 @@ _MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION = AVChannelMessage.AV_MEDIA_W
 _MSG_AV_CHANNEL_MEDIA_ACK                          = AVChannelMessage.AV_MEDIA_ACK_INDICATION
 
 _CODEC_PCM         = MediaCodecType.MEDIA_CODEC_AUDIO_PCM
-_CODEC_AAC         = MediaCodecType.MEDIA_CODEC_AUDIO_AAC
+_CODEC_AAC_LC      = MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC
 _CODEC_AAC_LC_ADTS = MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC_ADTS
 
 # Codecs that require pyav decoding
-_AAC_CODECS = (_CODEC_AAC, _CODEC_AAC_LC_ADTS)
+_AAC_CODECS = (_CODEC_AAC_LC, _CODEC_AAC_LC_ADTS)
 
 # ---------------------------------------------------------------------------
 # AudioModule
@@ -166,8 +166,8 @@ class AudioModule(BaseChannelModule):
             ),
             "max_unacked": field_int(
                 default=1,
-                min_value=1,
-                max_value=16,
+                min=1,
+                max=16,
             ),
         }
 
@@ -182,7 +182,7 @@ class AudioModule(BaseChannelModule):
         self._sample_rate:   int = 48000
         self._bit_depth:     int = 16
         self._channel_count: int = 2
-        self._codec:         int = _CODEC_AAC
+        self._codec:         int = _CODEC_AAC_LC
 
         # Runtime state
         self._state:      str = "IDLE"

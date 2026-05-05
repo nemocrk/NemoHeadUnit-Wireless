@@ -162,15 +162,15 @@ class TemplateModule(BaseChannelModule):
 
         Example (copy from audio):
             return {
-                "max_unacked": field_int(default=1, min_value=1, max_value=16),
+                "max_unacked": field_int(default=1, min=1, max=16),
             }
         """
         # TODO: replace with real schema or return {}
         return {
             "max_unacked": field_int(
                 default=1,
-                min_value=1,
-                max_value=16,
+                min=1,
+                max=16,
             ),
         }
 

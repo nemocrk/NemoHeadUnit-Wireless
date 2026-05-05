@@ -21,7 +21,7 @@ Module contract:
   Publishes   : channel_manager.module_ready              {name, priority}
                 aa.frame.send             {channel_id, flags, payload_hex}
                                             <- ChannelOpenResponse
-                                            <- SensorStartResponse
+                                            <- SensorStartResponseMessage
                                             <- SensorEventIndication (SensorBatch)
                 sensor.state              {state}  IDLE | OPEN
 
@@ -32,7 +32,7 @@ Flow:
      config_loaded and channel_config is not None.
   3. On aa.frame.ch<channel_id>:
        - ChannelOpenRequest   -> reply ChannelOpenResponse (STATUS_SUCCESS)
-       - SensorStartRequest   -> reply SensorStartResponse (STATUS_SUCCESS)
+       - SensorStartRequest   -> reply SensorStartResponseMessage (STATUS_SUCCESS)
                                 + immediate SensorEventIndication for:
                                     SENSOR_DRIVING_STATUS_DATA -> DRIVE_STATUS_UNRESTRICTED
                                     SENSOR_NIGHT_MODE          -> night_mode = False
@@ -61,7 +61,7 @@ GPS fields (payload keys):
 
 No proto dependency for SensorBatch encoding — all SensorEventIndication payload
 encoding is hand-rolled.  Control/sensor handshake messages (ChannelOpenResponse,
-SensorStartResponse) use real proto objects.
+SensorStartResponseMessage) use real proto objects.
 """
 
 from __future__ import annotations
@@ -92,8 +92,8 @@ from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage             # n
 
 # Proto — sensor
 from oaa.sensor.SensorChannelMessageIdsEnum_pb2 import SensorChannelMessage         # noqa: E402
-from oaa.sensor.SensorStartResponseMessage_pb2 import SensorStartResponse           # noqa: E402
-from oaa.common.StatusEnum_pb2 import SensorStatus                                  # noqa: E402
+from oaa.sensor.SensorStartResponseMessage_pb2 import SensorStartResponseMessage
+from oaa.common.StatusEnum_pb2 import Status                                        # noqa: E402
 
 # ---------------------------------------------------------------------------
 # AA message 
@@ -101,9 +101,9 @@ from oaa.common.StatusEnum_pb2 import SensorStatus                              
 
 _MSG_CHANNEL_OPEN_REQUEST      = ControlMessage.CHANNEL_OPEN_REQUEST
 _MSG_CHANNEL_OPEN_RESPONSE     = ControlMessage.CHANNEL_OPEN_RESPONSE
-_MSG_SENSOR_START_REQUEST      = SensorChannelMessage.SENSOR_START_REQUEST
+_MSG_SENSOR_START_REQUEST      = SensorChannelMessage.SENSOR_REQUEST
 _MSG_SENSOR_START_RESPONSE     = SensorChannelMessage.SENSOR_START_RESPONSE
-_MSG_SENSOR_EVENT_INDICATION   = SensorChannelMessage.SENSOR_EVENT
+_MSG_SENSOR_EVENT_INDICATION   = SensorChannelMessage.SENSOR_EVENT_INDICATION
 
 # ---------------------------------------------------------------------------
 # SensorType wire values
@@ -226,11 +226,11 @@ class SensorModule(BaseChannelModule):
         self.log.info("SensorStartRequest sensor_type=%d", sensor_type)
         self._started_sensors.add(sensor_type)
 
-        resp = SensorStartResponse()
-        resp.status = SensorStatus.Enum.OK
+        resp = SensorStartResponseMessage()
+        resp.status = Status.OK
         frame = encode_aa_frame(self.CHANNEL_ID, _MSG_SENSOR_START_RESPONSE, resp.SerializeToString())
         self.bus.publish("aa.frame.send", frame)
-        self.log.debug("SensorStartResponse sent for sensor_type=%d", sensor_type)
+        self.log.debug("SensorStartResponseMessage sent for sensor_type=%d", sensor_type)
 
         batch_bytes = _build_default_sensor_batch(sensor_type)
         if batch_bytes:

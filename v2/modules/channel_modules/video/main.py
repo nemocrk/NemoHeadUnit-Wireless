@@ -153,8 +153,8 @@ class VideoModule(BaseChannelModule):
         return {
             "max_unacked": field_int(
                 default=1,
-                min_value=1,
-                max_value=16,
+                min=1,
+                max=16,
             ),
         }
 

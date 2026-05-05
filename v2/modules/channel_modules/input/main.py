@@ -86,8 +86,8 @@ from oaa.input.InputBindingResponseMessage_pb2 import InputBindingResponse      
 _MSG_CHANNEL_OPEN_REQUEST   = ControlMessage.CHANNEL_OPEN_REQUEST
 _MSG_CHANNEL_OPEN_RESPONSE  = ControlMessage.CHANNEL_OPEN_RESPONSE
 
-_MSG_KEY_BINDING_REQUEST    = InputChannelMessage.KEY_BINDING_REQUEST
-_MSG_KEY_BINDING_RESPONSE   = InputChannelMessage.KEY_BINDING_RESPONSE
+_MSG_KEY_BINDING_REQUEST    = InputChannelMessage.BINDING_REQUEST
+_MSG_KEY_BINDING_RESPONSE   = InputChannelMessage.BINDING_RESPONSE
 _MSG_INPUT_REPORT           = InputChannelMessage.INPUT_EVENT_INDICATION
 
 # ---------------------------------------------------------------------------
