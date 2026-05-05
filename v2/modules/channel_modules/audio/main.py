@@ -5,9 +5,9 @@ Single-channel audio module.  One process instance per audio channel
 (MEDIA / SPEECH / SYSTEM).  All channel parameters are supplied by the
 orchestrator (channel_manager) at launch via CLI arguments:
 
-    python -m channel_modules.audio.main \
-        --module-name  channel_audio_4 \
-        --channel-id   4 \
+    python -m channel_modules.audio.main \\
+        --module-name  channel_audio_4 \\
+        --channel-id   4 \\
         --sdr-bytes-hex <hex string from ServiceDiscoveryResponse>
 
 Module contract:
@@ -30,15 +30,15 @@ Module contract:
                 system.ready         {name, priority}
                 aa.frame.send        {channel_id, flags, payload_hex}
                 audio.state          {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
-  Config keys : alsa_device  enum  "default"  ALSA PCM device name
+  Config keys : audio_device  enum  "default"  sounddevice output device name
 
 Flow:
   1. On system.start: cfg.get(schema) triggers config load + _init().
   2. _init(): call _apply_audio_config(_SDR_BYTES_HEX) to read codec params,
-     open ALSA PCM device, open pyav codec context if codec is AAC-LC ADTS.
+     open sounddevice RawOutputStream, open pyav codec context if AAC-LC ADTS.
   3. BaseChannelModule handles oaa.channel.open/close and oaa.frame.<id>.
-  4. on_frame(): decode AA frame header, dispatch by message_id, write PCM to ALSA.
-  5. on_config_changed("alsa_device"): re-open PCM on the fly.
+  4. on_frame(): decode AA frame header, dispatch by message_id, write PCM.
+  5. on_config_changed("audio_device"): re-open stream on the fly.
   6. on_aa_session_shutdown: reset state to IDLE.
 """
 
@@ -59,7 +59,7 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import alsaaudio                               # noqa: E402  (pyalsaaudio)
+import sounddevice as sd                       # noqa: E402  (python-sounddevice)
 import av                                      # noqa: E402  (PyAV / FFmpeg)
 
 from shared.config_schema import field_enum    # noqa: E402
@@ -110,12 +110,13 @@ _CODEC_PCM = "MEDIA_CODEC_AUDIO_PCM"
 
 class AudioModule(BaseChannelModule):
     """
-    Single-channel OAA audio module with direct ALSA output.
+    Single-channel OAA audio module with sounddevice (PortAudio) output.
 
     One process per channel; all parameters (channel_id, SDR bytes) are
     provided via CLI by channel_manager at spawn time.
     Codec parameters are read from --sdr-bytes-hex in _init().
-    AAC-LC ADTS frames are decoded via pyav before writing PCM to ALSA.
+    AAC-LC ADTS frames are decoded via pyav before writing PCM to the stream.
+    Audio errors are logged but do not crash the module.
     """
 
     MODULE_NAME: str = _MODULE_NAME
@@ -128,9 +129,9 @@ class AudioModule(BaseChannelModule):
 
     def get_schema(self) -> dict:
         return {
-            "alsa_device": field_enum(
+            "audio_device": field_enum(
                 default="default",
-                choices=_list_alsa_devices(),
+                choices=_list_audio_devices(),
             ),
         }
 
@@ -151,8 +152,8 @@ class AudioModule(BaseChannelModule):
         self._state:      str = "IDLE"
         self._session_id: int = 0
 
-        # ALSA PCM handle
-        self._pcm: alsaaudio.PCM | None = None
+        # sounddevice RawOutputStream handle
+        self._stream: sd.RawOutputStream | None = None
 
         # PyAV codec context for AAC decoding (None when PCM)
         self._av_codec_ctx: Any | None = None
@@ -165,9 +166,9 @@ class AudioModule(BaseChannelModule):
     def _init(self) -> None:
         """
         Apply audio config from SDR bytes (supplied at launch via CLI).
-        Opens ALSA PCM and pyav codec context.
-        NOTE: alsa_device may still be schema default if config_manager
-        hasn't responded yet; on_config_loaded re-opens the device.
+        Opens sounddevice RawOutputStream and pyav codec context.
+        NOTE: audio_device may still be schema default if config_manager
+        hasn't responded yet; on_config_loaded re-opens the stream.
         """
         if _SDR_BYTES_HEX:
             self._apply_audio_config(_SDR_BYTES_HEX)
@@ -177,10 +178,10 @@ class AudioModule(BaseChannelModule):
                 "using default audio params (48kHz 16bit stereo AAC)"
             )
             self._open_av_codec()  # open with defaults
-        self._open_alsa()
+        self._open_stream()
 
     def _cleanup(self) -> None:
-        self._close_alsa()
+        self._close_stream()
         self._close_av_codec()
         self._set_state("IDLE")
 
@@ -190,13 +191,13 @@ class AudioModule(BaseChannelModule):
 
     def on_config_loaded(self, config: dict) -> None:
         super().on_config_loaded(config)
-        self._open_alsa()  # reopen with persisted device
+        self._open_stream()  # reopen with persisted device
 
     def on_config_changed(self, key: str, value: Any) -> None:
         super().on_config_changed(key, value)
-        if key == "alsa_device":
-            self.log.info("alsa_device changed to %r — reopening PCM", value)
-            self._open_alsa()
+        if key == "audio_device":
+            self.log.info("audio_device changed to %r — reopening stream", value)
+            self._open_stream()
 
     # ------------------------------------------------------------------
     # Session lifecycle (shutdown only — config already set from CLI)
@@ -345,53 +346,56 @@ class AudioModule(BaseChannelModule):
             self._av_codec_ctx = None
             self._av_codec     = None
 
-    def _open_alsa(self) -> None:
-        """Open (or re-open) the ALSA PCM device with current audio params."""
-        self._close_alsa()
-        device = self._config.get("alsa_device", "default")
-        fmt = {
-            8:  alsaaudio.PCM_FORMAT_S8,
-            16: alsaaudio.PCM_FORMAT_S16_LE,
-            24: alsaaudio.PCM_FORMAT_S24_LE,
-            32: alsaaudio.PCM_FORMAT_S32_LE,
-        }.get(self._bit_depth, alsaaudio.PCM_FORMAT_S16_LE)
+    def _open_stream(self) -> None:
+        """Open (or re-open) a sounddevice RawOutputStream with current audio params."""
+        self._close_stream()
+        device = self._config.get("audio_device", "default")
+        # sounddevice dtype string from bit depth
+        dtype = {
+            8:  "int8",
+            16: "int16",
+            24: "int24",
+            32: "int32",
+        }.get(self._bit_depth, "int16")
+        # "default" → let sounddevice pick; otherwise pass device name as string
+        sd_device = None if device == "default" else device
         try:
-            self._pcm = alsaaudio.PCM(
-                type=alsaaudio.PCM_PLAYBACK,
-                mode=alsaaudio.PCM_NORMAL,
-                device=device,
+            self._stream = sd.RawOutputStream(
+                samplerate=self._sample_rate,
                 channels=self._channel_count,
-                rate=self._sample_rate,
-                format=fmt,
-                periodsize=1024,
+                dtype=dtype,
+                blocksize=1024,
+                device=sd_device,
             )
+            self._stream.start()
             self.log.info(
-                "ALSA PCM opened: device=%r rate=%d channels=%d depth=%d",
-                device, self._sample_rate, self._channel_count, self._bit_depth,
+                "sounddevice RawOutputStream opened: device=%r rate=%d channels=%d dtype=%s",
+                device, self._sample_rate, self._channel_count, dtype,
             )
-        except alsaaudio.ALSAAudioError as exc:
-            self.log.error("_open_alsa: failed to open device %r — %s", device, exc)
-            self._pcm = None
+        except sd.PortAudioError as exc:
+            self.log.error("_open_stream: failed to open device %r — %s", device, exc)
+            self._stream = None
 
-    def _close_alsa(self) -> None:
-        if self._pcm is not None:
+    def _close_stream(self) -> None:
+        if self._stream is not None:
             try:
-                self._pcm.close()
+                self._stream.stop()
+                self._stream.close()
             except Exception:
                 pass
-            self._pcm = None
+            self._stream = None
 
     def _write_audio(self, encoded: bytes) -> None:
-        """Decode (if AAC) and write raw PCM bytes to ALSA."""
+        """Decode (if AAC) and write raw PCM bytes to sounddevice stream."""
         if not encoded:
             return
         pcm = self._decode_aac(encoded) if self._codec == _CODEC_AAC else encoded
-        if not pcm or self._pcm is None:
+        if not pcm or self._stream is None:
             return
         try:
-            self._pcm.write(pcm)
-        except alsaaudio.ALSAAudioError as exc:
-            self.log.warning("ALSA write error ch=%d — %s", self.CHANNEL_ID, exc)
+            self._stream.write(pcm)
+        except sd.PortAudioError as exc:
+            self.log.warning("sounddevice write error ch=%d — %s", self.CHANNEL_ID, exc)
 
     def _decode_aac(self, adts_frame: bytes) -> bytes:
         """Decode a single AAC-LC ADTS frame to interleaved signed-16 PCM."""
@@ -433,16 +437,22 @@ class AudioModule(BaseChannelModule):
 
 
 # ---------------------------------------------------------------------------
-# ALSA device discovery
+# Audio device discovery (sounddevice)
 # ---------------------------------------------------------------------------
 
-def _list_alsa_devices() -> list[str]:
-    """Return available ALSA PCM playback device names, always starting with "default"."""
+def _list_audio_devices() -> list[str]:
+    """Return available output device names via sounddevice, always starting with 'default'.
+
+    Enumerates all PortAudio output devices (ALSA, PulseAudio, JACK, PipeWire…).
+    Silently returns ['default'] if sounddevice is unavailable or no devices found.
+    """
     try:
         devices = ["default"]
-        for pcm in alsaaudio.pcms(alsaaudio.PCM_PLAYBACK):
-            if pcm not in devices:
-                devices.append(pcm)
+        for info in sd.query_devices():
+            if info["max_output_channels"] > 0:
+                name = info["name"]
+                if name not in devices:
+                    devices.append(name)
         return devices
     except Exception:
         return ["default"]
