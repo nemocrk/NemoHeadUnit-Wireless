@@ -26,7 +26,7 @@ Module contract:
                 aa.frame.ch<ch_id>    raw bytes
                 aa.session.shutdown  {}
   Publishes   : channel_manager.module_ready  {name, priority}
-                aa.frame.send        {channel_id, flags, payload_hex}
+                aa.frame.send        bytes  (via BaseChannelModule.send_frame)
                 audio.state          {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
   Config keys : audio_device   enum  "default"  sounddevice output device name
                 max_unacked    int   1           AVChannelSetupResponse.max_unacked
@@ -83,7 +83,6 @@ import av                                      # noqa: E402  (PyAV / FFmpeg)
 
 from shared.config_schema import field_enum, field_int  # noqa: E402
 from shared.proto_utils import (               # noqa: E402
-    encode_aa_frame,
     decode_aa_frame,
     parse_media_with_timestamp,
 )
@@ -138,6 +137,10 @@ class AudioModule(BaseChannelModule):
     Codec parameters are read from self.channel_config in _init().
     AAC / AAC-LC ADTS frames are decoded via pyav before writing PCM to
     the sounddevice stream.  PCM frames are written directly.
+
+    All outgoing AA frames are sent via self.send_frame(message_id, proto_body)
+    which is provided by BaseChannelModule and always sets the encrypted flag
+    consistently for post-handshake channel traffic.
 
     session_id lifecycle:
       - Set to 0 at construction and on channel close / session shutdown.
@@ -328,8 +331,7 @@ class AudioModule(BaseChannelModule):
         resp.media_status = AVChannelSetupStatus.Enum.OK
         resp.max_unacked  = max_unacked
         resp.configs.append(0)
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_SETUP_RESPONSE, resp.SerializeToString())
-        self.bus.publish("aa.frame.send", frame)
+        self.send_frame(_MSG_AV_CHANNEL_SETUP_RESPONSE, resp.SerializeToString())
         self._set_state("SETUP")
         self.log.info(
             "AVChannelSetupRequest ch=%d → AVChannelSetupResponse sent (max_unacked=%d)",
@@ -339,8 +341,7 @@ class AudioModule(BaseChannelModule):
     def _handle_open_request(self, body: bytes) -> None:
         resp = ChannelOpenResponse()
         resp.status = 0  # STATUS_SUCCESS
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
-        self.bus.publish("aa.frame.send", frame)
+        self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)
 
@@ -389,8 +390,7 @@ class AudioModule(BaseChannelModule):
         ack = AVMediaAckIndication()
         ack.session_id = self._session_id
         ack.ack_count  = 1
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_MEDIA_ACK, ack.SerializeToString())
-        self.bus.publish("aa.frame.send", frame)
+        self.send_frame(_MSG_AV_CHANNEL_MEDIA_ACK, ack.SerializeToString())
         self.log.debug("MediaAck sent ch=%d session_id=%d", self.CHANNEL_ID, self._session_id)
 
     # ------------------------------------------------------------------
