@@ -9,7 +9,7 @@ proto_to_dict(msg) → dict
 dict_to_proto(msg, data) → None
 schema_from_proto_message(descriptor) → dict[str, AnyFieldSchema]
 channels_from_sdr_bytes(sdr_bytes_hex) → list[dict]
-audio_config_from_sdr_bytes(sdr_bytes_hex, channel_id) → dict | None
+channel_config_from_sdr(sdr_bytes_hex, channel_id) → dict | None
 
 schema_from_proto_message
 -------------------------
@@ -49,12 +49,11 @@ AUDIO channels, "audio_type" (AudioType int) so that consumers can
 distinguish VIDEO from the three audio stream types without importing
 proto enums.
 
-audio_config_from_sdr_bytes
----------------------------
+channel_config_from_sdr
+------------------------
 Convenience wrapper: given a hex-encoded SDR and a channel_id, returns
-a dict with keys sample_rate, bit_depth, channel_count, codec (string
-enum name) for the first audio_config entry of that channel, or None if
-the channel is not found / has no audio_config.
+the full channel dict for that channel_id as produced by
+channels_from_sdr_bytes(), or None if the channel is not found.
 """
 
 from __future__ import annotations
@@ -387,29 +386,27 @@ def channels_from_sdr_bytes(sdr_bytes_hex: str) -> list[dict]:
     return result
 
 
-def audio_config_from_sdr_bytes(sdr_bytes_hex: str, channel_id: int) -> dict | None:
-    """Return the first audio_config dict for *channel_id* from the SDR, or None.
+def channel_config_from_sdr(sdr_bytes_hex: str, channel_id: int) -> dict | None:
+    """Return the full channel dict for *channel_id* from the SDR, or None.
 
-    The returned dict has keys:
-        sample_rate   (int)  — e.g. 48000
-        bit_depth     (int)  — e.g. 16
-        channel_count (int)  — e.g. 2
-        codec         (str)  — e.g. "MEDIA_CODEC_AUDIO_AAC_LC_ADTS"
+    The returned dict has the same structure as a channels_from_sdr_bytes()
+    entry, i.e. at minimum:
+        {"channel_id": <int>, "<oneof_field>": <dict>}
+
+    For av_channel (audio) the nested dict includes:
+        av_type, audio_type, audio_configs (list of sample_rate/bit_depth/
+        channel_count/codec dicts).
 
     Args:
         sdr_bytes_hex: hex string of the serialised ServiceDiscoveryResponse.
         channel_id:    the integer channel ID to look up.
 
     Returns:
-        dict with audio config fields, or None if not found.
+        Full channel dict, or None if not found.
     """
     for ch in channels_from_sdr_bytes(sdr_bytes_hex):
-        if ch.get("channel_id") != channel_id:
-            continue
-        av = ch.get("av_channel", {})
-        configs = av.get("audio_configs", [])
-        if configs:
-            return configs[0]
+        if ch.get("channel_id") == channel_id:
+            return ch
     return None
 
 
