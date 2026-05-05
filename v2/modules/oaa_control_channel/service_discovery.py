@@ -46,10 +46,10 @@ build_service_discovery_response(cfg, bt_mac, wifi_bssid)
     Legacy flat-dict API.  Still fully functional for backward compat.
 
 channels_from_sdr_bytes(sdr_bytes)
-    Parse serialised SDR bytes and return the channel list as a list of
-    plain dicts suitable for publishing on the bus.  Used by handshake.py
-    to populate the oaa_control_channel.open_channels payload without
-    re-running build_from_schema_cfg().
+    Parse serialised SDR *bytes* and return the channel list as plain dicts.
+    Used by handshake.py (which holds raw bytes, not hex).
+    NOTE: for hex-encoded SDR use proto_utils.channels_from_sdr_bytes(hex_str).
+          For per-channel audio config use proto_utils.audio_config_from_sdr_bytes().
 """
 
 from __future__ import annotations
@@ -67,6 +67,7 @@ for _p in (_REPO_ROOT, _PROTO_ROOT):
 
 from shared.logger import get_logger                                                    # noqa: E402
 from shared.proto_utils import encode_proto, schema_from_proto_message, dict_to_proto  # noqa: E402
+from shared.proto_utils import audio_config_from_sdr_bytes  # noqa: E402,F401  (re-export)
 from shared.config_schema import (                                                      # noqa: E402
     AnyFieldSchema,
     ConfigFieldList,
@@ -388,8 +389,11 @@ _ONEOF_CHANNEL_FIELDS = (
 
 
 def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
-    """Parse serialised ServiceDiscoveryResponse bytes and return the channel
-    list as plain dicts.
+    """Parse serialised ServiceDiscoveryResponse *bytes* and return the channel
+    list as plain dicts.  Used by handshake.py which holds raw bytes.
+
+    NOTE: channel_modules should use proto_utils.audio_config_from_sdr_bytes()
+          (which accepts a hex string) instead of this function.
 
     Each dict contains at minimum:
         {"channel_id": <int>, "<oneof_field>": {}}
@@ -398,9 +402,6 @@ def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
     "audio_type" (AudioType int, only when av_type == AUDIO) so that
     registry.resolve_module_type() can distinguish VIDEO from the three
     audio stream types without importing proto enums.
-
-    This function is the bridge between handshake.py (which holds sdr_bytes)
-    and channel_manager (which needs a JSON-serialisable channel list).
 
     Args:
         sdr_bytes: raw proto bytes from build_from_schema_cfg().
