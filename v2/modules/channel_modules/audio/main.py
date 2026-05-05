@@ -1,59 +1,51 @@
 """
 NemoHeadUnit-Wireless v2 — channel_modules/audio
 
+Single-channel audio module.  One process instance per audio channel
+(MEDIA / SPEECH / SYSTEM).  The channel_id and MODULE_NAME are supplied
+by the orchestrator at launch via CLI arguments:
+
+    python -m channel_modules.audio.main \
+        --module-name channel_audio_4 \
+        --channel-id  4
+
 Module contract:
-  Name        : audio
+  Name        : <--module-name>   (e.g. channel_audio_4)
   Priority    : 1
-  Channel IDs : up to three — resolved at boot from oaa_control_channel config
-                  MEDIA   (stream_type == "MEDIA_AUDIO")    fallback: 1
-                  SPEECH  (stream_type == "SPEECH_AUDIO")   fallback: 2
-                  SYSTEM  (stream_type == "SYSTEM_AUDIO")   fallback: 7
+  Channel ID  : <--channel-id>    (e.g. 4 for MediaAudio)
   Subscribes  : system.readytostart
                 system.start
                 system.stop
-                config.response          {module, config, requester}
-                oaa.channel.open         {channel_id, av_type?, ...}
-                oaa.channel.close        {channel_id}
-                oaa.frame.<ch_media>     raw bytes
-                oaa.frame.<ch_speech>    raw bytes
-                oaa.frame.<ch_system>    raw bytes
-                aa.session.active        {}
-                aa.session.shutdown      {}
-  Publishes   : system.module_ready      {name, priority}
-                system.ready             {name, priority}
-                aa.frame.send            {channel_id, flags, payload_hex}  ← AVChannelSetup/Open resp + MediaAck
-                audio.pcm                {channel_id, stream_type, session_id, ts_us, data_b64}
-                audio.state              {channel_id, stream_type, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
+                config.response      (auto via ConfigClient)
+                config.changed       (auto via ConfigClient)
+                oaa.channel.open     {channel_id, ...}
+                oaa.channel.close    {channel_id}
+                oaa.frame.<ch_id>    raw bytes
+                aa.session.active    {}
+                aa.session.shutdown  {}
+  Publishes   : system.module_ready  {name, priority}
+                system.ready         {name, priority}
+                aa.frame.send        {channel_id, flags, payload_hex}
+                audio.state          {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
+  Config keys : alsa_device  str  "default"  ALSA PCM device name
 
 Flow:
-  1. On system.start: request oaa_control_channel config to discover MEDIA/SPEECH/SYSTEM channel ids.
-  2. On config.response (module=oaa_control_channel): scan channels list for
-       av_channel.stream_type in {MEDIA_AUDIO, SPEECH_AUDIO, SYSTEM_AUDIO}.
-  3. Publish system.ready once channel ids are resolved.
-  4. On oaa.frame.<ch>: decode AA media frame, dispatch by message_id:
-       - AVChannelSetupRequest  → reply AVChannelSetupResponse  (audio.state=SETUP)
-       - AVChannelOpenRequest   → reply AVChannelOpenResponse   (audio.state=OPEN)
-       - MediaWithTimestamp     → send MediaAck, publish audio.pcm
-       - Media (no timestamp)   → send MediaAck, publish audio.pcm
-       - AVChannelStopIndication → audio.state=STOPPED
-  5. On aa.session.shutdown: reset all channels to IDLE.
-
-ACK strategy:
-  MediaAck is sent immediately after each MediaWithTimestamp or Media frame.
-  Downstream consumers (audio_ui / ALSA sink) are fire-and-forget.
-
-Channel discovery:
-  Channel ids are resolved at boot from oaa_control_channel config.
-  Fallbacks: MEDIA=1, SPEECH=2, SYSTEM=7 (AASDK defaults).
+  1. On system.start: cfg.get(schema) triggers config load + _init().
+  2. _init(): parse sdr_bytes_hex from oaa.session.active payload to read
+     sample_rate / bit_depth / channel_count / codec for this channel_id.
+     Open ALSA PCM device.  If codec is AAC-LC ADTS, open pyav codec context.
+  3. BaseChannelModule handles oaa.channel.open/close and oaa.frame.<id>.
+  4. on_frame(): decode frame, handle AA messages, write PCM to ALSA.
+  5. on_config_changed("alsa_device"): re-open PCM on the fly.
 """
 
 from __future__ import annotations
 
-import base64
+import argparse
 import struct
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Any
 
 _HERE         = Path(__file__).parent          # v2/modules/channel_modules/audio/
 _CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
@@ -64,10 +56,28 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+import alsaaudio                               # noqa: E402  (pyalsaaudio)
+import av                                      # noqa: E402  (PyAV / FFmpeg)
+
+from shared.config_schema import field_enum    # noqa: E402
+from shared.proto_utils import audio_config_from_sdr_bytes  # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# AA media frame constants  (identical to video — re-declared for clarity)
+# CLI parsing — executed at import time so MODULE_NAME / CHANNEL_ID are
+# available as class attributes before BaseChannelModule.__init__ runs.
+# ---------------------------------------------------------------------------
+
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--module-name", default="channel_audio")
+_parser.add_argument("--channel-id",  type=int, default=4)
+_args, _ = _parser.parse_known_args()
+
+_MODULE_NAME: str = _args.module_name
+_CHANNEL_ID:  int = _args.channel_id
+
+# ---------------------------------------------------------------------------
+# AA media frame constants
 # ---------------------------------------------------------------------------
 
 _FLAG_FIRST     = 0x01
@@ -84,203 +94,134 @@ _MSG_MEDIA_WITH_TIMESTAMP       = 0x0001
 _MSG_MEDIA                      = 0x0003
 _MSG_MEDIA_ACK                  = 0x0002
 
-# Stream type constants (as returned in oaa_control_channel config)
-_STREAM_MEDIA  = "MEDIA_AUDIO"
-_STREAM_SPEECH = "SPEECH_AUDIO"
-_STREAM_SYSTEM = "SYSTEM_AUDIO"
-
-# Fallback channel ids (AASDK defaults)
-_CHANNEL_MEDIA_FALLBACK  = 1
-_CHANNEL_SPEECH_FALLBACK = 2
-_CHANNEL_SYSTEM_FALLBACK = 7
-
-
-# ---------------------------------------------------------------------------
-# Per-channel state tracker
-# ---------------------------------------------------------------------------
-
-class _AudioChannelState:
-    """Minimal state machine for a single audio channel."""
-
-    def __init__(self, stream_type: str, fallback_id: int) -> None:
-        self.stream_type = stream_type
-        self.channel_id  = fallback_id
-        self.session_id  = 0
-        self.state       = "IDLE"  # IDLE | SETUP | OPEN | PLAYING | STOPPED
-
-    def __repr__(self) -> str:
-        return (
-            f"<AudioChannel {self.stream_type} ch={self.channel_id} "
-            f"session={self.session_id} state={self.state}>"
-        )
-
+_CODEC_AAC = "MEDIA_CODEC_AUDIO_AAC_LC_ADTS"
+_CODEC_PCM = "MEDIA_CODEC_AUDIO_PCM"
 
 # ---------------------------------------------------------------------------
 # AudioModule
 # ---------------------------------------------------------------------------
 
+
 class AudioModule(BaseChannelModule):
     """
-    OAA Audio channel module.
+    Single-channel OAA audio module with direct ALSA output.
 
-    Handles three audio sub-channels (MEDIA, SPEECH, SYSTEM) within a single
-    module process.  Each sub-channel has its own _AudioChannelState.
-
-    Unlike VideoModule (single channel), AudioModule registers three frame
-    subscriptions and a manual channel-id lookup because BaseChannelModule
-    only models one CHANNEL_ID.  We use CHANNEL_ID = _CHANNEL_MEDIA_FALLBACK
-    as the primary (satisfies the base class constructor), but subscribe to
-    all three frame topics ourselves.
+    One process per channel (channel_id set from CLI --channel-id).
+    Codec parameters are discovered at _init() from the sdr_bytes_hex
+    published on aa.session.active.  If the channel is AAC-LC ADTS the
+    module uses pyav to decode each frame before writing PCM to ALSA.
     """
 
-    MODULE_NAME = "audio"
-    CHANNEL_ID  = _CHANNEL_MEDIA_FALLBACK  # overwritten after config.response
-    PRIORITY    = 1
+    MODULE_NAME: str = _MODULE_NAME
+    CHANNEL_ID:  int = _CHANNEL_ID
+    PRIORITY:    int = 1
+
+    # ------------------------------------------------------------------
+    # Config schema
+    # ------------------------------------------------------------------
+
+    def get_schema(self) -> dict:
+        return {
+            "alsa_device": field_enum(
+                default="default",
+                choices=_list_alsa_devices(),
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
 
     def __init__(self) -> None:
         super().__init__()
-        self._channels: Dict[int, _AudioChannelState] = {}
-        self._by_stream: Dict[str, _AudioChannelState] = {}
-        self._channel_resolved = False
 
-        for stream_type, fallback in (
-            (_STREAM_MEDIA,  _CHANNEL_MEDIA_FALLBACK),
-            (_STREAM_SPEECH, _CHANNEL_SPEECH_FALLBACK),
-            (_STREAM_SYSTEM, _CHANNEL_SYSTEM_FALLBACK),
-        ):
-            ch = _AudioChannelState(stream_type, fallback)
-            self._channels[fallback] = ch
-            self._by_stream[stream_type] = ch
+        # Audio params — filled in _init() from sdr_bytes_hex
+        self._sample_rate:   int  = 48000
+        self._bit_depth:     int  = 16
+        self._channel_count: int  = 2
+        self._codec:         str  = _CODEC_AAC
 
-    # ------------------------------------------------------------------
-    # Channel discovery
-    # ------------------------------------------------------------------
+        # Runtime state
+        self._state:         str  = "IDLE"
+        self._session_id:    int  = 0
+        self._sdr_bytes_hex: str  = ""
 
-    def _request_oaa_config(self) -> None:
-        self.bus.publish("config.get", {
-            "module":    "oaa_control_channel",
-            "requester": self.MODULE_NAME,
-        })
-        self.log.info("Requested oaa_control_channel config for AUDIO channel discovery")
+        # ALSA PCM handle (opened in _init / on_config_changed)
+        self._pcm: alsaaudio.PCM | None = None
 
-    def on_config_response(self, topic: str, payload: dict) -> None:
-        if payload.get("module") != "oaa_control_channel":
-            return
-        if payload.get("requester") != self.MODULE_NAME:
-            return
-
-        channels = payload.get("config", {}).get("channels", [])
-        resolved = self._resolve_audio_channels(channels)
-
-        # Rebuild index with resolved ids
-        new_channels: Dict[int, _AudioChannelState] = {}
-        for stream_type, channel_id in resolved.items():
-            ch = self._by_stream.get(stream_type)
-            if ch is None:
-                continue
-            old_id = ch.channel_id
-            if old_id in self._channels:
-                del self._channels[old_id]
-            ch.channel_id = channel_id
-            new_channels[channel_id] = ch
-            self.log.info("AUDIO %s resolved: channel_id=%d", stream_type, channel_id)
-
-        # Keep entries not overwritten (fallbacks not found in config)
-        for cid, ch in self._channels.items():
-            if cid not in new_channels:
-                new_channels[cid] = ch
-                self.log.warning(
-                    "AUDIO %s not in config — fallback channel_id=%d",
-                    ch.stream_type, cid,
-                )
-        self._channels = new_channels
-
-        # Update primary CHANNEL_ID to MEDIA
-        media_ch = self._by_stream.get(_STREAM_MEDIA)
-        if media_ch:
-            self.CHANNEL_ID = media_ch.channel_id
-
-        if not self._channel_resolved:
-            self._channel_resolved = True
-            # Re-subscribe all audio frame topics
-            for cid in self._channels:
-                topic = f"oaa.frame.{cid}"
-                self.bus.subscribe(topic, self._on_oaa_frame)
-                self.log.info("Subscribed to %s", topic)
-            self.bus.publish("system.ready", {
-                "name":     self.MODULE_NAME,
-                "priority": self.PRIORITY,
-            })
-            self.log.info("system.ready published (priority=%d)", self.PRIORITY)
-
-    @staticmethod
-    def _resolve_audio_channels(channels: list) -> dict:
-        """Scan channel list and return {stream_type: channel_id} for known audio types."""
-        result = {}
-        audio_types = {_STREAM_MEDIA, _STREAM_SPEECH, _STREAM_SYSTEM}
-        for ch in channels:
-            av = ch.get("av_channel", {})
-            st = av.get("stream_type", "")
-            if st in audio_types:
-                cid = ch.get("channel_id")
-                if cid is not None:
-                    result[st] = int(cid)
-        return result
+        # PyAV codec context for AAC decoding (None when PCM)
+        self._av_codec_ctx: Any | None = None
+        self._av_codec:     Any | None = None
 
     # ------------------------------------------------------------------
-    # _init / _cleanup hooks (called by BaseChannelModule.run())
+    # _init hook — called by BaseChannelModule._on_system_start after cfg.get
     # ------------------------------------------------------------------
 
     def _init(self) -> None:
-        """Trigger config discovery; system.ready is deferred to on_config_response."""
-        self._request_oaa_config()
+        """
+        NOTE: at this point self._config["alsa_device"] may still be the
+        schema default if config_manager hasn't responded yet.  The ALSA
+        device is (re-)opened in on_config_loaded as well, so this is safe.
+        """
+        if self._sdr_bytes_hex:
+            self._apply_audio_config(self._sdr_bytes_hex)
+        self._open_alsa()
 
     def _cleanup(self) -> None:
-        for ch in self._channels.values():
-            self._set_channel_state(ch, "IDLE")
+        self._close_alsa()
+        self._close_av_codec()
+        self._set_state("IDLE")
+
+    # ------------------------------------------------------------------
+    # Config callbacks
+    # ------------------------------------------------------------------
+
+    def on_config_loaded(self, config: dict) -> None:
+        super().on_config_loaded(config)
+        # Re-open ALSA with the persisted device (may differ from default)
+        self._open_alsa()
+
+    def on_config_changed(self, key: str, value: Any) -> None:
+        super().on_config_changed(key, value)
+        if key == "alsa_device":
+            self.log.info("alsa_device changed to %r — reopening PCM", value)
+            self._open_alsa()
 
     # ------------------------------------------------------------------
     # Session lifecycle
     # ------------------------------------------------------------------
 
     def on_aa_session_active(self, topic: str, payload: dict) -> None:
-        for ch in self._channels.values():
-            ch.session_id = 0
-            self._set_channel_state(ch, "IDLE")
-        self.log.info("AA session active — audio ready")
+        """Store sdr_bytes_hex and (re-)configure codec + ALSA."""
+        sdr_hex = payload.get("sdr_bytes_hex", "")
+        if sdr_hex:
+            self._sdr_bytes_hex = sdr_hex
+            self._apply_audio_config(sdr_hex)
+            self._open_alsa()   # reopen with correct sample_rate / channels
+        self._session_id = 0
+        self._set_state("IDLE")
+        self.log.info("AA session active — ch=%d ready", self.CHANNEL_ID)
 
     def on_aa_session_shutdown(self, topic: str, payload: dict) -> None:
-        for ch in self._channels.values():
-            ch.session_id = 0
-            self._set_channel_state(ch, "IDLE")
-        self.log.info("AA session shutdown — audio reset")
+        self._session_id = 0
+        self._set_state("IDLE")
+        self.log.info("AA session shutdown — ch=%d reset", self.CHANNEL_ID)
 
     # ------------------------------------------------------------------
     # BaseChannelModule abstract interface
     # ------------------------------------------------------------------
 
     def on_channel_open(self, channel_id: int, descriptor: dict) -> None:
-        ch = self._channels.get(channel_id)
-        if ch:
-            self._set_channel_state(ch, "IDLE")
-            self.log.info("Channel %d (%s) open", channel_id, ch.stream_type)
-        else:
-            self.log.debug("on_channel_open: unknown channel_id=%d", channel_id)
+        self._set_state("IDLE")
+        self.log.info("Channel %d open", channel_id)
 
     def on_channel_close(self, channel_id: int) -> None:
-        ch = self._channels.get(channel_id)
-        if ch:
-            self._set_channel_state(ch, "IDLE")
-            self.log.info("Channel %d (%s) closed", channel_id, ch.stream_type)
+        self._set_state("IDLE")
+        self.log.info("Channel %d closed", channel_id)
 
     def on_frame(self, channel_id: int, data: bytes) -> None:
-        """Dispatch incoming raw frame bytes by AA message_id."""
-        ch = self._channels.get(channel_id)
-        if ch is None:
-            self.log.debug("on_frame: unknown channel_id=%d — dropping", channel_id)
-            return
-
-        result = self._decode_media_frame(data)
+        """Dispatch incoming frame by AA message_id."""
+        result = _decode_frame_header(data)
         if result is None:
             self.log.error("on_frame: malformed payload on ch=%d — dropping", channel_id)
             return
@@ -288,228 +229,260 @@ class AudioModule(BaseChannelModule):
         message_id, body = result
 
         if message_id == _MSG_AV_CHANNEL_SETUP_REQUEST:
-            self._handle_setup_request(ch, body)
+            self._handle_setup_request(body)
         elif message_id == _MSG_AV_CHANNEL_OPEN_REQUEST:
-            self._handle_open_request(ch, body)
+            self._handle_open_request(body)
         elif message_id == _MSG_MEDIA_WITH_TIMESTAMP:
-            self._handle_media_with_timestamp(ch, body)
+            self._handle_media_with_timestamp(body)
         elif message_id == _MSG_MEDIA:
-            self._handle_media(ch, body)
+            self._handle_media(body)
         elif message_id == _MSG_AV_CHANNEL_STOP_INDICATION:
-            self.log.info("AVChannelStopIndication on ch=%d (%s)", channel_id, ch.stream_type)
-            self._set_channel_state(ch, "STOPPED")
+            self.log.info("AVChannelStopIndication on ch=%d", channel_id)
+            self._set_state("STOPPED")
         else:
             self.log.debug(
-                "Unhandled audio msg_id=0x%04x ch=%d (%s) len=%d",
-                message_id, channel_id, ch.stream_type, len(body),
+                "Unhandled audio msg_id=0x%04x ch=%d len=%d",
+                message_id, channel_id, len(body),
             )
-
-    # ------------------------------------------------------------------
-    # BaseChannelModule._on_oaa_channel_open override
-    # (base only checks self.CHANNEL_ID; we check all known ids)
-    # ------------------------------------------------------------------
-
-    def _on_oaa_channel_open(self, topic: str, payload: dict) -> None:
-        cid = payload.get("channel_id")
-        if cid not in self._channels:
-            return
-        self._channel_open = True
-        self.log.info("oaa.channel.open for audio ch=%d", cid)
-        self.on_channel_open(cid, payload)
-
-    def _on_oaa_channel_close(self, topic: str, payload: dict) -> None:
-        cid = payload.get("channel_id")
-        if cid not in self._channels:
-            return
-        self.log.info("oaa.channel.close for audio ch=%d", cid)
-        self.on_channel_close(cid)
 
     # ------------------------------------------------------------------
     # AA message handlers
     # ------------------------------------------------------------------
 
-    def _handle_setup_request(self, ch: _AudioChannelState, body: bytes) -> None:
-        """Reply AVChannelSetupResponse (status=OK, max_unacked=1)."""
+    def _handle_setup_request(self, body: bytes) -> None:
         proto_body = b"\x08\x00\x10\x01"
-        frame = self._encode_media_frame(
-            ch.channel_id, _MSG_AV_CHANNEL_SETUP_RESPONSE, proto_body
-        )
+        frame = _encode_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_SETUP_RESPONSE, proto_body)
         self.bus.publish("aa.frame.send", frame)
-        self._set_channel_state(ch, "SETUP")
-        self.log.info(
-            "AVChannelSetupRequest ch=%d (%s) → AVChannelSetupResponse sent",
-            ch.channel_id, ch.stream_type,
-        )
+        self._set_state("SETUP")
+        self.log.info("AVChannelSetupRequest ch=%d → AVChannelSetupResponse sent", self.CHANNEL_ID)
 
-    def _handle_open_request(self, ch: _AudioChannelState, body: bytes) -> None:
-        """Reply AVChannelOpenResponse (status=OK)."""
+    def _handle_open_request(self, body: bytes) -> None:
         proto_body = b"\x08\x00"
-        frame = self._encode_media_frame(
-            ch.channel_id, _MSG_AV_CHANNEL_OPEN_RESPONSE, proto_body
-        )
+        frame = _encode_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_OPEN_RESPONSE, proto_body)
         self.bus.publish("aa.frame.send", frame)
-        self._set_channel_state(ch, "OPEN")
-        self.log.info(
-            "AVChannelOpenRequest ch=%d (%s) → AVChannelOpenResponse sent",
-            ch.channel_id, ch.stream_type,
-        )
+        self._set_state("OPEN")
+        self.log.info("AVChannelOpenRequest ch=%d → AVChannelOpenResponse sent", self.CHANNEL_ID)
 
-    def _handle_media_with_timestamp(
-        self, ch: _AudioChannelState, body: bytes
-    ) -> None:
-        """Parse MediaWithTimestamp, send MediaAck, publish audio.pcm."""
-        ts_us, pcm_data = self._parse_media_with_timestamp(body)
-
-        if ch.state not in ("OPEN", "PLAYING"):
-            self._set_channel_state(ch, "PLAYING")
-
-        # Extract session_id from body field 3 (varint) if present
-        session_id = _parse_session_id(body) or ch.session_id
+    def _handle_media_with_timestamp(self, body: bytes) -> None:
+        ts_us, encoded = _parse_media_with_timestamp(body)
+        session_id     = _parse_session_id(body) or self._session_id
         if session_id:
-            ch.session_id = session_id
+            self._session_id = session_id
 
-        self._send_media_ack(ch)
+        if self._state not in ("OPEN", "PLAYING"):
+            self._set_state("PLAYING")
 
-        if pcm_data:
-            self.bus.publish("audio.pcm", {
-                "channel_id":  ch.channel_id,
-                "stream_type": ch.stream_type,
-                "session_id":  ch.session_id,
-                "ts_us":       ts_us,
-                "data_b64":    base64.b64encode(pcm_data).decode("ascii"),
-            })
-            self.log.debug(
-                "audio.pcm published ch=%d (%s) ts=%d len=%d",
-                ch.channel_id, ch.stream_type, ts_us, len(pcm_data),
-            )
+        self._send_media_ack()
+        self._write_audio(encoded)
 
-    def _handle_media(self, ch: _AudioChannelState, body: bytes) -> None:
-        """Media frame without timestamp — treat identically, ts_us=0."""
-        if ch.state not in ("OPEN", "PLAYING"):
-            self._set_channel_state(ch, "PLAYING")
+    def _handle_media(self, body: bytes) -> None:
+        if self._state not in ("OPEN", "PLAYING"):
+            self._set_state("PLAYING")
+        self._send_media_ack()
+        self._write_audio(body)
 
-        self._send_media_ack(ch)
-
-        if body:
-            self.bus.publish("audio.pcm", {
-                "channel_id":  ch.channel_id,
-                "stream_type": ch.stream_type,
-                "session_id":  ch.session_id,
-                "ts_us":       0,
-                "data_b64":    base64.b64encode(body).decode("ascii"),
-            })
-
-    def _send_media_ack(self, ch: _AudioChannelState) -> None:
+    def _send_media_ack(self) -> None:
         proto_body = (
-            _encode_varint_field(1, ch.session_id)
+            _encode_varint_field(1, self._session_id)
             + _encode_varint_field(2, 1)
         )
-        frame = self._encode_media_frame(ch.channel_id, _MSG_MEDIA_ACK, proto_body)
+        frame = _encode_frame(self.CHANNEL_ID, _MSG_MEDIA_ACK, proto_body)
         self.bus.publish("aa.frame.send", frame)
-        self.log.debug(
-            "MediaAck sent ch=%d (%s) session_id=%d",
-            ch.channel_id, ch.stream_type, ch.session_id,
+        self.log.debug("MediaAck sent ch=%d session_id=%d", self.CHANNEL_ID, self._session_id)
+
+    # ------------------------------------------------------------------
+    # Audio pipeline
+    # ------------------------------------------------------------------
+
+    def _apply_audio_config(self, sdr_bytes_hex: str) -> None:
+        """Read sample_rate / bit_depth / channel_count / codec from SDR hex."""
+        cfg = audio_config_from_sdr_bytes(sdr_bytes_hex, self.CHANNEL_ID)
+        if cfg is None:
+            self.log.warning(
+                "_apply_audio_config: channel_id=%d not found in SDR — using defaults",
+                self.CHANNEL_ID,
+            )
+            return
+        self._sample_rate   = cfg.get("sample_rate",   self._sample_rate)
+        self._bit_depth     = cfg.get("bit_depth",     self._bit_depth)
+        self._channel_count = cfg.get("channel_count", self._channel_count)
+        self._codec         = cfg.get("codec",         self._codec)
+        self.log.info(
+            "Audio config ch=%d: rate=%d depth=%d channels=%d codec=%s",
+            self.CHANNEL_ID, self._sample_rate, self._bit_depth,
+            self._channel_count, self._codec,
         )
+        self._open_av_codec()
+
+    def _open_av_codec(self) -> None:
+        """Open pyav codec context if codec is AAC, close it otherwise."""
+        self._close_av_codec()
+        if self._codec != _CODEC_AAC:
+            self.log.info("Codec %s — no pyav decoder needed", self._codec)
+            return
+        try:
+            codec = av.codec.Codec("aac", "r")
+            ctx   = codec.create()
+            ctx.sample_rate  = self._sample_rate
+            ctx.channels     = self._channel_count
+            self._av_codec_ctx = ctx
+            self._av_codec     = codec
+            self.log.info(
+                "pyav AAC decoder opened: rate=%d channels=%d",
+                self._sample_rate, self._channel_count,
+            )
+        except Exception as exc:
+            self.log.error("_open_av_codec: failed — %s", exc)
+            self._av_codec_ctx = None
+
+    def _close_av_codec(self) -> None:
+        if self._av_codec_ctx is not None:
+            try:
+                self._av_codec_ctx.close()
+            except Exception:
+                pass
+            self._av_codec_ctx = None
+            self._av_codec     = None
+
+    def _open_alsa(self) -> None:
+        """Open (or re-open) the ALSA PCM device with current audio params."""
+        self._close_alsa()
+        device = self._config.get("alsa_device", "default")
+        fmt = {
+            8:  alsaaudio.PCM_FORMAT_S8,
+            16: alsaaudio.PCM_FORMAT_S16_LE,
+            24: alsaaudio.PCM_FORMAT_S24_LE,
+            32: alsaaudio.PCM_FORMAT_S32_LE,
+        }.get(self._bit_depth, alsaaudio.PCM_FORMAT_S16_LE)
+        try:
+            self._pcm = alsaaudio.PCM(
+                type=alsaaudio.PCM_PLAYBACK,
+                mode=alsaaudio.PCM_NORMAL,
+                device=device,
+                channels=self._channel_count,
+                rate=self._sample_rate,
+                format=fmt,
+                periodsize=1024,
+            )
+            self.log.info(
+                "ALSA PCM opened: device=%r rate=%d channels=%d depth=%d",
+                device, self._sample_rate, self._channel_count, self._bit_depth,
+            )
+        except alsaaudio.ALSAAudioError as exc:
+            self.log.error("_open_alsa: failed to open device %r — %s", device, exc)
+            self._pcm = None
+
+    def _close_alsa(self) -> None:
+        if self._pcm is not None:
+            try:
+                self._pcm.close()
+            except Exception:
+                pass
+            self._pcm = None
+
+    def _write_audio(self, encoded: bytes) -> None:
+        """Decode (if AAC) and write raw PCM bytes to ALSA."""
+        if not encoded:
+            return
+
+        if self._codec == _CODEC_AAC:
+            pcm = self._decode_aac(encoded)
+        else:
+            pcm = encoded
+
+        if not pcm or self._pcm is None:
+            return
+
+        try:
+            self._pcm.write(pcm)
+        except alsaaudio.ALSAAudioError as exc:
+            self.log.warning("ALSA write error ch=%d — %s", self.CHANNEL_ID, exc)
+
+    def _decode_aac(self, adts_frame: bytes) -> bytes:
+        """Decode a single AAC-LC ADTS frame to interleaved signed-16 PCM."""
+        if self._av_codec_ctx is None:
+            return b""
+        try:
+            packet = av.Packet(adts_frame)
+            pcm_chunks: list[bytes] = []
+            for frame in self._av_codec_ctx.decode(packet):
+                # reformat to s16, interleaved
+                resampled = frame.to_ndarray(format="s16", layout="stereo" if self._channel_count > 1 else "mono")
+                pcm_chunks.append(resampled.tobytes())
+            return b"".join(pcm_chunks)
+        except Exception as exc:
+            self.log.warning("AAC decode error ch=%d — %s", self.CHANNEL_ID, exc)
+            return b""
 
     # ------------------------------------------------------------------
     # State helper
     # ------------------------------------------------------------------
 
-    def _set_channel_state(self, ch: _AudioChannelState, new_state: str) -> None:
-        ch.state = new_state
+    def _set_state(self, new_state: str) -> None:
+        if self._state == new_state:
+            return
+        self._state = new_state
         self.bus.publish("audio.state", {
-            "channel_id":  ch.channel_id,
-            "stream_type": ch.stream_type,
-            "state":       new_state,
+            "channel_id": self.CHANNEL_ID,
+            "state":      new_state,
         })
-        self.log.info(
-            "audio.state ch=%d (%s) → %s",
-            ch.channel_id, ch.stream_type, new_state,
-        )
+        self.log.info("audio.state ch=%d → %s", self.CHANNEL_ID, new_state)
 
     # ------------------------------------------------------------------
-    # MediaWithTimestamp parser
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
-        """Minimal manual proto parse: field 1=timestamp, field 2=data."""
-        ts_us = 0
-        data  = b""
-        pos   = 0
-
-        while pos < len(body):
-            tag_byte     = body[pos]; pos += 1
-            field_number = tag_byte >> 3
-            wire_type    = tag_byte & 0x07
-
-            if field_number == 1 and wire_type == 1:    # timestamp fixed64
-                if pos + 8 > len(body):
-                    break
-                ts_us = struct.unpack_from("<Q", body, pos)[0]
-                pos += 8
-            elif field_number == 2 and wire_type == 2:  # PCM data bytes
-                length, pos = _read_varint(body, pos)
-                if length is None:
-                    break
-                data = body[pos: pos + length]
-                pos += length
-            else:
-                # Skip unknown fields
-                if wire_type == 0:
-                    _, pos = _read_varint(body, pos)
-                elif wire_type == 1:
-                    pos += 8
-                elif wire_type == 2:
-                    length, pos = _read_varint(body, pos)
-                    if length:
-                        pos += length
-                elif wire_type == 5:
-                    pos += 4
-                else:
-                    break
-
-        return ts_us, data
-
-    # ------------------------------------------------------------------
-    # Frame encode / decode helpers  (identical to VideoModule)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _encode_media_frame(
-        channel_id: int, message_id: int, proto_body: bytes
-    ) -> dict:
-        payload = struct.pack(">H", message_id) + proto_body
-        return {
-            "channel_id":  channel_id,
-            "flags":       _FLAG_FULL,
-            "payload_hex": payload.hex(),
-        }
-
-    @staticmethod
-    def _decode_media_frame(data: bytes) -> tuple[int, bytes] | None:
-        if len(data) < 2:
-            return None
-        message_id = struct.unpack_from(">H", data, 0)[0]
-        return message_id, data[2:]
-
-    # ------------------------------------------------------------------
-    # run() override: add extra subscriptions before calling super
+    # run() override: add session subscriptions then delegate to base
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        self.bus.subscribe("config.response",     self.on_config_response)
         self.bus.subscribe("aa.session.active",   self.on_aa_session_active)
         self.bus.subscribe("aa.session.shutdown", self.on_aa_session_shutdown)
-        # Override oaa.channel lifecycle for multi-channel handling
-        self.bus.subscribe("oaa.channel.open",  self._on_oaa_channel_open)
-        self.bus.subscribe("oaa.channel.close", self._on_oaa_channel_close)
         super().run()
 
 
 # ---------------------------------------------------------------------------
-# Minimal protobuf varint helpers  (no proto dependency)
+# ALSA device discovery
 # ---------------------------------------------------------------------------
+
+def _list_alsa_devices() -> list[str]:
+    """Return all available ALSA PCM playback device names.
+
+    Always starts with "default" so the schema default is always valid.
+    Silently returns ["default"] if alsaaudio is not available or no
+    devices are found.
+    """
+    try:
+        cards   = alsaaudio.cards()
+        devices = ["default"]
+        for i, _card in enumerate(cards):
+            try:
+                for pcm in alsaaudio.pcms(alsaaudio.PCM_PLAYBACK):
+                    if pcm not in devices:
+                        devices.append(pcm)
+            except Exception:
+                devices.append(f"hw:{i}")
+        return devices if len(devices) > 1 else ["default"]
+    except Exception:
+        return ["default"]
+
+
+# ---------------------------------------------------------------------------
+# Proto frame helpers  (no proto dependency — manual varint)
+# ---------------------------------------------------------------------------
+
+def _decode_frame_header(data: bytes) -> tuple[int, bytes] | None:
+    if len(data) < 2:
+        return None
+    message_id = struct.unpack_from(">H", data, 0)[0]
+    return message_id, data[2:]
+
+
+def _encode_frame(channel_id: int, message_id: int, proto_body: bytes) -> dict:
+    payload = struct.pack(">H", message_id) + proto_body
+    return {
+        "channel_id":  channel_id,
+        "flags":       _FLAG_FULL,
+        "payload_hex": payload.hex(),
+    }
+
 
 def _read_varint(buf: bytes, pos: int) -> tuple[int | None, int]:
     result = 0
@@ -539,6 +512,42 @@ def _encode_varint_field(field_number: int, value: int) -> bytes:
     return _encode_varint(tag) + _encode_varint(value)
 
 
+def _parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
+    """Manual proto parse: field 1=timestamp (fixed64), field 2=data (bytes)."""
+    ts_us = 0
+    data  = b""
+    pos   = 0
+    while pos < len(body):
+        tag_byte     = body[pos]; pos += 1
+        field_number = tag_byte >> 3
+        wire_type    = tag_byte & 0x07
+        if field_number == 1 and wire_type == 1:
+            if pos + 8 > len(body):
+                break
+            ts_us = struct.unpack_from("<Q", body, pos)[0]
+            pos += 8
+        elif field_number == 2 and wire_type == 2:
+            length, pos = _read_varint(body, pos)
+            if length is None:
+                break
+            data = body[pos: pos + length]
+            pos += length
+        else:
+            if wire_type == 0:
+                _, pos = _read_varint(body, pos)
+            elif wire_type == 1:
+                pos += 8
+            elif wire_type == 2:
+                length, pos = _read_varint(body, pos)
+                if length:
+                    pos += length
+            elif wire_type == 5:
+                pos += 4
+            else:
+                break
+    return ts_us, data
+
+
 def _parse_session_id(body: bytes) -> int | None:
     """Extract proto field 3 (varint) = session_id from MediaWithTimestamp."""
     pos = 0
@@ -549,7 +558,6 @@ def _parse_session_id(body: bytes) -> int | None:
         if field_number == 3 and wire_type == 0:
             val, _ = _read_varint(body, pos)
             return val
-        # skip field
         if wire_type == 0:
             _, pos = _read_varint(body, pos)
         elif wire_type == 1:
