@@ -2,17 +2,21 @@
 NemoHeadUnit-Wireless v2 — channel_modules/audio
 
 Single-channel audio module.  One process instance per audio channel
-(MEDIA / SPEECH / SYSTEM).  The channel_id and MODULE_NAME are supplied
-by the orchestrator at launch via CLI arguments:
+(MEDIA / SPEECH / SYSTEM).  All channel parameters are supplied by the
+orchestrator (channel_manager) at launch via CLI arguments:
 
     python -m channel_modules.audio.main \
-        --module-name channel_audio_4 \
-        --channel-id  4
+        --module-name  channel_audio_4 \
+        --channel-id   4 \
+        --sdr-bytes-hex <hex string from ServiceDiscoveryResponse>
 
 Module contract:
   Name        : <--module-name>   (e.g. channel_audio_4)
   Priority    : 1
   Channel ID  : <--channel-id>    (e.g. 4 for MediaAudio)
+  SDR bytes   : <--sdr-bytes-hex> hex-encoded ServiceDiscoveryResponse
+                used at _init() to extract sample_rate / bit_depth /
+                channel_count / codec for this channel_id.
   Subscribes  : system.readytostart
                 system.start
                 system.stop
@@ -21,22 +25,21 @@ Module contract:
                 oaa.channel.open     {channel_id, ...}
                 oaa.channel.close    {channel_id}
                 oaa.frame.<ch_id>    raw bytes
-                aa.session.active    {}
                 aa.session.shutdown  {}
   Publishes   : system.module_ready  {name, priority}
                 system.ready         {name, priority}
                 aa.frame.send        {channel_id, flags, payload_hex}
                 audio.state          {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
-  Config keys : alsa_device  str  "default"  ALSA PCM device name
+  Config keys : alsa_device  enum  "default"  ALSA PCM device name
 
 Flow:
   1. On system.start: cfg.get(schema) triggers config load + _init().
-  2. _init(): parse sdr_bytes_hex from oaa.session.active payload to read
-     sample_rate / bit_depth / channel_count / codec for this channel_id.
-     Open ALSA PCM device.  If codec is AAC-LC ADTS, open pyav codec context.
+  2. _init(): call _apply_audio_config(_SDR_BYTES_HEX) to read codec params,
+     open ALSA PCM device, open pyav codec context if codec is AAC-LC ADTS.
   3. BaseChannelModule handles oaa.channel.open/close and oaa.frame.<id>.
-  4. on_frame(): decode frame, handle AA messages, write PCM to ALSA.
+  4. on_frame(): decode AA frame header, dispatch by message_id, write PCM to ALSA.
   5. on_config_changed("alsa_device"): re-open PCM on the fly.
+  6. on_aa_session_shutdown: reset state to IDLE.
 """
 
 from __future__ import annotations
@@ -69,12 +72,15 @@ from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 # ---------------------------------------------------------------------------
 
 _parser = argparse.ArgumentParser(add_help=False)
-_parser.add_argument("--module-name", default="channel_audio")
-_parser.add_argument("--channel-id",  type=int, default=4)
+_parser.add_argument("--module-name",   default="channel_audio")
+_parser.add_argument("--channel-id",    type=int, default=4)
+_parser.add_argument("--sdr-bytes-hex", default="",
+                     help="Hex-encoded ServiceDiscoveryResponse bytes")
 _args, _ = _parser.parse_known_args()
 
-_MODULE_NAME: str = _args.module_name
-_CHANNEL_ID:  int = _args.channel_id
+_MODULE_NAME:   str = _args.module_name
+_CHANNEL_ID:    int = _args.channel_id
+_SDR_BYTES_HEX: str = _args.sdr_bytes_hex
 
 # ---------------------------------------------------------------------------
 # AA media frame constants
@@ -106,10 +112,10 @@ class AudioModule(BaseChannelModule):
     """
     Single-channel OAA audio module with direct ALSA output.
 
-    One process per channel (channel_id set from CLI --channel-id).
-    Codec parameters are discovered at _init() from the sdr_bytes_hex
-    published on aa.session.active.  If the channel is AAC-LC ADTS the
-    module uses pyav to decode each frame before writing PCM to ALSA.
+    One process per channel; all parameters (channel_id, SDR bytes) are
+    provided via CLI by channel_manager at spawn time.
+    Codec parameters are read from --sdr-bytes-hex in _init().
+    AAC-LC ADTS frames are decoded via pyav before writing PCM to ALSA.
     """
 
     MODULE_NAME: str = _MODULE_NAME
@@ -135,18 +141,17 @@ class AudioModule(BaseChannelModule):
     def __init__(self) -> None:
         super().__init__()
 
-        # Audio params — filled in _init() from sdr_bytes_hex
-        self._sample_rate:   int  = 48000
-        self._bit_depth:     int  = 16
-        self._channel_count: int  = 2
-        self._codec:         str  = _CODEC_AAC
+        # Audio params — populated from SDR in _init()
+        self._sample_rate:   int = 48000
+        self._bit_depth:     int = 16
+        self._channel_count: int = 2
+        self._codec:         str = _CODEC_AAC
 
         # Runtime state
-        self._state:         str  = "IDLE"
-        self._session_id:    int  = 0
-        self._sdr_bytes_hex: str  = ""
+        self._state:      str = "IDLE"
+        self._session_id: int = 0
 
-        # ALSA PCM handle (opened in _init / on_config_changed)
+        # ALSA PCM handle
         self._pcm: alsaaudio.PCM | None = None
 
         # PyAV codec context for AAC decoding (None when PCM)
@@ -159,12 +164,19 @@ class AudioModule(BaseChannelModule):
 
     def _init(self) -> None:
         """
-        NOTE: at this point self._config["alsa_device"] may still be the
-        schema default if config_manager hasn't responded yet.  The ALSA
-        device is (re-)opened in on_config_loaded as well, so this is safe.
+        Apply audio config from SDR bytes (supplied at launch via CLI).
+        Opens ALSA PCM and pyav codec context.
+        NOTE: alsa_device may still be schema default if config_manager
+        hasn't responded yet; on_config_loaded re-opens the device.
         """
-        if self._sdr_bytes_hex:
-            self._apply_audio_config(self._sdr_bytes_hex)
+        if _SDR_BYTES_HEX:
+            self._apply_audio_config(_SDR_BYTES_HEX)
+        else:
+            self.log.warning(
+                "_init: --sdr-bytes-hex not provided — "
+                "using default audio params (48kHz 16bit stereo AAC)"
+            )
+            self._open_av_codec()  # open with defaults
         self._open_alsa()
 
     def _cleanup(self) -> None:
@@ -178,8 +190,7 @@ class AudioModule(BaseChannelModule):
 
     def on_config_loaded(self, config: dict) -> None:
         super().on_config_loaded(config)
-        # Re-open ALSA with the persisted device (may differ from default)
-        self._open_alsa()
+        self._open_alsa()  # reopen with persisted device
 
     def on_config_changed(self, key: str, value: Any) -> None:
         super().on_config_changed(key, value)
@@ -188,19 +199,8 @@ class AudioModule(BaseChannelModule):
             self._open_alsa()
 
     # ------------------------------------------------------------------
-    # Session lifecycle
+    # Session lifecycle (shutdown only — config already set from CLI)
     # ------------------------------------------------------------------
-
-    def on_aa_session_active(self, topic: str, payload: dict) -> None:
-        """Store sdr_bytes_hex and (re-)configure codec + ALSA."""
-        sdr_hex = payload.get("sdr_bytes_hex", "")
-        if sdr_hex:
-            self._sdr_bytes_hex = sdr_hex
-            self._apply_audio_config(sdr_hex)
-            self._open_alsa()   # reopen with correct sample_rate / channels
-        self._session_id = 0
-        self._set_state("IDLE")
-        self.log.info("AA session active — ch=%d ready", self.CHANNEL_ID)
 
     def on_aa_session_shutdown(self, topic: str, payload: dict) -> None:
         self._session_id = 0
@@ -302,6 +302,7 @@ class AudioModule(BaseChannelModule):
                 "_apply_audio_config: channel_id=%d not found in SDR — using defaults",
                 self.CHANNEL_ID,
             )
+            self._open_av_codec()
             return
         self._sample_rate   = cfg.get("sample_rate",   self._sample_rate)
         self._bit_depth     = cfg.get("bit_depth",     self._bit_depth)
@@ -323,8 +324,8 @@ class AudioModule(BaseChannelModule):
         try:
             codec = av.codec.Codec("aac", "r")
             ctx   = codec.create()
-            ctx.sample_rate  = self._sample_rate
-            ctx.channels     = self._channel_count
+            ctx.sample_rate = self._sample_rate
+            ctx.channels    = self._channel_count
             self._av_codec_ctx = ctx
             self._av_codec     = codec
             self.log.info(
@@ -384,15 +385,9 @@ class AudioModule(BaseChannelModule):
         """Decode (if AAC) and write raw PCM bytes to ALSA."""
         if not encoded:
             return
-
-        if self._codec == _CODEC_AAC:
-            pcm = self._decode_aac(encoded)
-        else:
-            pcm = encoded
-
+        pcm = self._decode_aac(encoded) if self._codec == _CODEC_AAC else encoded
         if not pcm or self._pcm is None:
             return
-
         try:
             self._pcm.write(pcm)
         except alsaaudio.ALSAAudioError as exc:
@@ -406,8 +401,8 @@ class AudioModule(BaseChannelModule):
             packet = av.Packet(adts_frame)
             pcm_chunks: list[bytes] = []
             for frame in self._av_codec_ctx.decode(packet):
-                # reformat to s16, interleaved
-                resampled = frame.to_ndarray(format="s16", layout="stereo" if self._channel_count > 1 else "mono")
+                layout = "stereo" if self._channel_count > 1 else "mono"
+                resampled = frame.to_ndarray(format="s16", layout=layout)
                 pcm_chunks.append(resampled.tobytes())
             return b"".join(pcm_chunks)
         except Exception as exc:
@@ -429,11 +424,10 @@ class AudioModule(BaseChannelModule):
         self.log.info("audio.state ch=%d → %s", self.CHANNEL_ID, new_state)
 
     # ------------------------------------------------------------------
-    # run() override: add session subscriptions then delegate to base
+    # run() override: add session shutdown subscription then delegate
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        self.bus.subscribe("aa.session.active",   self.on_aa_session_active)
         self.bus.subscribe("aa.session.shutdown", self.on_aa_session_shutdown)
         super().run()
 
@@ -443,23 +437,13 @@ class AudioModule(BaseChannelModule):
 # ---------------------------------------------------------------------------
 
 def _list_alsa_devices() -> list[str]:
-    """Return all available ALSA PCM playback device names.
-
-    Always starts with "default" so the schema default is always valid.
-    Silently returns ["default"] if alsaaudio is not available or no
-    devices are found.
-    """
+    """Return available ALSA PCM playback device names, always starting with "default"."""
     try:
-        cards   = alsaaudio.cards()
         devices = ["default"]
-        for i, _card in enumerate(cards):
-            try:
-                for pcm in alsaaudio.pcms(alsaaudio.PCM_PLAYBACK):
-                    if pcm not in devices:
-                        devices.append(pcm)
-            except Exception:
-                devices.append(f"hw:{i}")
-        return devices if len(devices) > 1 else ["default"]
+        for pcm in alsaaudio.pcms(alsaaudio.PCM_PLAYBACK):
+            if pcm not in devices:
+                devices.append(pcm)
+        return devices
     except Exception:
         return ["default"]
 
