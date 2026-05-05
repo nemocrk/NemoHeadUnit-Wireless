@@ -40,6 +40,12 @@ Flow:
   4. on_frame(): decode AA frame header, dispatch by message_id, write PCM.
   5. on_config_changed("audio_device"): re-open stream on the fly.
   6. on_aa_session_shutdown: reset state to IDLE.
+
+Readiness:
+  system.ready is emitted lazily by BaseChannelModule._try_publish_ready()
+  once _init_done AND _config_loaded AND _is_ready() are all True.
+  _is_ready() returns True only when the sounddevice stream is open,
+  so channel_manager never unblocks the phone before audio is operational.
 """
 
 from __future__ import annotations
@@ -117,6 +123,8 @@ class AudioModule(BaseChannelModule):
     Codec parameters are read from --sdr-bytes-hex in _init().
     AAC-LC ADTS frames are decoded via pyav before writing PCM to the stream.
     Audio errors are logged but do not crash the module.
+
+    system.ready is gated on the sounddevice stream being open (_is_ready).
     """
 
     MODULE_NAME: str = _MODULE_NAME
@@ -160,6 +168,13 @@ class AudioModule(BaseChannelModule):
         self._av_codec:     Any | None = None
 
     # ------------------------------------------------------------------
+    # Readiness gate — system.ready only when stream is open
+    # ------------------------------------------------------------------
+
+    def _is_ready(self) -> bool:
+        return self._stream is not None
+
+    # ------------------------------------------------------------------
     # _init hook — called by BaseChannelModule._on_system_start after cfg.get
     # ------------------------------------------------------------------
 
@@ -168,7 +183,8 @@ class AudioModule(BaseChannelModule):
         Apply audio config from SDR bytes (supplied at launch via CLI).
         Opens sounddevice RawOutputStream and pyav codec context.
         NOTE: audio_device may still be schema default if config_manager
-        hasn't responded yet; on_config_loaded re-opens the stream.
+        hasn't responded yet; on_config_loaded re-opens the stream with
+        the persisted device and then triggers _try_publish_ready().
         """
         if _SDR_BYTES_HEX:
             self._apply_audio_config(_SDR_BYTES_HEX)
@@ -190,8 +206,12 @@ class AudioModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def on_config_loaded(self, config: dict) -> None:
+        # super() merges config into self._config, sets _config_loaded=True
+        # and calls _try_publish_ready() — which checks _is_ready() after
+        # we re-open the stream below.
         super().on_config_loaded(config)
         self._open_stream()  # reopen with persisted device
+        self._try_publish_ready()  # re-check now that stream may be open
 
     def on_config_changed(self, key: str, value: Any) -> None:
         super().on_config_changed(key, value)
