@@ -20,10 +20,19 @@ system.ready is emitted only when ALL of the following are true:
   1. _init() has completed
   2. on_config_loaded() has been called (persisted config applied)
   3. _is_ready() returns True (default: True)
+  4. self.channel_config is not None (SDR lookup succeeded)
 
 Subclasses that manage an external resource (stream, pipeline, socket)
 can override _is_ready() to gate readiness on that resource being open.
 All other logic stays in BaseChannelModule — no override needed.
+
+---
+CLI arguments (parsed at import time):
+
+  --module-name    str   module name override (default: MODULE_NAME class attr)
+  --channel-id     int   OAA channel id (required for all channel modules)
+  --sdr-bytes-hex  str   hex-encoded ServiceDiscoveryResponse bytes
+                         used to populate self.channel_config
 
 ---
 Channel lifecycle (OAA-specific):
@@ -40,7 +49,8 @@ Channel lifecycle (OAA-specific):
 ---
 Subclass responsibilities:
 
-  - Set MODULE_NAME and CHANNEL_ID as class attributes
+  - Set MODULE_NAME as a class attribute
+  - Set CHANNEL_ID as class attribute fallback (overridden by --channel-id CLI)
   - Implement on_channel_open(channel_id, descriptor)
   - Implement on_channel_close(channel_id)
   - Implement on_frame(channel_id, data)
@@ -51,6 +61,7 @@ Subclass responsibilities:
 
 from __future__ import annotations
 
+import argparse
 import sys
 import time
 from abc import ABC, abstractmethod
@@ -63,14 +74,27 @@ from typing import Any
 _HERE        = Path(__file__).parent          # v2/modules/channel_modules/
 _MODULES     = _HERE.parent                   # v2/modules/
 _V2          = _MODULES.parent                # v2/
+_REPO        = _V2.parent                     # repo root
 
-for _p in (_V2, _MODULES):
+for _p in (_V2, _MODULES, _REPO):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
 from shared.bus_client import BusClient        # noqa: E402
 from shared.config_client import ConfigClient  # noqa: E402
 from shared.logger import get_logger           # noqa: E402
+from shared.proto_utils import channel_config_from_sdr  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Module-level CLI parsing
+# Parsed once at import time; subclasses read _CLI_ARGS at __init__.
+# add_help=False so subclasses can extend without conflicts.
+# ---------------------------------------------------------------------------
+_cli_parser = argparse.ArgumentParser(add_help=False)
+_cli_parser.add_argument("--module-name",   default=None)
+_cli_parser.add_argument("--channel-id",    type=int, default=None)
+_cli_parser.add_argument("--sdr-bytes-hex", default="")
+_CLI_ARGS, _ = _cli_parser.parse_known_args()
 
 
 class BaseChannelModule(ABC):
@@ -78,24 +102,24 @@ class BaseChannelModule(ABC):
 
     Concrete subclasses must define:
         MODULE_NAME : str   — matches the folder name (e.g. "video")
-        CHANNEL_ID  : int   — OAA channel number (e.g. 3 for video)
+        CHANNEL_ID  : int   — fallback OAA channel number if --channel-id not given
         PRIORITY    : int   — boot priority level (default 1 = services)
+
+    After __init__:
+        self.channel_config  — full channel dict from SDR, or None if lookup failed.
+                               Hard-fails system.ready when None.
+        self.CHANNEL_ID      — overridden by --channel-id CLI arg if provided.
 
     Example skeleton::
 
         class VideoModule(BaseChannelModule):
             MODULE_NAME = "video"
-            CHANNEL_ID  = 3
+            CHANNEL_ID  = 3       # fallback only
             PRIORITY    = 1
 
-            def on_channel_open(self, channel_id: int, descriptor: dict) -> None:
-                ...
-
-            def on_channel_close(self, channel_id: int) -> None:
-                ...
-
-            def on_frame(self, channel_id: int, data: bytes) -> None:
-                ...
+            def on_channel_open(self, channel_id: int, descriptor: dict) -> None: ...
+            def on_channel_close(self, channel_id: int) -> None: ...
+            def on_frame(self, channel_id: int, data: bytes) -> None: ...
     """
 
     # Subclasses MUST override these
@@ -108,14 +132,38 @@ class BaseChannelModule(ABC):
     # ------------------------------------------------------------------
 
     def __init__(self) -> None:
+        # Apply CLI overrides before any validation
+        if _CLI_ARGS.module_name is not None:
+            self.MODULE_NAME = _CLI_ARGS.module_name
+        if _CLI_ARGS.channel_id is not None:
+            self.CHANNEL_ID = _CLI_ARGS.channel_id
+
         if not self.MODULE_NAME:
             raise ValueError(f"{type(self).__name__}: MODULE_NAME must be set")
-        if self.CHANNEL_ID < 0:
-            raise ValueError(f"{type(self).__name__}: CHANNEL_ID must be set")
 
         self.bus = BusClient(module_name=self.MODULE_NAME)
         self.log = get_logger(self.MODULE_NAME, bus=self.bus)
         self.cfg = ConfigClient(bus=self.bus, module_name=self.MODULE_NAME)
+
+        # Populate channel_config from SDR (None = channel not found / SDR missing)
+        sdr_hex = _CLI_ARGS.sdr_bytes_hex
+        if sdr_hex and self.CHANNEL_ID >= 0:
+            self.channel_config: dict | None = channel_config_from_sdr(
+                sdr_hex, self.CHANNEL_ID
+            )
+            if self.channel_config is None:
+                self.log.error(
+                    "channel_config_from_sdr: channel_id=%d not found in SDR — "
+                    "system.ready will NOT be published",
+                    self.CHANNEL_ID,
+                )
+        else:
+            self.channel_config = None
+            if not sdr_hex:
+                self.log.warning(
+                    "--sdr-bytes-hex not provided — channel_config is None, "
+                    "system.ready will NOT be published"
+                )
 
         # In-RAM config seeded from schema defaults
         schema = self.get_schema()
@@ -198,10 +246,21 @@ class BaseChannelModule(ABC):
           - on_config_loaded() called  (_config_loaded)
             OR module has no schema (config_manager will never respond)
           - _is_ready() returns True
+          - self.channel_config is not None (SDR lookup succeeded)
+
+        Hard-fails silently on missing channel_config: logs error, does NOT
+        publish system.ready, so channel_manager never unblocks the phone.
 
         Safe to call multiple times — emits at most once per session.
         """
         if self._ready_published:
+            return
+        if self.channel_config is None:
+            self.log.error(
+                "_try_publish_ready: channel_config is None — "
+                "system.ready will NOT be published for %s",
+                self.MODULE_NAME,
+            )
             return
         has_schema = bool(self.get_schema())
         config_ok  = (not has_schema) or self._config_loaded
