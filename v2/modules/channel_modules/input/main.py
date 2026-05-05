@@ -18,10 +18,7 @@ Module contract:
                 input.touch               {action, pointers, action_index?, disp_channel_id?}
                 input.key                 {keycode, down, metastate?, longpress?, disp_channel_id?}
   Publishes   : channel_manager.module_ready       {name, priority}
-                channel_manager.module_ready              {name, priority}
-                aa.frame.send             {channel_id, flags, payload_hex}  ← ChannelOpenResponse,
-                                                                               KeyBindingResponse,
-                                                                               InputReport
+                aa.frame.send             bytes  (via BaseChannelModule.send_frame)
                 input.state               {state}  IDLE | OPEN | BOUND
 
 Flow:
@@ -33,7 +30,7 @@ Flow:
        - ChannelOpenRequest   → reply ChannelOpenResponse (STATUS_SUCCESS)
        - KeyBindingRequest    → negotiate keycodes, reply KeyBindingResponse
   4. On input.touch / input.key (from UI layer): build InputReport and send
-     via aa.frame.send.
+     via self.send_frame().
   5. On aa.session.shutdown: reset to IDLE, clear channel reference.
 
 Input report encoding:
@@ -56,20 +53,20 @@ from pathlib import Path
 from typing import List, Tuple
 
 # ---------------------------------------------------------------------------
-# sys.path bootstrap — identical to audio / video
+# sys.path bootstrap
 # ---------------------------------------------------------------------------
-_HERE         = Path(__file__).parent          # v2/modules/channel_modules/_template/
-_CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
-_MODULES      = _CHANNEL_MODS.parent           # v2/modules/
-_V2           = _MODULES.parent                # v2/
-_PROTOS       = _V2 / "protos"                 # v2/protos/
+_HERE         = Path(__file__).parent
+_CHANNEL_MODS = _HERE.parent
+_MODULES      = _CHANNEL_MODS.parent
+_V2           = _MODULES.parent
+_PROTOS       = _V2 / "protos"
 
 for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
-from shared.proto_utils import encode_aa_frame, decode_aa_frame    # noqa: E402
+from shared.proto_utils import decode_aa_frame                     # noqa: E402
 
 # Proto — control
 from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
@@ -82,7 +79,7 @@ from oaa.input.InputBindingResponseMessage_pb2 import InputBindingResponse      
 # ---------------------------------------------------------------------------
 # AA message IDs
 # ---------------------------------------------------------------------------
-    
+
 _MSG_CHANNEL_OPEN_REQUEST   = ControlMessage.CHANNEL_OPEN_REQUEST
 _MSG_CHANNEL_OPEN_RESPONSE  = ControlMessage.CHANNEL_OPEN_RESPONSE
 
@@ -138,6 +135,10 @@ class InputModule(BaseChannelModule):
     Receives ChannelOpenRequest and KeyBindingRequest from the phone,
     then relays InputReports (touch + key events) published on the bus
     by the UI layer.
+
+    All outgoing AA frames are sent via self.send_frame(message_id, proto_body)
+    which is provided by BaseChannelModule and always sets the encrypted flag
+    consistently for post-handshake channel traffic.
 
     channel_id and SDR bytes are provided at spawn time via CLI by
     channel_manager and parsed by BaseChannelModule into self.CHANNEL_ID
@@ -225,8 +226,7 @@ class InputModule(BaseChannelModule):
     def _handle_channel_open_request(self, body: bytes) -> None:
         resp = ChannelOpenResponse()
         resp.status = 0  # STATUS_SUCCESS
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
-        self.bus.publish("aa.frame.send", frame)
+        self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest → ChannelOpenResponse sent (STATUS_SUCCESS)")
 
@@ -248,8 +248,7 @@ class InputModule(BaseChannelModule):
 
         resp = InputBindingResponse()
         resp.status = 0  # STATUS_SUCCESS (int32, no enum in proto)
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_KEY_BINDING_RESPONSE, resp.SerializeToString())
-        self.bus.publish("aa.frame.send", frame)
+        self.send_frame(_MSG_KEY_BINDING_RESPONSE, resp.SerializeToString())
         self._set_state("BOUND")
         self.log.info(
             "KeyBindingRequest → InputBindingResponse sent (%d keycodes bound)",
@@ -275,8 +274,7 @@ class InputModule(BaseChannelModule):
             self.log.warning("on_input_touch: empty pointers list — dropping")
             return
         report_bytes = _build_input_report_touch(action, pointers, action_index, disp_channel_id)
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_INPUT_REPORT, report_bytes)
-        self.bus.publish("aa.frame.send", frame)
+        self.send_frame(_MSG_INPUT_REPORT, report_bytes)
         self.log.debug("TouchEvent sent action=%d pointers=%s", action, pointers)
 
     def on_input_key(self, topic: str, payload: dict) -> None:
@@ -292,8 +290,7 @@ class InputModule(BaseChannelModule):
             self.log.debug("on_input_key: keycode=%d not bound — dropping", keycode)
             return
         report_bytes = _build_input_report_key(keycode, down, metastate, longpress, disp_channel_id)
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_INPUT_REPORT, report_bytes)
-        self.bus.publish("aa.frame.send", frame)
+        self.send_frame(_MSG_INPUT_REPORT, report_bytes)
         self.log.debug("KeyEvent sent keycode=%d down=%s", keycode, down)
 
     # ------------------------------------------------------------------
@@ -429,6 +426,8 @@ def _parse_key_binding_request(body: bytes) -> set:
     result = set()
     pos = 0
     while pos < len(body):
+        if pos >= len(body):
+            break
         tag_byte     = body[pos]; pos += 1
         field_number = tag_byte >> 3
         wire_type    = tag_byte & 0x07
@@ -443,7 +442,7 @@ def _parse_key_binding_request(body: bytes) -> set:
                 pos += 8
             elif wire_type == 2:
                 length, pos = _read_varint(body, pos)
-                if length:
+                if length is not None:
                     pos += length
             elif wire_type == 5:
                 pos += 4
