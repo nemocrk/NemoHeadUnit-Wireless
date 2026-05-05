@@ -83,7 +83,7 @@ for _p in (_V2, _MODULES, _REPO):
 from shared.bus_client import BusClient        # noqa: E402
 from shared.config_client import ConfigClient  # noqa: E402
 from shared.logger import get_logger           # noqa: E402
-from shared.proto_utils import channel_config_from_sdr  # noqa: E402
+from shared.proto_utils import channel_config_from_sdr, encode_aa_frame  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module-level CLI parsing
@@ -338,6 +338,28 @@ class BaseChannelModule(ABC):
             self.log.warning(f"Frame dropped — channel {self.CHANNEL_ID} not open yet")
             return
         self.on_frame(self.CHANNEL_ID, data)
+
+    # ------------------------------------------------------------------
+    # Outgoing frame helper
+    # ------------------------------------------------------------------
+
+    def send_frame(self, message_id: int, proto_body: bytes) -> None:
+        """Send an encrypted AA frame on this module's channel.
+
+        All post-handshake channel traffic is always encrypted.
+        Subclasses MUST use this method instead of publishing aa.frame.send
+        directly so that the encrypted flag is always set consistently.
+
+        Args:
+            message_id:  2-byte big-endian AA message identifier.
+            proto_body:  serialised protobuf payload (may be empty bytes).
+        """
+        frame = encode_aa_frame(self.CHANNEL_ID, message_id, proto_body)
+        self.log.info(
+            "CH%d → msg_id=0x%04x len=%d (encrypted)",
+            self.CHANNEL_ID, message_id, len(proto_body),
+        )
+        self.bus.publish("aa.frame.send", frame)
 
     # ------------------------------------------------------------------
     # Abstract interface — MUST be implemented by subclasses
