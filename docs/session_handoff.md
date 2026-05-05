@@ -249,15 +249,10 @@ python -m pytest tests/v2/ -v
 
 **Verification commands:**
 ```bash
-# Import smoke test
 python -c "from v2.modules.config_ui.field_widgets import _OptionalMessageWidget; print('OK')"
 python -c "from v2.modules.config_ui.form_builder import build_form_for_schema, build_default_value; print('OK')"
 python -c "from v2.modules.config_ui.module_tab import ModuleConfigTab; print('OK')"
-
-# Test suite
 python -m pytest v2/modules/config_ui/tests/ -v
-
-# Standalone
 python v2/bus_broker.py &
 python v2/modules/config_manager/main.py &
 python v2/modules/config_ui/main.py
@@ -272,70 +267,13 @@ python v2/modules/config_ui/main.py
 Creato `v2/modules/video/main.py` — modulo che gestisce il canale video Android Auto
 con scoperta dinamica del channel id e flow control via MediaAck.
 
-**Architettura:**
-
-| Responsabilità | Modulo |
-|---|---|
-| Handshake AA (setup/open/stop), MediaAck, pubblica `video.frame` | `video` (questo modulo) |
-| Pipeline GStreamer, rendering su display | `video_ui` (futuro) |
-
-**Channel discovery:**
-- Su `system.start` pubblica `config.get {module: "oaa_control_channel", requester: "video"}`
-- Su `config.response`: scansiona `channels[]` cercando `av_channel.stream_type == "VIDEO"`
-- Estrae `channel_id` e si sottoscrive dinamicamente ad `aa.frame.chN`
-- Fallback su `channel_id=3` se la config non è disponibile
-- `system.ready` viene pubblicato solo dopo che il canale è risolto
-
-**Flow control:**
-- `AVChannelSetupRequest` → `AVChannelSetupResponse` (max_unacked=1)
-- `AVChannelOpenRequest` → `AVChannelOpenResponse`
-- `MediaWithTimestamp` → MediaAck immediato (indipendente da video_ui) + pubblica `video.frame`
-- `AVChannelStopIndication` → pubblica `video.state=STOPPED`
-
-**Payload `video.frame`:**
-```python
-{
-    "channel_id": 3,
-    "session_id": 0,
-    "ts_us":      1234567890,
-    "data_b64":   "AAAAAW..."   # H.264 NAL data in base64
-}
-```
-
-**Why:**
-- Il modulo `video` non può delegare gli ACK al `video_ui`: se il display non è
-  attivo, il flusso si bloccherebbe. Gli ACK sono inviati sempre, indipendentemente
-  dalla presenza di `video_ui`.
-- La separazione `video` / `video_ui` segue il pattern già in uso (`bluetooth` /
-  `bluetooth_ui`, `config_manager` / `config_ui`) e rende il modulo testabile
-  senza GStreamer installato.
-- Il channel id non è hardcoded: segue eventuali modifiche alla configurazione
-  di `oaa_control_channel` senza richiedere modifiche al modulo `video`.
-
 **Status:** Completed
-
-**Next 1-3 steps:**
-1. Aggiungere test unitari per `_resolve_video_channel()`, `_handle_setup_request()`,
-   `_handle_media_with_timestamp()` e il parsing varint
-2. Creare `v2/modules/video_ui/main.py` con pipeline GStreamer
-   (`appsrc → queue leaky=downstream → h264parse → avdec_h264 → videoconvert → xvimagesink`)
-3. Aggiungere `video` all'autodiscovery in `v2/main.py`
 
 **Commit:**
 
 | File | Commit |
 |---|---|
 | `v2/modules/video/main.py` | [285a76a](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/285a76a2ebefddc093d9f3cfc892503cf832a1ac) |
-
-**Verification commands:**
-```bash
-# Import smoke test
-python -c "from v2.modules.video.main import _resolve_video_channel; print('OK')"
-
-# Standalone (richiede bus_broker attivo)
-python v2/bus_broker.py &
-python v2/modules/video/main.py
-```
 
 ---
 
@@ -344,48 +282,9 @@ python v2/modules/video/main.py
 **What changed:**
 
 Creato `v2/modules/channel_modules/input/main.py` — modulo che gestisce il canale
-Input Android Auto (touch + tasti fisici), ispirato a `InputOrchestrator` e
-`InputEventHandlerLogic` di NemoHeadUnit originale.
-
-**Ruolo nel sistema:**
-
-| Aspetto | Dettaglio |
-|---|---|
-| Direzione dati | HU → telefono (invia `InputReport`) |
-| Messaggi in ingresso | `ChannelOpenRequest`, `KeyBindingRequest` |
-| Messaggi in uscita | `InputReport` (touch + key) |
-| Stato | `IDLE` → `OPEN` → `BOUND` |
-| Bus events in | `oaa.frame.*`, `input.touch`, `input.key` |
-| Keycode negotiation | accetta intersezione tra richiesti e `_DEFAULT_KEYCODES` |
-| Helper pubblici | `send_touch_down/up/move`, `send_key_down/up` |
-| Proto dependency | zero (hand-rolled: varint, fixed64, bytes field) |
-
-**Channel discovery:**
-- Stesso pattern di `video`: richiede config a `oaa_control_channel`,
-  cerca `stream_type == "INPUT"`, fallback `channel_id = 7`.
-
-**Ispirazione da NemoHeadUnit originale:**
-- `InputOrchestrator.on_key_binding_request()` → logica di negotiation keycodes
-- `InputEventHandlerLogic.send_touch()` / `send_key()` → builder `_build_input_report_touch/key()`
-- `default_supported_keycodes()` → `_DEFAULT_KEYCODES` lista identica
+Input Android Auto (touch + tasti fisici).
 
 **Status:** Completed
-
-**Next 1-3 steps:**
-1. Aggiungere `__init__.py` per `input/`, `audio/`, `sensor/`
-2. Creare test unitari per `InputModule` (touch report encoding, key negotiation)
-3. Aggiungere `input` all'autodiscovery in `v2/main.py`
-
-**Commit:**
-
-| File | Commit |
-|---|---|
-| `v2/modules/channel_modules/input/main.py` | (pushed questa sessione) |
-
-**Verification commands:**
-```bash
-python -c "from v2.modules.channel_modules.input.main import InputModule; print('OK')"
-```
 
 ---
 
@@ -394,61 +293,15 @@ python -c "from v2.modules.channel_modules.input.main import InputModule; print(
 **What changed:**
 
 Creato `v2/modules/channel_modules/sensor/main.py` — modulo che gestisce il canale
-Sensor Android Auto (DrivingStatus, NightMode, GPS), ispirato a `SensorOrchestrator`
-e `SensorEventHandlerLogic` di NemoHeadUnit originale.
-
-**Ruolo nel sistema:**
-
-| Aspetto | Dettaglio |
-|---|---|
-| Direzione dati | HU → telefono (invia `SensorEventIndication`) |
-| Messaggi in ingresso | `ChannelOpenRequest`, `SensorStartRequest` |
-| Messaggi in uscita | `ChannelOpenResponse`, `SensorStartResponse`, `SensorEventIndication` |
-| Stato | `IDLE` → `OPEN` |
-| Bus events in | `sensor.driving_status`, `sensor.night_mode`, `sensor.gps` |
-| Proto dependency | zero (hand-rolled: varint, sfixed32, bytes field) |
-
-**SensorType wire values:**
-
-| Costante | Valore | Campo SensorBatch |
-|---|---|---|
-| `SENSOR_DRIVING_STATUS` | 1 | field 1 (`DrivingStatusData`) |
-| `SENSOR_NIGHT_MODE` | 4 | field 4 (`NightModeData`) |
-| `SENSOR_LOCATION` | 6 | field 6 (`GPSData`, sfixed32 × 1e7/1e6/1e3) |
-
-**Channel discovery:**
-- Stesso pattern di `video` e `input`: richiede config a `oaa_control_channel`,
-  cerca `stream_type == "SENSOR"`, fallback `channel_id = 10`.
-
-**Comportamento immediato alla startup del sensore:**
-- `SensorStartRequest` per `DRIVING_STATUS` → invia subito `DRIVE_STATUS_UNRESTRICTED`
-- `SensorStartRequest` per `NIGHT_MODE` → invia subito `night_mode = False`
-
-**Ispirazione da NemoHeadUnit originale:**
-- `SensorOrchestrator.on_sensor_start_request()` → `_handle_sensor_start_request()` + `_build_default_sensor_batch()`
-- `SensorEventHandlerLogic` → struttura on_channel_open / on_sensor_start / on_channel_error
+Sensor Android Auto (DrivingStatus, NightMode, GPS).
 
 **Status:** Completed
-
-**Next 1-3 steps:**
-1. Aggiungere `__init__.py` per `sensor/`, `input/`, `audio/`
-2. Creare test unitari per `SensorModule` (encoding sfixed32, default batch, GPS payload)
-3. Aggiungere `sensor` all'autodiscovery in `v2/main.py`
 
 **Commit:**
 
 | File | Commit |
 |---|---|
 | `v2/modules/channel_modules/sensor/main.py` | [9ed34d0](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/9ed34d08891e13f3070ff1de808bff4f842ee824) |
-
-**Verification commands:**
-```bash
-python -c "from v2.modules.channel_modules.sensor.main import SensorModule; print('OK')"
-
-# Standalone
-python v2/bus_broker.py &
-python v2/modules/channel_modules/sensor/main.py
-```
 
 ---
 
@@ -459,64 +312,7 @@ python v2/modules/channel_modules/sensor/main.py
 Riscritti `registry.py` e `main.py` di `channel_manager`, e fix chirurgico a
 `service_discovery.py` di `oaa_control_channel`.
 
-### 1. `service_discovery.py` — `channels_from_sdr_bytes` fix
-
-`av_channel` dict ora espone anche `audio_type` (intero `AudioType`) quando
-`stream_type == AUDIO`, oltre al precedente `av_type`:
-
-```python
-# Prima
-entry["av_channel"] = {"av_type": sub.stream_type}
-
-# Dopo
-av_dict = {"av_type": sub.stream_type}
-if sub.stream_type == AVStreamType.AUDIO:
-    av_dict["audio_type"] = sub.audio_type
-entry["av_channel"] = av_dict
-```
-
-Senza questo fix `registry.resolve_module_type()` non poteva distinguere i tre
-stream audio (MEDIA / SPEECH / SYSTEM).
-
-### 2. `registry.py` — riscrittura completa
-
-**Problemi corretti:**
-- `AV_TYPE_VIDEO = 1` e `AV_TYPE_AUDIO = 3` erano invertiti rispetto ai valori
-  reali di `AVStreamType` (VIDEO=1, AUDIO=2) e `AudioType` (MEDIA=1, SYSTEM=3, SPEECH=4)
-- Il routing era basato su `channel_id` numerico anziché sulla chiave descriptor,
-  rendendo il codice fragile a variazioni di canale tra telefoni/versioni AA
-- `KeyError` abortiva la sessione anche per canali noti ma senza module ancora
-
-**Nuovo comportamento:**
-- Routing su **chiave descriptor** (`av_channel`, `input_channel`, `sensor_channel`, ...)
-- Costanti corrette: `AV_STREAM_VIDEO=1`, `AV_STREAM_AUDIO=2`, `AUDIO_TYPE_MEDIA=1`,
-  `AUDIO_TYPE_SYSTEM=3`, `AUDIO_TYPE_SPEECH=4`
-- Tutti e tre gli audio `av_channel` (MEDIA/SPEECH/SYSTEM) → `module_type="audio"`,
-  producendo 3 istanze separate: `channel_audio_4`, `channel_audio_5`, `channel_audio_6`
-- Nuova eccezione `SkipChannel` per canali non ancora implementati
-  (`av_input_channel`, `bluetooth_channel`, `navigation_channel`,
-  `media_info_channel`, `wifi_channel`, `phone_status_channel`)
-
-### 3. `channel_manager/main.py` — gestione `SkipChannel`
-
-- Importa `SkipChannel` da `registry`
-- In `ChannelManagerSession.start()`: cattura `SkipChannel` con `log.warning + continue`
-  invece di propagare l'errore e abortire la sessione
-
-**Why:**
-- I valori invertiti avrebbero fatto sì che i canali audio venissero erroneamente
-  risolti come `video` e il canale video come `audio`
-- Il routing per `channel_id` numerico è fragile: il pattern corretto è leggere
-  la chiave top-level del descriptor, che rispecchia il tipo semantico del canale
-- Un canale senza module ancora non deve bloccare l'intera sessione AA
-
 **Status:** Completed
-
-**Next 1-3 steps:**
-1. Creare `v2/modules/channel_modules/audio/main.py` (3 istanze: MEDIA, SPEECH, SYSTEM)
-2. Aggiungere test unitari per `registry.resolve_module_type()` con fixture SDR reale
-3. Aggiungere test per `channels_from_sdr_bytes` verificando che `audio_type` sia
-   correttamente esposto per tutti e tre i canali audio
 
 **Commit map:**
 
@@ -526,20 +322,59 @@ stream audio (MEDIA / SPEECH / SYSTEM).
 | `v2/modules/channel_manager/registry.py` | [bbfee3a](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/bbfee3aea79792f152c0c56d513d39b67616475b) | Riscrittura completa: descriptor-key routing, costanti corrette, `SkipChannel` |
 | `v2/modules/channel_manager/main.py` | [b062ee4](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/b062ee41f767ea76ca1eb5bdc3451fe2f51e59fc) | Cattura `SkipChannel` con warning invece di abort |
 
+---
+
+## 2026-05-05 - channel_modules refactor: discovery dinamica → CLI (--channel-id)
+
+**What changed:**
+
+Rimossa la discovery dinamica del `channel_id` (pattern `config.get` /
+`config.response` / `_resolve_*_channel`) da tutti i moduli channel che la
+usavano ancora. Ora tutti i moduli ricevono `channel_id` e SDR bytes
+esclusivamente via argomenti CLI (`--channel-id`, `--sdr-bytes-hex`),
+coerentemente con quanto già implementato in `audio/main.py` e con la logica
+di `BaseChannelModule`.
+
+**Moduli aggiornati:**
+
+| Modulo | Prima | Dopo | Commit |
+|---|---|---|---|
+| `input/main.py` | discovery dinamica via `config.response` | `CHANNEL_ID = -1`, `_init()` solo loga | [182047e](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/182047e99727418cbaaaaae90aaec2bc43b010f6) |
+| `sensor/main.py` | discovery dinamica via `config.response` | `CHANNEL_ID = -1`, `_init()` solo loga | [9aad7dc](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/9aad7dcc8ba92ce6fc5fbf6068c25579c50dee5d) |
+| `video/main.py` | già allineato | invariato | — |
+| `audio/main.py` | già allineato | invariato | — |
+
+**Dettaglio rimozioni per modulo:**
+- `on_config_response()` → rimosso
+- `_request_oaa_config()` → rimosso
+- `_resolve_*_channel()` → rimosso
+- `_channel_resolved` flag → rimosso
+- `_*_CHANNEL_FALLBACK` costante → rimossa
+- Subscription a `config.response` in `run()` → rimossa
+- `_init()` ora logga solo `channel_id` e `channel_config` per debug
+
+**Why:**
+- `system.ready` deve essere pubblicato da `BaseChannelModule` in modo uniforme,
+  gated su `channel_config is not None` (già implementato in base).
+- La discovery tramite `config.get`/`config.response` era un pattern parallelo
+  e ridondante rispetto all'approccio CLI già adottato da `audio`.
+- Eliminare la dipendenza da `oaa_control_channel` nei moduli channel semplifica
+  il grafo delle dipendenze e rende ogni modulo testabile in isolamento.
+- La responsabilità di sapere quale `channel_id` assegnare a quale modulo
+  appartiene a `channel_manager`, non ai moduli stessi.
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Verificare che `BaseChannelModule` pubblichi correttamente `system.ready`
+   quando `channel_config` è valorizzato dopo il parsing CLI
+2. Aggiungere test unitari per `InputModule` e `SensorModule` con mock
+   `--channel-id` / `--sdr-bytes-hex`
+3. Aggiornare `channel_manager/main.py` per passare `--channel-id` e
+   `--sdr-bytes-hex` correttamente allo spawn di `input` e `sensor`
+
 **Verification commands:**
 ```bash
-# Import smoke test
-python -c "from v2.modules.channel_manager.registry import resolve_module_type, SkipChannel; print('OK')"
-
-# Verifica mapping audio
-python -c "
-from v2.modules.channel_manager.registry import resolve_module_type
-assert resolve_module_type(3, {'av_channel': {'av_type': 1}}) == 'video'
-assert resolve_module_type(4, {'av_channel': {'av_type': 2, 'audio_type': 1}}) == 'audio'
-assert resolve_module_type(5, {'av_channel': {'av_type': 2, 'audio_type': 4}}) == 'audio'
-assert resolve_module_type(6, {'av_channel': {'av_type': 2, 'audio_type': 3}}) == 'audio'
-assert resolve_module_type(1, {'input_channel': {}}) == 'input'
-assert resolve_module_type(2, {'sensor_channel': {}}) == 'sensor'
-print('All assertions OK')
-"
+python -c "from v2.modules.channel_modules.input.main import InputModule; print('OK')"
+python -c "from v2.modules.channel_modules.sensor.main import SensorModule; print('OK')"
 ```
