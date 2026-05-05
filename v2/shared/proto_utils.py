@@ -11,6 +11,8 @@ dict_to_proto(msg, data) → None
 schema_from_proto_message(descriptor) → dict[str, AnyFieldSchema]
 channels_from_sdr_bytes(sdr_bytes_hex) → list[dict]
 channel_config_from_sdr(sdr_bytes_hex, channel_id) → dict | None
+encode_aa_frame(channel_id, message_id, proto_body) → dict
+decode_aa_frame(data) → tuple[int, bytes] | None
 
 parse_media_with_timestamp
 --------------------------
@@ -22,6 +24,23 @@ implementations parse this manually.
 
 Returns (timestamp_us, audio_or_video_data).
 Used by both audio and video channel modules.
+
+encode_aa_frame / decode_aa_frame
+----------------------------------
+Low-level AA frame framing helpers shared by all channel modules.
+Every outgoing AA frame is a 2-byte big-endian message_id followed by the
+serialised proto body, wrapped in a dict understood by aa.frame.send.
+Every incoming raw frame is decoded by stripping the same 2-byte header.
+
+  encode_aa_frame(channel_id, message_id, proto_body) → dict
+      Returns {channel_id, flags, payload_hex} ready for bus.publish("aa.frame.send").
+
+  decode_aa_frame(data) → (message_id, body) | None
+      Splits a raw frame into its message_id and body.
+      Returns None on frames shorter than 2 bytes.
+
+These replace the duplicated _encode_frame / _decode_frame static methods
+that previously lived in each channel module class.
 
 schema_from_proto_message
 -------------------------
@@ -115,6 +134,12 @@ _FLOAT_TYPES = {
     _descriptor.FieldDescriptor.TYPE_DOUBLE,
 }
 
+# AA frame flags — used by encode_aa_frame
+_FLAG_FIRST     = 0x01
+_FLAG_LAST      = 0x02
+_FLAG_ENCRYPTED = 0x08
+_FLAG_FULL      = _FLAG_FIRST | _FLAG_LAST | _FLAG_ENCRYPTED  # 0x0B
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -150,6 +175,47 @@ def encode_proto(msg: Message) -> bytes:
     except Exception as exc:  # pragma: no cover
         log.error("encode_proto(%s): serialisation failed — %s", type(msg).__name__, exc)
         return b""
+
+
+def encode_aa_frame(channel_id: int, message_id: int, proto_body: bytes) -> dict:
+    """Wrap a serialised proto body into an aa.frame.send payload dict.
+
+    Every outgoing AA frame is a 2-byte big-endian message_id followed by the
+    serialised proto body.  The returned dict is understood directly by the
+    aa.frame.send bus topic.
+
+    Args:
+        channel_id:  the AA channel this frame belongs to.
+        message_id:  2-byte big-endian AA message identifier.
+        proto_body:  serialised protobuf payload (may be empty bytes).
+
+    Returns:
+        {"channel_id": int, "flags": int, "payload_hex": str}
+    """
+    payload = struct.pack(">H", message_id) + proto_body
+    return {
+        "channel_id":  channel_id,
+        "flags":       _FLAG_FULL,
+        "payload_hex": payload.hex(),
+    }
+
+
+def decode_aa_frame(data: bytes) -> tuple[int, bytes] | None:
+    """Split a raw AA frame into (message_id, body).
+
+    The first 2 bytes are the big-endian message_id; everything after is the
+    proto body.  Returns None if *data* is shorter than 2 bytes.
+
+    Args:
+        data: raw bytes as received from the AA transport layer.
+
+    Returns:
+        (message_id, body) on success, None on truncated input.
+    """
+    if len(data) < 2:
+        return None
+    message_id = struct.unpack_from(">H", data, 0)[0]
+    return message_id, data[2:]
 
 
 def parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
