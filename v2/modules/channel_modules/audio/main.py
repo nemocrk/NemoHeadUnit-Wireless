@@ -61,7 +61,6 @@ Codec support:
 
 from __future__ import annotations
 
-import struct
 import sys
 from pathlib import Path
 from typing import Any
@@ -79,7 +78,11 @@ import sounddevice as sd                       # noqa: E402  (python-sounddevice
 import av                                      # noqa: E402  (PyAV / FFmpeg)
 
 from shared.config_schema import field_enum, field_int  # noqa: E402
-from shared.proto_utils import parse_media_with_timestamp  # noqa: E402
+from shared.proto_utils import (               # noqa: E402
+    encode_aa_frame,
+    decode_aa_frame,
+    parse_media_with_timestamp,
+)
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -95,23 +98,18 @@ from v2.protos.oaa.av.AVChannelStartIndicationMessage_pb2 import AVChannelStartI
 from v2.protos.oaa.av.AVMediaAckIndicationMessage_pb2 import AVMediaAckIndication          # noqa: E402
 
 # ---------------------------------------------------------------------------
-# AA media frame constants
+# AA message ID constants
 # ---------------------------------------------------------------------------
 
-_FLAG_FIRST     = 0x01
-_FLAG_LAST      = 0x02
-_FLAG_ENCRYPTED = 0x08
-_FLAG_FULL      = _FLAG_FIRST | _FLAG_LAST | _FLAG_ENCRYPTED  # 0x0B
-
-_MSG_AV_CHANNEL_SETUP_REQUEST                    = AVChannelMessageIdsEnum.SETUP_REQUEST
-_MSG_AV_CHANNEL_SETUP_RESPONSE                   = AVChannelMessageIdsEnum.SETUP_RESPONSE
-_MSG_CHANNEL_OPEN_REQUEST                        = ControlMessageIdsEnum.CHANNEL_OPEN_REQUEST
-_MSG_CHANNEL_OPEN_RESPONSE                       = ControlMessageIdsEnum.CHANNEL_OPEN_RESPONSE
-_MSG_AV_CHANNEL_START_INDICATION                 = AVChannelMessageIdsEnum.START_INDICATION
-_MSG_AV_CHANNEL_STOP_INDICATION                  = AVChannelMessageIdsEnum.STOP_INDICATION
-_MSG_AV_CHANNEL_AV_MEDIA_INDICATION              = AVChannelMessageIdsEnum.AV_MEDIA_INDICATION
+_MSG_AV_CHANNEL_SETUP_REQUEST                      = AVChannelMessageIdsEnum.SETUP_REQUEST
+_MSG_AV_CHANNEL_SETUP_RESPONSE                     = AVChannelMessageIdsEnum.SETUP_RESPONSE
+_MSG_CHANNEL_OPEN_REQUEST                          = ControlMessageIdsEnum.CHANNEL_OPEN_REQUEST
+_MSG_CHANNEL_OPEN_RESPONSE                         = ControlMessageIdsEnum.CHANNEL_OPEN_RESPONSE
+_MSG_AV_CHANNEL_START_INDICATION                   = AVChannelMessageIdsEnum.START_INDICATION
+_MSG_AV_CHANNEL_STOP_INDICATION                    = AVChannelMessageIdsEnum.STOP_INDICATION
+_MSG_AV_CHANNEL_AV_MEDIA_INDICATION                = AVChannelMessageIdsEnum.AV_MEDIA_INDICATION
 _MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION = AVChannelMessageIdsEnum.AV_MEDIA_WITH_TIMESTAMP_INDICATION
-_MSG_AV_CHANNEL_MEDIA_ACK                        = AVChannelMessageIdsEnum.AV_MEDIA_ACK_INDICATION
+_MSG_AV_CHANNEL_MEDIA_ACK                          = AVChannelMessageIdsEnum.AV_MEDIA_ACK_INDICATION
 
 _CODEC_PCM         = MediaCodecTypeEnum.MEDIA_CODEC_AUDIO_PCM
 _CODEC_AAC         = MediaCodecTypeEnum.MEDIA_CODEC_AUDIO_AAC
@@ -290,7 +288,7 @@ class AudioModule(BaseChannelModule):
 
     def on_frame(self, channel_id: int, data: bytes) -> None:
         """Dispatch incoming frame by AA message_id."""
-        result = _decode_frame_header(data)
+        result = decode_aa_frame(data)
         self.log.debug("Decoded frame header on ch=%d: %s", channel_id, result)
         if result is None:
             self.log.error("on_frame: malformed payload on ch=%d — dropping", channel_id)
@@ -326,7 +324,7 @@ class AudioModule(BaseChannelModule):
         resp.media_status = AVChannelSetupStatus.Enum.OK
         resp.max_unacked  = max_unacked
         resp.configs.append(0)
-        frame = _encode_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_SETUP_RESPONSE, resp.SerializeToString())
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_SETUP_RESPONSE, resp.SerializeToString())
         self.bus.publish("aa.frame.send", frame)
         self._set_state("SETUP")
         self.log.info(
@@ -337,7 +335,7 @@ class AudioModule(BaseChannelModule):
     def _handle_open_request(self, body: bytes) -> None:
         resp = ChannelOpenResponse()
         resp.status = 0  # STATUS_SUCCESS
-        frame = _encode_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self.bus.publish("aa.frame.send", frame)
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)
@@ -387,7 +385,7 @@ class AudioModule(BaseChannelModule):
         ack = AVMediaAckIndication()
         ack.session_id = self._session_id
         ack.ack_count  = 1
-        frame = _encode_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_MEDIA_ACK, ack.SerializeToString())
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_AV_CHANNEL_MEDIA_ACK, ack.SerializeToString())
         self.bus.publish("aa.frame.send", frame)
         self.log.debug("MediaAck sent ch=%d session_id=%d", self.CHANNEL_ID, self._session_id)
 
@@ -544,28 +542,6 @@ def _list_audio_devices() -> list[str]:
         return devices
     except Exception:
         return ["default"]
-
-
-# ---------------------------------------------------------------------------
-# Frame helpers  (proto-free, low-level AA framing only)
-# ---------------------------------------------------------------------------
-
-def _decode_frame_header(data: bytes) -> tuple[int, bytes] | None:
-    """Extract (message_id, body) from a raw AA frame."""
-    if len(data) < 2:
-        return None
-    message_id = struct.unpack_from(">H", data, 0)[0]
-    return message_id, data[2:]
-
-
-def _encode_frame(channel_id: int, message_id: int, proto_body: bytes) -> dict:
-    """Wrap a serialized proto body into an aa.frame.send payload dict."""
-    payload = struct.pack(">H", message_id) + proto_body
-    return {
-        "channel_id":  channel_id,
-        "flags":       _FLAG_FULL,
-        "payload_hex": payload.hex(),
-    }
 
 
 # ---------------------------------------------------------------------------
