@@ -2,14 +2,14 @@
 NemoHeadUnit-Wireless v2 — channel_modules/video
 
 Module contract:
-  Name        : video
+  Name        : video  (overridden by --module-name)
   Priority    : 1
-  Channel ID  : resolved at boot from oaa_control_channel config
-                (fallback: 3)
+  Channel ID  : supplied via --channel-id CLI arg (parsed by BaseChannelModule)
+  SDR bytes   : supplied via --sdr-bytes-hex CLI arg, parsed by base into
+                self.channel_config (used for future codec negotiation).
   Subscribes  : system.readytostart
                 system.start
                 system.stop
-                config.response          {module, config, requester}
                 oaa.channel.open         {channel_id, av_type?, ...}  ← from BaseChannelModule
                 oaa.channel.close        {channel_id}                 ← from BaseChannelModule
                 oaa.frame.<channel_id>   raw bytes                    ← from BaseChannelModule
@@ -22,26 +22,21 @@ Module contract:
                 video.state              {state}  IDLE | SETUP | OPEN | PLAYING | STOPPED
 
 Flow:
-  1. On system.start: request oaa_control_channel config to discover the VIDEO channel id.
-  2. On config.response (module=oaa_control_channel): scan channels list for
-     av_channel.stream_type == "VIDEO", extract channel_id.
-  3. Publish system.ready once channel id is resolved.
-  4. On oaa.channel.open (channel_id matches): record channel open.
-  5. On oaa.frame.<channel_id>: decode AA media frame, dispatch by message_id:
-       - AVChannelSetupRequest  → reply AVChannelSetupResponse, video.state=SETUP
-       - AVChannelOpenRequest   → reply AVChannelOpenResponse,  video.state=OPEN
-       - MediaWithTimestamp     → send MediaAck, publish video.frame (for video_ui)
+  1. BaseChannelModule parses CLI and populates self.CHANNEL_ID and
+     self.channel_config from --channel-id / --sdr-bytes-hex.
+  2. system.ready is published lazily by base once _init_done, config_loaded
+     and channel_config is not None.
+  3. On oaa.channel.open (channel_id matches): record channel open.
+  4. On oaa.frame.<channel_id>: decode AA media frame, dispatch by message_id:
+       - AVChannelSetupRequest   → reply AVChannelSetupResponse, video.state=SETUP
+       - AVChannelOpenRequest    → reply AVChannelOpenResponse,  video.state=OPEN
+       - MediaWithTimestamp      → send MediaAck, publish video.frame (for video_ui)
        - AVChannelStopIndication → video.state=STOPPED
-  6. On aa.session.shutdown: reset state, video.state=IDLE.
+  5. On aa.session.shutdown: reset state, video.state=IDLE.
 
 ACK strategy:
   MediaAck is sent immediately after each MediaWithTimestamp frame is received.
   video_ui is fire-and-forget: the ACK does NOT depend on video_ui processing.
-
-Channel discovery:
-  The video channel id is resolved at boot by reading oaa_control_channel config
-  and scanning for the descriptor whose av_channel.stream_type == "VIDEO".
-  Fallback is channel 3 (SEMANTIC_DEFAULTS default).
 """
 
 from __future__ import annotations
@@ -79,8 +74,6 @@ _MSG_AV_CHANNEL_STOP_INDICATION = 0x8004
 _MSG_MEDIA_WITH_TIMESTAMP       = 0x0001
 _MSG_MEDIA_ACK                  = 0x0002
 
-_VIDEO_CHANNEL_FALLBACK = 3
-
 
 # ---------------------------------------------------------------------------
 # VideoModule
@@ -92,79 +85,33 @@ class VideoModule(BaseChannelModule):
 
     Handles AVChannelSetup / Open handshake and MediaWithTimestamp frames.
     Publishes decoded H.264 NAL data on video.frame for video_ui.
+
+    channel_id and SDR bytes are provided at spawn time via CLI by
+    channel_manager and parsed by BaseChannelModule into self.CHANNEL_ID
+    and self.channel_config.  system.ready is hard-blocked by base if
+    channel_config is None.
     """
 
-    MODULE_NAME = "video"
-    CHANNEL_ID  = _VIDEO_CHANNEL_FALLBACK  # overwritten after config.response
+    MODULE_NAME = "video"   # overridden by --module-name CLI
+    CHANNEL_ID  = -1         # overridden by --channel-id CLI
     PRIORITY    = 1
 
     def __init__(self) -> None:
         super().__init__()
-        self._session_id: int  = 0
-        self._state: str       = "IDLE"  # IDLE | SETUP | OPEN | PLAYING | STOPPED
-        self._channel_resolved = False
-
-    # ------------------------------------------------------------------
-    # Channel discovery
-    # ------------------------------------------------------------------
-
-    def _request_oaa_config(self) -> None:
-        self.bus.publish("config.get", {
-            "module":    "oaa_control_channel",
-            "requester": self.MODULE_NAME,
-        })
-        self.log.info("Requested oaa_control_channel config for VIDEO channel discovery")
-
-    def on_config_response(self, topic: str, payload: dict) -> None:
-        """Handle config.response from oaa_control_channel."""
-        if payload.get("module") != "oaa_control_channel":
-            return
-        if payload.get("requester") != self.MODULE_NAME:
-            return
-
-        channels = payload.get("config", {}).get("channels", [])
-        resolved = self._resolve_video_channel(channels)
-
-        if resolved is not None:
-            self.CHANNEL_ID = resolved
-            self.log.info("VIDEO channel resolved: channel_id=%d", self.CHANNEL_ID)
-        else:
-            self.CHANNEL_ID = _VIDEO_CHANNEL_FALLBACK
-            self.log.warning(
-                "VIDEO channel not found in config — fallback channel_id=%d",
-                self.CHANNEL_ID,
-            )
-
-        if not self._channel_resolved:
-            self._channel_resolved = True
-            # Re-subscribe frame topic now that CHANNEL_ID is confirmed
-            frame_topic = f"oaa.frame.{self.CHANNEL_ID}"
-            self.bus.subscribe(frame_topic, self._on_oaa_frame)
-            self.log.info("Subscribed to %s", frame_topic)
-            self.bus.publish("system.ready", {
-                "name":     self.MODULE_NAME,
-                "priority": self.PRIORITY,
-            })
-            self.log.info("system.ready published (priority=%d)", self.PRIORITY)
-
-    @staticmethod
-    def _resolve_video_channel(channels: list) -> int | None:
-        for ch in channels:
-            av = ch.get("av_channel", {})
-            if av.get("stream_type") == "VIDEO":
-                cid = ch.get("channel_id")
-                if cid is not None:
-                    return int(cid)
-        return None
+        self._session_id: int = 0
+        self._state: str      = "IDLE"  # IDLE | SETUP | OPEN | PLAYING | STOPPED
 
     # ------------------------------------------------------------------
     # _init / _cleanup hooks
     # ------------------------------------------------------------------
 
     def _init(self) -> None:
-        """Trigger config discovery; system.ready is deferred to on_config_response."""
-        self._request_oaa_config()
-        # Do NOT publish system.ready here — it is published in on_config_response.
+        """Log resolved channel info; system.ready is handled by base."""
+        self.log.info(
+            "VideoModule _init: channel_id=%d channel_config=%s",
+            self.CHANNEL_ID,
+            self.channel_config,
+        )
 
     def _cleanup(self) -> None:
         self._set_state("IDLE")
@@ -259,7 +206,6 @@ class VideoModule(BaseChannelModule):
                 data = body[pos: pos + length]
                 pos += length
             else:
-                # Skip unknown fields
                 if wire_type == 0:
                     _, pos = _read_varint(body, pos)
                 elif wire_type == 1:
@@ -328,7 +274,6 @@ class VideoModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        self.bus.subscribe("config.response",     self.on_config_response)
         self.bus.subscribe("aa.session.active",   self.on_aa_session_active)
         self.bus.subscribe("aa.session.shutdown", self.on_aa_session_shutdown)
         super().run()
