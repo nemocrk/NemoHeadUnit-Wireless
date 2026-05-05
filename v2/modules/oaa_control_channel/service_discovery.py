@@ -49,7 +49,7 @@ channels_from_sdr_bytes(sdr_bytes)
     Parse serialised SDR *bytes* and return the channel list as plain dicts.
     Used by handshake.py (which holds raw bytes, not hex).
     NOTE: for hex-encoded SDR use proto_utils.channels_from_sdr_bytes(hex_str).
-          For per-channel audio config use proto_utils.audio_config_from_sdr_bytes().
+          For per-channel config use proto_utils.channel_config_from_sdr().
 """
 
 from __future__ import annotations
@@ -67,7 +67,6 @@ for _p in (_REPO_ROOT, _PROTO_ROOT):
 
 from shared.logger import get_logger                                                    # noqa: E402
 from shared.proto_utils import encode_proto, schema_from_proto_message, dict_to_proto  # noqa: E402
-from shared.proto_utils import audio_config_from_sdr_bytes  # noqa: E402,F401  (re-export)
 from shared.config_schema import (                                                      # noqa: E402
     AnyFieldSchema,
     ConfigFieldList,
@@ -392,7 +391,7 @@ def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
     """Parse serialised ServiceDiscoveryResponse *bytes* and return the channel
     list as plain dicts.  Used by handshake.py which holds raw bytes.
 
-    NOTE: channel_modules should use proto_utils.audio_config_from_sdr_bytes()
+    NOTE: channel_modules should use proto_utils.channel_config_from_sdr()
           (which accepts a hex string) instead of this function.
 
     Each dict contains at minimum:
