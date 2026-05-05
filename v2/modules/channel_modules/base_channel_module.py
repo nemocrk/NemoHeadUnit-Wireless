@@ -337,7 +337,7 @@ class BaseChannelModule(ABC):
         if not self._channel_open:
             self.log.warning(f"Frame dropped — channel {self.CHANNEL_ID} not open yet")
             return
-        self.on_frame(self.CHANNEL_ID, data['payload_hex'])
+        self.on_frame(self.CHANNEL_ID, data)
 
     # ------------------------------------------------------------------
     # Abstract interface — MUST be implemented by subclasses
