@@ -69,7 +69,7 @@ import sounddevice as sd                       # noqa: E402  (python-sounddevice
 import av                                      # noqa: E402  (PyAV / FFmpeg)
 
 from shared.config_schema import field_enum    # noqa: E402
-from shared.proto_utils import audio_config_from_sdr_bytes  # noqa: E402
+from shared.proto_utils import channel_config_from_sdr  # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -317,14 +317,23 @@ class AudioModule(BaseChannelModule):
 
     def _apply_audio_config(self, sdr_bytes_hex: str) -> None:
         """Read sample_rate / bit_depth / channel_count / codec from SDR hex."""
-        cfg = audio_config_from_sdr_bytes(sdr_bytes_hex, self.CHANNEL_ID)
-        if cfg is None:
+        ch = channel_config_from_sdr(sdr_bytes_hex, self.CHANNEL_ID)
+        if ch is None:
             self.log.warning(
                 "_apply_audio_config: channel_id=%d not found in SDR — using defaults",
                 self.CHANNEL_ID,
             )
             self._open_av_codec()
             return
+        configs = ch.get("av_channel", {}).get("audio_configs", [])
+        if not configs:
+            self.log.warning(
+                "_apply_audio_config: channel_id=%d has no audio_configs — using defaults",
+                self.CHANNEL_ID,
+            )
+            self._open_av_codec()
+            return
+        cfg = configs[0]
         self._sample_rate   = cfg.get("sample_rate",   self._sample_rate)
         self._bit_depth     = cfg.get("bit_depth",     self._bit_depth)
         self._channel_count = cfg.get("channel_count", self._channel_count)
