@@ -67,16 +67,25 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS):
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 from shared.proto_utils import encode_aa_frame, decode_aa_frame    # noqa: E402
 
+# Proto — control
+from v2.protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
+from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessageIdsEnum      # noqa: E402
+
+# Proto — input
+from v2.protos.oaa.input.InputChannelMessageIdsEnum_pb2 import InputChannelMessageIdsEnum  # noqa: E402
+from v2.protos.oaa.input.KeyBindingResponseMessage_pb2 import KeyBindingResponse            # noqa: E402
+from v2.protos.oaa.input.InputStatusEnum_pb2 import InputStatus                             # noqa: E402
+
 # ---------------------------------------------------------------------------
 # AA message IDs
 # ---------------------------------------------------------------------------
 
-_MSG_CHANNEL_OPEN_REQUEST   = 0x8003
-_MSG_CHANNEL_OPEN_RESPONSE  = 0x8005
+_MSG_CHANNEL_OPEN_REQUEST   = ControlMessageIdsEnum.CHANNEL_OPEN_REQUEST
+_MSG_CHANNEL_OPEN_RESPONSE  = ControlMessageIdsEnum.CHANNEL_OPEN_RESPONSE
 
-_MSG_KEY_BINDING_REQUEST    = 0x8009
-_MSG_KEY_BINDING_RESPONSE   = 0x800A
-_MSG_INPUT_REPORT           = 0x0001
+_MSG_KEY_BINDING_REQUEST    = InputChannelMessageIdsEnum.KEY_BINDING_REQUEST
+_MSG_KEY_BINDING_RESPONSE   = InputChannelMessageIdsEnum.KEY_BINDING_RESPONSE
+_MSG_INPUT_REPORT           = InputChannelMessageIdsEnum.INPUT_EVENT_INDICATION
 
 # ---------------------------------------------------------------------------
 # Keycodes (Android KeyEvent constants — wire values, no proto dependency)
@@ -211,7 +220,9 @@ class InputModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def _handle_channel_open_request(self, body: bytes) -> None:
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, b"\x08\x00")
+        resp = ChannelOpenResponse()
+        resp.status = 0  # STATUS_SUCCESS
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self.bus.publish("aa.frame.send", frame)
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest → ChannelOpenResponse sent (STATUS_SUCCESS)")
@@ -232,7 +243,9 @@ class InputModule(BaseChannelModule):
         else:
             self._bound_keycodes = supported
 
-        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_KEY_BINDING_RESPONSE, b"\x08\x00")
+        resp = KeyBindingResponse()
+        resp.status = InputStatus.Enum.OK
+        frame = encode_aa_frame(self.CHANNEL_ID, _MSG_KEY_BINDING_RESPONSE, resp.SerializeToString())
         self.bus.publish("aa.frame.send", frame)
         self._set_state("BOUND")
         self.log.info(
@@ -322,6 +335,7 @@ class InputModule(BaseChannelModule):
 
 # ---------------------------------------------------------------------------
 # Minimal hand-rolled protobuf helpers  (no proto dependency)
+# Used only for InputReport / TouchEvent / KeyEvent payload encoding.
 # ---------------------------------------------------------------------------
 
 def _read_varint(buf: bytes, pos: int) -> tuple[int | None, int]:
