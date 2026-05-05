@@ -19,8 +19,7 @@ Module contract (fill in before shipping):
   Priority    : 1
   Channel ID  : <--channel-id>    (parsed by BaseChannelModule from CLI)
   SDR bytes   : <--sdr-bytes-hex> (parsed by base into self.channel_config)
-  Subscribes  : channel_manager.module_readytostart
-                channel_manager.module_start
+  Subscribes  : channel_manager.module_start
                 channel_manager.module_stop
                 config.response      (auto via ConfigClient)
                 config.changed       (auto via ConfigClient)
@@ -88,7 +87,7 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
 # ---------------------------------------------------------------------------
 # Shared utilities
 # ---------------------------------------------------------------------------
-from shared.config_schema import field_int, field_enum          # noqa: E402
+from shared.config_schema import field_int                       # noqa: E402
 from shared.proto_utils import (                                 # noqa: E402
     encode_aa_frame,
     decode_aa_frame,
@@ -107,7 +106,7 @@ from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse      
 from oaa.av.AVChannelStartIndicationMessage_pb2 import AVChannelStartIndication   # noqa: E402
 from oaa.av.AVMediaAckIndicationMessage_pb2 import AVMediaAckIndication           # noqa: E402
 
-# TODO: add channel-type–specific proto imports here, e.g.:
+# TODO: add channel-type-specific proto imports here, e.g.:
 # from oaa.input.InputEventIndication_pb2 import InputEventIndication
 
 # ---------------------------------------------------------------------------
@@ -160,19 +159,13 @@ class TemplateModule(BaseChannelModule):
         Use field_int / field_enum / field_str / field_bool from
         shared.config_schema.  Return {} if this module needs no config.
 
-        Example (copy from audio):
+        Example:
             return {
                 "max_unacked": field_int(default=1, min=1, max=16),
             }
         """
-        # TODO: replace with real schema or return {}
-        return {
-            "max_unacked": field_int(
-                default=1,
-                min=1,
-                max=16,
-            ),
-        }
+        # TODO: replace {} with a real schema if this module needs config.
+        return {}
 
     # ------------------------------------------------------------------
     # Construction
@@ -242,28 +235,20 @@ class TemplateModule(BaseChannelModule):
     # ------------------------------------------------------------------
     # Config callbacks — override only when needed
     # ------------------------------------------------------------------
-
-    def on_config_loaded(self, config: dict) -> None:
-        """
-        Called once the persisted config arrives from config_manager.
-
-        super() merges config into self._config, sets _config_loaded=True,
-        and calls _try_publish_ready().
-
-        Only override when you need to react to the loaded values
-        (e.g. reopening a stream with a user-chosen device — see AudioModule).
-        """
-        super().on_config_loaded(config)
-        # TODO: react to loaded config if needed, e.g.:
-        # if self._init_done:
-        #     self._reopen_resource()
-
-    def on_config_changed(self, key: str, value: Any) -> None:
-        """Called at runtime when a single config key changes."""
-        super().on_config_changed(key, value)
-        # TODO: react to hot-reload of individual keys, e.g.:
-        # if key == "max_unacked":
-        #     self.log.info("max_unacked changed to %r", value)
+    #
+    # BaseChannelModule already handles on_config_loaded() and on_config_changed()
+    # correctly for the common case (merge + _try_publish_ready).
+    # Override here ONLY if you need extra logic on top, e.g. reopening a resource:
+    #
+    #   def on_config_loaded(self, config: dict) -> None:
+    #       super().on_config_loaded(config)
+    #       if self._init_done:
+    #           self._reopen_resource()
+    #
+    #   def on_config_changed(self, key: str, value: Any) -> None:
+    #       super().on_config_changed(key, value)
+    #       if key == "my_key":
+    #           self.log.info("my_key changed to %r", value)
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -425,7 +410,7 @@ class TemplateModule(BaseChannelModule):
 
         # TODO: process / publish payload, e.g.:
         # if payload:
-        #     self.bus.publish("<module>.frame", {
+        #     self.bus.publish(f"{self.MODULE_NAME}.frame", {
         #         "channel_id": self.CHANNEL_ID,
         #         "ts_us":      ts_us,
         #         "data":       payload,
@@ -452,12 +437,11 @@ class TemplateModule(BaseChannelModule):
         if self._state == new_state:
             return
         self._state = new_state
-        # TODO: replace "_template.state" with "<your_module>.state"
-        self.bus.publish("_template.state", {
+        self.bus.publish(f"{self.MODULE_NAME}.state", {
             "channel_id": self.CHANNEL_ID,
             "state":      new_state,
         })
-        self.log.info("_template.state ch=%d → %s", self.CHANNEL_ID, new_state)
+        self.log.info("%s.state ch=%d → %s", self.MODULE_NAME, self.CHANNEL_ID, new_state)
 
     # ------------------------------------------------------------------
     # run() override — add extra bus subscriptions before calling super()
