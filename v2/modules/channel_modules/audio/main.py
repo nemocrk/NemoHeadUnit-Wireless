@@ -92,13 +92,14 @@ from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 # Proto imports — generated from v2/protos/oaa/
 # ---------------------------------------------------------------------------
 from oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessage                  # noqa: E402
-from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage             # noqa: E402
+from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage                 # noqa: E402
 from oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType                         # noqa: E402
 from oaa.av.AVChannelSetupResponseMessage_pb2 import AVChannelSetupResponse      # noqa: E402
 from oaa.av.AVChannelSetupStatusEnum_pb2 import AVChannelSetupStatus             # noqa: E402
 from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse       # noqa: E402
 from oaa.av.AVChannelStartIndicationMessage_pb2 import AVChannelStartIndication  # noqa: E402
 from oaa.av.AVMediaAckIndicationMessage_pb2 import AVMediaAckIndication          # noqa: E402
+from oaa.common.StatusEnum_pb2 import Status                                     # noqa: E402
 
 # ---------------------------------------------------------------------------
 # AA message ID constants
@@ -328,7 +329,7 @@ class AudioModule(BaseChannelModule):
     def _handle_setup_request(self, body: bytes) -> None:
         max_unacked = self._config.get("max_unacked", 1)
         resp = AVChannelSetupResponse()
-        resp.media_status = AVChannelSetupStatus.Enum.OK
+        resp.media_status = AVChannelSetupStatus.OK
         resp.max_unacked  = max_unacked
         resp.configs.append(0)
         self.send_frame(_MSG_AV_CHANNEL_SETUP_RESPONSE, resp.SerializeToString())
@@ -340,7 +341,7 @@ class AudioModule(BaseChannelModule):
 
     def _handle_open_request(self, body: bytes) -> None:
         resp = ChannelOpenResponse()
-        resp.status = 0  # STATUS_SUCCESS
+        resp.status = Status.OK
         self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)

@@ -111,6 +111,7 @@ from oaa.av.AVChannelSetupStatusEnum_pb2 import AVChannelSetupStatus            
 from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse        # noqa: E402
 from oaa.av.AVChannelStartIndicationMessage_pb2 import AVChannelStartIndication   # noqa: E402
 from oaa.av.AVMediaAckIndicationMessage_pb2 import AVMediaAckIndication           # noqa: E402
+from oaa.common.StatusEnum_pb2 import Status                                      # noqa: E402
 
 # TODO: add channel-type-specific proto imports here, e.g.:
 # from oaa.input.InputEventIndication_pb2 import InputEventIndication
@@ -347,7 +348,7 @@ class TemplateModule(BaseChannelModule):
     def _handle_open_request(self, body: bytes) -> None:
         """Send ChannelOpenResponse and transition to OPEN."""
         resp = ChannelOpenResponse()
-        resp.status = 0  # STATUS_SUCCESS
+        resp.status = Status.OK
         self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)

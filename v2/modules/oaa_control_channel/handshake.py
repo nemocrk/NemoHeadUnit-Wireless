@@ -84,6 +84,7 @@ from v2.protos.oaa.control.BatteryStatusMessage_pb2 import BatteryStatusNotifica
 
 # Audio focus proto imports
 from v2.protos.oaa.audio.AudioFocusRequestMessage_pb2 import AudioFocusRequest         # noqa: E402
+from oaa.audio.AudioFocusTypeEnum_pb2 import AudioFocusType                            # noqa: E402
 from v2.protos.oaa.audio.AudioFocusResponseMessage_pb2 import AudioFocusResponse       # noqa: E402
 from v2.protos.oaa.audio.AudioFocusStateEnum_pb2 import AudioFocusState                # noqa: E402
 
@@ -338,7 +339,7 @@ class ControlChannelHandshake:
             "waiting for channel_manager.channels_ready (%d channels)",
             len(channels),
         )
-        
+
     def _on_channel_open_request(self, body: bytes, encrypted: bool) -> None:
         req = decode_proto(ChannelOpenRequest, body)
         ch_id = getattr(req, 'channel_id', -1) if req else -1
@@ -368,11 +369,33 @@ class ControlChannelHandshake:
     def _on_audio_focus_request(self, body: bytes, encrypted: bool) -> None:
         req = decode_proto(AudioFocusRequest, body)
         focus_type = getattr(req, 'audio_focus_type', '?') if req else '?'
-        log.info("AUDIO_FOCUS_REQUEST focus_type=%s — granting GAIN", focus_type)
 
         resp = AudioFocusResponse()
-        resp.audio_focus_state = AudioFocusState.Enum.GAIN
+        """
+                case proto::enums::AudioFocusType::GAIN:
+                    state = proto::enums::AudioFocusState::GAIN; break;
+                case proto::enums::AudioFocusType::GAIN_TRANSIENT:
+                    state = proto::enums::AudioFocusState::GAIN_TRANSIENT; break;
+                case proto::enums::AudioFocusType::GAIN_TRANSIENT_MAY_DUCK:
+                    state = proto::enums::AudioFocusState::GAIN_TRANSIENT_GUIDANCE_ONLY; break;
+                case proto::enums::AudioFocusType::RELEASE:
+                    state = proto::enums::AudioFocusState::LOSS; break;
+                default:
+                    state = proto::enums::AudioFocusState::INVALID; break;
+        """
+        match focus_type:
+            case AudioFocusType.GAIN:
+                resp.audio_focus_state = AudioFocusState.GAIN
+            case AudioFocusType.GAIN_TRANSIENT:
+                resp.audio_focus_state = AudioFocusState.GAIN_TRANSIENT
+            case AudioFocusType.GAIN_TRANSIENT_MAY_DUCK:
+                resp.audio_focus_state = AudioFocusState.GAIN_TRANSIENT_GUIDANCE_ONLY
+            case AudioFocusType.RELEASE:
+                resp.audio_focus_state = AudioFocusState.LOSS
+            case _:
+                resp.audio_focus_state = AudioFocusState.INVALID
         resp.granted = True
+        log.info("AUDIO_FOCUS_REQUEST focus_type=%s — granting %s", focus_type, resp.audio_focus_state)
         self._send(MSG_AUDIO_FOCUS_RESPONSE, encode_proto(resp), encrypted=encrypted)
 
         if self._state == HandshakeState.CHANNELS_OPENING:

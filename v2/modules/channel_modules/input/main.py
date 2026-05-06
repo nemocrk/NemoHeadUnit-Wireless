@@ -71,6 +71,7 @@ from shared.proto_utils import decode_aa_frame                     # noqa: E402
 # Proto — control
 from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
 from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage             # noqa: E402
+from oaa.common.StatusEnum_pb2 import Status                                 # noqa: E402
 
 # Proto — input
 from oaa.input.InputChannelMessageIdsEnum_pb2 import InputChannelMessage             # noqa: E402
@@ -211,7 +212,7 @@ class InputModule(BaseChannelModule):
         message_id, body = result
 
         if message_id == _MSG_CHANNEL_OPEN_REQUEST:
-            self._handle_channel_open_request(body)
+            self._handle_open_request(body)
         elif message_id == _MSG_KEY_BINDING_REQUEST:
             self._handle_key_binding_request(body)
         else:
@@ -223,9 +224,9 @@ class InputModule(BaseChannelModule):
     # Incoming message handlers
     # ------------------------------------------------------------------
 
-    def _handle_channel_open_request(self, body: bytes) -> None:
+    def _handle_open_request(self, body: bytes) -> None:
         resp = ChannelOpenResponse()
-        resp.status = 0  # STATUS_SUCCESS
+        resp.status = Status.OK
         self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest → ChannelOpenResponse sent (STATUS_SUCCESS)")
@@ -247,7 +248,7 @@ class InputModule(BaseChannelModule):
             self._bound_keycodes = supported
 
         resp = InputBindingResponse()
-        resp.status = 0  # STATUS_SUCCESS (int32, no enum in proto)
+        resp.status = Status.OK
         self.send_frame(_MSG_KEY_BINDING_RESPONSE, resp.SerializeToString())
         self._set_state("BOUND")
         self.log.info(
