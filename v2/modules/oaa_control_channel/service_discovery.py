@@ -66,7 +66,7 @@ for _p in (_REPO_ROOT, _PROTO_ROOT):
         sys.path.insert(0, str(_p))
 
 from shared.logger import get_logger                                                    # noqa: E402
-from shared.proto_utils import encode_proto, schema_from_proto_message, dict_to_proto  # noqa: E402
+from shared.proto_utils import encode_proto, proto_to_dict, schema_from_proto_message, dict_to_proto  # noqa: E402
 from shared.config_schema import (                                                      # noqa: E402
     AnyFieldSchema,
     ConfigFieldList,
@@ -207,62 +207,62 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
                 "stream_type": "AUDIO",
                 "audio_type":  "SPEECH",
                 "audio_configs": [
-                    {"sample_rate": 48000, "bit_depth": 16, "channel_count": 1, "codec": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS"},
+                    {"sample_rate": 48000, "bit_depth": 16, "channel_count": 1},
                 ],
             },
         },
-        # ch 6 — SystemAudio (PCM 16kHz mono)
+        # ch 6 — SystemAudio (PCM 48kHz mono)
         {
             "channel_id": 6,
             "av_channel": {
                 "stream_type": "AUDIO",
                 "audio_type":  "SYSTEM",
                 "audio_configs": [
-                    {"sample_rate": 16000, "bit_depth": 16, "channel_count": 1, "codec": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS"},
+                    {"sample_rate": 48000, "bit_depth": 16, "channel_count": 1},
                 ],
             },
         },
-        # ch 7 — AVInput (PCM 16kHz mono)
+        # ch 7 — AVInput (PCM 48kHz mono)
         {
             "channel_id": 7,
             "av_input_channel": {
                 "stream_type": "AUDIO",
-                "audio_config": {"sample_rate": 16000, "bit_depth": 16, "channel_count": 1},
+                "audio_config": {"sample_rate": 48000, "bit_depth": 16, "channel_count": 1},
             },
         },
-        # ch 8 — Bluetooth (bt_mac injected at runtime)
-        {
-            "channel_id": 8,
-            "bluetooth_channel": {
-                "adapter_address": "",
-                "supported_pairing_methods": ["PIN"],
-            },
-        },
-        # ch 9 — Navigation
-        {
-            "channel_id": 9,
-            "navigation_channel": {
-                "minimum_interval_ms": 500,
-                "type": 1,  # TURN_BY_TURN
-                "image_options": {
-                    "width":              64,
-                    "height":             64,
-                    "colour_depth_bits":  32,
-                },
-            },
-        },
-        # ch 10 — MediaStatus
-        {
-            "channel_id": 10,
-            "media_info_channel": {},
-        },
-        # ch 14 — WiFi (bssid injected at runtime)
-        {
-            "channel_id": 14,
-            "wifi_channel": {
-                "bssid": "",
-            },
-        },
+        # # ch 8 — Bluetooth (bt_mac injected at runtime)
+        # {
+        #     "channel_id": 8,
+        #     "bluetooth_channel": {
+        #         "adapter_address": "",
+        #         "supported_pairing_methods": ["PIN"],
+        #     },
+        # },
+        # # ch 9 — Navigation
+        # {
+        #     "channel_id": 9,
+        #     "navigation_channel": {
+        #         "minimum_interval_ms": 500,
+        #         "type": 1,  # TURN_BY_TURN
+        #         "image_options": {
+        #             "width":              64,
+        #             "height":             64,
+        #             "colour_depth_bits":  32,
+        #         },
+        #     },
+        # },
+        # # ch 10 — MediaStatus
+        # {
+        #     "channel_id": 10,
+        #     "media_info_channel": {},
+        # },
+        # # ch 14 — WiFi (bssid injected at runtime)
+        # {
+        #     "channel_id": 14,
+        #     "wifi_channel": {
+        #         "bssid": "",
+        #     },
+        # },
     ],
 }
 
@@ -306,29 +306,6 @@ def _apply_defaults_to_schema(
 
 _apply_defaults_to_schema(_SCHEMA, SEMANTIC_DEFAULTS)
 
-
-# ---------------------------------------------------------------------------
-# Legacy flat-dict defaults (backward compat with build_service_discovery_response)
-# ---------------------------------------------------------------------------
-
-DEFAULTS: dict = {
-    "hu.name":                    "NemoHeadUnit",
-    "hu.make":                    "Nemo",
-    "hu.model":                   "NemoHeadUnit-Wireless",
-    "hu.sw_version":              "2.0",
-    "video.resolution":           "VIDEO_1280x720",
-    "video.fps":                  "_30",
-    "video.dpi":                  140,
-    "touch.width":                1280,
-    "touch.height":               720,
-    "audio.media.sample_rate":    48000,
-    "audio.media.channel_count":  2,
-    "audio.speech.sample_rate":   48000,
-    "audio.system.sample_rate":   16000,
-    "nav.min_interval_ms":        500,
-    "nav.image.width":            64,
-    "nav.image.height":           64,
-}
 
 
 # ---------------------------------------------------------------------------
@@ -440,190 +417,20 @@ def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
 
     return result
 
+def message_from_sdr_bytes(sdr_bytes: bytes) -> ServiceDiscoveryResponse | None:
+    """Parse serialised ServiceDiscoveryResponse *bytes* and return the proto message.
 
-# ---------------------------------------------------------------------------
-# Legacy flat-dict API (backward compat — unchanged)
-# ---------------------------------------------------------------------------
-
-def build_service_discovery_response(
-    cfg:        dict,
-    bt_mac:     str = "00:00:00:00:00:00",
-    wifi_bssid: str = "",
-) -> bytes:
-    """Return the serialised ServiceDiscoveryResponse protobuf bytes.
+    Used by handshake.py which holds raw bytes.
 
     Args:
-        cfg:        config dict pre-loaded from config_manager (keys as in DEFAULTS).
-        bt_mac:     local BT adapter MAC address (runtime value, not persisted).
-        wifi_bssid: local WiFi BSSID (runtime value, not persisted).
+        sdr_bytes: raw proto bytes from build_from_schema_cfg().
+    Returns:
+        Parsed ServiceDiscoveryResponse proto message, or None on parse errors.
     """
-    resp = ServiceDiscoveryResponse()
-    resp.head_unit_name   = cfg.get("hu.name",       DEFAULTS["hu.name"])
-    resp.car_model        = "Universal"
-    resp.car_year         = "2025"
-    resp.car_serial       = "20250101"
-    resp.driver_position  = DriverPosition.LEFT
-    resp.headunit_manufacturer     = cfg.get("hu.make",       DEFAULTS["hu.make"])
-    resp.headunit_model            = cfg.get("hu.model",      DEFAULTS["hu.model"])
-    resp.sw_build         = "1"
-    resp.sw_version       = cfg.get("hu.sw_version", DEFAULTS["hu.sw_version"])
-    resp.can_play_native_media_during_vr = True
-
-    descriptors = [
-        _build_video_descriptor(cfg),
-        _build_media_audio_descriptor(cfg),
-        _build_speech_audio_descriptor(cfg),
-        _build_system_audio_descriptor(cfg),
-        _build_input_descriptor(cfg),
-        _build_sensor_descriptor(),
-        _build_bluetooth_descriptor(bt_mac),
-        _build_wifi_descriptor(wifi_bssid),
-        _build_av_input_descriptor(),
-        _build_navigation_descriptor(cfg),
-        _build_media_status_descriptor(),
-    ]
-    if _HAS_PHONE_STATUS:
-        descriptors.append(_build_phone_status_descriptor())
-
-    for desc in descriptors:
-        resp.channels.add().MergeFrom(desc)
-
-    return encode_proto(resp)
-
-
-# ---------------------------------------------------------------------------
-# Channel descriptor builders (legacy — mirror ServiceDiscoveryBuilder.cpp)
-# ---------------------------------------------------------------------------
-
-def _build_video_descriptor(cfg: dict) -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 3
-    av = desc.av_channel
-    av.stream_type = AVStreamType.VIDEO
-
-    resolution_name = cfg.get("video.resolution", DEFAULTS["video.resolution"])
-    fps_name        = cfg.get("video.fps",         DEFAULTS["video.fps"])
-
-    cfg_pb = av.video_configs.add()
-    cfg_pb.video_resolution = VideoResolution.Enum.Value(resolution_name)
-    cfg_pb.video_fps        = VideoFPS.Enum.Value(fps_name)
-    cfg_pb.margin_width     = 0
-    cfg_pb.margin_height    = 0
-    cfg_pb.dpi              = int(cfg.get("video.dpi", DEFAULTS["video.dpi"]))
-    cfg_pb.codec            = MediaCodecType.MEDIA_CODEC_VIDEO_H264_BP
-    return desc
-
-
-def _build_media_audio_descriptor(cfg: dict) -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 4
-    av = desc.av_channel
-    av.stream_type = AVStreamType.AUDIO
-    av.audio_type  = AudioType.MEDIA
-    ac = av.audio_configs.add()
-    ac.sample_rate   = int(cfg.get("audio.media.sample_rate",   DEFAULTS["audio.media.sample_rate"]))
-    ac.bit_depth     = 16
-    ac.channel_count = int(cfg.get("audio.media.channel_count", DEFAULTS["audio.media.channel_count"]))
-    return desc
-
-
-def _build_speech_audio_descriptor(cfg: dict) -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 5
-    av = desc.av_channel
-    av.stream_type = AVStreamType.AUDIO
-    av.audio_type  = AudioType.SPEECH
-    ac = av.audio_configs.add()
-    ac.sample_rate   = int(cfg.get("audio.speech.sample_rate", DEFAULTS["audio.speech.sample_rate"]))
-    ac.bit_depth     = 16
-    ac.channel_count = 1
-    return desc
-
-
-def _build_system_audio_descriptor(cfg: dict) -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 6
-    av = desc.av_channel
-    av.stream_type = AVStreamType.AUDIO
-    av.audio_type  = AudioType.SYSTEM
-    ac = av.audio_configs.add()
-    ac.sample_rate   = int(cfg.get("audio.system.sample_rate", DEFAULTS["audio.system.sample_rate"]))
-    ac.bit_depth     = 16
-    ac.channel_count = 1
-    return desc
-
-
-def _build_input_descriptor(cfg: dict) -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 1
-    inp = desc.input_channel
-    ts = inp.touch_screen_configs.add()
-    ts.width  = int(cfg.get("touch.width",  DEFAULTS["touch.width"]))
-    ts.height = int(cfg.get("touch.height", DEFAULTS["touch.height"]))
-    for kc in [3, 4, 84, 85, 86, 87, 88, 126, 127, 219, 231]:
-        inp.supported_keycodes.append(kc)
-    return desc
-
-
-def _build_sensor_descriptor() -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 2
-    sc = desc.sensor_channel
-    for st in [SensorType.NIGHT_DATA, SensorType.DRIVING_STATUS, SensorType.PARKING_BRAKE]:
-        sc.sensors.add().type = st
-    return desc
-
-
-def _build_bluetooth_descriptor(bt_mac: str) -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 8
-    bt = desc.bluetooth_channel
-    bt.adapter_address = bt_mac
-    bt.supported_pairing_methods.append(BluetoothPairingMethod.PIN)
-    return desc
-
-
-def _build_wifi_descriptor(bssid: str) -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 14
-    wf = desc.wifi_channel
-    wf.bssid = bssid
-    return desc
-
-
-def _build_av_input_descriptor() -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 7
-    av = desc.av_input_channel
-    av.stream_type = AVStreamType.AUDIO
-    ac = av.audio_config
-    ac.sample_rate   = 16000
-    ac.bit_depth     = 16
-    ac.channel_count = 1
-    return desc
-
-
-def _build_navigation_descriptor(cfg: dict) -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 9
-    nav = desc.navigation_channel
-    nav.minimum_interval_ms             = int(cfg.get("nav.min_interval_ms", DEFAULTS["nav.min_interval_ms"]))
-    nav.type                            = NavigationType.TURN_BY_TURN
-    nav.image_options.width             = int(cfg.get("nav.image.width",  DEFAULTS["nav.image.width"]))
-    nav.image_options.height            = int(cfg.get("nav.image.height", DEFAULTS["nav.image.height"]))
-    nav.image_options.colour_depth_bits = 32
-    return desc
-
-
-def _build_media_status_descriptor() -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 10
-    desc.media_info_channel.SetInParent()
-    return desc
-
-
-def _build_phone_status_descriptor() -> ChannelDescriptor:
-    desc = ChannelDescriptor()
-    desc.channel_id = 11
-    desc.phone_status_channel.SetInParent()
-    return desc
+    try:
+        resp = ServiceDiscoveryResponse()
+        resp.ParseFromString(sdr_bytes)
+        return resp
+    except Exception as exc:
+        log.error("message_from_sdr_bytes: parse error — %s", exc)
+        return None

@@ -68,7 +68,7 @@ for _p in (_REPO_ROOT, _PROTO_ROOT):
 
 
 from shared.logger import get_logger                                                    # noqa: E402
-from shared.proto_utils import decode_proto, encode_proto                               # noqa: E402
+from shared.proto_utils import decode_proto, encode_proto, proto_to_dict                               # noqa: E402
 
 # Control proto imports
 from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage             # noqa: E402
@@ -92,7 +92,7 @@ from v2.protos.oaa.navigation.NavigationFocusRequestMessage_pb2 import Navigatio
 from v2.protos.oaa.navigation.NavigationFocusResponseMessage_pb2 import NavigationFocusResponse  # noqa: E402
 
 from oaa_control_channel.frame_codec import encode_control_frame, decode_control_frame  # noqa: E402
-from oaa_control_channel.service_discovery import build_from_schema_cfg, channels_from_sdr_bytes  # noqa: E402
+from oaa_control_channel.service_discovery import build_from_schema_cfg, channels_from_sdr_bytes, message_from_sdr_bytes  # noqa: E402
 
 log = get_logger("oaa_control_channel.handshake")
 
@@ -275,6 +275,9 @@ class ControlChannelHandshake:
             return
 
         sdr_bytes = bytes.fromhex(sdr_bytes_hex)
+        
+        log.debug(f"on_channels_ready: {proto_to_dict(message_from_sdr_bytes(sdr_bytes))}")
+
         self._send(MSG_SERVICE_DISCOVERY_RES, sdr_bytes, encrypted=self._sdr_encrypted)
         self._state = HandshakeState.CHANNELS_OPENING
         log.info("SERVICE_DISCOVERY_RESPONSE sent (%d bytes)", len(sdr_bytes))
@@ -309,7 +312,7 @@ class ControlChannelHandshake:
     def _on_service_discovery_request(self, body: bytes, encrypted: bool) -> None:
         req = decode_proto(ServiceDiscoveryRequest, body)
         if req is not None:
-            log.info("SERVICE_DISCOVERY_REQUEST from '%s'", getattr(req, 'phone_name', '?'))
+            log.info("SERVICE_DISCOVERY_REQUEST from '%s'", getattr(req, 'device_name', '?'))
 
         sdr_bytes = build_from_schema_cfg(
             schema_cfg=self._cfg,
@@ -335,7 +338,7 @@ class ControlChannelHandshake:
             "waiting for channel_manager.channels_ready (%d channels)",
             len(channels),
         )
-
+        
     def _on_channel_open_request(self, body: bytes, encrypted: bool) -> None:
         req = decode_proto(ChannelOpenRequest, body)
         ch_id = getattr(req, 'channel_id', -1) if req else -1

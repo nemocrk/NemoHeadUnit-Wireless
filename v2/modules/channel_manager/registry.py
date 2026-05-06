@@ -139,6 +139,9 @@ def resolve_module_type(channel_id: int, channel_descriptor: dict) -> str:
 
     if "sensor_channel" in channel_descriptor:
         return "sensor"
+    
+    if "av_input_channel" in channel_descriptor:
+        return "av_input"
 
     # --- Known but not-yet-implemented channels ---
     for skip_key in _SKIP_KEYS:

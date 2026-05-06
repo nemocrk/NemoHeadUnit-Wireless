@@ -314,7 +314,7 @@ def proto_to_dict(msg: Message) -> dict:
     """
     from google.protobuf.json_format import MessageToDict  # lazy import
 
-    return MessageToDict(msg, preserving_proto_field_name=True, including_default_value_fields=False)
+    return MessageToDict(msg, preserving_proto_field_name=True)
 
 
 def dict_to_proto(msg: Any, data: dict) -> None:
