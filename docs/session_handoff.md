@@ -406,3 +406,29 @@ python -c "from shared.proto_utils import build_media_with_timestamp; print('OK'
 python -c "from v2.modules.channel_modules.av_input.main import AVInputModule; print('OK')"
 python -m pytest tests/v2/ -v
 ```
+## 2026-05-06 - ch0 focus handlers: AudioFocus, NavigationFocus, VoiceSession, BatteryStatus
+
+**What changed:**
+
+`v2/modules/oaa_control_channel/handshake.py` — aggiunti 4 handler per messaggi ch0
+precedentemente non gestiti (causavano blocco della sessione wireless AA).
+
+| msg_id | Nome | Handler | Comportamento |
+|---|---|---|---|
+| 18 (0x0012) | `AUDIO_FOCUS_REQUEST` | `_on_audio_focus_request` | Risponde `GAIN + granted=True`; se stato `CHANNELS_OPENING` → `ACTIVE` (secondo trigger wireless) |
+| 13 (0x000D) | `NAVIGATION_FOCUS_REQUEST` | `_on_navigation_focus_request` | Risponde sempre `NAV_FOCUS_PROJECTED` |
+| 17 (0x0011) | `VOICE_SESSION_REQUEST` | `_on_voice_session_request` | Solo log START/STOP, nessuna risposta |
+| 23 (0x0017) | `BATTERY_STATUS_NOTIFICATION` | `_on_battery_status_notification` | Log level, time_remaining_s, critical_battery |
+
+**Why:**
+Su Android Auto wireless il telefono manda `AUDIO_FOCUS_REQUEST (0x0012)` prima
+(o al posto) del `PING_REQUEST`. Senza handler la sessione non diventava mai ACTIVE.
+
+**Status:** Completed
+
+**Commit:** [a505b88](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/a505b887a5b8f05df864fce06e95fa343bb7174a)
+
+**Next 1-3 steps:**
+1. Test unitari per i 4 nuovi handler in `tests/v2/test_handshake.py`
+2. Test end-to-end su hardware wireless
+3. Verificare che `PING_REQUEST` non causi doppia callback `on_active`
