@@ -178,16 +178,28 @@ def on_frame_send(topic: str, payload: dict) -> None:
         log.warning("on_frame_send: no active relay, dropping frame (ch=%s)",
                     payload.get("channel_id"))
         return
-
+    log.info(f"on_frame_send: sending frame on ch={payload.get('channel_id')}, flags=0x{payload.get('flags', 0):02X}, encrypted={bool(payload.get('flags', 0) & _FLAG_ENCRYPTED)}, payload_len={len(payload.get('payload_hex', '')) // 2}")
     try:
         channel_id  = int(payload["channel_id"])
         flags       = int(payload["flags"])
+        encrypted   = bool(flags & _FLAG_ENCRYPTED)
         raw_payload = bytes.fromhex(payload["payload_hex"])
     except (KeyError, ValueError) as exc:
         log.error("on_frame_send: malformed payload — %s", exc)
         return
 
     # AA wire format: [channel:1B][flags:1B][len:2B_BE][payload]
+    if encrypted:
+        if _cryptor is None or not _cryptor.is_active():
+            log.warning("on_frame_send: encryption requested but cryptor not active — sending unencrypted")
+            encrypted = False
+        else:
+            try:
+                raw_payload = _cryptor.encrypt(raw_payload)
+            except Exception as exc:
+                log.error("on_frame_send: encrypt failed ch=%d — %s", channel_id, exc)
+                return
+    
     frame = struct.pack(">BBH", channel_id, flags, len(raw_payload)) + raw_payload
 
     try:
