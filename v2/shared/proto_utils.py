@@ -12,7 +12,7 @@ dict_to_proto(msg, data) → None
 schema_from_proto_message(descriptor) → dict[str, AnyFieldSchema]
 channels_from_sdr_bytes(sdr_bytes_hex) → list[dict]
 channel_config_from_sdr(sdr_bytes_hex, channel_id) → dict | None
-encode_aa_frame(channel_id, message_id, proto_body) → dict
+encode_aa_frame(channel_id, message_id, proto_body, *, control=False) → dict
 decode_aa_frame(data) → tuple[int, bytes] | None
 
 parse_media_with_timestamp
@@ -43,8 +43,16 @@ Every outgoing AA frame is a 2-byte big-endian message_id followed by the
 serialised proto body, wrapped in a dict understood by aa.frame.send.
 Every incoming raw frame is decoded by stripping the same 2-byte header.
 
-  encode_aa_frame(channel_id, message_id, proto_body) → dict
+  encode_aa_frame(channel_id, message_id, proto_body, *, control=False) → dict
       Returns {channel_id, flags, payload_hex} ready for bus.publish("aa.frame.send").
+
+      The `control` flag documents that the message_id belongs to the
+      ControlMessage namespace (e.g. CHANNEL_OPEN_RESPONSE = 0x0008) rather
+      than an AV-specific namespace, even when channel_id != 0.
+      On the wire the flags byte is identical (0x0B) for both namespaces, so
+      `control` has no runtime effect — it exists solely to make the intent
+      explicit at every call site that sends a Control-namespace message on a
+      non-zero channel.
 
   decode_aa_frame(data) → (message_id, body) | None
       Splits a raw frame into its message_id and body.
@@ -188,7 +196,13 @@ def encode_proto(msg: Message) -> bytes:
         return b""
 
 
-def encode_aa_frame(channel_id: int, message_id: int, proto_body: bytes) -> dict:
+def encode_aa_frame(
+    channel_id: int,
+    message_id: int,
+    proto_body: bytes,
+    *,
+    control: bool = False,
+) -> dict:
     """Wrap a serialised proto body into an aa.frame.send payload dict.
 
     Every outgoing AA frame is a 2-byte big-endian message_id followed by the
@@ -199,6 +213,15 @@ def encode_aa_frame(channel_id: int, message_id: int, proto_body: bytes) -> dict
         channel_id:  the AA channel this frame belongs to.
         message_id:  2-byte big-endian AA message identifier.
         proto_body:  serialised protobuf payload (may be empty bytes).
+        control:     set to True when message_id belongs to the ControlMessage
+                     namespace (e.g. CHANNEL_OPEN_RESPONSE = 0x0008) even
+                     though channel_id != 0.  On the wire the flags byte is
+                     identical (0x0B) for both Control and AV namespaces, so
+                     this parameter has NO runtime effect.  It exists solely
+                     to document intent at call sites that send a Control-
+                     namespace message on a non-zero channel — specifically
+                     ChannelOpenResponse, which is the only such case in the
+                     AA protocol.
 
     Returns:
         {"channel_id": int, "flags": int, "payload_hex": str}
