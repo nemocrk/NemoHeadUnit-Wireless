@@ -343,7 +343,7 @@ class BaseChannelModule(ABC):
     # Outgoing frame helper
     # ------------------------------------------------------------------
 
-    def send_frame(self, message_id: int, proto_body: bytes) -> None:
+    def send_frame(self, message_id: int, proto_body: bytes, *, control: bool = False) -> None:
         """Send an encrypted AA frame on this module's channel.
 
         All post-handshake channel traffic is always encrypted.
@@ -353,11 +353,21 @@ class BaseChannelModule(ABC):
         Args:
             message_id:  2-byte big-endian AA message identifier.
             proto_body:  serialised protobuf payload (may be empty bytes).
+            control:     set to True when message_id belongs to the
+                         ControlMessage namespace (e.g. CHANNEL_OPEN_RESPONSE
+                         = 0x0008) even though this channel is non-zero.
+                         On the wire the flags byte is identical (0x0B) for
+                         both Control and AV namespaces, so this parameter
+                         has NO runtime effect.  It exists solely to document
+                         intent — ChannelOpenResponse is the only AA message
+                         that belongs to the Control namespace yet travels on
+                         a non-zero channel.
         """
-        frame = encode_aa_frame(self.CHANNEL_ID, message_id, proto_body)
+        frame = encode_aa_frame(self.CHANNEL_ID, message_id, proto_body, control=control)
         self.log.info(
-            "CH%d → msg_id=0x%04x len=%d (encrypted)",
+            "CH%d → msg_id=0x%04x len=%d (encrypted%s)",
             self.CHANNEL_ID, message_id, len(proto_body),
+            " control-ns" if control else "",
         )
         self.bus.publish("aa.frame.send", frame)
 
