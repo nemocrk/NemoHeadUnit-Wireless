@@ -70,6 +70,14 @@ Outgoing frame pattern:
   Never call encode_aa_frame() + bus.publish("aa.frame.send") directly.
   BaseChannelModule.send_frame() handles channel_id and encrypted flag
   consistently for all post-handshake channel traffic.
+
+  Exception — ChannelOpenResponse:
+    ChannelOpenResponse (ControlMessage.CHANNEL_OPEN_RESPONSE = 0x0008) belongs
+    to the ControlMessage namespace even when sent on a non-zero AV channel.
+    Always pass control=True when sending it:
+        self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, body, control=True)
+    This has NO runtime effect (wire flags = 0x0B in both cases) but documents
+    the namespace boundary explicitly.
 """
 
 from __future__ import annotations
@@ -150,6 +158,11 @@ class TemplateModule(BaseChannelModule):
       Never encode manually with encode_aa_frame() + bus.publish("aa.frame.send").
       BaseChannelModule.send_frame() is the single authoritative point that
       sets channel_id and the encrypted flag for all post-handshake traffic.
+
+      Exception — ChannelOpenResponse:
+        ChannelOpenResponse (ControlMessage.CHANNEL_OPEN_RESPONSE = 0x0008)
+        belongs to the ControlMessage namespace even on non-zero AV channels.
+        Pass control=True when sending it (no runtime effect; documents intent).
 
     Required class attributes (set at class level, not in __init__):
       MODULE_NAME — overridden by --module-name CLI
@@ -346,10 +359,16 @@ class TemplateModule(BaseChannelModule):
         # TODO: some channel types (e.g. video) send an extra indication here.
 
     def _handle_open_request(self, body: bytes) -> None:
-        """Send ChannelOpenResponse and transition to OPEN."""
+        """Send ChannelOpenResponse and transition to OPEN.
+
+        ChannelOpenResponse uses ControlMessage.CHANNEL_OPEN_RESPONSE (0x0008),
+        which belongs to the ControlMessage namespace even on non-zero AV channels.
+        We pass control=True so the intent is explicit; on the wire the flags
+        byte is unchanged (0x0B).
+        """
         resp = ChannelOpenResponse()
         resp.status = Status.OK
-        self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
+        self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString(), control=True)
         self._set_state("OPEN")
         self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)
 
