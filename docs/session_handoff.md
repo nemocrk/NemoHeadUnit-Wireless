@@ -337,3 +337,72 @@ per le future implementazioni di channel module.
    (allineamento pendente da entry precedente)
 3. Aggiungere un test smoke in `tests/v2/test_template.py` che verifica
    l'importabilità e l'istanziazione di `TemplateModule` senza bus attivo
+
+---
+
+## 2026-05-06 - av_input module + build_media_with_timestamp
+
+**What changed:**
+
+### 1. `v2/shared/proto_utils.py` — aggiunta `build_media_with_timestamp`
+
+Aggiunta la controparte simmetrica di `parse_media_with_timestamp`:
+```python
+def build_media_with_timestamp(ts_us: int, data: bytes) -> bytes:
+    return struct.pack(">Q", ts_us) + data
+```
+Wire format: `[8-byte BE uint64 timestamp_us][raw PCM/codec bytes]`,
+consistente con `openauto-prodigy AVInputChannelHandler::sendMicData`.
+Public API docstring aggiornato.
+
+### 2. `v2/modules/channel_modules/av_input/__init__.py` — scaffold
+
+File minimo creato per rendere la directory un package Python.
+
+### 3. `v2/modules/channel_modules/av_input/main.py` — implementazione completa
+
+`AVInputModule(BaseChannelModule)` — canale AVInput (ch.7 default).
+
+| Aspetto | Dettaglio |
+|---|---|
+| Cattura | `sounddevice.RawInputStream` 48kHz/mono/16-bit |
+| Lifecycle | Controllato dal telefono via `INPUT_OPEN_REQUEST(open=True/False)` |
+| Handshake | `SETUP_REQUEST` → `CHANNEL_OPEN_REQUEST` → `INPUT_OPEN_REQUEST` |
+| Invio frame | `build_media_with_timestamp(ts_us, pcm)` + `send_frame(AV_MEDIA_WITH_TIMESTAMP, ...)` |
+| Config keys | `mic_device` (enum, default=`"default"`), `max_unacked` (int, default=1) |
+| Bus topics | `av_input.state`, `av_input.mic_started`, `av_input.mic_stopped` |
+| Timestamp | `time.monotonic_ns() // 1000` in µs nel callback sounddevice |
+| `_is_ready()` | Sempre `True` — lo stream è aperto solo on-demand |
+
+**Why:**
+- Il canale AVInput è la controparte del canale audio: anziché ricevere media
+  dal telefono e riprodurlo localmente, acquisisce dal microfono HU e invia
+  PCM grezzo al telefono per il riconoscimento vocale AA.
+- `build_media_with_timestamp` appartiene a `proto_utils` perché è wire format,
+  non business logic — riutilizzabile da qualsiasi modulo che invii media con timestamp.
+
+**Status:** Completed
+
+**Commit map:**
+
+| File | Commit |
+|---|---|
+| `v2/shared/proto_utils.py` | [88e5aab](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/88e5aab8515ab2eb40f03102ed758f9b4e4417bc) |
+| `v2/modules/channel_modules/av_input/__init__.py` | [92104c6](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/92104c65c33bde08ae37f0e28d83404cb959e9a0) |
+| `v2/modules/channel_modules/av_input/main.py` | [2ff45cc](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/2ff45ccd3398008f76c19974560f0615fee08622) |
+
+**Next 1-3 steps:**
+1. Aggiungere test unitari in `tests/v2/test_av_input.py`:
+   - `test_build_media_with_timestamp` (round-trip con `parse_media_with_timestamp`)
+   - `test_handle_setup_request` (verifica payload `AVChannelSetupResponse`)
+   - `test_handle_input_open_request_start` / `_stop` (mock sounddevice)
+   - `test_mic_callback` (verifica che `send_frame` venga chiamato con payload corretto)
+2. Verificare compatibilità wire format con `openauto-prodigy` su hardware
+3. Aggiungere `av_input` al registry del `channel_manager`
+
+**Verification commands:**
+```bash
+python -c "from shared.proto_utils import build_media_with_timestamp; print('OK')"
+python -c "from v2.modules.channel_modules.av_input.main import AVInputModule; print('OK')"
+python -m pytest tests/v2/ -v
+```
