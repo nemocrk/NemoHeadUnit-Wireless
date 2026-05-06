@@ -21,9 +21,15 @@ Handshake sequence (HU speaks first):
   HU → Phone : SERVICE_DISCOVERY_RES   (0x0007)  ← sent only after all channel modules are up
   Phone → HU : CHANNEL_OPEN_REQ         (0x0008)  [one per channel]
   HU → Phone : CHANNEL_OPEN_RES         (0x0009)  [STATUS_OK]
-  Phone → HU : PING_REQUEST             (0x000B)
+  Phone → HU : AUDIO_FOCUS_REQUEST      (0x0012)  ← wireless: may arrive before PING
+  HU → Phone : AUDIO_FOCUS_RESPONSE     (0x0013)  [GAIN] → Session ACTIVE (second trigger)
+  Phone → HU : PING_REQUEST             (0x000B)  ← wired: primary ACTIVE trigger
   HU → Phone : PING_RESPONSE            (0x000C)
   → Session ACTIVE
+
+  Note: on wireless AA, AUDIO_FOCUS_REQUEST typically arrives before PING_REQUEST.
+  Both transitions fire independently — whichever comes first sets ACTIVE.
+  AUDIO_FOCUS_REQUEST trigger only fires when state == CHANNELS_OPENING.
 
 TLS note:
   AA uses TLS 1.2 in-band: SSL bytes are exchanged as AA frame payloads
@@ -73,6 +79,17 @@ from v2.protos.oaa.control.ChannelOpenRequestMessage_pb2 import ChannelOpenReque
 from v2.protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
 from v2.protos.oaa.control.PingRequestMessage_pb2 import PingRequest                   # noqa: E402
 from v2.protos.oaa.control.PingResponseMessage_pb2 import PingResponse                 # noqa: E402
+from v2.protos.oaa.control.VoiceSessionRequestMessage_pb2 import VoiceSessionRequest   # noqa: E402
+from v2.protos.oaa.control.BatteryStatusMessage_pb2 import BatteryStatusNotification   # noqa: E402
+
+# Audio focus proto imports
+from v2.protos.oaa.audio.AudioFocusRequestMessage_pb2 import AudioFocusRequest         # noqa: E402
+from v2.protos.oaa.audio.AudioFocusResponseMessage_pb2 import AudioFocusResponse       # noqa: E402
+from v2.protos.oaa.audio.AudioFocusStateEnum_pb2 import AudioFocusState                # noqa: E402
+
+# Navigation focus proto imports
+from v2.protos.oaa.navigation.NavigationFocusRequestMessage_pb2 import NavigationFocusRequest, NavigationFocusType  # noqa: E402
+from v2.protos.oaa.navigation.NavigationFocusResponseMessage_pb2 import NavigationFocusResponse  # noqa: E402
 
 from oaa_control_channel.frame_codec import encode_control_frame, decode_control_frame  # noqa: E402
 from oaa_control_channel.service_discovery import build_from_schema_cfg, channels_from_sdr_bytes  # noqa: E402
@@ -93,6 +110,12 @@ MSG_CHANNEL_OPEN_REQ       = ControlMessage.Enum.CHANNEL_OPEN_REQUEST
 MSG_CHANNEL_OPEN_RES       = ControlMessage.Enum.CHANNEL_OPEN_RESPONSE
 MSG_PING_REQUEST           = ControlMessage.Enum.PING_REQUEST
 MSG_PING_RESPONSE          = ControlMessage.Enum.PING_RESPONSE
+MSG_AUDIO_FOCUS_REQUEST    = ControlMessage.Enum.AUDIO_FOCUS_REQUEST
+MSG_AUDIO_FOCUS_RESPONSE   = ControlMessage.Enum.AUDIO_FOCUS_RESPONSE
+MSG_NAV_FOCUS_REQUEST      = ControlMessage.Enum.NAVIGATION_FOCUS_REQUEST
+MSG_NAV_FOCUS_RESPONSE     = ControlMessage.Enum.NAVIGATION_FOCUS_RESPONSE
+MSG_VOICE_SESSION_REQUEST  = ControlMessage.Enum.VOICE_SESSION_REQUEST
+MSG_BATTERY_STATUS         = ControlMessage.Enum.BATTERY_STATUS_NOTIFICATION
 MSG_SHUTDOWN_REQUEST       = ControlMessage.Enum.SHUTDOWN_REQUEST
 MSG_SHUTDOWN_RESPONSE      = ControlMessage.Enum.SHUTDOWN_RESPONSE
 MSG_BYEBYE_RESPONSE        = ControlMessage.Enum.SHUTDOWN_RESPONSE
@@ -205,6 +228,10 @@ class ControlChannelHandshake:
             MSG_SERVICE_DISCOVERY_REQ: self._on_service_discovery_request,
             MSG_CHANNEL_OPEN_REQ:      self._on_channel_open_request,
             MSG_PING_REQUEST:          self._on_ping_request,
+            MSG_AUDIO_FOCUS_REQUEST:   self._on_audio_focus_request,
+            MSG_NAV_FOCUS_REQUEST:     self._on_navigation_focus_request,
+            MSG_VOICE_SESSION_REQUEST: self._on_voice_session_request,
+            MSG_BATTERY_STATUS:        self._on_battery_status_notification,
             MSG_SHUTDOWN_REQUEST:      self._on_shutdown_request,
         }.get(msg_id)
 
@@ -331,9 +358,51 @@ class ControlChannelHandshake:
 
         if self._state != HandshakeState.ACTIVE:
             self._state = HandshakeState.ACTIVE
-            log.info("Session ACTIVE — all channels open: %s", sorted(self._open_channels))
+            log.info("Session ACTIVE (ping trigger) — all channels open: %s", sorted(self._open_channels))
             if self._on_active:
                 self._on_active()
+
+    def _on_audio_focus_request(self, body: bytes, encrypted: bool) -> None:
+        req = decode_proto(AudioFocusRequest, body)
+        focus_type = getattr(req, 'audio_focus_type', '?') if req else '?'
+        log.info("AUDIO_FOCUS_REQUEST focus_type=%s — granting GAIN", focus_type)
+
+        resp = AudioFocusResponse()
+        resp.audio_focus_state = AudioFocusState.Enum.GAIN
+        resp.granted = True
+        self._send(MSG_AUDIO_FOCUS_RESPONSE, encode_proto(resp), encrypted=encrypted)
+
+        if self._state == HandshakeState.CHANNELS_OPENING:
+            self._state = HandshakeState.ACTIVE
+            log.info("Session ACTIVE (audio focus trigger) — channels open: %s", sorted(self._open_channels))
+            if self._on_active:
+                self._on_active()
+
+    def _on_navigation_focus_request(self, body: bytes, encrypted: bool) -> None:
+        req = decode_proto(NavigationFocusRequest, body)
+        req_type = getattr(req, 'type', '?') if req else '?'
+        log.info("NAVIGATION_FOCUS_REQUEST type=%s — responding NAV_FOCUS_PROJECTED", req_type)
+
+        resp = NavigationFocusResponse()
+        resp.type = NavigationFocusType.NAV_FOCUS_PROJECTED
+        self._send(MSG_NAV_FOCUS_RESPONSE, encode_proto(resp), encrypted=encrypted)
+
+    def _on_voice_session_request(self, body: bytes, encrypted: bool) -> None:
+        req = decode_proto(VoiceSessionRequest, body)
+        session_type = getattr(req, 'session_type', '?') if req else '?'
+        log.info("VOICE_SESSION_REQUEST session_type=%s — no response required", session_type)
+
+    def _on_battery_status_notification(self, body: bytes, encrypted: bool) -> None:
+        req = decode_proto(BatteryStatusNotification, body)
+        if req is not None:
+            log.info(
+                "BATTERY_STATUS level=%s%% remaining=%ss critical=%s",
+                getattr(req, 'battery_level', '?'),
+                getattr(req, 'time_remaining_s', '?'),
+                getattr(req, 'critical_battery', '?'),
+            )
+        else:
+            log.info("BATTERY_STATUS_NOTIFICATION received (unparseable body)")
 
     def _on_shutdown_request(self, body: bytes, encrypted: bool) -> None:
         log.info("SHUTDOWN_REQUEST received")
