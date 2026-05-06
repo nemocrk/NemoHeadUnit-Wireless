@@ -103,19 +103,51 @@ class DiscoverySession:
     def _start_discovery(self) -> None:
         """Call Adapter1.StartDiscovery via D-Bus."""
         try:
+            # Pre-check property to avoid unnecessary D-Bus error noise
+            if self._adapter.is_discovering():
+                log.info("StartDiscovery: Adapter is already discovering (according to properties)")
+                return
+
             # adapter._adapter is the dbus.Interface for Adapter1
             self._adapter._adapter.StartDiscovery()
             log.debug("Adapter1.StartDiscovery called")
         except Exception as e:
-            log.error(f"StartDiscovery failed: {e}")
+            if "org.bluez.Error.InProgress" in str(e):
+                # Check if BlueZ is lying
+                if not self._adapter.is_discovering():
+                    log.error("BlueZ Inconsistency: StartDiscovery returns InProgress but Discovering property is False. Triggering adapter reset...")
+                    if self._adapter.reset():
+                        # Give BlueZ and the kernel a moment to settle after power-up
+                        time.sleep(2)
+                        try:
+                            # Attempt to resume the discovery session after the reset
+                            self._adapter._adapter.StartDiscovery()
+                            log.info("StartDiscovery succeeded after adapter reset")
+                        except Exception as retry_e:
+                            log.error(f"StartDiscovery failed even after reset: {retry_e}")
+                    else:
+                        log.error("Adapter reset failed, unable to clear BlueZ inconsistency.")
+                else:
+                    log.info("StartDiscovery: BlueZ reports discovery already in progress")
+            else:
+                log.error(f"StartDiscovery failed: {e}")
 
     def _stop_discovery(self) -> None:
         """Call Adapter1.StopDiscovery via D-Bus."""
         try:
+            # If BlueZ says it's not discovering, don't bother trying to stop it
+            if not self._adapter.is_discovering():
+                log.debug("StopDiscovery: already stopped according to BlueZ")
+                return
+
             self._adapter._adapter.StopDiscovery()
             log.debug("Adapter1.StopDiscovery called")
         except Exception as e:
-            log.warning(f"StopDiscovery failed (may already be stopped): {e}")
+            # Catch "No discovery started" error string
+            if "org.bluez.Error.Failed" in str(e) and "No discovery started" in str(e):
+                log.debug("StopDiscovery: BlueZ reports no discovery was active")
+            else:
+                log.warning(f"StopDiscovery failed: {e}")
 
     def _poll_devices(self) -> list[dict]:
         """

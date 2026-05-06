@@ -15,6 +15,7 @@ instantiated by main.py after the broker is ready.
 
 
 import os
+import time
 from shared.logger import get_logger
 
 log = get_logger("bluetooth.bluez_adapter")
@@ -159,34 +160,42 @@ class BluezAdapter:
         """Make adapter discoverable. timeout=0 → permanent."""
         if not self._initialized:
             return
-        try:
-            import dbus
-            props = dbus.Interface(
-                self._bus.get_object("org.bluez", self._adapter.object_path),
-                "org.freedesktop.DBus.Properties",
-            )
-            props.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(enabled))
-            props.Set("org.bluez.Adapter1", "DiscoverableTimeout", dbus.UInt32(timeout))
-            log.info(f"Adapter discoverable={enabled} timeout={timeout}")
-        except Exception as e:
-            log.error(f"set_discoverable failed: {e}")
-
+        i = 0
+        while i < 3:
+            try:
+                import dbus
+                props = dbus.Interface(
+                    self._bus.get_object("org.bluez", self._adapter.object_path),
+                    "org.freedesktop.DBus.Properties",
+                )
+                props.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(enabled))
+                props.Set("org.bluez.Adapter1", "DiscoverableTimeout", dbus.UInt32(timeout))
+                log.info(f"Adapter discoverable={enabled} timeout={timeout}")
+                i = 3
+            except Exception as e:
+                i += 1
+                if i == 3:
+                    log.error(f"set_discoverable failed: {e}")
     def set_name(self, name: str) -> None:
         """Set the Bluetooth adapter alias (visible name during discovery)."""
         if not self._initialized:
             log.warning("set_name called before init()")
             return
-        try:
-            import dbus
-            props = dbus.Interface(
-                self._bus.get_object("org.bluez", self._adapter.object_path),
-                "org.freedesktop.DBus.Properties",
-            )
-            props.Set("org.bluez.Adapter1", "Alias", dbus.String(name))
-            log.info(f"Adapter name set to '{name}'")
-        except Exception as e:
-            log.error(f"set_name failed: {e}")
-
+        i = 0
+        while i < 3:
+            try:
+                import dbus
+                props = dbus.Interface(
+                    self._bus.get_object("org.bluez", self._adapter.object_path),
+                    "org.freedesktop.DBus.Properties",
+                )
+                props.Set("org.bluez.Adapter1", "Alias", dbus.String(name))
+                log.info(f"Adapter name set to '{name}'")
+                i = 3
+            except Exception as e:
+                i += 1
+                if i == 3:
+                    log.error(f"set_name failed: {e}")
     def get_adapter_address(self) -> str:
         """Return the local adapter MAC address."""
         if not self._initialized:
@@ -201,6 +210,51 @@ class BluezAdapter:
         except Exception as e:
             log.error(f"get_adapter_address failed: {e}")
             return ""
+
+    def is_discovering(self) -> bool:
+        """Check if the adapter is currently in discovery mode via D-Bus properties."""
+        if not self._initialized:
+            return False
+        try:
+            import dbus
+            props = dbus.Interface(
+                self._bus.get_object("org.bluez", self._adapter.object_path),
+                "org.freedesktop.DBus.Properties",
+            )
+            return bool(props.Get("org.bluez.Adapter1", "Discovering"))
+        except Exception as e:
+            log.error(f"is_discovering check failed: {e}")
+            return False
+
+    def reset(self) -> bool:
+        """
+        Power-cycle the adapter to clear BlueZ internal errors/inconsistencies.
+        This is a 'last resort' fix for org.bluez.Error.InProgress loops.
+        """
+        if not self._initialized:
+            return False
+        log.warning("Resetting Bluetooth adapter (Power cycle)...")
+        try:
+            import dbus
+            props = dbus.Interface(
+                self._bus.get_object("org.bluez", self._adapter.object_path),
+                "org.freedesktop.DBus.Properties",
+            )
+            # Power off
+            props.Set("org.bluez.Adapter1", "Powered", dbus.Boolean(False))
+            time.sleep(1.5)
+            # Power on
+            props.Set("org.bluez.Adapter1", "Powered", dbus.Boolean(True))
+            
+            # Restore basic settings
+            time.sleep(0.5)
+            self.register_profiles()
+            
+            log.info("Bluetooth adapter reset complete")
+            return True
+        except Exception as e:
+            log.error(f"Adapter reset failed: {e}")
+            return False
 
     def shutdown(self) -> None:
         """Release D-Bus connection."""

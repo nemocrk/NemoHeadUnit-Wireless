@@ -235,6 +235,11 @@ def on_discover(topic: str, payload: dict) -> None:
     if _adapter is None:
         bus.publish("bluetooth.error", {"error": "Adapter not ready"})
         return
+
+    if _discovery is not None and _discovery.is_running:
+        log.warning("Discovery already in progress — ignoring duplicate request")
+        return
+
     duration = int(payload.get("duration_sec", _config["discovery_duration_sec"]))
     log.info(f"Discovery requested for {duration}s")
     _discovery = DiscoverySession(
