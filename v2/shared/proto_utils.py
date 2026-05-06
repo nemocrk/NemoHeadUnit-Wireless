@@ -6,6 +6,7 @@ Public API
 decode_proto(proto_class, raw_bytes) → Message | None
 encode_proto(msg) → bytes
 parse_media_with_timestamp(body) → tuple[int, bytes]
+build_media_with_timestamp(ts_us, data) → bytes
 proto_to_dict(msg) → dict
 dict_to_proto(msg, data) → None
 schema_from_proto_message(descriptor) → dict[str, AnyFieldSchema]
@@ -24,6 +25,16 @@ implementations parse this manually.
 
 Returns (timestamp_us, audio_or_video_data).
 Used by both audio and video channel modules.
+
+build_media_with_timestamp
+--------------------------
+Symmetric counterpart of parse_media_with_timestamp, used by outgoing
+AV_MEDIA_WITH_TIMESTAMP frames (e.g. av_input mic stream).
+Packs [8-byte BE timestamp][raw PCM/codec bytes] as required by the
+Android Auto wire format (matches openauto-prodigy AVInputChannelHandler
+sendMicData implementation).
+
+Returns bytes ready to be passed directly to send_frame() as proto_body.
 
 encode_aa_frame / decode_aa_frame
 ----------------------------------
@@ -271,6 +282,28 @@ def parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
                 break
 
     return ts_us, data
+
+
+def build_media_with_timestamp(ts_us: int, data: bytes) -> bytes:
+    """Pack an outgoing AV_MEDIA_WITH_TIMESTAMP frame body.
+
+    Symmetric counterpart of parse_media_with_timestamp, used when the HU
+    sends media upstream to the phone (e.g. av_input mic stream).
+
+    Wire format (matches openauto-prodigy AVInputChannelHandler::sendMicData):
+        [8-byte big-endian uint64 timestamp_us][raw PCM / codec bytes]
+
+    The returned bytes are passed directly as proto_body to send_frame();
+    no further serialisation is needed.
+
+    Args:
+        ts_us: presentation timestamp in microseconds (monotonic clock).
+        data:  raw PCM or codec payload bytes.
+
+    Returns:
+        Packed frame body ready for send_frame(AV_MEDIA_WITH_TIMESTAMP, ...).
+    """
+    return struct.pack(">Q", ts_us) + data
 
 
 def proto_to_dict(msg: Message) -> dict:
