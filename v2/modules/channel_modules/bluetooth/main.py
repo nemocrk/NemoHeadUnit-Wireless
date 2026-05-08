@@ -63,6 +63,9 @@ from channel_modules.base_channel_module import BaseChannelModule           # no
 # ---------------------------------------------------------------------------
 # Proto imports — Bluetooth channel
 # ---------------------------------------------------------------------------
+from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage                       # noqa: E402
+from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse             # noqa: E402
+from oaa.common.StatusEnum_pb2 import Status                                           # noqa: E402
 from oaa.bluetooth.BluetoothChannelMessageIdsEnum_pb2 import BluetoothChannelMessage   # noqa: E402
 from oaa.bluetooth.BluetoothPairingRequestMessage_pb2 import BluetoothPairingRequest   # noqa: E402
 from oaa.bluetooth.BluetoothPairingResponseMessage_pb2 import BluetoothPairingResponse # noqa: E402
@@ -70,6 +73,8 @@ from oaa.bluetooth.BluetoothPairingResponseMessage_pb2 import BluetoothPairingRe
 # ---------------------------------------------------------------------------
 # AA message ID aliases
 # ---------------------------------------------------------------------------
+_MSG_CHANNEL_OPEN_REQUEST       = ControlMessage.CHANNEL_OPEN_REQUEST
+_MSG_CHANNEL_OPEN_RESPONSE      = ControlMessage.CHANNEL_OPEN_RESPONSE
 _MSG_PAIRING_REQUEST  = BluetoothChannelMessage.Enum.PAIRING_REQUEST
 _MSG_PAIRING_RESPONSE = BluetoothChannelMessage.Enum.PAIRING_RESPONSE
 _MSG_AUTH_DATA        = BluetoothChannelMessage.Enum.AUTH_DATA
@@ -140,6 +145,8 @@ class BluetoothModule(BaseChannelModule):
 
         if message_id == _MSG_PAIRING_REQUEST:
             self._handle_pairing_request(body)
+        elif message_id == _MSG_CHANNEL_OPEN_REQUEST:
+            self._handle_open_request(body)
         elif message_id == _MSG_AUTH_DATA:
             self._handle_auth_data(body)
         elif message_id == _MSG_AUTH_RESULT:
@@ -153,6 +160,13 @@ class BluetoothModule(BaseChannelModule):
     # ------------------------------------------------------------------
     # Message handlers
     # ------------------------------------------------------------------
+
+    def _handle_open_request(self, body: bytes) -> None:
+        """Send ChannelOpenResponse and transition to OPEN."""
+        resp = ChannelOpenResponse()
+        resp.status = Status.OK
+        self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
+        self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)
 
     def _handle_pairing_request(self, body: bytes) -> None:
         """

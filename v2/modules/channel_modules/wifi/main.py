@@ -72,12 +72,17 @@ from channel_modules.base_channel_module import BaseChannelModule           # no
 # ---------------------------------------------------------------------------
 # Proto imports — WiFi channel
 # ---------------------------------------------------------------------------
-from oaa.wifi.WifiChannelMessageIdsEnum_pb2  import WifiChannelMessage      # noqa: E402
-from oaa.wifi.WifiSecurityResponseMessage_pb2 import WifiSecurityResponse   # noqa: E402
+from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage                       # noqa: E402
+from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse             # noqa: E402
+from oaa.common.StatusEnum_pb2 import Status                                           # noqa: E402
+from oaa.wifi.WifiChannelMessageIdsEnum_pb2  import WifiChannelMessage                 # noqa: E402
+from oaa.wifi.WifiSecurityResponseMessage_pb2 import WifiSecurityResponse              # noqa: E402
 
 # ---------------------------------------------------------------------------
 # AA message ID aliases
 # ---------------------------------------------------------------------------
+_MSG_CHANNEL_OPEN_REQUEST       = ControlMessage.CHANNEL_OPEN_REQUEST
+_MSG_CHANNEL_OPEN_RESPONSE      = ControlMessage.CHANNEL_OPEN_RESPONSE
 _MSG_CREDENTIALS_REQUEST  = WifiChannelMessage.Enum.CREDENTIALS_REQUEST
 _MSG_CREDENTIALS_RESPONSE = WifiChannelMessage.Enum.CREDENTIALS_RESPONSE
 
@@ -255,6 +260,8 @@ class WiFiModule(BaseChannelModule):
 
         if message_id == _MSG_CREDENTIALS_REQUEST:
             self._handle_credentials_request(body)
+        elif message_id == _MSG_CHANNEL_OPEN_REQUEST:
+            self._handle_open_request(body)
         else:
             self.log.debug(
                 "Unhandled msg_id=0x%04x ch=%d len=%d",
@@ -264,6 +271,13 @@ class WiFiModule(BaseChannelModule):
     # ------------------------------------------------------------------
     # Message handlers
     # ------------------------------------------------------------------
+
+    def _handle_open_request(self, body: bytes) -> None:
+        """Send ChannelOpenResponse and transition to OPEN."""
+        resp = ChannelOpenResponse()
+        resp.status = Status.OK
+        self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
+        self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)
 
     def _handle_credentials_request(self, body: bytes) -> None:
         """

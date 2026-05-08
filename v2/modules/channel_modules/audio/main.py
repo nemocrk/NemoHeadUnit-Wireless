@@ -297,7 +297,7 @@ class AudioModule(BaseChannelModule):
     def on_frame(self, channel_id: int, data: bytes) -> None:
         """Dispatch incoming frame by AA message_id."""
         result = decode_aa_frame(data)
-        self.log.debug("Decoded frame header on ch=%d: %s", channel_id, result)
+        self.log.debug("Decoded frame header on ch=%d: %d", channel_id, result[0] if result else 0)
         if result is None:
             self.log.error("on_frame: malformed payload on ch=%d — dropping", channel_id)
             return
@@ -429,32 +429,39 @@ class AudioModule(BaseChannelModule):
             self._av_codec     = None
 
     def _open_stream(self) -> None:
-        """Open (or re-open) a sounddevice RawOutputStream with current audio params."""
         self._close_stream()
         device = self._config.get("audio_device", "default")
-        dtype = {
-            8:  "int8",
-            16: "int16",
-            24: "int24",
-            32: "int32",
-        }.get(self._bit_depth, "int16")
-        sd_device = None if device == "default" else device
-        try:
-            self._stream = sd.RawOutputStream(
-                samplerate=self._sample_rate,
-                channels=self._channel_count,
-                dtype=dtype,
-                blocksize=1024,
-                device=sd_device,
-            )
-            self._stream.start()
-            self.log.info(
-                "sounddevice RawOutputStream opened: device=%r rate=%d channels=%d dtype=%s",
-                device, self._sample_rate, self._channel_count, dtype,
-            )
-        except sd.PortAudioError as exc:
-            self.log.error("_open_stream: failed to open device %r — %s", device, exc)
-            self._stream = None
+        dtype = {8: "int8", 16: "int16", 24: "int24", 32: "int32"}.get(self._bit_depth, "int16")
+
+        # Build candidate list: named device first, then None (system default), then enumerated
+        if device == "default":
+            candidates = [None]  # sounddevice picks the OS default
+        else:
+            candidates = [device, None]  # try requested device, fall back to OS default
+
+        for candidate in candidates:
+            try:
+                self._stream = sd.RawOutputStream(
+                    samplerate=self._sample_rate,
+                    channels=self._channel_count,
+                    dtype=dtype,
+                    blocksize=1024,
+                    device=candidate,
+                )
+                self._stream.start()
+                self.log.info(
+                    "sounddevice RawOutputStream opened: device=%r rate=%d channels=%d dtype=%s",
+                    candidate or "default", self._sample_rate, self._channel_count, dtype,
+                )
+                return
+            except sd.PortAudioError as exc:
+                self.log.warning("_open_stream: device=%r failed — %s", candidate, exc)
+
+        self.log.error(
+            "_open_stream: all candidates exhausted. Available output devices: %s",
+            _list_audio_devices(),
+        )
+        self._stream = None
 
     def _close_stream(self) -> None:
         if self._stream is not None:
