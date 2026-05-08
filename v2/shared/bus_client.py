@@ -16,16 +16,29 @@ Publishing from anywhere:
 Message format (multipart ZMQ frames):
     frame[0] = topic (bytes)
     frame[1] = json payload (bytes)
+
+Saturation diagnostics:
+    Every BUS_STATS_INTERVAL seconds the receive loop logs a one-liner with:
+      - total messages received
+      - total publishes attempted / dropped (HWM)
+      - drop rate %
+    Set BUS_STATS_INTERVAL = 0 to disable.
 """
 
 import json
 import threading
+import time
 import zmq
 from shared.logger import get_logger
 
 BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
 BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
-BUS_HWM = 1000
+
+# Raised from 1000 to reduce drop probability under heavy video+log traffic.
+BUS_HWM = 5000
+
+# How often (seconds) to emit the saturation summary log. 0 = disabled.
+BUS_STATS_INTERVAL = 10.0
 
 
 class BusClient:
@@ -48,6 +61,15 @@ class BusClient:
         self._sub.setsockopt(zmq.LINGER, 0)
         self._sub.connect(BROKER_SUB_ADDR)
 
+        # Saturation counters (thread-safe via GIL for simple int increments)
+        self._stat_pub_ok:    int = 0
+        self._stat_pub_drop:  int = 0
+        self._stat_recv:      int = 0
+        self._stat_next_log:  float = time.monotonic() + BUS_STATS_INTERVAL
+
+        # Per-topic drop counters for detailed diagnostics
+        self._drop_by_topic: dict[str, int] = {}
+
     def subscribe(self, topic: str, handler: callable):
         """Register a handler for a topic. Must be called before start()."""
         self._subscriptions[topic] = handler
@@ -61,9 +83,16 @@ class BusClient:
                 topic.encode(),
                 json.dumps(payload).encode(),
             ], flags=zmq.NOBLOCK)
+            self._stat_pub_ok += 1
         except zmq.Again:
+            self._stat_pub_drop += 1
+            self._drop_by_topic[topic] = self._drop_by_topic.get(topic, 0) + 1
+            self.log.warning(
+                "publish DROPPED (HWM saturated): topic=%s  "
+                "[total_drops=%d this_topic=%d]",
+                topic, self._stat_pub_drop, self._drop_by_topic[topic],
+            )
             return False
-        #self.log.debug(f"Published [{topic}]: {payload}")
         return True
 
     def start(self, blocking: bool = True):
@@ -84,6 +113,20 @@ class BusClient:
         self._context.term()
         self.log.info("BusClient stopped.")
 
+    def _log_stats(self) -> None:
+        total = self._stat_pub_ok + self._stat_pub_drop
+        drop_pct = (self._stat_pub_drop / total * 100) if total else 0.0
+        top_drops = sorted(
+            self._drop_by_topic.items(), key=lambda x: x[1], reverse=True
+        )[:3]
+        top_str = ", ".join(f"{t}:{n}" for t, n in top_drops) if top_drops else "none"
+        self.log.info(
+            "BUS STATS | recv=%d  pub_ok=%d  pub_drop=%d (%.1f%%)  "
+            "top_drop_topics=[%s]",
+            self._stat_recv, self._stat_pub_ok, self._stat_pub_drop,
+            drop_pct, top_str,
+        )
+
     def _receive_loop(self):
         self.log.info("Bus receive loop started.")
         while self._running:
@@ -96,11 +139,23 @@ class BusClient:
                     try:
                         payload = json.loads(frames[1].decode())
                     except json.JSONDecodeError:
-                        self.log.warning(f"Received invalid JSON payload on topic '{topic}', skipping. Payload: {frames[1]}")
+                        self.log.warning(
+                            f"Received invalid JSON payload on topic '{topic}', "
+                            f"skipping. Payload: {frames[1]}"
+                        )
                         continue
+                    self._stat_recv += 1
                     handler = self._subscriptions.get(topic)
                     if handler:
                         handler(topic, payload)
+
+                # Periodic saturation report
+                if BUS_STATS_INTERVAL > 0:
+                    now = time.monotonic()
+                    if now >= self._stat_next_log:
+                        self._log_stats()
+                        self._stat_next_log = now + BUS_STATS_INTERVAL
+
             except KeyboardInterrupt:
                 self.log.info("KeyboardInterrupt received — stopping.")
                 break
