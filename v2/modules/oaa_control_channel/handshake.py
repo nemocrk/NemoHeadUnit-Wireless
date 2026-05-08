@@ -47,6 +47,11 @@ Channel manager integration:
     3. Waits for channel_manager.channels_ready {sdr_bytes_hex} via on_channels_ready()
     4. Sends SERVICE_DISCOVERY_RESPONSE to the phone
   This guarantees all channel modules are up before the phone starts opening channels.
+
+Frame contract (input):
+  on_message(message_id, body, encrypted) — called by main.py after tcp_server
+  has already extracted message_id and decrypted the body.
+  No struct.unpack or frame decoding needed here.
 """
 
 from __future__ import annotations
@@ -92,7 +97,6 @@ from v2.protos.oaa.audio.AudioFocusStateEnum_pb2 import AudioFocusState         
 from v2.protos.oaa.navigation.NavigationFocusRequestMessage_pb2 import NavigationFocusRequest, NavigationFocusType  # noqa: E402
 from v2.protos.oaa.navigation.NavigationFocusResponseMessage_pb2 import NavigationFocusResponse  # noqa: E402
 
-from oaa_control_channel.frame_codec import encode_control_frame, decode_control_frame  # noqa: E402
 from oaa_control_channel.service_discovery import build_from_schema_cfg, channels_from_sdr_bytes, message_from_sdr_bytes  # noqa: E402
 
 log = get_logger("oaa_control_channel.handshake")
@@ -141,23 +145,14 @@ class ControlChannelHandshake:
     """
     Drives the AA control channel (ch 0) handshake.
 
-    TLS is fully delegated to tcp_server via bus messages:
-      publish  aa.handshake.start_tls    {}               ← triggers AACryptor.init + ClientHello
-      publish  aa.handshake.feed_input   {payload_hex}    ← feeds SSL round bytes to cryptor
-      receive  on_tls_handshake_blob(outgoing)            ← forwards blob to phone as SSL_HANDSHAKE
-      receive  on_tls_complete()                          ← sends AUTH_COMPLETE to phone
-
-    Channel manager delegation:
-      publish  oaa_control_channel.open_channels {sdr_bytes_hex, channels}  ← triggers channel_manager
-      receive  on_channels_ready(sdr_bytes_hex)           ← sends SERVICE_DISCOVERY_RES to phone
+    TLS is fully delegated to tcp_server via bus messages.
+    Frame decoding is done by tcp_server: on_message() receives already-extracted
+    (message_id, body, encrypted) tuples — no frame codec needed here.
 
     Args:
         send_fn        : callable(message_id: int, proto_body: bytes, encrypted: bool)
         publish_fn     : callable(topic: str, payload: dict)  — bus.publish
-        cfg            : nested config dict with proto field names as keys
-                         (mirrors service_discovery._SCHEMA / SEMANTIC_DEFAULTS).
-                         Passed directly to build_from_schema_cfg() at
-                         SERVICE_DISCOVERY_REQUEST time.
+        cfg            : flat config dict (mirrors service_discovery._SCHEMA / SEMANTIC_DEFAULTS)
         bt_mac         : local BT MAC address (runtime, not persisted in config)
         wifi_bssid     : local WiFi BSSID    (runtime, not persisted in config)
         on_active_cb   : called when session becomes ACTIVE
@@ -183,8 +178,6 @@ class ControlChannelHandshake:
         self._on_shutdown  = on_shutdown_cb
         self._state        = HandshakeState.IDLE
         self._open_channels: set[int] = set()
-        # Encryption flag saved at SERVICE_DISCOVERY_REQUEST time,
-        # reused when actually sending SERVICE_DISCOVERY_RESPONSE.
         self._sdr_encrypted: bool = False
 
     # ------------------------------------------------------------------
@@ -192,11 +185,6 @@ class ControlChannelHandshake:
     # ------------------------------------------------------------------
 
     def send_version_request(self) -> None:
-        """
-        Send VERSION_REQUEST (msgId 0x0001) to the phone.
-        Must be called immediately after TCP connect — the phone waits in
-        silence until the HU speaks first.
-        """
         body = struct.pack(">HH", AA_VERSION_MAJOR, AA_VERSION_MINOR)
         self._send(MSG_VERSION_REQUEST, body, encrypted=False)
         self._state = HandshakeState.VERSION_SENT
@@ -205,22 +193,19 @@ class ControlChannelHandshake:
             AA_VERSION_MAJOR, AA_VERSION_MINOR,
         )
 
-    def on_message(self, channel_id: int, flags: int, payload: bytes) -> None:
-        """Feed a raw payload from FrameRelay into the state machine.
+    def on_message(self, message_id: int, body: bytes, encrypted: bool) -> None:
+        """Feed a decoded message into the state machine.
 
-        Note: tcp_server decrypts encrypted frames before publishing,
-        so payload is always plaintext here.
+        tcp_server has already extracted message_id and decrypted the body.
+        No frame decoding needed here.
+
+        Args:
+            message_id : 2-byte AA message identifier
+            body       : decrypted proto body bytes
+            encrypted  : True if the wire frame was encrypted (echo)
         """
-        frame = decode_control_frame(channel_id, flags, payload)
-        if frame is None:
-            log.warning("on_message: malformed frame (payload too short)")
-            return
-
-        msg_id = frame.message_id
-        body   = frame.body
-        encrypted = bool(flags & 0x08)
-
-        log.debug("CH0 ← msg_id=0x%04x state=%s len=%d", msg_id, self._state.name, len(body))
+        log.debug("CH0 ← msg_id=0x%04x state=%s len=%d enc=%s",
+                  message_id, self._state.name, len(body), encrypted)
 
         handler = {
             MSG_VERSION_RESPONSE:      self._on_version_response,
@@ -234,28 +219,21 @@ class ControlChannelHandshake:
             MSG_VOICE_SESSION_REQUEST: self._on_voice_session_request,
             MSG_BATTERY_STATUS:        self._on_battery_status_notification,
             MSG_SHUTDOWN_REQUEST:      self._on_shutdown_request,
-        }.get(msg_id)
+        }.get(message_id)
 
         if handler:
             handler(body, encrypted)
         else:
-            log.debug("CH0: unhandled msg_id=0x%04x — ignoring", msg_id)
+            log.debug("CH0: unhandled msg_id=0x%04x — ignoring", message_id)
 
     def on_tls_handshake_blob(self, outgoing_hex: str) -> None:
-        """Called by oaa_control_channel/main.py on tcp.server.tls_handshake.
-
-        Forwards TLS bytes from tcp_server's AACryptor to the phone
-        as an SSL_HANDSHAKE frame (msgId 0x0003).
-        """
+        """Forward TLS bytes from tcp_server to the phone as SSL_HANDSHAKE (0x0003)."""
         outgoing = bytes.fromhex(outgoing_hex)
         log.debug("TLS blob from tcp_server (%d bytes) — forwarding to phone", len(outgoing))
         self._send(MSG_SSL_HANDSHAKE, outgoing, encrypted=False)
 
     def on_tls_complete(self) -> None:
-        """Called by oaa_control_channel/main.py on tcp.server.tls_handshake_completed.
-
-        TLS is now active in tcp_server. Send AUTH_COMPLETE to the phone.
-        """
+        """TLS is now active in tcp_server — send AUTH_COMPLETE to the phone."""
         log.info("TLS handshake complete (tcp_server) — sending AUTH_COMPLETE")
         auth = AuthCompleteIndication()
         auth.status = 0  # STATUS_OK
@@ -263,11 +241,7 @@ class ControlChannelHandshake:
         self._state = HandshakeState.AUTH_OK
 
     def on_channels_ready(self, sdr_bytes_hex: str) -> None:
-        """Called by oaa_control_channel/main.py on channel_manager.channels_ready.
-
-        All channel modules are up — now safe to send SERVICE_DISCOVERY_RESPONSE
-        to the phone so it starts opening individual channels.
-        """
+        """All channel modules are up — send SERVICE_DISCOVERY_RESPONSE to the phone."""
         if self._state != HandshakeState.WAITING_CHANNELS:
             log.warning(
                 "on_channels_ready called in unexpected state %s — ignored",
@@ -276,7 +250,6 @@ class ControlChannelHandshake:
             return
 
         sdr_bytes = bytes.fromhex(sdr_bytes_hex)
-        
         log.debug(f"on_channels_ready: {proto_to_dict(message_from_sdr_bytes(sdr_bytes))}")
 
         self._send(MSG_SERVICE_DISCOVERY_RES, sdr_bytes, encrypted=self._sdr_encrypted)
@@ -302,7 +275,6 @@ class ControlChannelHandshake:
         self._state = HandshakeState.TLS_IN_PROGRESS
 
     def _on_ssl_handshake(self, body: bytes, encrypted: bool) -> None:
-        """TLS handshake blob from phone — relay to tcp_server for processing."""
         log.info("SSL_HANDSHAKE blob from phone (%d bytes) — forwarding to tcp_server", len(body))
         self._publish("aa.handshake.feed_input", {"payload_hex": body.hex()})
 
@@ -321,12 +293,7 @@ class ControlChannelHandshake:
             wifi_bssid=self._wifi_bssid,
         )
 
-        # Save encryption flag: reused in on_channels_ready() when we
-        # actually send SERVICE_DISCOVERY_RESPONSE.
         self._sdr_encrypted = encrypted
-
-        # Extract channel list from the serialised SDR so channel_manager
-        # can resolve module types without re-parsing config.
         channels = channels_from_sdr_bytes(sdr_bytes)
 
         self._publish("oaa_control_channel.open_channels", {
@@ -371,18 +338,6 @@ class ControlChannelHandshake:
         focus_type = getattr(req, 'audio_focus_type', '?') if req else '?'
 
         resp = AudioFocusResponse()
-        """
-                case proto::enums::AudioFocusType::GAIN:
-                    state = proto::enums::AudioFocusState::GAIN; break;
-                case proto::enums::AudioFocusType::GAIN_TRANSIENT:
-                    state = proto::enums::AudioFocusState::GAIN_TRANSIENT; break;
-                case proto::enums::AudioFocusType::GAIN_TRANSIENT_MAY_DUCK:
-                    state = proto::enums::AudioFocusState::GAIN_TRANSIENT_GUIDANCE_ONLY; break;
-                case proto::enums::AudioFocusType::RELEASE:
-                    state = proto::enums::AudioFocusState::LOSS; break;
-                default:
-                    state = proto::enums::AudioFocusState::INVALID; break;
-        """
         match focus_type:
             case AudioFocusType.GAIN:
                 resp.audio_focus_state = AudioFocusState.GAIN
