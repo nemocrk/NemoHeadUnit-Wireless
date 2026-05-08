@@ -17,7 +17,7 @@ Module contract:
                 system.ready                 {name, priority}
                 tcp.server.started          {host, port}
                 tcp.session.connected       {address}
-                aa.frame.received           {channel_id, message_id, encrypted, payload_hex}  (all channels)
+                aa.frame.received           lightweight metadata mirror for diagnostics
                 aa.frame.ch<N>              {channel_id, message_id, encrypted, payload_hex}  (per-channel)
                 tcp.session.closed          {}
                 tcp.server.error            {error}
@@ -32,11 +32,14 @@ aa.frame.send payload contract:
     payload_hex : str   — serialised proto body ONLY (no message_id prepended)
     encrypted   : bool  — semantic flag; tcp_server enforces actual encryption policy via frame_codec
 
-aa.frame.ch<N> / aa.frame.received publish contract:
+aa.frame.ch<N> publish contract:
     channel_id  : int   — AA channel
     message_id  : int   — 2-byte AA message identifier (stripped from wire payload by tcp_server)
     encrypted   : bool  — True if the frame was encrypted on the wire (echo of original flag)
     payload_hex : str   — decrypted proto body ONLY (message_id already removed)
+
+aa.frame.received is diagnostic-only and intentionally lightweight by default.
+Set AA_FRAME_RECEIVED_FULL=1 to include payload_hex there too.
 
 Flow:
   1. Waits for rfcomm.handshake.completed — phone is now on the WiFi AP
@@ -69,6 +72,7 @@ Internal helpers (no ZMQ):
   aa_cryptor.py  — memory-BIO TLS (mirrors aasdk Cryptor.cpp)
 """
 
+import os
 import sys
 import struct
 import threading
@@ -101,6 +105,7 @@ PRIORITY    = 1
 
 bus = BusClient(module_name=MODULE_NAME)
 log = get_logger(MODULE_NAME, bus=bus)
+_PUBLISH_FULL_FRAME_RECEIVED = os.getenv("AA_FRAME_RECEIVED_FULL") == "1"
 
 # ---------------------------------------------------------------------------
 # Module state
@@ -113,6 +118,7 @@ _assembler: Optional[FrameAssembler] = None
 _server_starting = False
 _server_lock = threading.Lock()
 _write_lock  = threading.Lock()
+_crypto_lock = threading.RLock()
 
 _restart_pending      = False
 _shutdown_ack_event   = threading.Event()
@@ -195,13 +201,14 @@ def on_frame_send(topic: str, payload: dict) -> None:
         return
 
     try:
-        frames = encode(
-            channel_id=channel_id,
-            message_id=message_id,
-            body=body,
-            ssl_active=ssl_active,
-            cryptor=_cryptor,
-        )
+        with _crypto_lock:
+            frames = encode(
+                channel_id=channel_id,
+                message_id=message_id,
+                body=body,
+                ssl_active=ssl_active,
+                cryptor=_cryptor,
+            )
     except Exception as exc:
         log.error("on_frame_send: encode failed ch=%d msg=0x%04x — %s", channel_id, message_id, exc)
         return
@@ -222,9 +229,10 @@ def on_handshake_start_tls(topic: str, payload: dict) -> None:
     """oaa_control_channel signals VERSION_RESPONSE received — init cryptor and send ClientHello."""
     global _cryptor
     log.info("aa.handshake.start_tls — initialising AACryptor")
-    _cryptor = AACryptor()
-    _cryptor.init()
-    outgoing = _cryptor.drive_handshake()
+    with _crypto_lock:
+        _cryptor = AACryptor()
+        _cryptor.init()
+        outgoing = _cryptor.drive_handshake()
     if outgoing:
         log.debug("TLS ClientHello generated (%d bytes) — publishing tcp.server.tls_handshake", len(outgoing))
         bus.publish("tcp.server.tls_handshake", {"outgoing_hex": outgoing.hex()})
@@ -242,10 +250,12 @@ def on_handshake_feed_input(topic: str, payload: dict) -> None:
         log.error("on_handshake_feed_input: malformed payload — %s", exc)
         return
 
-    _cryptor.write_handshake_input(data)
-    outgoing = _cryptor.drive_handshake()
+    with _crypto_lock:
+        _cryptor.write_handshake_input(data)
+        outgoing = _cryptor.drive_handshake()
+        active = _cryptor.is_active()
 
-    if _cryptor.is_active():
+    if active:
         log.info("TLS handshake complete — publishing tcp.server.tls_handshake_completed")
         bus.publish("tcp.server.tls_handshake_completed", {})
     elif outgoing:
@@ -266,13 +276,14 @@ def on_aa_session_restart(topic: str, payload: dict) -> None:
     _shutdown_ack_event.clear()
 
     # Build and send SHUTDOWN_REQUEST directly via frame_codec (bypasses bus round-trip)
-    shutdown_frames = encode(
-        channel_id=0,
-        message_id=_MSG_SHUTDOWN_REQUEST,
-        body=b"",
-        ssl_active=(_cryptor is not None and _cryptor.is_active()),
-        cryptor=_cryptor,
-    )
+    with _crypto_lock:
+        shutdown_frames = encode(
+            channel_id=0,
+            message_id=_MSG_SHUTDOWN_REQUEST,
+            body=b"",
+            ssl_active=(_cryptor is not None and _cryptor.is_active()),
+            cryptor=_cryptor,
+        )
     try:
         with _write_lock:
             for frame in shutdown_frames:
@@ -292,7 +303,8 @@ def on_aa_session_restart(topic: str, payload: dict) -> None:
         log.info("on_aa_session_restart: SHUTDOWN_RESPONSE received")
 
     if _cryptor is not None:
-        _cryptor.deinit()
+        with _crypto_lock:
+            _cryptor.deinit()
         log.info("on_aa_session_restart: AACryptor reset")
 
     if _assembler is not None:
@@ -365,8 +377,9 @@ def _teardown() -> None:
         _server.stop()
         _server = None
     if _cryptor:
-        _cryptor.deinit()
-        _cryptor = None
+        with _crypto_lock:
+            _cryptor.deinit()
+            _cryptor = None
     if _assembler:
         _assembler.reset()
         _assembler = None
@@ -398,9 +411,20 @@ def _on_raw_frame(channel_id: int, flags: int, payload: bytes, total_size: int) 
     encrypted = bool(flags & _FLAG_ENCRYPTED)
 
     # Decrypt if needed
-    if encrypted and _cryptor is not None and _cryptor.is_active():
+    if encrypted:
         try:
-            assembled = _cryptor.decrypt(assembled)
+            cipher_len = len(assembled)
+            decrypted = False
+            with _crypto_lock:
+                cryptor = _cryptor
+                if cryptor is not None and cryptor.is_active():
+                    assembled = cryptor.decrypt(assembled)
+                    decrypted = True
+            if decrypted:
+                log.debug(
+                    "_on_raw_frame: decrypt ok ch=%d cipher_len=%d plain_len=%d",
+                    channel_id, cipher_len, len(assembled),
+                )
         except Exception as exc:
             log.error("_on_raw_frame: decrypt failed ch=%d — %s", channel_id, exc)
             return
@@ -419,7 +443,16 @@ def _on_raw_frame(channel_id: int, flags: int, payload: bytes, total_size: int) 
         "encrypted":   encrypted,
         "payload_hex": body.hex(),
     }
-    bus.publish("aa.frame.received", frame_data)
+    received_data = {
+        "channel_id": channel_id,
+        "message_id": message_id,
+        "encrypted": encrypted,
+        "payload_len": len(body),
+        "payload_head": body[:16].hex(),
+    }
+    if _PUBLISH_FULL_FRAME_RECEIVED:
+        received_data["payload_hex"] = frame_data["payload_hex"]
+    bus.publish("aa.frame.received", received_data)
     bus.publish(f"aa.frame.ch{channel_id}", frame_data)
     log.debug(
         "_on_raw_frame: ch=%d msg=0x%04x enc=%s body_len=%d",

@@ -17,7 +17,7 @@ Module contract:
                 aa.session.shutdown      {}
   Publishes   : channel_manager.module_ready             {name, priority}
                 aa.frame.send            bytes  (via BaseChannelModule.send_frame)
-                video.frame              {channel_id, ts_us, data_b64, codec}
+                video.frame              {channel_id, ts_us, data_b64, codec, is_config}
                 video.state              {state}  IDLE | SETUP | OPEN | PLAYING | STOPPED
 
 Flow:
@@ -29,8 +29,8 @@ Flow:
        - ChannelOpenRequest       → ChannelOpenResponse,   video.state=OPEN
        - AVChannelStartIndication → extract session_id,    video.state=PLAYING
        - AVChannelStopIndication  → reset session_id,      video.state=STOPPED
-       - AV_MEDIA_INDICATION      → ACK + update self._codec
-       - AV_MEDIA_WITH_TIMESTAMP  → ACK + publish video.frame (drop if session_id==0)
+       - AV_MEDIA_INDICATION      → ACK + publish codec/media config frame
+       - AV_MEDIA_WITH_TIMESTAMP  → ACK + publish video.frame
        - VIDEO_FOCUS_REQUEST      → VideoFocusIndication(PROJECTED)
   5. On aa.session.shutdown: reset state + session_id → IDLE.
 
@@ -39,21 +39,19 @@ ACK strategy:
   video_ui is fire-and-forget: the ACK does NOT depend on video_ui processing.
 
 session_id lifecycle:
-  - 0 at construction and on channel close / session shutdown / stop indication.
-  - Populated from AVChannelStartIndication.session on StartIndication.
-  - Frames arriving before StartIndication (session_id==0) are dropped.
+  - 0 is a valid Android Auto session id, so media gating uses channel state
+    rather than treating session_id==0 as "not started".
 
 codec lifecycle:
   - self._codec_sdr : codec negotiated in SDR (from channel_config), set in _init().
-  - self._codec      : active codec, initialised from _codec_sdr, updated on
-                       AV_MEDIA_INDICATION (codec config message).
-  - Both are propagated in video.frame payload.
+  - self._codec      : active codec, initialised from _codec_sdr.
+  - AV_MEDIA_INDICATION often carries AnnexB SPS/PPS, so its buffer is
+    forwarded to video.frame instead of being interpreted as an enum.
 """
 
 from __future__ import annotations
 
 import base64
-import struct
 import sys
 from pathlib import Path
 
@@ -70,7 +68,7 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from shared.config_schema import field_int                                                  # noqa: E402
+from shared.config_schema import field_bool, field_int                                      # noqa: E402
 from shared.proto_utils import parse_media_with_timestamp                                   # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule                           # noqa: E402
 
@@ -129,12 +127,12 @@ class VideoModule(BaseChannelModule):
 
     codec lifecycle:
       self._codec_sdr  — codec negotiated in SDR, read in _init().
-      self._codec      — active codec, starts equal to _codec_sdr, updated
-                         on AV_MEDIA_INDICATION (codec config message from phone).
+      self._codec      — active codec, starts equal to _codec_sdr. Media
+                         indications are forwarded as raw AnnexB buffers.
 
     session_id lifecycle:
-      0 until AVChannelStartIndication is received; frames arriving before
-      StartIndication are dropped.
+      0 is a valid Android Auto session id, so media is accepted based on
+      channel state instead of dropping frames when session_id == 0.
     """
 
     MODULE_NAME = "video"   # overridden by --module-name CLI
@@ -152,6 +150,9 @@ class VideoModule(BaseChannelModule):
                 min=1,
                 max=16,
             ),
+            "publish_frames": field_bool(
+                default=False,
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -163,7 +164,8 @@ class VideoModule(BaseChannelModule):
         self._session_id:  int = 0
         self._state:       str = "IDLE"   # IDLE | SETUP | OPEN | PLAYING | STOPPED
         self._codec_sdr:   int = _CODEC_H264_BP   # from SDR, set in _init()
-        self._codec:       int = _CODEC_H264_BP   # active codec, updated on MEDIA_INDICATION
+        self._codec:       int = _CODEC_H264_BP   # active codec from SDR/negotiation
+        self._frame_debug_count: int = 0
 
     # ------------------------------------------------------------------
     # _init / _cleanup hooks
@@ -198,8 +200,6 @@ class VideoModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def on_aa_session_active(self, topic: str, payload: dict) -> None:
-        self._session_id = 0
-        self._set_state("IDLE")
         self.log.info("AA session active — video ready")
 
     def on_aa_session_shutdown(self, topic: str, payload: dict) -> None:
@@ -296,32 +296,36 @@ class VideoModule(BaseChannelModule):
 
     def _handle_media(self, body: bytes) -> None:
         """
-        AV_MEDIA_INDICATION = codec config message.
-        ACK immediately, then update self._codec.
+        AV_MEDIA_INDICATION is non-timestamped media/config data.
+
+        Android Auto commonly sends H.264 SPS/PPS here as AnnexB bytes
+        (00 00 00 01 67... / 68...). Forward the buffer to the decoder before
+        timestamped IDR/P frames arrive; otherwise decoders start without
+        codec parameters.
         """
         self._send_media_ack()
 
-        if len(body) >= 2:
-            codec_raw = struct.unpack_from(">H", body, 0)[0]
-            self._codec = codec_raw
-            self.log.info(
-                "AV_MEDIA_INDICATION ch=%d codec updated to 0x%04x (was %s)",
-                self.CHANNEL_ID, codec_raw, self._codec_sdr,
-            )
-        else:
-            self.log.warning(
-                "AV_MEDIA_INDICATION ch=%d: body too short (%d bytes) to read codec",
-                self.CHANNEL_ID, len(body),
-            )
+        self.log.debug(
+            "AV_MEDIA_INDICATION ch=%d len=%d head=%s — ACK sent, publishing config frame",
+            self.CHANNEL_ID, len(body), body[:32].hex(),
+        )
+
+        if body:
+            self._publish_video_frame(ts_us=0, data=body, is_config=True)
+            return
+
+        self.log.warning(
+            "AV_MEDIA_INDICATION ch=%d: empty body",
+            self.CHANNEL_ID,
+        )
 
     def _handle_media_with_timestamp(self, body: bytes) -> None:
         """Parse MediaWithTimestamp, ACK immediately, publish video.frame."""
-        if self._session_id == 0:
+        if self._state not in ("OPEN", "SETUP", "PLAYING"):
             self.log.warning(
-                "MediaWithTimestamp ch=%d dropped — session_id==0 (waiting for StartIndication)",
-                self.CHANNEL_ID,
+                "MediaWithTimestamp ch=%d received while state=%s — accepting anyway",
+                self.CHANNEL_ID, self._state,
             )
-            return
 
         if self._state not in ("OPEN", "PLAYING"):
             self._set_state("PLAYING")
@@ -336,13 +340,27 @@ class VideoModule(BaseChannelModule):
         self._send_media_ack()
 
         if data:
+            self._publish_video_frame(ts_us=ts_us, data=data, is_config=False)
+
+    def _publish_video_frame(self, *, ts_us: int, data: bytes, is_config: bool) -> None:
+        publish_frames = bool(self._config.get("publish_frames", False))
+        if publish_frames:
             self.bus.publish("video.frame", {
                 "channel_id": self.CHANNEL_ID,
                 "ts_us":      ts_us,
                 "data_b64":   base64.b64encode(data).decode("ascii"),
                 "codec":      self._codec,
                 "codec_sdr":  self._codec_sdr,
+                "is_config":  is_config,
             })
+
+        self._frame_debug_count += 1
+        if is_config or self._frame_debug_count <= 5 or self._frame_debug_count % 120 == 0:
+            action = "published" if publish_frames else "observed"
+            self.log.debug(
+                "video.frame %s ch=%d ts_us=%d len=%d codec=%s is_config=%s head=%s",
+                action, self.CHANNEL_ID, ts_us, len(data), self._codec, is_config, data[:16].hex(),
+            )
 
     def _handle_video_focus_request(self, body: bytes) -> None:
         """Respond to an explicit VideoFocusRequest from the phone."""

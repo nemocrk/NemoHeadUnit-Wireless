@@ -39,6 +39,7 @@ import subprocess
 import sys
 import threading
 import time
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,7 @@ from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse      
 from oaa.av.AVChannelStartIndicationMessage_pb2 import AVChannelStartIndication  # noqa: E402
 from oaa.av.AVMediaAckIndicationMessage_pb2 import AVMediaAckIndication          # noqa: E402
 from oaa.common.StatusEnum_pb2 import Status                                     # noqa: E402
+from oaa.audio.AudioTypeEnum_pb2 import AudioType                                # noqa: E402
 
 # ---------------------------------------------------------------------------
 # AA message ID constants
@@ -130,6 +132,8 @@ class AudioModule(BaseChannelModule):
         self._sink_input_index: int | None = None
         self._av_codec_ctx: Any | None = None
         self._av_codec:     Any | None = None
+        self._media_debug_count: int = 0
+        self._pcm_debug_count: int = 0
 
     def _is_ready(self) -> bool:
         return self._proc is not None
@@ -140,14 +144,15 @@ class AudioModule(BaseChannelModule):
             configs = cfg.get("av_channel", {}).get("audio_configs", [])
             if configs:
                 c = configs[0]
+                audio_type = cfg.get("av_channel", {}).get("audio_type")
                 self._sample_rate   = c.get("sample_rate",   self._sample_rate)
                 self._bit_depth     = c.get("bit_depth",     self._bit_depth)
                 self._channel_count = c.get("channel_count", self._channel_count)
-                self._codec         = c.get("codec",         self._codec)
+                self._codec         = _normalise_audio_codec(c.get("codec"), audio_type)
                 self.log.info(
-                    "Audio config ch=%d: rate=%d depth=%d channels=%d codec=%s",
+                    "Audio config ch=%d: rate=%d depth=%d channels=%d codec=%s raw_config=%r audio_type=%r",
                     self.CHANNEL_ID, self._sample_rate, self._bit_depth,
-                    self._channel_count, self._codec,
+                    self._channel_count, _codec_name(self._codec), c, audio_type,
                 )
             else:
                 self.log.warning(
@@ -323,14 +328,19 @@ class AudioModule(BaseChannelModule):
         if self._state not in ("OPEN", "PLAYING"):
             self._set_state("PLAYING")
         ts_us, encoded = parse_media_with_timestamp(body)
-        self.log.debug("MediaWithTimestamp ch=%d ts_us=%d len=%d", self.CHANNEL_ID, ts_us, len(encoded))
+        self._log_media_sample("MediaWithTimestamp", body, encoded, ts_us)
         self._send_media_ack()
         self._write_audio(encoded)
 
     def _handle_media(self, body: bytes) -> None:
+        self.log.debug(
+            "AV_MEDIA_INDICATION ch=%d body=%s — ACK sent, parsing codec",
+            self.CHANNEL_ID, body.hex(),
+        )
         if self._state not in ("OPEN", "PLAYING"):
             self._set_state("PLAYING")
         self._send_media_ack()
+        self._log_media_sample("Media", body, body, 0)
         self._write_audio(body)
 
     def _send_media_ack(self) -> None:
@@ -347,7 +357,7 @@ class AudioModule(BaseChannelModule):
     def _open_av_codec(self) -> None:
         self._close_av_codec()
         if self._codec not in _AAC_CODECS:
-            self.log.info("Codec %s — no pyav decoder needed", self._codec)
+            self.log.info("Codec %s — no pyav decoder needed", _codec_name(self._codec))
             return
         try:
             codec = av.codec.Codec("aac", "r")
@@ -358,7 +368,7 @@ class AudioModule(BaseChannelModule):
             self._av_codec     = codec
             self.log.info(
                 "pyav AAC decoder opened: rate=%d channels=%d codec_enum=%s",
-                self._sample_rate, self._channel_count, self._codec,
+                self._sample_rate, self._channel_count, _codec_name(self._codec),
             )
         except Exception as exc:
             self.log.error("_open_av_codec: failed — %s", exc)
@@ -433,12 +443,13 @@ class AudioModule(BaseChannelModule):
             pcm = encoded
         else:
             self.log.error(
-                "_write_audio: unsupported codec %s on ch=%d — dropping frame",
-                self._codec, self.CHANNEL_ID,
+                "_write_audio: unsupported codec %r on ch=%d — dropping frame len=%d head=%s",
+                self._codec, self.CHANNEL_ID, len(encoded), encoded[:16].hex(),
             )
             return
         if not pcm or self._proc is None:
             return
+        self._log_pcm_sample(pcm)
         try:
             with self._proc_lock:
                 self._proc.stdin.write(pcm)
@@ -463,6 +474,44 @@ class AudioModule(BaseChannelModule):
         except Exception as exc:
             self.log.warning("AAC decode error ch=%d — %s", self.CHANNEL_ID, exc)
             return b""
+
+    def _log_pcm_sample(self, pcm: bytes) -> None:
+        self._pcm_debug_count += 1
+        if self._pcm_debug_count > 8:
+            return
+        stats = _pcm_s16le_stats(pcm)
+        if stats is None:
+            self.log.debug(
+                "PCM write ch=%d len=%d codec=%s stats=unavailable head=%s",
+                self.CHANNEL_ID, len(pcm), _codec_name(self._codec), pcm[:16].hex(),
+            )
+            return
+        self.log.info(
+            "PCM write ch=%d len=%d codec=%s samples=%d peak=%d rms=%d zero_ratio=%.3f head=%s",
+            self.CHANNEL_ID,
+            len(pcm),
+            _codec_name(self._codec),
+            stats["samples"],
+            stats["peak"],
+            stats["rms"],
+            stats["zero_ratio"],
+            pcm[:16].hex(),
+        )
+
+    def _log_media_sample(self, label: str, body: bytes, encoded: bytes, ts_us: int) -> None:
+        self._media_debug_count += 1
+        if self._media_debug_count <= 5 or not encoded:
+            self.log.debug(
+                "%s ch=%d ts_us=%d body_len=%d payload_len=%d codec=%s body_head=%s payload_head=%s",
+                label,
+                self.CHANNEL_ID,
+                ts_us,
+                len(body),
+                len(encoded),
+                _codec_name(self._codec),
+                body[:16].hex(),
+                encoded[:16].hex(),
+            )
 
     def _set_state(self, new_state: str) -> None:
         if self._state == new_state:
@@ -491,7 +540,7 @@ def _list_audio_devices() -> list[str]:
     try:
         result = subprocess.run(
             ["pactl", "list", "sinks", "short"],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True, text=True, timeout=1,
         )
         devices = ["default"]
         for line in result.stdout.splitlines():
@@ -503,6 +552,55 @@ def _list_audio_devices() -> list[str]:
         return devices
     except Exception:
         return ["default"]
+
+
+def _normalise_audio_codec(raw: Any, audio_type: Any) -> int:
+    """Return a numeric MediaCodecType for the SDR audio config.
+
+    The AA AudioConfig proto used here has no codec field, so parsed SDR
+    configs often carry None/"" even when our schema mentions a codec.  In
+    that case Android Auto audio frames are treated as PCM, matching the
+    advertised sample rate / bit depth / channel count.
+    """
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw:
+        by_name = {
+            "MEDIA_CODEC_AUDIO_PCM": _CODEC_PCM,
+            "MEDIA_CODEC_AUDIO_AAC_LC": _CODEC_AAC_LC,
+            "MEDIA_CODEC_AUDIO_AAC_LC_ADTS": _CODEC_AAC_LC_ADTS,
+        }
+        if raw in by_name:
+            return by_name[raw]
+    if audio_type in (AudioType.MEDIA, AudioType.SPEECH, AudioType.SYSTEM):
+        return _CODEC_PCM
+    return _CODEC_PCM
+
+
+def _pcm_s16le_stats(pcm: bytes) -> dict[str, float | int] | None:
+    if len(pcm) < 2:
+        return None
+    usable = len(pcm) - (len(pcm) % 2)
+    samples = [sample for (sample,) in struct.iter_unpack("<h", pcm[:usable])]
+    if not samples:
+        return None
+    abs_values = [abs(sample) for sample in samples]
+    square_sum = sum(sample * sample for sample in samples)
+    return {
+        "samples": len(samples),
+        "peak": max(abs_values),
+        "rms": int((square_sum / len(samples)) ** 0.5),
+        "zero_ratio": sum(1 for sample in samples if sample == 0) / len(samples),
+    }
+
+
+def _codec_name(codec: Any) -> str:
+    names = {
+        _CODEC_PCM: "MEDIA_CODEC_AUDIO_PCM",
+        _CODEC_AAC_LC: "MEDIA_CODEC_AUDIO_AAC_LC",
+        _CODEC_AAC_LC_ADTS: "MEDIA_CODEC_AUDIO_AAC_LC_ADTS",
+    }
+    return names.get(codec, repr(codec))
 
 
 # ---------------------------------------------------------------------------

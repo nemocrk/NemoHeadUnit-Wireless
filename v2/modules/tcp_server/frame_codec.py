@@ -285,6 +285,12 @@ class FrameAssembler:
         if frame_type == _FT_LAST:
             assembled = b"".join(buf.chunks)
             saved_flags = buf.first_flags
+            if buf.total_size and len(assembled) != buf.total_size:
+                import logging
+                logging.getLogger("tcp_server.frame_codec").warning(
+                    "FrameAssembler: ch=%d assembled_len=%d differs from declared total_size=%d",
+                    channel_id, len(assembled), buf.total_size,
+                )
             del self._buffers[channel_id]
             # Return with BULK frame_type so consumers don't need to special-case
             out_flags = (saved_flags & ~0x03) | _FT_BULK

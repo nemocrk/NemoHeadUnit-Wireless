@@ -4,6 +4,47 @@ Registro delle sessioni di sviluppo, modifiche apportate e prossimi step.
 
 ---
 
+## 2026-05-08 — AA wireless video/audio debug: SPS/PPS, audio mute, shutdown hang
+
+**Current user report:**
+- Video: non mostra piu' warning dopo la correzione SPS/PPS; potenzialmente OK.
+- Audio: ancora muto, audio mai riprodotto finora nell'app WIP.
+- Shutdown/freezing: dopo un run video/audio, `Ctrl+C received` appare alle `16:24:40`, ma `bus_broker` stampa `Shutdown signal received` solo alle `16:25:14`; il processo sembra bloccarsi e l'utente deve killare.
+- Aggiornamento utente: il problema reale potrebbe essere che il bus "scoppia"/si satura prima del Ctrl+C; il Ctrl+C e' stato premuto dopo che tutto sembrava gia' fermo e il relativo messaggio non risultava pubblicato in tempo.
+
+**Recent fixes already applied:**
+- `v2/modules/tcp_server/main.py`: aggiunto lock TLS/crypto intorno a encode/decode/handshake/deinit per evitare decrypt concorrenti su frame frammentati (`FIRST/MIDDLE/LAST`). Nei log successivi non compaiono piu' `RECORD_LAYER_FAILURE`/`decrypt failed`.
+- `v2/modules/tcp_server/main.py`: `aa.frame.received` ora e' lightweight per default (`payload_len`, `payload_head`) e non duplica piu' il `payload_hex` completo di ogni frame; `AA_FRAME_RECEIVED_FULL=1` ripristina il payload completo per debug mirato.
+- `v2/modules/tcp_server/frame_codec.py`: aggiunto warning se la ricomposizione `LAST` non corrisponde a `total_size`.
+- `v2/shared/proto_utils.py`: `parse_media_with_timestamp()` ora supporta fallback `[uint64 BE timestamp][raw media]`.
+- `v2/shared/bus_client.py`, `v2/bus_broker.py`, `v2/main.py`: aggiunti HWM piu' alti, `LINGER=0`, publish non-blocking nel client/main publisher per evitare freeze quando il bus e' saturo.
+- `v2/main.py`: `_terminate_all()` non aspetta piu' `GRACE_PERIOD` in serie per ogni modulo prima di inviare SIGTERM; usa una finestra globale breve.
+- `v2/modules/channel_modules/audio/main.py`: normalizzazione codec audio, default PCM per audio type noti, log su config/sample e sink; il codec vuoto nel proto non dovrebbe piu' causare drop immediato.
+- `v2/modules/channel_modules/audio/main.py`: aggiunti log `PCM write ... peak/rms/zero_ratio` sui primi frame per distinguere silenzio reale da audio valido non udibile.
+- `v2/modules/channel_modules/video/main.py`: `AV_MEDIA_INDICATION` (`msg=0x0001`) ora viene pubblicato come frame config AnnexB (`is_config=True`) invece di essere interpretato come codec enum `0x0000`; `AV_MEDIA_WITH_TIMESTAMP` non viene piu' scartato solo per `session_id == 0`; `aa.session.active` non resetta piu' lo stato video.
+- `v2/modules/channel_modules/video/main.py`: aggiunta config `publish_frames` default `False`; senza consumer video reale il modulo non ripubblica piu' ogni frame in base64 su `video.frame`, ma mantiene log leggero/rate-limited.
+
+**Evidence dai log:**
+- Il frame `AV_MEDIA_INDICATION` video contiene SPS/PPS AnnexB:
+  `000000016742c01f...0000000168ce0d88`.
+- Prima veniva loggato `codec updated to 0x0000 (was 3)`, segno che il buffer SPS/PPS era letto come intero codec.
+- Il freeze/shutdown mostra almeno 34s fra `main Ctrl+C received` e `bus_broker Shutdown signal received`, quindi c'e' probabilmente un join/cleanup/subprocess shutdown bloccante o un thread/processo non cooperativo.
+- Ispezione successiva: `v2/main.py::_terminate_all()` fa `proc.wait(timeout=GRACE_PERIOD)` in serie per ogni modulo prima di inviare `SIGTERM`; con ~10 moduli e `GRACE_PERIOD=5s` questo puo' sembrare un freeze da 30-50s.
+- Audio: `ch=4` riceve `AV_MEDIA_WITH_TIMESTAMP` e ACKa; i sample loggati hanno `payload_len=8192` e `payload_head=0000...`, quindi serve distinguere fra audio davvero silenzioso, PCM interpretato male, sink errato o volume.
+- Nuova ipotesi prioritaria: overload/backpressure sul bus o logging. I frame video vengono pubblicati a ~30fps con `data_b64` completo e log DEBUG per ogni frame; in parallelo `shared.logger.attach_bus` forwarda i log al bus. Questo puo' creare un feedback/volume eccessivo se non ci sono consumer o se il broker e' single-threaded/slow.
+
+**Next 1-3 steps:**
+1. Ispezionare `v2/bus_broker.py`, `shared.bus_client`, `shared.logger` e i socket ZMQ per HWM/linger/blocking send; cercare send bloccanti e feedback log->bus->log.
+2. Ridurre/limitare il traffico su bus: non pubblicare ogni frame video con payload completo se non c'e' consumer reale, oppure usare topic disaccoppiato/HWM/drop; rate-limitare i log per-frame.
+3. Per audio, mantenere i nuovi log `PCM write ... peak/rms/zero_ratio` per distinguere silenzio reale da sink/volume.
+
+**Verification so far:**
+```bash
+python -m py_compile v2/main.py v2/bus_broker.py v2/shared/bus_client.py v2/modules/tcp_server/main.py v2/modules/channel_modules/video/main.py v2/modules/channel_modules/audio/main.py
+```
+
+---
+
 ## 2026-05-04 — Migrazione cfg.get(schema=): tutti i moduli allineati al nuovo pattern
 
 **What changed:**
