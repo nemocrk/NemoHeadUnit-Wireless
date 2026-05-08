@@ -45,22 +45,11 @@ show_help() {
   exit 0
 }
 
-# Parse arguments
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --help|-h)
-    show_help
-    ;;
-    --sync-env)
-    SYNC_ENV_FLAG=1
-    shift
-    ;;
-    *)
-    echo "Unknown option: $1"
-    show_help
-    ;;
-  esac
-done
+# Parse arguments: --sync-env is a positional option
+if [ $# -ge 1 ] && [ "$1" = "--sync-env" ]; then
+  SYNC_ENV_FLAG=1
+  shift
+fi
 
 # Check for required arguments
 if [ $# -lt 2 ]; then
@@ -155,7 +144,7 @@ if [ "$SYNC_ENV_FLAG" = "1" ]; then
   echo "[4/5] Creating/updating Conda environment (py314)..."
   ssh "$REMOTE" bash <<'ENDSSH'
   set -euo pipefail
-  eval "\$($HOME/miniconda3/bin/conda shell.bash hook)"
+  eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
   cd ~/NemoHeadUnit-Wireless
   if conda env list | grep -q '^py314'; then
     echo "[INFO] Environment exists, updating..."
@@ -165,7 +154,7 @@ if [ "$SYNC_ENV_FLAG" = "1" ]; then
     conda env create -f environment.yml
   fi
   echo "[OK] Conda environment ready."
-  ENDSSH
+ENDSSH
   echo ""
 fi
 
