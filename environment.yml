@@ -35,16 +35,24 @@ dependencies:
   # -----------------------------------------------------------------------
   # Media (optional — GStreamer Python bindings)
   # Install system GStreamer plugins separately:
-  #   sudo apt install gstreamer1.0-plugins-{base,good,bad,ugly} \\
+  #   sudo apt install gstreamer1.0-plugins-{base,good,bad,ugly} \
   #                    gstreamer1.0-libav gstreamer1.0-tools
   # -----------------------------------------------------------------------
   - gst-python            # gi.repository.Gst bindings (conda-forge)
 
   # -----------------------------------------------------------------------
   # Audio backend (channel_modules/audio)
+  #
+  # PCM output is handled by pacat (PulseAudio/PipeWire) — a system tool,
+  # NOT a Python package.  Install via:
+  #   sudo apt install pulseaudio-utils
+  # pacat writes directly to the PipeWire/PulseAudio daemon, avoiding
+  # PortAudio/ALSA exclusive-access conflicts.
+  #
+  # Per-channel volume is controlled via:
+  #   pactl set-sink-input-volume <sink-input-index> <vol>%
   # -----------------------------------------------------------------------
   - av>=12.0              # PyAV — FFmpeg bindings for AAC-LC ADTS decoding
-  - python-sounddevice>=0.5  # PortAudio bindings — supports ALSA, PulseAudio, JACK, PipeWire
 
   # -----------------------------------------------------------------------
   # Configuration persistence
