@@ -12,56 +12,15 @@ Module contract:
                 channel_manager.module_stop
                 aa.channel.open          {channel_id, ...}
                 aa.channel.close         {channel_id}
-                aa.frame.ch<channel_id>    raw bytes (ChannelOpenRequest, SensorStartRequest)
+                aa.frame.ch<channel_id>  {channel_id, message_id, encrypted, payload_hex}
                 aa.session.active         {}
                 aa.session.shutdown       {}
-                sensor.driving_status     {status: int}   <- from vehicle integration
+                sensor.driving_status     {status: int}
                 sensor.night_mode         {night_mode: bool}
                 sensor.gps                {latitude, longitude, bearing, speed, ...}
   Publishes   : channel_manager.module_ready              {name, priority}
                 aa.frame.send             bytes  (via BaseChannelModule.send_frame)
-                                            <- ChannelOpenResponse
-                                            <- SensorStartResponseMessage
-                                            <- SensorEventIndication (SensorBatch)
                 sensor.state              {state}  IDLE | OPEN
-
-Flow:
-  1. BaseChannelModule parses CLI and populates self.CHANNEL_ID and
-     self.channel_config from --channel-id / --sdr-bytes-hex.
-  2. channel_manager.module_ready is published lazily by base once _init_done,
-     config_loaded and channel_config is not None.
-  3. On aa.frame.ch<channel_id>:
-       - ChannelOpenRequest   -> reply ChannelOpenResponse (STATUS_SUCCESS)
-       - SensorStartRequest   -> reply SensorStartResponseMessage (STATUS_SUCCESS)
-                                + immediate SensorEventIndication for:
-                                    SENSOR_DRIVING_STATUS_DATA -> DRIVE_STATUS_UNRESTRICTED
-                                    SENSOR_NIGHT_MODE          -> night_mode = False
-  4. On sensor.driving_status / sensor.night_mode / sensor.gps: build and send
-     SensorEventIndication (SensorBatch) if channel is OPEN.
-  5. On aa.session.shutdown: reset to IDLE.
-
-SensorType wire values (from aasdk_proto SensorType.proto):
-  SENSOR_DRIVING_STATUS_DATA = 1
-  SENSOR_NIGHT_MODE          = 4
-  SENSOR_LOCATION            = 6
-
-DrivingStatus wire values:
-  DRIVE_STATUS_UNRESTRICTED   = 0
-  DRIVE_STATUS_NO_VIDEO       = 1
-  DRIVE_STATUS_NO_KEYB_INPUT  = 2
-  DRIVE_STATUS_NO_VOICE       = 4
-  DRIVE_STATUS_NO_CONFIG      = 8
-  DRIVE_STATUS_LIMIT_MESS_LEN = 16
-  DRIVE_STATUS_FULLY_RESTRICTED = 31
-
-GPS fields (payload keys):
-  latitude, longitude, bearing, speed — passed through as-is (int or float).
-  altitude, accuracy                  — optional, included when present.
-  timestamp                           — optional unix ms, included when present.
-
-No proto dependency for SensorBatch encoding — all SensorEventIndication payload
-encoding is hand-rolled.  Control/sensor handshake messages (ChannelOpenResponse,
-SensorStartResponseMessage) use real proto objects.
 """
 
 from __future__ import annotations
@@ -71,7 +30,7 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# sys.path bootstrap — identical to audio / video / input
+# sys.path bootstrap
 # ---------------------------------------------------------------------------
 _HERE         = Path(__file__).parent
 _CHANNEL_MODS = _HERE.parent
@@ -84,7 +43,6 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
         sys.path.insert(0, str(_p))
 
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
-from shared.proto_utils import decode_aa_frame                     # noqa: E402
 
 # Proto — control
 from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
@@ -127,50 +85,24 @@ DRIVE_STATUS_FULLY_RESTRICTED = 31
 # ---------------------------------------------------------------------------
 
 class SensorModule(BaseChannelModule):
-    """
-    AA Sensor channel module.
-
-    Handles ChannelOpenRequest and SensorStartRequest from the phone,
-    then sends SensorEventIndication (SensorBatch) whenever sensor data
-    is published on the bus by the vehicle integration layer.
-
-    All outgoing AA frames are sent via self.send_frame(message_id, proto_body)
-    which is provided by BaseChannelModule and always sets the encrypted flag
-    consistently for post-handshake channel traffic.
-
-    channel_id and SDR bytes are provided at spawn time via CLI by
-    channel_manager and parsed by BaseChannelModule into self.CHANNEL_ID
-    and self.channel_config.  channel_manager.module_ready is hard-blocked by base if
-    channel_config is None.
-    """
-
-    MODULE_NAME = "sensor"  # overridden by --module-name CLI
-    CHANNEL_ID  = -1         # overridden by --channel-id CLI
+    MODULE_NAME = "sensor"
+    CHANNEL_ID  = -1
     PRIORITY    = 1
 
     def __init__(self) -> None:
         super().__init__()
-        self._state             = "IDLE"   # IDLE | OPEN
+        self._state             = "IDLE"
         self._started_sensors: set = set()
-
-    # ------------------------------------------------------------------
-    # _init / _cleanup hooks
-    # ------------------------------------------------------------------
 
     def _init(self) -> None:
         self.log.info(
             "SensorModule _init: channel_id=%d channel_config=%s",
-            self.CHANNEL_ID,
-            self.channel_config,
+            self.CHANNEL_ID, self.channel_config,
         )
 
     def _cleanup(self) -> None:
         self._started_sensors.clear()
         self._set_state("IDLE")
-
-    # ------------------------------------------------------------------
-    # Session lifecycle
-    # ------------------------------------------------------------------
 
     def on_aa_session_active(self, topic: str, payload: dict) -> None:
         self._started_sensors.clear()
@@ -182,10 +114,6 @@ class SensorModule(BaseChannelModule):
         self._set_state("IDLE")
         self.log.info("AA session shutdown — sensor reset")
 
-    # ------------------------------------------------------------------
-    # BaseChannelModule abstract interface
-    # ------------------------------------------------------------------
-
     def on_channel_open(self, channel_id: int, descriptor: dict) -> None:
         self.log.info("Sensor channel %d open (descriptor: %s)", channel_id, descriptor)
 
@@ -194,26 +122,16 @@ class SensorModule(BaseChannelModule):
         self._set_state("IDLE")
         self.log.info("Sensor channel %d closed", channel_id)
 
-    def on_frame(self, channel_id: int, data: bytes) -> None:
-        result = decode_aa_frame(data)
-        if result is None:
-            self.log.error("on_frame: malformed payload — dropping")
-            return
-
-        message_id, body = result
-
+    def on_frame(self, channel_id: int, message_id: int, encrypted: bool, data: bytes) -> None:
+        """Dispatch incoming frame by AA message_id (already extracted by tcp_server)."""
         if message_id == _MSG_CHANNEL_OPEN_REQUEST:
-            self._handle_open_request(body)
+            self._handle_open_request(data)
         elif message_id == _MSG_SENSOR_START_REQUEST:
-            self._handle_sensor_start_request(body)
+            self._handle_sensor_start_request(data)
         else:
             self.log.debug(
-                "Unhandled sensor msg_id=0x%04x len=%d", message_id, len(body)
+                "Unhandled sensor msg_id=0x%04x len=%d", message_id, len(data)
             )
-
-    # ------------------------------------------------------------------
-    # Incoming message handlers
-    # ------------------------------------------------------------------
 
     def _handle_open_request(self, body: bytes) -> None:
         resp = ChannelOpenResponse()
@@ -239,10 +157,6 @@ class SensorModule(BaseChannelModule):
                 "Initial SensorEventIndication sent for sensor_type=%d", sensor_type
             )
 
-    # ------------------------------------------------------------------
-    # Outgoing sensor updates  (bus events from vehicle integration)
-    # ------------------------------------------------------------------
-
     def on_sensor_driving_status(self, topic: str, payload: dict) -> None:
         if self._state != "OPEN" or SENSOR_DRIVING_STATUS not in self._started_sensors:
             self.log.debug("on_sensor_driving_status: channel not ready — dropping")
@@ -263,12 +177,10 @@ class SensorModule(BaseChannelModule):
         if self._state != "OPEN" or SENSOR_LOCATION not in self._started_sensors:
             self.log.debug("on_sensor_gps: channel not ready — dropping")
             return
-
         lat  = int(payload.get("latitude",  0))
         lon  = int(payload.get("longitude", 0))
         bear = int(payload.get("bearing",   0))
         spd  = int(payload.get("speed",     0))
-
         gps_data = (
             _sfixed32_field(1, lat)
             + _sfixed32_field(2, lon)
@@ -281,7 +193,6 @@ class SensorModule(BaseChannelModule):
             gps_data += _sfixed32_field(6, int(payload["accuracy"]))
         if "timestamp" in payload:
             gps_data += _int64_field(7, int(payload["timestamp"]))
-
         self._send_sensor_event(_bytes_field(6, gps_data))
         self.log.debug(
             "SensorEventIndication GPS lat=%d lon=%d speed=%d sent", lat, lon, spd
@@ -290,20 +201,12 @@ class SensorModule(BaseChannelModule):
     def _send_sensor_event(self, batch_bytes: bytes) -> None:
         self.send_frame(_MSG_SENSOR_EVENT_INDICATION, batch_bytes)
 
-    # ------------------------------------------------------------------
-    # State helper
-    # ------------------------------------------------------------------
-
     def _set_state(self, new_state: str) -> None:
         if self._state == new_state:
             return
         self._state = new_state
         self.bus.publish("sensor.state", {"state": new_state})
         self.log.info("sensor.state -> %s", new_state)
-
-    # ------------------------------------------------------------------
-    # run() override
-    # ------------------------------------------------------------------
 
     def run(self) -> None:
         self.bus.subscribe("aa.session.active",        self.on_aa_session_active)
@@ -319,11 +222,6 @@ class SensorModule(BaseChannelModule):
 # ---------------------------------------------------------------------------
 
 def _build_default_sensor_batch(sensor_type: int) -> bytes:
-    """Return the initial SensorBatch bytes for a freshly started sensor_type.
-
-    Only SENSOR_DRIVING_STATUS and SENSOR_NIGHT_MODE send an initial batch;
-    SENSOR_LOCATION (and any unknown type) returns empty bytes.
-    """
     if sensor_type == SENSOR_DRIVING_STATUS:
         return _bytes_field(1, _varint_field(1, DRIVE_STATUS_UNRESTRICTED))
     if sensor_type == SENSOR_NIGHT_MODE:
@@ -332,8 +230,7 @@ def _build_default_sensor_batch(sensor_type: int) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Minimal hand-rolled protobuf helpers  (no proto dependency)
-# Used only for SensorEventIndication / SensorBatch payload encoding.
+# Minimal hand-rolled protobuf helpers
 # ---------------------------------------------------------------------------
 
 def _encode_varint(value: int) -> bytes:
