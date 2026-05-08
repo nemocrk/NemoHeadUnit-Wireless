@@ -76,11 +76,8 @@ AUDIO_TYPE_ALARM   = 4   # AudioType.ALARM
 # ---------------------------------------------------------------------------
 
 _SKIP_KEYS: frozenset[str] = frozenset({
-    "av_input_channel",
-    "bluetooth_channel",
     "navigation_channel",
     "media_info_channel",
-    "wifi_channel",
     "phone_status_channel",
 })
 
@@ -142,6 +139,12 @@ def resolve_module_type(channel_id: int, channel_descriptor: dict) -> str:
     
     if "av_input_channel" in channel_descriptor:
         return "av_input"
+    
+    if "bluetooth_channel" in channel_descriptor:
+        return "bluetooth"
+    
+    if "wifi_channel" in channel_descriptor:
+        return "wifi"
 
     # --- Known but not-yet-implemented channels ---
     for skip_key in _SKIP_KEYS:

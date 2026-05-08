@@ -83,7 +83,7 @@ for _p in (_V2, _MODULES, _REPO):
 from shared.bus_client import BusClient        # noqa: E402
 from shared.config_client import ConfigClient  # noqa: E402
 from shared.logger import get_logger           # noqa: E402
-from shared.proto_utils import channel_config_from_sdr, encode_aa_frame  # noqa: E402
+from shared.proto_utils import channel_config_from_sdr, encode_aa_frame, proto_to_dict  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module-level CLI parsing
@@ -278,16 +278,16 @@ class BaseChannelModule(ABC):
     # ------------------------------------------------------------------
 
     def _on_channel_manager_module_readytostart(self) -> None:
-        self.log.info(f"channel_manager.module_ready — announcing priority {self.PRIORITY}")
-        self.bus.publish("channel_manager.module_ready", {
+        self.log.info(f"channel_manager.module_ready_to_start — announcing priority {self.PRIORITY}")
+        self.bus.publish("channel_manager.module_ready_to_start", {
             "name":     self.MODULE_NAME,
             "priority": self.PRIORITY,
         })
 
     def _on_channel_manager_module_start(self, topic: str, payload: dict) -> None:
-        if payload.get("priority") != self.PRIORITY:
+        if payload.get("name") != self.MODULE_NAME:
             return
-        self.log.info(f"channel_manager.module_start priority={self.PRIORITY} — initialising...")
+        self.log.info(f"channel_manager.module_start name={self.MODULE_NAME} priority={self.PRIORITY} — initialising...")
         schema = self.get_schema()
         if schema:
             self.cfg.get(schema=schema)
@@ -343,7 +343,7 @@ class BaseChannelModule(ABC):
     # Outgoing frame helper
     # ------------------------------------------------------------------
 
-    def send_frame(self, message_id: int, proto_body: bytes, *, control: bool = False) -> None:
+    def send_frame(self, message_id: int, proto_body: bytes) -> None:
         """Send an encrypted AA frame on this module's channel.
 
         All post-handshake channel traffic is always encrypted.
@@ -353,23 +353,16 @@ class BaseChannelModule(ABC):
         Args:
             message_id:  2-byte big-endian AA message identifier.
             proto_body:  serialised protobuf payload (may be empty bytes).
-            control:     set to True when message_id belongs to the
-                         ControlMessage namespace (e.g. CHANNEL_OPEN_RESPONSE
-                         = 0x0008) even though this channel is non-zero.
-                         On the wire the flags byte is identical (0x0B) for
-                         both Control and AV namespaces, so this parameter
-                         has NO runtime effect.  It exists solely to document
-                         intent — ChannelOpenResponse is the only AA message
-                         that belongs to the Control namespace yet travels on
-                         a non-zero channel.
         """
+        self.log.info(f"send_frame: channel_id={self.CHANNEL_ID}, message_id=0x{message_id:04x}, payload={proto_body.hex()}, ssl_active=true")
+        control = (message_id == 0x0008)  # ChannelOpenResponse is the only control message sent by modules
         frame = encode_aa_frame(self.CHANNEL_ID, message_id, proto_body, control=control)
-        self.log.info(
+        self.log.debug(
             "CH%d → msg_id=0x%04x len=%d (encrypted%s)",
             self.CHANNEL_ID, message_id, len(proto_body),
             " control-ns" if control else "",
         )
-        self.bus.publish("aa.frame.send", frame)
+        self.bus.publish("aa.frame.send", {**frame, "frame_data": {"ssl_active": True, "payload": proto_body.hex(), "channel_id": self.CHANNEL_ID, "message_id": message_id}})
 
     # ------------------------------------------------------------------
     # Abstract interface — MUST be implemented by subclasses

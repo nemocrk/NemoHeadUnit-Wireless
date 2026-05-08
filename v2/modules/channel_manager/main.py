@@ -88,10 +88,12 @@ class ChannelManagerSession:
     """
 
     def __init__(self) -> None:
+        self._is_active = False  # True between start() and shutdown()
         self._launcher = Launcher()
         self._expected: set[str] = set()
         self._ready:    set[str] = set()
         self._lock      = threading.Lock()
+        self._all_ready_to_start = threading.Event()
         self._all_ready = threading.Event()
         self._all_started_channels: list[dict] = []
         self._all_active_channels: list[dict] = []
@@ -116,6 +118,8 @@ class ChannelManagerSession:
 
         import json
         log.info("Starting channel modules for channels: %s", json.dumps(channels, indent=2))
+
+        self._is_active = True
 
         for ch in channels:
             ch_id = ch.get("channel_id")
@@ -158,6 +162,19 @@ class ChannelManagerSession:
     # ------------------------------------------------------------------
     # Readiness tracking
     # ------------------------------------------------------------------
+
+    def on_module_ready_to_start(self, name: str) -> None:
+        """Called when channel_manager.module_ready_to_start {name} arrives on the bus."""
+        with self._lock:
+            if name not in self._expected:
+                log.debug("on_module_ready_to_start: unexpected name=%r — ignored", name)
+                return
+            self._ready.add(name)
+            self._all_active_channels.append(next(ch for ch in self._all_started_channels if ch["module_name"] == name))
+            pending = self._expected - self._ready
+            log.info("module_ready_to_start: %s (%d/%d)", name, len(self._ready), len(self._expected))
+            if not pending:
+                self._all_ready_to_start.set()
 
     def on_module_ready(self, name: str) -> None:
         """Called when channel_manager.module_ready {name} arrives on the bus."""
@@ -202,6 +219,7 @@ class ChannelManagerSession:
 
     def shutdown(self) -> None:
         """Orderly shutdown: signal children, wait, then publish stopped."""
+        self._is_active = False
         log.info("Shutting down channel modules...")
         for active_channel in self._all_active_channels:
             log.info(f"Active channel: id={active_channel['channel_id']} module={active_channel['module_name']} type={active_channel['module_type']}")
@@ -218,10 +236,14 @@ class ChannelManagerSession:
     # Crash monitoring
     # ------------------------------------------------------------------
 
-    def check_crashes(self) -> None:
+    def check_crashes(self) -> bool:
         """Log any children that have exited unexpectedly."""
-        for name in self._launcher.check_crashes():
-            log.warning("%s exited unexpectedly", name)
+        crashes = False
+        if self._is_active:
+            for name in self._launcher.check_crashes():
+                log.warning("%s exited unexpectedly", name)
+                crashes = True
+        return crashes
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +350,12 @@ def on_channel_manager_module_ready(topic: str, payload: dict) -> None:
     if _session:
         _session.on_module_ready(name)
 
+        
+def on_channel_manager_module_ready_to_start(topic: str, payload: dict) -> None:
+    """Track readiness of a spawned channel module child."""
+    name = payload.get("name", "")
+    bus.publish("channel_manager.module_start", {"name": name})
+
 
 def on_aa_session_shutdown(topic: str, payload: dict) -> None:
     """AA session ended cleanly — stop all channel modules."""
@@ -356,7 +384,10 @@ def _crash_monitor() -> None:
     while True:
         time.sleep(CRASH_POLL_INTERVAL)
         if _session:
-            _session.check_crashes()
+            if _session.check_crashes():
+                log.warning("One or more channel modules have crashed during an active session — closing app.")
+                bus.publish("system.shutdown", {})
+
 
 
 # ---------------------------------------------------------------------------
@@ -370,10 +401,11 @@ def run() -> None:
     bus.subscribe("system.stop",         on_system_stop)
 
     # Topic subscriptions
-    bus.subscribe("oaa_control_channel.open_channels",  on_oaa_control_channel_open_channels)
-    bus.subscribe("channel_manager.module_ready",       on_channel_manager_module_ready)
-    bus.subscribe("aa.session.shutdown",                on_aa_session_shutdown)
-    bus.subscribe("aa.session.restart",                 on_aa_session_restart)
+    bus.subscribe("oaa_control_channel.open_channels",       on_oaa_control_channel_open_channels)
+    bus.subscribe("channel_manager.module_ready_to_start",   on_channel_manager_module_ready_to_start) 
+    bus.subscribe("channel_manager.module_ready",            on_channel_manager_module_ready)
+    bus.subscribe("aa.session.shutdown",                     on_aa_session_shutdown)
+    bus.subscribe("aa.session.restart",                      on_aa_session_restart)
 
     # Start crash monitor
     threading.Thread(target=_crash_monitor, daemon=True, name="cm_crash_monitor").start()
