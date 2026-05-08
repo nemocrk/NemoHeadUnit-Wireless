@@ -25,6 +25,7 @@ Module contract:
                 aa.channel.close    {channel_id}
                 aa.frame.ch<ch_id>    raw bytes
                 aa.session.shutdown  {}
+                channel_<channel_id>.set_volume  {volume: int}  0-100 percent
   Publishes   : channel_manager.module_ready  {name, priority}
                 aa.frame.send        bytes  (via BaseChannelModule.send_frame)
                 audio.state          {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
@@ -44,6 +45,9 @@ Flow:
   5. on_frame(): decode AA frame header, dispatch by message_id, write PCM.
   6. on_config_changed("audio_device" | "max_unacked"): re-open stream on the fly.
   7. on_aa_session_shutdown: reset state + session_id to IDLE.
+  8. on_set_volume(): resolve pacat sink-input index via pactl, then call
+     pactl set-sink-input-volume to adjust per-channel volume without
+     affecting other channels or the global sink volume.
 
 Readiness:
   channel_manager.module_ready is emitted lazily by BaseChannelModule._try_publish_ready()
@@ -58,6 +62,13 @@ Audio backend:
   exclusive-access issues.  A threading.Lock guards stdin writes for
   thread safety across concurrent channel processes.
 
+Volume control:
+  Per-channel volume is controlled via pactl set-sink-input-volume targeting
+  the sink-input associated with the pacat PID.  _resolve_sink_input() parses
+  'pactl list sink-inputs short' to find the sink-input index for self._proc.pid.
+  _sink_input_index is cached after the first successful resolution and cleared
+  on _close_stream().
+
 Codec support:
   MEDIA_CODEC_AUDIO_PCM          — raw PCM, written directly to pacat stdin
   MEDIA_CODEC_AUDIO_AAC          — AAC, decoded via pyav before writing
@@ -70,6 +81,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -159,6 +171,11 @@ class AudioModule(BaseChannelModule):
       - Configurable via config key "max_unacked" (default 1).
       - Sent to the phone in AVChannelSetupResponse.
       - Controls how many unacknowledged media frames the phone may send.
+
+    Volume control:
+      - Subscribes to channel_<channel_id>.set_volume {volume: int} (0-100).
+      - Resolves the pacat sink-input index via pactl and applies volume
+        with pactl set-sink-input-volume, affecting only this channel.
     """
 
     MODULE_NAME: str = "channel_audio"   # overridden by --module-name CLI
@@ -202,6 +219,10 @@ class AudioModule(BaseChannelModule):
         # pacat subprocess handle + write lock
         self._proc:      subprocess.Popen | None = None
         self._proc_lock: threading.Lock          = threading.Lock()
+
+        # PulseAudio sink-input index for per-channel volume control.
+        # Resolved lazily on first set_volume call and cached until _close_stream().
+        self._sink_input_index: int | None = None
 
         # PyAV codec context for AAC decoding (None when PCM)
         self._av_codec_ctx: Any | None = None
@@ -288,6 +309,96 @@ class AudioModule(BaseChannelModule):
         self._session_id = 0
         self._set_state("IDLE")
         self.log.info("AA session shutdown — ch=%d reset", self.CHANNEL_ID)
+
+    # ------------------------------------------------------------------
+    # Volume control
+    # ------------------------------------------------------------------
+
+    def on_set_volume(self, topic: str, payload: dict) -> None:
+        """Handle channel_<channel_id>.set_volume {volume: int} (0-100).
+
+        Resolves the pacat sink-input index (cached after first resolution)
+        and calls pactl set-sink-input-volume to apply per-channel volume
+        without affecting other channels or the global sink volume.
+        """
+        volume = payload.get("volume")
+        if not isinstance(volume, int) or not (0 <= volume <= 100):
+            self.log.warning(
+                "on_set_volume: invalid payload on ch=%d — expected {volume: 0-100}, got %r",
+                self.CHANNEL_ID, payload,
+            )
+            return
+
+        if self._proc is None:
+            self.log.warning("on_set_volume: pacat not running on ch=%d — ignoring", self.CHANNEL_ID)
+            return
+
+        sink_input = self._resolve_sink_input()
+        if sink_input is None:
+            self.log.warning(
+                "on_set_volume: could not resolve sink-input for ch=%d pid=%d — ignoring",
+                self.CHANNEL_ID, self._proc.pid,
+            )
+            return
+
+        try:
+            subprocess.run(
+                ["pactl", "set-sink-input-volume", str(sink_input), f"{volume}%"],
+                check=True, timeout=2,
+            )
+            self.log.info(
+                "Volume ch=%d sink-input=%d → %d%%",
+                self.CHANNEL_ID, sink_input, volume,
+            )
+        except Exception as exc:
+            self.log.warning("on_set_volume: pactl failed ch=%d — %s", self.CHANNEL_ID, exc)
+
+    def _resolve_sink_input(self) -> int | None:
+        """Return the PulseAudio sink-input index for the current pacat process.
+
+        Parses 'pactl list sink-inputs short' and matches by PID found in
+        'pactl list sink-inputs' properties.  Result is cached in
+        self._sink_input_index until _close_stream() clears it.
+
+        Returns None if the sink-input cannot be found (e.g. pacat not yet
+        registered with PulseAudio, or pactl unavailable).
+        """
+        if self._sink_input_index is not None:
+            return self._sink_input_index
+
+        if self._proc is None:
+            return None
+
+        pid = self._proc.pid
+
+        # Allow up to 500ms for pacat to register with PulseAudio after spawn
+        for _ in range(5):
+            try:
+                result = subprocess.run(
+                    ["pactl", "list", "sink-inputs"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                current_index: int | None = None
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith("Sink Input #"):
+                        try:
+                            current_index = int(line.split("#")[1])
+                        except ValueError:
+                            current_index = None
+                    elif current_index is not None and f"application.process.id = \"{pid}\"" in line:
+                        self._sink_input_index = current_index
+                        self.log.debug(
+                            "_resolve_sink_input: ch=%d pid=%d → sink-input=%d",
+                            self.CHANNEL_ID, pid, current_index,
+                        )
+                        return self._sink_input_index
+            except Exception as exc:
+                self.log.debug("_resolve_sink_input: pactl error — %s", exc)
+                return None
+            time.sleep(0.1)
+
+        return None
 
     # ------------------------------------------------------------------
     # BaseChannelModule abstract interface
@@ -471,6 +582,7 @@ class AudioModule(BaseChannelModule):
                     stderr=subprocess.DEVNULL,
                 )
                 self._proc = proc
+                self._sink_input_index = None  # invalidate cached index on new spawn
                 self.log.info(
                     "pacat spawned: device=%r rate=%d channels=%d fmt=%s pid=%d",
                     candidate or "default", self._sample_rate, self._channel_count, fmt, proc.pid,
@@ -497,6 +609,7 @@ class AudioModule(BaseChannelModule):
             except Exception:
                 pass
             self._proc = None
+            self._sink_input_index = None
 
     def _write_audio(self, encoded: bytes) -> None:
         """Decode (if AAC / AAC-LC ADTS) and write raw PCM bytes to pacat stdin."""
@@ -557,11 +670,15 @@ class AudioModule(BaseChannelModule):
         self.log.info("audio.state ch=%d → %s", self.CHANNEL_ID, new_state)
 
     # ------------------------------------------------------------------
-    # run() override: add session shutdown subscription then delegate
+    # run() override: add session shutdown + volume subscriptions
     # ------------------------------------------------------------------
 
     def run(self) -> None:
         self.bus.subscribe("aa.session.shutdown", self.on_aa_session_shutdown)
+        self.bus.subscribe(
+            f"channel_{self.CHANNEL_ID}.set_volume",
+            self.on_set_volume,
+        )
         super().run()
 
 
