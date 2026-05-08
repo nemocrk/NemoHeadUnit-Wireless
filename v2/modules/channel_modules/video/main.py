@@ -12,7 +12,7 @@ Module contract:
                 channel_manager.module_stop
                 aa.channel.open         {channel_id, av_type?, ...}  ← from BaseChannelModule
                 aa.channel.close        {channel_id}                 ← from BaseChannelModule
-                aa.frame.ch<channel_id>   raw bytes                    ← from BaseChannelModule
+                aa.frame.ch<channel_id> {channel_id, message_id, encrypted, payload_hex}
                 aa.session.active        {}
                 aa.session.shutdown      {}
   Publishes   : channel_manager.module_ready             {name, priority}
@@ -24,12 +24,12 @@ Flow:
   1. BaseChannelModule parses CLI → self.CHANNEL_ID, self.channel_config.
   2. channel_manager.module_ready published lazily by base once ready.
   3. On aa.channel.open (channel_id matches): record channel open.
-  4. On aa.frame.ch<channel_id>: decode AA media frame, dispatch by message_id:
+  4. On aa.frame.ch<channel_id>: dispatch by message_id (already extracted by tcp_server):
        - AVChannelSetupRequest    → AVChannelSetupResponse + VideoFocusIndication(PROJECTED)
        - ChannelOpenRequest       → ChannelOpenResponse,   video.state=OPEN
        - AVChannelStartIndication → extract session_id,    video.state=PLAYING
        - AVChannelStopIndication  → reset session_id,      video.state=STOPPED
-       - AV_MEDIA_INDICATION      → codec config: ACK + update self._codec
+       - AV_MEDIA_INDICATION      → ACK + update self._codec
        - AV_MEDIA_WITH_TIMESTAMP  → ACK + publish video.frame (drop if session_id==0)
        - VIDEO_FOCUS_REQUEST      → VideoFocusIndication(PROJECTED)
   5. On aa.session.shutdown: reset state + session_id → IDLE.
@@ -71,10 +71,7 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
         sys.path.insert(0, str(_p))
 
 from shared.config_schema import field_int                                                  # noqa: E402
-from shared.proto_utils import (
-    parse_media_with_timestamp,
-    decode_aa_frame,
-)                                                                                           # noqa: E402
+from shared.proto_utils import parse_media_with_timestamp                                   # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule                           # noqa: E402
 
 # Proto — AV shared
@@ -127,9 +124,8 @@ class VideoModule(BaseChannelModule):
     Handles the full AVChannel handshake (Setup → Open → Start → media frames)
     and publishes decoded NAL data on video.frame for video_ui.
 
-    All outgoing AA frames are sent via self.send_frame(message_id, proto_body)
-    which is provided by BaseChannelModule and always sets the encrypted flag
-    consistently for post-handshake channel traffic.
+    All outgoing AA frames are sent via self.send_frame(message_id, proto_body, encrypted)
+    which is provided by BaseChannelModule.
 
     codec lifecycle:
       self._codec_sdr  — codec negotiated in SDR, read in _init().
@@ -225,31 +221,24 @@ class VideoModule(BaseChannelModule):
         self._session_id = 0
         self._set_state("IDLE")
 
-    def on_frame(self, channel_id: int, data: bytes) -> None:
-        """Dispatch incoming raw frame bytes by AA message_id."""
-        result = decode_aa_frame(data)
-        if result is None:
-            self.log.error("on_frame: malformed payload — dropping (len=%d)", len(data))
-            return
-
-        message_id, body = result
-
+    def on_frame(self, channel_id: int, message_id: int, encrypted: bool, data: bytes) -> None:
+        """Dispatch incoming frame by AA message_id (already extracted by tcp_server)."""
         if message_id == _MSG_AV_CHANNEL_SETUP_REQUEST:
-            self._handle_setup_request(body)
+            self._handle_setup_request(data)
         elif message_id == _MSG_CHANNEL_OPEN_REQUEST:
-            self._handle_open_request(body)
+            self._handle_open_request(data)
         elif message_id == _MSG_AV_CHANNEL_START_INDICATION:
-            self._handle_start_indication(body)
+            self._handle_start_indication(data)
         elif message_id == _MSG_AV_CHANNEL_STOP_INDICATION:
-            self._handle_stop_indication(body)
+            self._handle_stop_indication(data)
         elif message_id == _MSG_AV_CHANNEL_AV_MEDIA_INDICATION:
-            self._handle_media(body)
+            self._handle_media(data)
         elif message_id == _MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION:
-            self._handle_media_with_timestamp(body)
+            self._handle_media_with_timestamp(data)
         elif message_id == _MSG_VIDEO_FOCUS_REQUEST:
-            self._handle_video_focus_request(body)
+            self._handle_video_focus_request(data)
         else:
-            self.log.warning("Unhandled video msg_id=0x%04x len=%d", message_id, len(body))
+            self.log.warning("Unhandled video msg_id=0x%04x len=%d", message_id, len(data))
 
     # ------------------------------------------------------------------
     # AA message handlers
@@ -307,8 +296,7 @@ class VideoModule(BaseChannelModule):
 
     def _handle_media(self, body: bytes) -> None:
         """
-        AV_MEDIA_INDICATION = codec config message (MEDIA_MESSAGE_CODEC_CONFIG).
-        The body contains codec configuration bytes; first 2 bytes encode the codec type.
+        AV_MEDIA_INDICATION = codec config message.
         ACK immediately, then update self._codec.
         """
         self._send_media_ack()
