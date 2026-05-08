@@ -4,17 +4,12 @@ NemoHeadUnit-Wireless v2 — channel_modules/av_input
 AVInput channel module: captures PCM audio from the HU microphone and
 streams it upstream to the connected Android Auto phone.
 
-This is the inverse of the audio channel: instead of receiving media from
-the phone and playing it locally, this module records from a local input
-device and sends raw PCM frames to the phone via AV_MEDIA_WITH_TIMESTAMP.
-
 Launch example (by channel_manager):
     python -m channel_modules.av_input.main \\
         --module-name  channel_av_input_7 \\
         --channel-id   7 \\
         --sdr-bytes-hex <hex string from ServiceDiscoveryResponse>
 
----
 Module contract:
   Name        : <--module-name>   (e.g. channel_av_input_7)
   Priority    : 1
@@ -26,50 +21,15 @@ Module contract:
                 config.changed       (auto via ConfigClient)
                 aa.channel.open     {channel_id, ...}
                 aa.channel.close    {channel_id}
-                aa.frame.ch<ch_id>  raw bytes
+                aa.frame.ch<ch_id>  {channel_id, message_id, encrypted, payload_hex}
                 aa.session.shutdown {}
   Publishes   : channel_manager.module_ready  {name, priority}
                 aa.frame.send        bytes  (via BaseChannelModule.send_frame)
                 av_input.state       {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
                 av_input.mic_started {channel_id}
                 av_input.mic_stopped {channel_id}
-  Config keys : mic_device    enum  "default"  PulseAudio source name (pactl list sources short)
+  Config keys : mic_device    enum  "default"  PulseAudio source name
                 max_unacked   int   1           AVChannelSetupResponse.max_unacked
-
----
-AA channel lifecycle:
-
-  SETUP_REQUEST         → AVChannelSetupResponse(OK, max_unacked)  state → SETUP
-  CHANNEL_OPEN_REQUEST  → ChannelOpenResponse(0)                   state → OPEN
-  INPUT_OPEN_REQ(T)     → AVInputOpenResponse(session=0, value=0)
-                          _start_stream()                           state → PLAYING
-                          publishes av_input.mic_started
-  INPUT_OPEN_REQ(F)     → AVInputOpenResponse(session=0, value=0)
-                          _stop_stream()                            state → STOPPED
-                          publishes av_input.mic_stopped
-  ACK_INDICATION        → log debug, no-op (phone acks our frames)
-  aa.session.shutdown   → _stop_stream(), reset                    state → IDLE
-  aa.channel.close      → if capturing: _stop_stream() + mic_stopped
-
----
-Capture pipeline:
-
-  pacat --record subprocess spawned in _start_stream().
-  A dedicated reader thread (_mic_reader) reads chunks from pacat stdout:
-    1. Records monotonic timestamp in microseconds BEFORE read().
-    2. Reads CHUNK_BYTES from stdout (blocking).
-    3. Enqueues (ts_us, pcm_bytes) on self._send_queue.
-  The bus thread drains _send_queue in _drain_send_queue() called from
-  the main run loop via a periodic bus subscription.
-  A stderr drain thread logs pacat warnings at WARNING level.
-  On EOF (pacat crash/device lost): auto-retry up to MAX_RETRIES times
-  with exponential backoff before giving up.
-
----
-Outgoing frame convention:
-  Use self.send_frame(message_id, proto_body) for ALL outgoing AA frames.
-  For AV_MEDIA_WITH_TIMESTAMP the proto_body is a raw packed buffer
-  (not a serialised protobuf) built by build_media_with_timestamp().
 """
 
 from __future__ import annotations
@@ -85,21 +45,18 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # sys.path bootstrap
 # ---------------------------------------------------------------------------
-_HERE         = Path(__file__).parent          # v2/modules/channel_modules/av_input/
-_CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
-_MODULES      = _CHANNEL_MODS.parent           # v2/modules/
-_V2           = _MODULES.parent                # v2/
-_PROTOS       = _V2 / "protos"                 # v2/protos/
+_HERE         = Path(__file__).parent
+_CHANNEL_MODS = _HERE.parent
+_MODULES      = _CHANNEL_MODS.parent
+_V2           = _MODULES.parent
+_PROTOS       = _V2 / "protos"
 
 for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
 from shared.config_schema import field_enum, field_int           # noqa: E402
-from shared.proto_utils import (                                 # noqa: E402
-    build_media_with_timestamp,
-    decode_aa_frame,
-)
+from shared.proto_utils import build_media_with_timestamp        # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -129,10 +86,9 @@ _MSG_AV_MEDIA_ACK               = AVChannelMessage.AV_MEDIA_ACK_INDICATION
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-# 2048 bytes = 512 s16le mono samples @ 48kHz ≈ 10.6 ms per chunk
 _CHUNK_BYTES  = 2048
 _MAX_RETRIES  = 3
-_RETRY_BACKOFF = 0.5  # seconds, doubled on each retry
+_RETRY_BACKOFF = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -140,38 +96,13 @@ _RETRY_BACKOFF = 0.5  # seconds, doubled on each retry
 # ---------------------------------------------------------------------------
 
 class AVInputModule(BaseChannelModule):
-    """
-    AA AVInput channel module — HU microphone capture upstream to phone.
-
-    Captures PCM from a local PulseAudio/PipeWire source via pacat --record
-    and streams it to the phone via AV_MEDIA_WITH_TIMESTAMP frames.
-
-    The phone controls capture lifecycle via INPUT_OPEN_REQUEST(open=True/False).
-    The module responds with AVInputOpenResponse and starts/stops the
-    pacat subprocess accordingly.
-
-    Audio params (sample_rate, bit_depth, channel_count) are read from
-    self.channel_config (SDR) in _init(); defaults to 48kHz/16bit/mono
-    if SDR is absent or incomplete.
-
-    Thread model:
-      - Main bus thread: handles AA messages, drains _send_queue
-      - _mic_reader thread: reads pacat stdout, enqueues (ts_us, pcm)
-      - _stderr_drain thread: reads pacat stderr, logs at WARNING
-    """
-
     MODULE_NAME: str = "channel_av_input"
     CHANNEL_ID:  int = -1
     PRIORITY:    int = 1
 
-    # Default audio params for AVInput (PCM 48kHz mono 16-bit)
     _SAMPLE_RATE:   int = 48000
     _BIT_DEPTH:     int = 16
     _CHANNEL_COUNT: int = 1
-
-    # ------------------------------------------------------------------
-    # Config schema
-    # ------------------------------------------------------------------
 
     def get_schema(self) -> dict:
         return {
@@ -186,54 +117,24 @@ class AVInputModule(BaseChannelModule):
             ),
         }
 
-    # ------------------------------------------------------------------
-    # Construction
-    # ------------------------------------------------------------------
-
     def __init__(self) -> None:
         super().__init__()
-
         self._state:       str  = "IDLE"
         self._capturing:   bool = False
         self._max_unacked: int  = 1
-
-        # Audio params — populated from SDR in _init(), fallback to defaults
         self._sample_rate:   int = self._SAMPLE_RATE
         self._bit_depth:     int = self._BIT_DEPTH
         self._channel_count: int = self._CHANNEL_COUNT
-
-        # pacat availability flag — set in _init()
         self._pacat_ok: bool = False
-
-        # pacat subprocess handle
         self._proc: subprocess.Popen | None = None
-
-        # Reader thread control
         self._stop_event:  threading.Event      = threading.Event()
         self._send_queue:  queue.SimpleQueue     = queue.SimpleQueue()
         self._reader_thread: threading.Thread | None = None
 
-    # ------------------------------------------------------------------
-    # Readiness gate
-    # ------------------------------------------------------------------
-
     def _is_ready(self) -> bool:
-        """
-        AVInput is ready only if pacat is available on the system.
-        The mic stream is opened on demand (INPUT_OPEN_REQUEST), not at init.
-        """
         return self._pacat_ok
 
-    # ------------------------------------------------------------------
-    # _init / _cleanup hooks
-    # ------------------------------------------------------------------
-
     def _init(self) -> None:
-        """
-        1. Verify pacat is available.
-        2. Read audio params from SDR (fallback to defaults if missing).
-        """
-        # Verify pacat availability
         try:
             subprocess.run(
                 ["pacat", "--version"],
@@ -245,8 +146,6 @@ class AVInputModule(BaseChannelModule):
             self._pacat_ok = False
             self.log.error("pacat not available — AVInput will NOT be ready: %s", exc)
             return
-
-        # Read audio params from SDR
         cfg = self.channel_config
         if cfg is not None:
             av_input  = cfg.get("av_input_channel", {})
@@ -268,13 +167,8 @@ class AVInputModule(BaseChannelModule):
             self.log.warning("_init: channel_config is None for ch=%d — using defaults", self.CHANNEL_ID)
 
     def _cleanup(self) -> None:
-        """Stop capture and release resources on module_stop."""
         self._stop_stream(publish=False)
         self._set_state("IDLE")
-
-    # ------------------------------------------------------------------
-    # Config callbacks
-    # ------------------------------------------------------------------
 
     def on_config_changed(self, key: str, value: Any) -> None:
         super().on_config_changed(key, value)
@@ -287,19 +181,10 @@ class AVInputModule(BaseChannelModule):
             self.log.info("max_unacked changed to %r", value)
             self._max_unacked = int(value)
 
-    # ------------------------------------------------------------------
-    # Session lifecycle
-    # ------------------------------------------------------------------
-
     def on_aa_session_shutdown(self, topic: str, payload: dict) -> None:
-        """AA session ended — stop capture and reset."""
         self._stop_stream(publish=True)
         self._set_state("IDLE")
         self.log.info("AA session shutdown — ch=%d reset", self.CHANNEL_ID)
-
-    # ------------------------------------------------------------------
-    # BaseChannelModule abstract interface
-    # ------------------------------------------------------------------
 
     def on_channel_open(self, channel_id: int, descriptor: dict) -> None:
         self._capturing = False
@@ -307,44 +192,30 @@ class AVInputModule(BaseChannelModule):
         self.log.info("Channel %d open", channel_id)
 
     def on_channel_close(self, channel_id: int) -> None:
-        """Stop capture if active, then reset."""
         if self._capturing:
             self._stop_stream(publish=True)
         self._set_state("IDLE")
         self.log.info("Channel %d closed", channel_id)
 
-    def on_frame(self, channel_id: int, data: bytes) -> None:
-        """Dispatch incoming AA frame by message_id."""
-        # Drain any pending mic frames first
+    def on_frame(self, channel_id: int, message_id: int, encrypted: bool, data: bytes) -> None:
+        """Dispatch incoming AA frame by message_id (already extracted by tcp_server)."""
         self._drain_send_queue()
 
-        result = decode_aa_frame(data)
-        if result is None:
-            self.log.error("on_frame: malformed payload on ch=%d — dropping", channel_id)
-            return
-
-        message_id, body = result
-
         if message_id == _MSG_AV_CHANNEL_SETUP_REQUEST:
-            self._handle_setup_request(body)
+            self._handle_setup_request(data)
         elif message_id == _MSG_CHANNEL_OPEN_REQUEST:
-            self._handle_open_request(body)
+            self._handle_open_request(data)
         elif message_id == _MSG_AV_INPUT_OPEN_REQUEST:
-            self._handle_input_open_request(body)
+            self._handle_input_open_request(data)
         elif message_id == _MSG_AV_MEDIA_ACK:
             self.log.debug("ACK_INDICATION ch=%d — no-op", channel_id)
         else:
             self.log.debug(
                 "Unhandled av_input msg_id=0x%04x ch=%d len=%d",
-                message_id, channel_id, len(body),
+                message_id, channel_id, len(data),
             )
 
-    # ------------------------------------------------------------------
-    # AA message handlers
-    # ------------------------------------------------------------------
-
     def _handle_setup_request(self, body: bytes) -> None:
-        """Send AVChannelSetupResponse and transition to SETUP."""
         max_unacked = self._config.get("max_unacked", 1)
         self._max_unacked = max_unacked
         resp = AVChannelSetupResponse()
@@ -359,7 +230,6 @@ class AVInputModule(BaseChannelModule):
         )
 
     def _handle_open_request(self, body: bytes) -> None:
-        """Send ChannelOpenResponse and transition to OPEN."""
         resp = ChannelOpenResponse()
         resp.status = Status.OK
         self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
@@ -367,54 +237,32 @@ class AVInputModule(BaseChannelModule):
         self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)
 
     def _handle_input_open_request(self, body: bytes) -> None:
-        """
-        Parse AVInputOpenRequest and start or stop mic capture.
-
-        Fields read:
-          open        (bool)  — True = start capture, False = stop
-          max_unacked (int)   — optional, update if present
-          anc, ec     (bool)  — logged, not implemented
-
-        Always responds with AVInputOpenResponse(session=0, value=0).
-        """
         try:
             req = AVInputOpenRequest()
             req.ParseFromString(body)
         except Exception as exc:
             self.log.warning("AVInputOpenRequest parse error ch=%d — %s", self.CHANNEL_ID, exc)
             return
-
         if req.HasField("max_unacked") if hasattr(req, "HasField") else req.max_unacked:
             self._max_unacked = req.max_unacked
-
         self.log.info(
             "AVInputOpenRequest ch=%d open=%s anc=%s ec=%s max_unacked=%d",
             self.CHANNEL_ID, req.open, req.anc, req.ec, self._max_unacked,
         )
-
-        # Send response before touching stream state
         resp = AVInputOpenResponse()
         resp.session = 0
         resp.value   = 0
         self.send_frame(_MSG_AV_INPUT_OPEN_RESPONSE, resp.SerializeToString())
-
         if req.open:
             self._start_stream()
         else:
             self._stop_stream(publish=True)
 
-    # ------------------------------------------------------------------
-    # Capture pipeline
-    # ------------------------------------------------------------------
-
     def _start_stream(self, retry: int = 0) -> None:
-        """Spawn pacat --record subprocess and start reader thread."""
         self._stop_stream(publish=False)
         self._stop_event.clear()
-
-        device  = self._config.get("mic_device", "default")
-        fmt     = {8: "u8", 16: "s16le", 24: "s24le", 32: "s32le"}.get(self._bit_depth, "s16le")
-
+        device = self._config.get("mic_device", "default")
+        fmt    = {8: "u8", 16: "s16le", 24: "s24le", 32: "s32le"}.get(self._bit_depth, "s16le")
         cmd = [
             "pacat", "--record",
             f"--format={fmt}",
@@ -423,7 +271,6 @@ class AVInputModule(BaseChannelModule):
         ]
         if device != "default":
             cmd.append(f"--device={device}")
-
         try:
             self._proc = subprocess.Popen(
                 cmd,
@@ -436,7 +283,6 @@ class AVInputModule(BaseChannelModule):
             self._proc = None
             self._capturing = False
             return
-
         self._capturing = True
         self._set_state("PLAYING")
         self.bus.publish("av_input.mic_started", {"channel_id": self.CHANNEL_ID})
@@ -444,8 +290,6 @@ class AVInputModule(BaseChannelModule):
             "pacat --record spawned: device=%r rate=%d channels=%d fmt=%s pid=%d",
             device, self._sample_rate, self._channel_count, fmt, self._proc.pid,
         )
-
-        # Reader thread
         self._reader_thread = threading.Thread(
             target=self._mic_reader,
             args=(self._proc, retry),
@@ -453,8 +297,6 @@ class AVInputModule(BaseChannelModule):
             name=f"mic-reader-ch{self.CHANNEL_ID}",
         )
         self._reader_thread.start()
-
-        # Stderr drain thread
         threading.Thread(
             target=self._stderr_drain,
             args=(self._proc,),
@@ -463,9 +305,7 @@ class AVInputModule(BaseChannelModule):
         ).start()
 
     def _stop_stream(self, publish: bool = True) -> None:
-        """Signal reader thread to stop and terminate pacat subprocess."""
         self._stop_event.set()
-
         if self._proc is not None:
             try:
                 self._proc.terminate()
@@ -473,18 +313,14 @@ class AVInputModule(BaseChannelModule):
             except Exception:
                 pass
             self._proc = None
-
         if self._reader_thread is not None:
             self._reader_thread.join(timeout=2)
             self._reader_thread = None
-
-        # Flush pending queue entries
         while not self._send_queue.empty():
             try:
                 self._send_queue.get_nowait()
             except Exception:
                 break
-
         if self._capturing:
             self._capturing = False
             self._set_state("STOPPED")
@@ -493,25 +329,17 @@ class AVInputModule(BaseChannelModule):
                 self.log.info("Mic capture stopped ch=%d", self.CHANNEL_ID)
 
     def _mic_reader(self, proc: subprocess.Popen, retry: int) -> None:
-        """
-        Reader thread: reads PCM chunks from pacat stdout and enqueues them.
-        On EOF, attempts auto-retry up to MAX_RETRIES times.
-        """
         try:
             while not self._stop_event.is_set():
                 ts_us = time.monotonic_ns() // 1000
                 chunk = proc.stdout.read(_CHUNK_BYTES)
                 if not chunk:
-                    # EOF — pacat exited
                     break
                 self._send_queue.put((ts_us, chunk))
         except Exception as exc:
             self.log.warning("_mic_reader exception ch=%d — %s", self.CHANNEL_ID, exc)
-
         if self._stop_event.is_set():
-            return  # intentional stop, no retry
-
-        # Unexpected EOF — attempt retry
+            return
         if retry < _MAX_RETRIES:
             backoff = _RETRY_BACKOFF * (2 ** retry)
             self.log.warning(
@@ -530,7 +358,6 @@ class AVInputModule(BaseChannelModule):
             self.bus.publish("av_input.mic_stopped", {"channel_id": self.CHANNEL_ID})
 
     def _stderr_drain(self, proc: subprocess.Popen) -> None:
-        """Drain pacat stderr and log each line at WARNING level."""
         try:
             for line in proc.stderr:
                 decoded = line.decode(errors="replace").rstrip()
@@ -540,7 +367,6 @@ class AVInputModule(BaseChannelModule):
             pass
 
     def _drain_send_queue(self) -> None:
-        """Drain pending (ts_us, pcm) items from the send queue and send frames."""
         while True:
             try:
                 ts_us, pcm = self._send_queue.get_nowait()
@@ -548,10 +374,6 @@ class AVInputModule(BaseChannelModule):
                 break
             payload = build_media_with_timestamp(ts_us, pcm)
             self.send_frame(_MSG_AV_MEDIA_WITH_TIMESTAMP, payload)
-
-    # ------------------------------------------------------------------
-    # State helper
-    # ------------------------------------------------------------------
 
     def _set_state(self, new_state: str) -> None:
         if self._state == new_state:
@@ -563,26 +385,16 @@ class AVInputModule(BaseChannelModule):
         })
         self.log.info("av_input.state ch=%d → %s", self.CHANNEL_ID, new_state)
 
-    # ------------------------------------------------------------------
-    # run() override
-    # ------------------------------------------------------------------
-
     def run(self) -> None:
         self.bus.subscribe("aa.session.shutdown", self.on_aa_session_shutdown)
         super().run()
 
 
 # ---------------------------------------------------------------------------
-# Mic device discovery (PulseAudio/PipeWire via pactl)
+# Mic device discovery
 # ---------------------------------------------------------------------------
 
 def _list_mic_devices() -> list[str]:
-    """Return available PulseAudio/PipeWire source names via pactl.
-
-    Parses 'pactl list sources short' output.
-    Silently returns ['default'] if pactl is unavailable or no sources found.
-    Excludes monitor sources (sink.monitor) to avoid loopback confusion.
-    """
     try:
         result = subprocess.run(
             ["pactl", "list", "sources", "short"],
