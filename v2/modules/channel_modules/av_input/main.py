@@ -33,7 +33,7 @@ Module contract:
                 av_input.state       {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
                 av_input.mic_started {channel_id}
                 av_input.mic_stopped {channel_id}
-  Config keys : mic_device    enum  "default"  sounddevice input device name
+  Config keys : mic_device    enum  "default"  PulseAudio source name (pactl list sources short)
                 max_unacked   int   1           AVChannelSetupResponse.max_unacked
 
 ---
@@ -54,14 +54,16 @@ AA channel lifecycle:
 ---
 Capture pipeline:
 
-  sd.RawInputStream(callback=_mic_callback) opened in _start_stream().
-  Callback runs in sounddevice internal thread — no heavy I/O allowed.
-  Each callback invocation:
-    1. Reads raw PCM bytes from indata.
-    2. Gets current monotonic timestamp in microseconds.
-    3. Calls build_media_with_timestamp(ts_us, pcm) from proto_utils.
-    4. Calls self.send_frame(AV_MEDIA_WITH_TIMESTAMP, payload).
-  Guard: callback is a no-op when self._capturing is False.
+  pacat --record subprocess spawned in _start_stream().
+  A dedicated reader thread (_mic_reader) reads chunks from pacat stdout:
+    1. Records monotonic timestamp in microseconds BEFORE read().
+    2. Reads CHUNK_BYTES from stdout (blocking).
+    3. Enqueues (ts_us, pcm_bytes) on self._send_queue.
+  The bus thread drains _send_queue in _drain_send_queue() called from
+  the main run loop via a periodic bus subscription.
+  A stderr drain thread logs pacat warnings at WARNING level.
+  On EOF (pacat crash/device lost): auto-retry up to MAX_RETRIES times
+  with exponential backoff before giving up.
 
 ---
 Outgoing frame convention:
@@ -72,7 +74,10 @@ Outgoing frame convention:
 
 from __future__ import annotations
 
+import queue
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -89,8 +94,6 @@ _PROTOS       = _V2 / "protos"                 # v2/protos/
 for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
-
-import sounddevice as sd                       # noqa: E402
 
 from shared.config_schema import field_enum, field_int           # noqa: E402
 from shared.proto_utils import (                                 # noqa: E402
@@ -123,6 +126,14 @@ _MSG_AV_INPUT_OPEN_RESPONSE     = AVChannelMessage.AV_INPUT_OPEN_RESPONSE
 _MSG_AV_MEDIA_WITH_TIMESTAMP    = AVChannelMessage.AV_MEDIA_WITH_TIMESTAMP_INDICATION
 _MSG_AV_MEDIA_ACK               = AVChannelMessage.AV_MEDIA_ACK_INDICATION
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+# 2048 bytes = 512 s16le mono samples @ 48kHz ≈ 10.6 ms per chunk
+_CHUNK_BYTES  = 2048
+_MAX_RETRIES  = 3
+_RETRY_BACKOFF = 0.5  # seconds, doubled on each retry
+
 
 # ---------------------------------------------------------------------------
 # AVInputModule
@@ -132,17 +143,21 @@ class AVInputModule(BaseChannelModule):
     """
     AA AVInput channel module — HU microphone capture upstream to phone.
 
-    Captures PCM 48kHz/16-bit/mono from a local sounddevice input device
+    Captures PCM from a local PulseAudio/PipeWire source via pacat --record
     and streams it to the phone via AV_MEDIA_WITH_TIMESTAMP frames.
 
     The phone controls capture lifecycle via INPUT_OPEN_REQUEST(open=True/False).
     The module responds with AVInputOpenResponse and starts/stops the
-    sounddevice RawInputStream accordingly.
+    pacat subprocess accordingly.
 
-    session_ is always 0 (AVInput does not use AVChannelStartIndication).
-    max_unacked is updated from INPUT_OPEN_REQUEST if the phone provides it;
-    it is also configurable via the config key "max_unacked" used in
-    AVChannelSetupResponse.
+    Audio params (sample_rate, bit_depth, channel_count) are read from
+    self.channel_config (SDR) in _init(); defaults to 48kHz/16bit/mono
+    if SDR is absent or incomplete.
+
+    Thread model:
+      - Main bus thread: handles AA messages, drains _send_queue
+      - _mic_reader thread: reads pacat stdout, enqueues (ts_us, pcm)
+      - _stderr_drain thread: reads pacat stderr, logs at WARNING
     """
 
     MODULE_NAME: str = "channel_av_input"
@@ -182,8 +197,21 @@ class AVInputModule(BaseChannelModule):
         self._capturing:   bool = False
         self._max_unacked: int  = 1
 
-        # sounddevice RawInputStream handle (opened on INPUT_OPEN_REQUEST)
-        self._stream: sd.RawInputStream | None = None
+        # Audio params — populated from SDR in _init(), fallback to defaults
+        self._sample_rate:   int = self._SAMPLE_RATE
+        self._bit_depth:     int = self._BIT_DEPTH
+        self._channel_count: int = self._CHANNEL_COUNT
+
+        # pacat availability flag — set in _init()
+        self._pacat_ok: bool = False
+
+        # pacat subprocess handle
+        self._proc: subprocess.Popen | None = None
+
+        # Reader thread control
+        self._stop_event:  threading.Event      = threading.Event()
+        self._send_queue:  queue.SimpleQueue     = queue.SimpleQueue()
+        self._reader_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
     # Readiness gate
@@ -191,10 +219,10 @@ class AVInputModule(BaseChannelModule):
 
     def _is_ready(self) -> bool:
         """
-        AVInput is always ready at startup — the mic stream is opened
-        only on demand (INPUT_OPEN_REQUEST), not at init time.
+        AVInput is ready only if pacat is available on the system.
+        The mic stream is opened on demand (INPUT_OPEN_REQUEST), not at init.
         """
-        return True
+        return self._pacat_ok
 
     # ------------------------------------------------------------------
     # _init / _cleanup hooks
@@ -202,29 +230,45 @@ class AVInputModule(BaseChannelModule):
 
     def _init(self) -> None:
         """
-        Read audio params from self.channel_config (populated by base from SDR).
-        Audio params are fixed at 48kHz/mono/16-bit for AVInput; the SDR
-        av_input_channel config is parsed here for logging purposes.
+        1. Verify pacat is available.
+        2. Read audio params from SDR (fallback to defaults if missing).
         """
+        # Verify pacat availability
+        try:
+            subprocess.run(
+                ["pacat", "--version"],
+                capture_output=True, timeout=3, check=True,
+            )
+            self._pacat_ok = True
+            self.log.info("pacat available — AVInput ready")
+        except Exception as exc:
+            self._pacat_ok = False
+            self.log.error("pacat not available — AVInput will NOT be ready: %s", exc)
+            return
+
+        # Read audio params from SDR
         cfg = self.channel_config
         if cfg is not None:
-            av_input = cfg.get("av_input_channel", {})
+            av_input  = cfg.get("av_input_channel", {})
             audio_cfg = av_input.get("audio_config", {})
             if audio_cfg:
+                self._sample_rate   = audio_cfg.get("sample_rate",   self._SAMPLE_RATE)
+                self._bit_depth     = audio_cfg.get("bit_depth",     self._BIT_DEPTH)
+                self._channel_count = audio_cfg.get("channel_count", self._CHANNEL_COUNT)
                 self.log.info(
-                    "_init: av_input_channel ch=%d rate=%s depth=%s channels=%s",
-                    self.CHANNEL_ID,
-                    audio_cfg.get("sample_rate", self._SAMPLE_RATE),
-                    audio_cfg.get("bit_depth",   self._BIT_DEPTH),
-                    audio_cfg.get("channel_count", self._CHANNEL_COUNT),
+                    "_init: ch=%d rate=%d depth=%d channels=%d (from SDR)",
+                    self.CHANNEL_ID, self._sample_rate, self._bit_depth, self._channel_count,
                 )
             else:
-                self.log.info("_init: no audio_config in SDR for ch=%d — using defaults", self.CHANNEL_ID)
+                self.log.info(
+                    "_init: no audio_config in SDR for ch=%d — using defaults %dHz/%dbit/%dch",
+                    self.CHANNEL_ID, self._sample_rate, self._bit_depth, self._channel_count,
+                )
         else:
-            self.log.warning("_init: channel_config is None for ch=%d", self.CHANNEL_ID)
+            self.log.warning("_init: channel_config is None for ch=%d — using defaults", self.CHANNEL_ID)
 
     def _cleanup(self) -> None:
-        """Stop capture and release stream on module_stop."""
+        """Stop capture and release resources on module_stop."""
         self._stop_stream(publish=False)
         self._set_state("IDLE")
 
@@ -271,6 +315,9 @@ class AVInputModule(BaseChannelModule):
 
     def on_frame(self, channel_id: int, data: bytes) -> None:
         """Dispatch incoming AA frame by message_id."""
+        # Drain any pending mic frames first
+        self._drain_send_queue()
+
         result = decode_aa_frame(data)
         if result is None:
             self.log.error("on_frame: malformed payload on ch=%d — dropping", channel_id)
@@ -293,7 +340,7 @@ class AVInputModule(BaseChannelModule):
             )
 
     # ------------------------------------------------------------------
-    # AA message handlers — standard AVChannel handshake
+    # AA message handlers
     # ------------------------------------------------------------------
 
     def _handle_setup_request(self, body: bytes) -> None:
@@ -360,42 +407,83 @@ class AVInputModule(BaseChannelModule):
     # Capture pipeline
     # ------------------------------------------------------------------
 
-    def _start_stream(self) -> None:
-        """Open sounddevice RawInputStream with callback and start capture."""
+    def _start_stream(self, retry: int = 0) -> None:
+        """Spawn pacat --record subprocess and start reader thread."""
         self._stop_stream(publish=False)
-        device = self._config.get("mic_device", "default")
-        sd_device = None if device == "default" else device
+        self._stop_event.clear()
+
+        device  = self._config.get("mic_device", "default")
+        fmt     = {8: "u8", 16: "s16le", 24: "s24le", 32: "s32le"}.get(self._bit_depth, "s16le")
+
+        cmd = [
+            "pacat", "--record",
+            f"--format={fmt}",
+            f"--channels={self._channel_count}",
+            f"--rate={self._sample_rate}",
+        ]
+        if device != "default":
+            cmd.append(f"--device={device}")
+
         try:
-            self._stream = sd.RawInputStream(
-                samplerate=self._SAMPLE_RATE,
-                channels=self._CHANNEL_COUNT,
-                dtype="int16",
-                blocksize=1024,
-                device=sd_device,
-                callback=self._mic_callback,
+            self._proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
             )
-            self._stream.start()
-            self._capturing = True
-            self._set_state("PLAYING")
-            self.bus.publish("av_input.mic_started", {"channel_id": self.CHANNEL_ID})
-            self.log.info(
-                "Mic capture started: device=%r rate=%d channels=%d",
-                device, self._SAMPLE_RATE, self._CHANNEL_COUNT,
-            )
-        except sd.PortAudioError as exc:
-            self.log.error("_start_stream: failed to open device %r — %s", device, exc)
-            self._stream = None
+        except Exception as exc:
+            self.log.error("_start_stream: failed to spawn pacat — %s", exc)
+            self._proc = None
             self._capturing = False
+            return
+
+        self._capturing = True
+        self._set_state("PLAYING")
+        self.bus.publish("av_input.mic_started", {"channel_id": self.CHANNEL_ID})
+        self.log.info(
+            "pacat --record spawned: device=%r rate=%d channels=%d fmt=%s pid=%d",
+            device, self._sample_rate, self._channel_count, fmt, self._proc.pid,
+        )
+
+        # Reader thread
+        self._reader_thread = threading.Thread(
+            target=self._mic_reader,
+            args=(self._proc, retry),
+            daemon=True,
+            name=f"mic-reader-ch{self.CHANNEL_ID}",
+        )
+        self._reader_thread.start()
+
+        # Stderr drain thread
+        threading.Thread(
+            target=self._stderr_drain,
+            args=(self._proc,),
+            daemon=True,
+            name=f"mic-stderr-ch{self.CHANNEL_ID}",
+        ).start()
 
     def _stop_stream(self, publish: bool = True) -> None:
-        """Stop and close sounddevice RawInputStream."""
-        if self._stream is not None:
+        """Signal reader thread to stop and terminate pacat subprocess."""
+        self._stop_event.set()
+
+        if self._proc is not None:
             try:
-                self._stream.stop()
-                self._stream.close()
+                self._proc.terminate()
+                self._proc.wait(timeout=2)
             except Exception:
                 pass
-            self._stream = None
+            self._proc = None
+
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=2)
+            self._reader_thread = None
+
+        # Flush pending queue entries
+        while not self._send_queue.empty():
+            try:
+                self._send_queue.get_nowait()
+            except Exception:
+                break
 
         if self._capturing:
             self._capturing = False
@@ -404,26 +492,62 @@ class AVInputModule(BaseChannelModule):
                 self.bus.publish("av_input.mic_stopped", {"channel_id": self.CHANNEL_ID})
                 self.log.info("Mic capture stopped ch=%d", self.CHANNEL_ID)
 
-    def _mic_callback(
-        self,
-        indata: bytes,
-        frames: int,
-        time_info: Any,
-        status: sd.CallbackFlags,
-    ) -> None:
+    def _mic_reader(self, proc: subprocess.Popen, retry: int) -> None:
         """
-        sounddevice RawInputStream callback — runs in sounddevice internal thread.
+        Reader thread: reads PCM chunks from pacat stdout and enqueues them.
+        On EOF, attempts auto-retry up to MAX_RETRIES times.
+        """
+        try:
+            while not self._stop_event.is_set():
+                ts_us = time.monotonic_ns() // 1000
+                chunk = proc.stdout.read(_CHUNK_BYTES)
+                if not chunk:
+                    # EOF — pacat exited
+                    break
+                self._send_queue.put((ts_us, chunk))
+        except Exception as exc:
+            self.log.warning("_mic_reader exception ch=%d — %s", self.CHANNEL_ID, exc)
 
-        Kept intentionally minimal: no blocking I/O, no heavy processing.
-        Guards against spurious calls when not capturing.
-        """
-        if not self._capturing:
-            return
-        if status:
-            self.log.debug("_mic_callback status ch=%d: %s", self.CHANNEL_ID, status)
-        ts_us  = time.monotonic_ns() // 1000
-        payload = build_media_with_timestamp(ts_us, bytes(indata))
-        self.send_frame(_MSG_AV_MEDIA_WITH_TIMESTAMP, payload)
+        if self._stop_event.is_set():
+            return  # intentional stop, no retry
+
+        # Unexpected EOF — attempt retry
+        if retry < _MAX_RETRIES:
+            backoff = _RETRY_BACKOFF * (2 ** retry)
+            self.log.warning(
+                "pacat stdout EOF ch=%d — retry %d/%d in %.1fs",
+                self.CHANNEL_ID, retry + 1, _MAX_RETRIES, backoff,
+            )
+            time.sleep(backoff)
+            self._start_stream(retry=retry + 1)
+        else:
+            self.log.error(
+                "pacat stdout EOF ch=%d — max retries (%d) exhausted, giving up",
+                self.CHANNEL_ID, _MAX_RETRIES,
+            )
+            self._capturing = False
+            self._set_state("STOPPED")
+            self.bus.publish("av_input.mic_stopped", {"channel_id": self.CHANNEL_ID})
+
+    def _stderr_drain(self, proc: subprocess.Popen) -> None:
+        """Drain pacat stderr and log each line at WARNING level."""
+        try:
+            for line in proc.stderr:
+                decoded = line.decode(errors="replace").rstrip()
+                if decoded:
+                    self.log.warning("pacat stderr ch=%d: %s", self.CHANNEL_ID, decoded)
+        except Exception:
+            pass
+
+    def _drain_send_queue(self) -> None:
+        """Drain pending (ts_us, pcm) items from the send queue and send frames."""
+        while True:
+            try:
+                ts_us, pcm = self._send_queue.get_nowait()
+            except queue.Empty:
+                break
+            payload = build_media_with_timestamp(ts_us, pcm)
+            self.send_frame(_MSG_AV_MEDIA_WITH_TIMESTAMP, payload)
 
     # ------------------------------------------------------------------
     # State helper
@@ -449,21 +573,27 @@ class AVInputModule(BaseChannelModule):
 
 
 # ---------------------------------------------------------------------------
-# Mic device discovery
+# Mic device discovery (PulseAudio/PipeWire via pactl)
 # ---------------------------------------------------------------------------
 
 def _list_mic_devices() -> list[str]:
-    """Return available input device names via sounddevice, always starting with 'default'.
+    """Return available PulseAudio/PipeWire source names via pactl.
 
-    Enumerates all PortAudio input devices (ALSA, PulseAudio, JACK, PipeWire…).
-    Silently returns ['default'] if sounddevice is unavailable or no devices found.
+    Parses 'pactl list sources short' output.
+    Silently returns ['default'] if pactl is unavailable or no sources found.
+    Excludes monitor sources (sink.monitor) to avoid loopback confusion.
     """
     try:
+        result = subprocess.run(
+            ["pactl", "list", "sources", "short"],
+            capture_output=True, text=True, timeout=3,
+        )
         devices = ["default"]
-        for info in sd.query_devices():
-            if info["max_input_channels"] > 0:
-                name = info["name"]
-                if name not in devices:
+        for line in result.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                name = parts[1].strip()
+                if name and name not in devices and ".monitor" not in name:
                     devices.append(name)
         return devices
     except Exception:
