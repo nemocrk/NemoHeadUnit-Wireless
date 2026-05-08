@@ -9,7 +9,7 @@ Module contract:
                 system.stop
                 rfcomm.handshake.completed  {device_address, phone_ip}
                 aa.frame.send               {channel_id, message_id, payload_hex, encrypted}
-                aa.frame.ch0                {channel_id, flags, payload_hex}  ← monitors SHUTDOWN_RESPONSE
+                aa.frame.ch0                {channel_id, message_id, encrypted, payload_hex}  ← monitors SHUTDOWN_RESPONSE
                 aa.handshake.start_tls      {}                 ← oaa_control_channel triggers TLS init
                 aa.handshake.feed_input     {payload_hex}      ← SSL round bytes from phone
                 aa.session.restart          {}                 ← config changed, restart AA session
@@ -17,8 +17,8 @@ Module contract:
                 system.ready                 {name, priority}
                 tcp.server.started          {host, port}
                 tcp.session.connected       {address}
-                aa.frame.received           {channel_id, flags, payload_hex}  (all channels, plain)
-                aa.frame.ch<N>              {channel_id, flags, payload_hex}  (per-channel, plain)
+                aa.frame.received           {channel_id, message_id, encrypted, payload_hex}  (all channels)
+                aa.frame.ch<N>              {channel_id, message_id, encrypted, payload_hex}  (per-channel)
                 tcp.session.closed          {}
                 tcp.server.error            {error}
                 tcp.server.tls_handshake    {outgoing_hex}     ← TLS bytes to forward to phone
@@ -26,11 +26,17 @@ Module contract:
                 aa.session.restarting       {}                 ← cryptor reset done, oaa_control_channel
                                                                   should send VERSION_REQUEST
 
-aa.frame.send payload contract (post-refactor):
+aa.frame.send payload contract:
     channel_id  : int   — AA channel (0 = control)
     message_id  : int   — 2-byte AA message identifier
     payload_hex : str   — serialised proto body ONLY (no message_id prepended)
-    encrypted   : bool  — semantic flag; tcp_server enforces encryption policy
+    encrypted   : bool  — semantic flag; tcp_server enforces actual encryption policy via frame_codec
+
+aa.frame.ch<N> / aa.frame.received publish contract:
+    channel_id  : int   — AA channel
+    message_id  : int   — 2-byte AA message identifier (stripped from wire payload by tcp_server)
+    encrypted   : bool  — True if the frame was encrypted on the wire (echo of original flag)
+    payload_hex : str   — decrypted proto body ONLY (message_id already removed)
 
 Flow:
   1. Waits for rfcomm.handshake.completed — phone is now on the WiFi AP
@@ -38,7 +44,8 @@ Flow:
   3. Accepts the phone connection (plain TCP — no TLS wrap)
   4. FrameRelay reads raw AA frames → FrameAssembler reassembles multi-frame messages:
      - If assembled and encrypted flag set and cryptor is active → decrypt
-     - Publish plain assembled payload on bus
+     - Extract message_id (2B BE) from assembled payload
+     - Publish {channel_id, message_id, encrypted, payload_hex} on bus
   5. On aa.frame.send → frame_codec.encode() builds wire frames → FrameRelay.send_raw()
   6. On aa.handshake.start_tls → AACryptor.init() + drive_handshake() → publish tcp.server.tls_handshake
   7. On aa.handshake.feed_input → write_handshake_input() + drive_handshake():
@@ -46,7 +53,7 @@ Flow:
        - if is_active()   → publish tcp.server.tls_handshake_completed
   8. On aa.session.restart:
        a. Send SHUTDOWN_REQUEST (ch0, msgId 0x000D) to phone
-       b. Wait for SHUTDOWN_RESPONSE on aa.frame.ch0 (msgId 0x000E)
+       b. Wait for SHUTDOWN_RESPONSE on aa.frame.ch0 (message_id == 0x000E)
        c. deinit() cryptor (reset SSLObject)
        d. Publish aa.session.restarting → oaa_control_channel sends VERSION_REQUEST
   9. On socket close → publishes tcp.session.closed
@@ -167,11 +174,11 @@ def on_handshake_completed(topic: str, payload: dict) -> None:
 def on_frame_send(topic: str, payload: dict) -> None:
     """Write an AA frame to the active socket.
 
-    Expected payload keys (new contract):
+    Expected payload keys:
         channel_id  : int   — AA channel id
         message_id  : int   — 2-byte AA message identifier
         payload_hex : str   — proto body ONLY (no message_id prepended)
-        encrypted   : bool  — semantic hint; policy is enforced by frame_codec
+        encrypted   : bool  — semantic hint; actual policy enforced by frame_codec
     """
     relay = _relay
     if relay is None:
@@ -258,13 +265,18 @@ def on_aa_session_restart(topic: str, payload: dict) -> None:
     _restart_pending = True
     _shutdown_ack_event.clear()
 
-    # Build SHUTDOWN_REQUEST directly (internal control frame, not via bus)
-    # Wire: [channel:1B][flags:1B][len:2B_BE][msg_id:2B_BE]
-    msg_id_bytes = struct.pack(">H", _MSG_SHUTDOWN_REQUEST)
-    frame = struct.pack(">BBH", 0, 0x00, len(msg_id_bytes)) + msg_id_bytes
+    # Build and send SHUTDOWN_REQUEST directly via frame_codec (bypasses bus round-trip)
+    shutdown_frames = encode(
+        channel_id=0,
+        message_id=_MSG_SHUTDOWN_REQUEST,
+        body=b"",
+        ssl_active=(_cryptor is not None and _cryptor.is_active()),
+        cryptor=_cryptor,
+    )
     try:
         with _write_lock:
-            _relay.send_raw(frame)
+            for frame in shutdown_frames:
+                _relay.send_raw(frame)
     except Exception as exc:
         log.error("on_aa_session_restart: failed to send SHUTDOWN_REQUEST — %s", exc)
         _restart_pending = False
@@ -296,14 +308,7 @@ def on_ch0_frame(topic: str, payload: dict) -> None:
     """Monitor ch0 frames for SHUTDOWN_RESPONSE during a restart sequence."""
     if not _restart_pending:
         return
-    try:
-        raw = bytes.fromhex(payload["payload_hex"])
-    except (KeyError, ValueError):
-        return
-    if len(raw) < 2:
-        return
-    msg_id = struct.unpack_from(">H", raw, 0)[0]
-    if msg_id == _MSG_SHUTDOWN_RESPONSE:
+    if int(payload.get("message_id", -1)) == _MSG_SHUTDOWN_RESPONSE:
         _shutdown_ack_event.set()
 
 
@@ -376,34 +381,49 @@ def _teardown() -> None:
 def _on_raw_frame(channel_id: int, flags: int, payload: bytes, total_size: int) -> None:
     """Called by FrameRelay for every raw frame off the socket.
 
-    Feeds the frame into FrameAssembler; when a full message is ready,
-    optionally decrypts it and publishes on the bus.
+    Pipeline:
+      1. Feed into FrameAssembler — returns None until message is complete
+      2. Save encrypted flag (echo to subscribers) before decrypting
+      3. Decrypt if needed
+      4. Strip message_id (2B BE) from assembled payload
+      5. Publish {channel_id, message_id, encrypted, payload_hex} on bus
     """
     result = _assembler.feed(channel_id, flags, payload, total_size)
     if result is None:
-        return  # waiting for more chunks
+        return
 
     channel_id, flags, assembled = result
 
-    # Decrypt if encrypted flag is set and cryptor is active
-    if (flags & _FLAG_ENCRYPTED) and _cryptor is not None and _cryptor.is_active():
+    # Save original encrypted flag — echoed to subscribers
+    encrypted = bool(flags & _FLAG_ENCRYPTED)
+
+    # Decrypt if needed
+    if encrypted and _cryptor is not None and _cryptor.is_active():
         try:
             assembled = _cryptor.decrypt(assembled)
         except Exception as exc:
             log.error("_on_raw_frame: decrypt failed ch=%d — %s", channel_id, exc)
             return
-        flags = flags & ~_FLAG_ENCRYPTED
+
+    # Extract message_id from the assembled payload (always first 2 bytes)
+    if len(assembled) < 2:
+        log.error("_on_raw_frame: ch=%d assembled payload too short (%d bytes) — dropping",
+                  channel_id, len(assembled))
+        return
+    message_id = struct.unpack_from(">H", assembled, 0)[0]
+    body       = assembled[2:]
 
     frame_data = {
         "channel_id":  channel_id,
-        "flags":       flags,
-        "payload_hex": assembled.hex(),
+        "message_id":  message_id,
+        "encrypted":   encrypted,
+        "payload_hex": body.hex(),
     }
     bus.publish("aa.frame.received", frame_data)
     bus.publish(f"aa.frame.ch{channel_id}", frame_data)
     log.debug(
-        "_on_raw_frame: published aa.frame.ch%d flags=0x%02x payload_len=%d",
-        channel_id, flags, len(assembled),
+        "_on_raw_frame: ch=%d msg=0x%04x enc=%s body_len=%d",
+        channel_id, message_id, encrypted, len(body),
     )
 
 
