@@ -12,6 +12,10 @@ Shutdown strategy:
     zmq.proxy() is blocking and lives in a daemon thread.
     SIGINT/SIGTERM set a stop_event that closes the context from the main
     thread, which unblocks the proxy thread with a ZMQError — clean exit.
+
+HWM note:
+    HWM here must be >= BUS_HWM in shared/bus_client.py so the broker
+    never becomes the bottleneck before client sockets saturate.
 """
 
 import signal
@@ -26,7 +30,8 @@ from shared.logger import get_logger  # noqa: E402
 BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
 BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
 
-HWM = 1000
+# Must be >= BUS_HWM in shared/bus_client.py
+HWM = 5000
 
 log = get_logger("bus_broker")
 
