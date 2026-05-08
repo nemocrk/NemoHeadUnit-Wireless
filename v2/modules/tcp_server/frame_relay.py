@@ -23,10 +23,10 @@ Wire format (verified against openauto-prodigy FrameSerializer.cpp + FrameHeader
     Byte 8+  : payload bytes
 
   FrameType encoding (flags & 0x03):
-    0x00 = Bulk   (single-frame message, most common)
-    0x01 = First  (first of multi-frame message)
-    0x02 = Middle
-    0x03 = Last
+    0x00 = Middle  (part of multi-frame sequence)
+    0x01 = First   (first of multi-frame message)
+    0x02 = Last    (last of multi-frame message)
+    0x03 = Bulk    (single-frame message, most common)
 
 No ZMQ dependency — caller injects callbacks.
 """
@@ -54,8 +54,14 @@ class FrameRelay:
     Also exposes send_raw() so other components (e.g. oaa_control_channel)
     can write frames back to the phone.
 
+    The on_frame_cb signature is:
+        on_frame_cb(channel_id: int, flags: int, payload: bytes, total_size: int) -> None
+
+    total_size is the value from the FIRST-frame header (u32 BE), or 0 for
+    BULK / MIDDLE / LAST frames.  Callers pass it straight to FrameAssembler.
+
     Usage:
-        def on_frame(channel_id, flags, payload):
+        def on_frame(channel_id, flags, payload, total_size):
             bus.publish("aa.frame.received", {...})
 
         relay = FrameRelay(sock, on_frame_cb=on_frame, on_closed_cb=on_closed)
@@ -66,7 +72,7 @@ class FrameRelay:
     def __init__(
         self,
         sock: socket.socket,
-        on_frame_cb: Callable[[int, int, bytes], None],
+        on_frame_cb: Callable[[int, int, bytes, int], None],
         on_closed_cb: Optional[Callable[[], None]] = None,
     ):
         self._sock = sock
@@ -88,8 +94,8 @@ class FrameRelay:
                 if frame is None:
                     log.info("Socket closed or read error — ending relay")
                     break
-                channel_id, flags, payload = frame
-                self._on_frame(channel_id, flags, payload)
+                channel_id, flags, payload, total_size = frame
+                self._on_frame(channel_id, flags, payload, total_size)
         finally:
             self._running = False
             if self._on_closed:
@@ -125,13 +131,10 @@ class FrameRelay:
     def _read_frame(self) -> Optional[tuple]:
         """
         Read one AA frame from the socket.
-        Returns (channel_id, flags, payload) or None on error/close.
+        Returns (channel_id, flags, payload, total_size) or None on error/close.
 
-        Layout (BULK frame, the common case):
-          [channel_id:1B][flags:1B][payload_len:2B_BE][payload]
-
-        FIRST frames have an extra 4B total_len field before the payload;
-        we read and discard it here (reassembly is out of scope for the relay).
+        total_size is populated only for FIRST frames (from the 4-byte field);
+        it is 0 for BULK / MIDDLE / LAST frames.
         """
         # 1. Read 2-byte header
         header = self._recv_exact(FRAME_HEADER_SIZE)
@@ -148,27 +151,24 @@ class FrameRelay:
         payload_len = struct.unpack(">H", size_field)[0]
 
         # 3. FIRST frames carry an extra 4-byte total-message-length field
+        total_size = 0
         if frame_type == FRAMETYPE_FIRST:
             total_len_field = self._recv_exact(FRAME_TOTAL_LEN_FIELD)
             if not total_len_field:
                 return None
-            # total_len available if needed: struct.unpack(">I", total_len_field)[0]
+            total_size = struct.unpack(">I", total_len_field)[0]
 
         # 4. Read payload
         payload = self._recv_exact(payload_len) if payload_len else b""
-
-        log.info(
-            f"Frame: channel={channel_id} flags=0x{flags:02x} len={payload_len if payload else 0}"
-        )
 
         if payload is None:
             return None
 
         log.debug(
-            "Frame: channel=%d flags=0x%02x type=%d len=%d",
-            channel_id, flags, frame_type, payload_len,
+            "Frame: channel=%d flags=0x%02x type=0x%02x len=%d total_size=%d",
+            channel_id, flags, frame_type, payload_len, total_size,
         )
-        return channel_id, flags, payload
+        return channel_id, flags, payload, total_size
 
     def _recv_exact(self, n: int) -> Optional[bytes]:
         """Read exactly n bytes from the socket."""
