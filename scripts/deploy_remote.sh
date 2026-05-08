@@ -29,6 +29,7 @@ set -euo pipefail
 KEEP=5
 LOGFILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/logs/deploy.log"
 REMOTE_DIR="NemoHeadUnit-Wireless"
+SYNC_ENV_FLAG=0
 
 # ---------------------------------------------------------------------------
 # Args
@@ -109,6 +110,7 @@ rsync -avz --delete \
   --exclude='*.pyc' \
   -e ssh \
   "$REPO_ROOT/v2/" "$REMOTE:/home/$REMOTE_USER/$REMOTE_DIR/v2/"
+if [ "$SYNC_ENV_FLAG" = "1" ]; then
 
 echo "[2/5] Syncing environment.yml to remote..."
 rsync -avz \
@@ -140,7 +142,6 @@ echo ""
 # ---------------------------------------------------------------------------
 # Step 4: Conda environment + avvio (enabled with --sync-env flag)
 # ---------------------------------------------------------------------------
-if [ "$SYNC_ENV_FLAG" = "1" ]; then
   echo "[4/5] Creating/updating Conda environment (py314)..."
   ssh "$REMOTE" bash <<'ENDSSH'
   set -euo pipefail
