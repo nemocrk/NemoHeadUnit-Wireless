@@ -25,6 +25,7 @@ from shared.logger import get_logger
 
 BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
 BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
+BUS_HWM = 1000
 
 
 class BusClient:
@@ -37,10 +38,14 @@ class BusClient:
 
         # Publisher socket
         self._pub = self._context.socket(zmq.PUB)
+        self._pub.setsockopt(zmq.SNDHWM, BUS_HWM)
+        self._pub.setsockopt(zmq.LINGER, 0)
         self._pub.connect(BROKER_PUB_ADDR)
 
         # Subscriber socket
         self._sub = self._context.socket(zmq.SUB)
+        self._sub.setsockopt(zmq.RCVHWM, BUS_HWM)
+        self._sub.setsockopt(zmq.LINGER, 0)
         self._sub.connect(BROKER_SUB_ADDR)
 
     def subscribe(self, topic: str, handler: callable):
@@ -51,11 +56,15 @@ class BusClient:
 
     def publish(self, topic: str, payload: dict):
         """Publish a message on the bus."""
-        self._pub.send_multipart([
-            topic.encode(),
-            json.dumps(payload).encode(),
-        ])
+        try:
+            self._pub.send_multipart([
+                topic.encode(),
+                json.dumps(payload).encode(),
+            ], flags=zmq.NOBLOCK)
+        except zmq.Again:
+            return False
         #self.log.debug(f"Published [{topic}]: {payload}")
+        return True
 
     def start(self, blocking: bool = True):
         """Start the receive loop. Set blocking=False to run in a thread."""
@@ -71,7 +80,7 @@ class BusClient:
         """Stop the receive loop and close sockets."""
         self._running = False
         self._pub.close(linger=0)
-        self._sub.close()
+        self._sub.close(linger=0)
         self._context.term()
         self.log.info("BusClient stopped.")
 

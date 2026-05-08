@@ -46,6 +46,7 @@ BROKER_SCRIPT   = BASE_DIR / "bus_broker.py"
 MODULES_DIR     = BASE_DIR / "modules"
 BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
 BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
+BUS_HWM = 1000
 
 BROKER_STARTUP_DELAY  = 0.5   # s — wait for broker to bind
 MODULE_STARTUP_DELAY  = 0.2   # s — between module launches
@@ -78,16 +79,21 @@ def discover_modules() -> list[Path]:
 def _make_publisher() -> tuple[zmq.Context, zmq.Socket]:
     ctx = zmq.Context()
     pub = ctx.socket(zmq.PUB)
+    pub.setsockopt(zmq.SNDHWM, BUS_HWM)
+    pub.setsockopt(zmq.LINGER, 0)
     pub.connect(BROKER_PUB_ADDR)
     return ctx, pub
 
 
 def _publish(pub: zmq.Socket, topic: str, payload: dict) -> None:
-    pub.send_multipart([
-        topic.encode(),
-        json.dumps(payload).encode(),
-    ])
-    log.info(f"Published [{topic}]: {payload}")
+    try:
+        pub.send_multipart([
+            topic.encode(),
+            json.dumps(payload).encode(),
+        ], flags=zmq.NOBLOCK)
+        log.info(f"Published [{topic}]: {payload}")
+    except zmq.Again:
+        log.warning(f"Publish [{topic}] dropped because bus publisher is saturated")
 
 
 # ---------------------------------------------------------------------------
@@ -350,16 +356,25 @@ def _start_process(script: Path, label: str) -> subprocess.Popen:
 
 
 def _terminate_all(processes: list[tuple[str, subprocess.Popen]]) -> None:
+    deadline = time.monotonic() + GRACE_PERIOD
     for label, proc in processes:
+        if proc.poll() is not None:
+            log.info(f"{label} exited on its own (code {proc.returncode})")
+            continue
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0:
+            break
         try:
-            proc.wait(timeout=GRACE_PERIOD)
+            proc.wait(timeout=min(0.25, remaining))
             log.info(f"{label} exited on its own (code {proc.returncode})")
         except subprocess.TimeoutExpired:
-            pass
+            continue
+
     for label, proc in reversed(processes):
         if proc.poll() is None:
             log.info(f"Terminating {label} (PID {proc.pid})...")
             proc.terminate()
+
     for label, proc in processes:
         if proc.returncode is not None:
             continue

@@ -26,7 +26,7 @@ from shared.logger import get_logger  # noqa: E402
 BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
 BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
 
-HWM = 200
+HWM = 1000
 
 log = get_logger("bus_broker")
 
@@ -37,10 +37,12 @@ def run():
 
     xsub = context.socket(zmq.XSUB)
     xsub.setsockopt(zmq.RCVHWM, HWM)
+    xsub.setsockopt(zmq.LINGER, 0)
     xsub.bind(BROKER_PUB_ADDR)
 
     xpub = context.socket(zmq.XPUB)
     xpub.setsockopt(zmq.SNDHWM, HWM)
+    xpub.setsockopt(zmq.LINGER, 0)
     xpub.bind(BROKER_SUB_ADDR)
 
     log.info(f"XSUB listening on {BROKER_PUB_ADDR}")
@@ -66,8 +68,8 @@ def run():
     stop_event.wait()
 
     log.info("Broker shutting down...")
-    xsub.close()
-    xpub.close()
+    xsub.close(linger=0)
+    xpub.close(linger=0)
     context.term()
     t.join(timeout=2)
     log.info("Broker stopped.")

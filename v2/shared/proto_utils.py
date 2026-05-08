@@ -256,13 +256,13 @@ def decode_aa_frame(data: bytes) -> tuple[int, bytes] | None:
 def parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
     """Parse an AV_MEDIA_WITH_TIMESTAMP_INDICATION frame body.
 
-    No generated pb2 class exists for this message.  The phone sends:
+    No generated pb2 class exists for this message.  The phone may send:
         field 1 (wire type 1, fixed64) — timestamp in microseconds
         field 2 (wire type 2, bytes)   — codec payload (AAC / H.264 / PCM)
 
-    This format is consistent across all known Android Auto implementations
-    (openauto, openauto-prodigy, aasdk).  The timestamp is extracted as an
-    informational value; the codec payload is what callers actually need.
+    Some implementations use a compact [uint64 BE timestamp][raw codec bytes]
+    tuple instead.  The timestamp is extracted as an informational value; the
+    codec payload is what callers actually need.
 
     Used by both AudioModule and VideoModule.
 
@@ -278,6 +278,13 @@ def parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
     """
     ts_us: int  = 0
     data:  bytes = b""
+
+    if len(body) >= 8:
+        raw_ts_us = struct.unpack_from(">Q", body, 0)[0]
+        raw_data = body[8:]
+    else:
+        raw_ts_us = 0
+        raw_data = b""
     pos:   int  = 0
 
     while pos < len(body):
@@ -304,6 +311,15 @@ def parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
             pos = _skip_field(body, pos, wire_type)
             if pos is None:
                 break
+
+    if data:
+        return ts_us, data
+
+    # Some AA media implementations send the timestamped media body as a
+    # compact [uint64 BE timestamp][raw codec bytes] tuple instead of protobuf
+    # fields.  Large video/audio frames in the wild commonly use this form.
+    if raw_data:
+        return raw_ts_us, raw_data
 
     return ts_us, data
 
