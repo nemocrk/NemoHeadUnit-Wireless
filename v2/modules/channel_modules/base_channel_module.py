@@ -43,8 +43,16 @@ Channel lifecycle (AA-specific):
   aa_control_channel → aa.channel.close {channel_id}
        module calls: on_channel_close(channel_id)
 
-  bus (binary frame) → aa.frame.ch<channel_id>  raw bytes
-       module calls: on_frame(channel_id, data)
+  bus (assembled frame) → aa.frame.ch<channel_id>  {channel_id, flags, payload_hex}
+       payload_hex contains message_id (2 bytes BE) + proto body
+       module calls: on_frame(channel_id, message_id, data)
+
+---
+aa.frame.send contract (new):
+    channel_id  : int   — AA channel
+    message_id  : int   — 2-byte AA message identifier
+    payload_hex : str   — proto body ONLY (no message_id prepended)
+    encrypted   : bool  — semantic flag; tcp_server enforces the actual policy
 
 ---
 Subclass responsibilities:
@@ -53,7 +61,7 @@ Subclass responsibilities:
   - Set CHANNEL_ID as class attribute fallback (overridden by --channel-id CLI)
   - Implement on_channel_open(channel_id, descriptor)
   - Implement on_channel_close(channel_id)
-  - Implement on_frame(channel_id, data)
+  - Implement on_frame(channel_id, message_id, data)
   - Optionally override get_schema() to expose config keys
   - Optionally override on_config_loaded() / on_config_changed()
   - Optionally override _is_ready() to gate channel_manager.module_ready on a resource
@@ -62,6 +70,7 @@ Subclass responsibilities:
 from __future__ import annotations
 
 import argparse
+import struct
 import sys
 import time
 from abc import ABC, abstractmethod
@@ -83,12 +92,10 @@ for _p in (_V2, _MODULES, _REPO):
 from shared.bus_client import BusClient        # noqa: E402
 from shared.config_client import ConfigClient  # noqa: E402
 from shared.logger import get_logger           # noqa: E402
-from shared.proto_utils import channel_config_from_sdr, encode_aa_frame, proto_to_dict  # noqa: E402
+from shared.proto_utils import channel_config_from_sdr, proto_to_dict  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module-level CLI parsing
-# Parsed once at import time; subclasses read _CLI_ARGS at __init__.
-# add_help=False so subclasses can extend without conflicts.
 # ---------------------------------------------------------------------------
 _cli_parser = argparse.ArgumentParser(add_help=False)
 _cli_parser.add_argument("--module-name",   default=None)
@@ -119,7 +126,7 @@ class BaseChannelModule(ABC):
 
             def on_channel_open(self, channel_id: int, descriptor: dict) -> None: ...
             def on_channel_close(self, channel_id: int) -> None: ...
-            def on_frame(self, channel_id: int, data: bytes) -> None: ...
+            def on_frame(self, channel_id: int, message_id: int, data: bytes) -> None: ...
     """
 
     # Subclasses MUST override these
@@ -239,20 +246,7 @@ class BaseChannelModule(ABC):
         return True
 
     def _try_publish_ready(self) -> None:
-        """Emit channel_manager.module_ready if all readiness conditions are met.
-
-        Conditions:
-          - _init() completed  (_init_done)
-          - on_config_loaded() called  (_config_loaded)
-            OR module has no schema (config_manager will never respond)
-          - _is_ready() returns True
-          - self.channel_config is not None (SDR lookup succeeded)
-
-        Hard-fails silently on missing channel_config: logs error, does NOT
-        publish system.ready, so channel_manager never unblocks the phone.
-
-        Safe to call multiple times — emits at most once per session.
-        """
+        """Emit channel_manager.module_ready if all readiness conditions are met."""
         if self._ready_published:
             return
         if self.channel_config is None:
@@ -319,50 +313,68 @@ class BaseChannelModule(ABC):
         self.on_channel_close(self.CHANNEL_ID)
 
     def _on_aa_frame(self, topic: str, payload: dict) -> None:
-        """Receive a frame dict from the bus.
+        """Receive a fully-assembled, decrypted frame from the bus.
 
-        The topic carries the channel id (aa.frame.ch<channel_id>), but
-        since we subscribe to our specific topic the channel_id here is
-        always self.CHANNEL_ID.
+        The payload contains the raw AA frame bytes (message_id prefix + proto body).
+        We strip the 2-byte message_id header here so subclasses receive the
+        proto body only, with message_id as a separate int argument.
         """
         try:
             channel_id  = int(payload["channel_id"])
-            flags       = int(payload["flags"])
-            data        = bytes.fromhex(payload["payload_hex"])
+            raw         = bytes.fromhex(payload["payload_hex"])
         except (KeyError, ValueError) as exc:
             self.log.error("_on_aa_frame: malformed payload — %s", exc)
             return
 
-        self.log.info(f"Received frame on channel {self.CHANNEL_ID}: {len(data)} bytes")
+        if len(raw) < 2:
+            self.log.error(
+                "_on_aa_frame: ch=%d payload too short (%d bytes) — dropping",
+                channel_id, len(raw),
+            )
+            return
+
+        message_id = struct.unpack_from(">H", raw, 0)[0]
+        body       = raw[2:]
+
+        self.log.debug(
+            "_on_aa_frame: ch=%d msg=0x%04x body_len=%d",
+            channel_id, message_id, len(body),
+        )
         if not self._channel_open:
             self.log.warning(f"Frame dropped — channel {self.CHANNEL_ID} not open yet")
             return
-        self.on_frame(self.CHANNEL_ID, data)
+        self.on_frame(self.CHANNEL_ID, message_id, body)
 
     # ------------------------------------------------------------------
     # Outgoing frame helper
     # ------------------------------------------------------------------
 
     def send_frame(self, message_id: int, proto_body: bytes) -> None:
-        """Send an encrypted AA frame on this module's channel.
+        """Send an AA frame on this module's channel.
 
-        All post-handshake channel traffic is always encrypted.
-        Subclasses MUST use this method instead of publishing aa.frame.send
-        directly so that the encrypted flag is always set consistently.
+        Publishes on aa.frame.send using the new contract:
+            channel_id  : int   — this module's CHANNEL_ID
+            message_id  : int   — 2-byte AA message identifier
+            payload_hex : str   — serialised proto body ONLY (no message_id prepended)
+            encrypted   : bool  — True for all post-handshake channel traffic
+
+        tcp_server's frame_codec will determine message_type, encryption_type,
+        and handle fragmentation based on channel_id + message_id + ssl_active.
 
         Args:
             message_id:  2-byte big-endian AA message identifier.
             proto_body:  serialised protobuf payload (may be empty bytes).
         """
-        self.log.info(f"send_frame: channel_id={self.CHANNEL_ID}, message_id=0x{message_id:04x}, payload={proto_body.hex()}, ssl_active=true")
-        control = (message_id == 0x0008)  # ChannelOpenResponse is the only control message sent by modules
-        frame = encode_aa_frame(self.CHANNEL_ID, message_id, proto_body, control=control)
         self.log.debug(
-            "CH%d → msg_id=0x%04x len=%d (encrypted%s)",
+            "send_frame: ch=%d msg=0x%04x body_len=%d",
             self.CHANNEL_ID, message_id, len(proto_body),
-            " control-ns" if control else "",
         )
-        self.bus.publish("aa.frame.send", {**frame, "frame_data": {"ssl_active": True, "payload": proto_body.hex(), "channel_id": self.CHANNEL_ID, "message_id": message_id}})
+        self.bus.publish("aa.frame.send", {
+            "channel_id":  self.CHANNEL_ID,
+            "message_id":  message_id,
+            "payload_hex": proto_body.hex(),
+            "encrypted":   True,
+        })
 
     # ------------------------------------------------------------------
     # Abstract interface — MUST be implemented by subclasses
@@ -386,12 +398,13 @@ class BaseChannelModule(ABC):
         """
 
     @abstractmethod
-    def on_frame(self, channel_id: int, data: bytes) -> None:
-        """Called for every binary frame received on this channel.
+    def on_frame(self, channel_id: int, message_id: int, data: bytes) -> None:
+        """Called for every fully-assembled, decrypted frame on this channel.
 
         Args:
             channel_id:  AA channel number.
-            data:        raw frame bytes (H.264 NAL unit, PCM block, etc.).
+            message_id:  2-byte AA message identifier (stripped from raw payload).
+            data:        proto body bytes (message_id already removed).
         """
 
     # ------------------------------------------------------------------
@@ -431,10 +444,10 @@ class BaseChannelModule(ABC):
         self.bus.subscribe("aa.channel.open",  self._on_aa_channel_open)
         self.bus.subscribe("aa.channel.close", self._on_aa_channel_close)
 
-        # Raw frame topic: aa.frame.ch<channel_id>
+        # Assembled frame topic: aa.frame.ch<channel_id>
         frame_topic = f"aa.frame.ch{self.CHANNEL_ID}"
         self.bus.subscribe(frame_topic, self._on_aa_frame)
-        self.log.info(f"Subscribed to {frame_topic} for raw frame data")
+        self.log.info(f"Subscribed to {frame_topic}")
 
         self.log.info(
             f"{self.MODULE_NAME} started "
