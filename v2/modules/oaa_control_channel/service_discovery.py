@@ -256,7 +256,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
         #     "channel_id": 10,
         #     "media_info_channel": {},
         # },
-        # # ch 14 — WiFi (bssid injected at runtime)
+        # ch 14 — WiFi (bssid injected at runtime)
         # {
         #     "channel_id": 14,
         #     "wifi_channel": {

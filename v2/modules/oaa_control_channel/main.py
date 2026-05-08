@@ -109,7 +109,7 @@ def _make_handshake() -> ControlChannelHandshake:
         frame = encode_control_frame(message_id, proto_body, encrypted=encrypted)
         log.info("CH0 → msg_id=0x%04x len=%d enc=%s",
                   message_id, len(proto_body), encrypted)
-        bus.publish("aa.frame.send", frame)
+        bus.publish("aa.frame.send", {**frame, "frame_data": {"ssl_active": encrypted, "payload": proto_body.hex(), "channel_id": 0, "message_id": message_id}})
 
     return ControlChannelHandshake(
         send_fn=send_fn,
