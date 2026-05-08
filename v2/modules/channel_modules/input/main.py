@@ -12,7 +12,7 @@ Module contract:
                 channel_manager.module_stop
                 aa.channel.open          {channel_id, ...}
                 aa.channel.close         {channel_id}
-                aa.frame.ch<channel_id>    raw bytes  (ChannelOpenRequest, KeyBindingRequest)
+                aa.frame.ch<channel_id>  {channel_id, message_id, encrypted, payload_hex}
                 aa.session.active         {}
                 aa.session.shutdown       {}
                 input.touch               {action, pointers, action_index?, disp_channel_id?}
@@ -20,28 +20,6 @@ Module contract:
   Publishes   : channel_manager.module_ready       {name, priority}
                 aa.frame.send             bytes  (via BaseChannelModule.send_frame)
                 input.state               {state}  IDLE | OPEN | BOUND
-
-Flow:
-  1. BaseChannelModule parses CLI and populates self.CHANNEL_ID and
-     self.channel_config from --channel-id / --sdr-bytes-hex.
-  2. channel_manager.module_ready is published lazily by base once _init_done, config_loaded
-     and channel_config is not None.
-  3. On aa.frame.ch<channel_id>:
-       - ChannelOpenRequest   → reply ChannelOpenResponse (STATUS_SUCCESS)
-       - KeyBindingRequest    → negotiate keycodes, reply KeyBindingResponse
-  4. On input.touch / input.key (from UI layer): build InputReport and send
-     via self.send_frame().
-  5. On aa.session.shutdown: reset to IDLE, clear channel reference.
-
-Input report encoding:
-  All outgoing AA frames use the minimal hand-rolled protobuf encoder
-  (no proto dependency) for InputReport, TouchEvent, KeyEvent.
-  The wire format mirrors aasdk_proto.service.inputsource exactly.
-
-Default keycodes exposed (same list as NemoHeadUnit InputOrchestrator):
-  HOME, BACK, CALL, ENDCALL, DPAD_*, ENTER, MENU,
-  MEDIA_PLAY_PAUSE, MEDIA_NEXT, MEDIA_PREVIOUS,
-  VOLUME_UP, VOLUME_DOWN, VOLUME_MUTE, VOICE_ASSIST.
 """
 
 from __future__ import annotations
@@ -66,7 +44,6 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
         sys.path.insert(0, str(_p))
 
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
-from shared.proto_utils import decode_aa_frame                     # noqa: E402
 
 # Proto — control
 from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
@@ -89,7 +66,7 @@ _MSG_KEY_BINDING_RESPONSE   = InputChannelMessage.BINDING_RESPONSE
 _MSG_INPUT_REPORT           = InputChannelMessage.INPUT_EVENT_INDICATION
 
 # ---------------------------------------------------------------------------
-# Keycodes (Android KeyEvent constants — wire values, no proto dependency)
+# Keycodes
 # ---------------------------------------------------------------------------
 
 KEYCODE_HOME            = 3
@@ -130,52 +107,26 @@ ACTION_MOVED  = 2
 # ---------------------------------------------------------------------------
 
 class InputModule(BaseChannelModule):
-    """
-    AA Input channel module.
-
-    Receives ChannelOpenRequest and KeyBindingRequest from the phone,
-    then relays InputReports (touch + key events) published on the bus
-    by the UI layer.
-
-    All outgoing AA frames are sent via self.send_frame(message_id, proto_body)
-    which is provided by BaseChannelModule and always sets the encrypted flag
-    consistently for post-handshake channel traffic.
-
-    channel_id and SDR bytes are provided at spawn time via CLI by
-    channel_manager and parsed by BaseChannelModule into self.CHANNEL_ID
-    and self.channel_config.  channel_manager.module_ready is hard-blocked by base if
-    channel_config is None.
-    """
-
-    MODULE_NAME = "input"   # overridden by --module-name CLI
-    CHANNEL_ID  = -1         # overridden by --channel-id CLI
+    MODULE_NAME = "input"
+    CHANNEL_ID  = -1
     PRIORITY    = 1
 
     def __init__(self) -> None:
         super().__init__()
-        self._state            = "IDLE"   # IDLE | OPEN | BOUND
+        self._state            = "IDLE"
         self._bound_keycodes: set = set()
         self._channel_open_flag  = False
-
-    # ------------------------------------------------------------------
-    # _init / _cleanup hooks
-    # ------------------------------------------------------------------
 
     def _init(self) -> None:
         self.log.info(
             "InputModule _init: channel_id=%d channel_config=%s",
-            self.CHANNEL_ID,
-            self.channel_config,
+            self.CHANNEL_ID, self.channel_config,
         )
 
     def _cleanup(self) -> None:
         self._set_state("IDLE")
         self._bound_keycodes.clear()
         self._channel_open_flag = False
-
-    # ------------------------------------------------------------------
-    # Session lifecycle
-    # ------------------------------------------------------------------
 
     def on_aa_session_active(self, topic: str, payload: dict) -> None:
         self._bound_keycodes.clear()
@@ -189,10 +140,6 @@ class InputModule(BaseChannelModule):
         self._set_state("IDLE")
         self.log.info("AA session shutdown — input reset")
 
-    # ------------------------------------------------------------------
-    # BaseChannelModule abstract interface
-    # ------------------------------------------------------------------
-
     def on_channel_open(self, channel_id: int, descriptor: dict) -> None:
         self._channel_open_flag = True
         self.log.info("Input channel %d open (descriptor: %s)", channel_id, descriptor)
@@ -202,27 +149,16 @@ class InputModule(BaseChannelModule):
         self._set_state("IDLE")
         self.log.info("Input channel %d closed", channel_id)
 
-    def on_frame(self, channel_id: int, data: bytes) -> None:
-        """Dispatch incoming frame by AA message_id."""
-        result = decode_aa_frame(data)
-        if result is None:
-            self.log.error("on_frame: malformed payload — dropping")
-            return
-
-        message_id, body = result
-
+    def on_frame(self, channel_id: int, message_id: int, encrypted: bool, data: bytes) -> None:
+        """Dispatch incoming frame by AA message_id (already extracted by tcp_server)."""
         if message_id == _MSG_CHANNEL_OPEN_REQUEST:
-            self._handle_open_request(body)
+            self._handle_open_request(data)
         elif message_id == _MSG_KEY_BINDING_REQUEST:
-            self._handle_key_binding_request(body)
+            self._handle_key_binding_request(data)
         else:
             self.log.debug(
-                "Unhandled input msg_id=0x%04x len=%d", message_id, len(body)
+                "Unhandled input msg_id=0x%04x len=%d", message_id, len(data)
             )
-
-    # ------------------------------------------------------------------
-    # Incoming message handlers
-    # ------------------------------------------------------------------
 
     def _handle_open_request(self, body: bytes) -> None:
         resp = ChannelOpenResponse()
@@ -234,7 +170,6 @@ class InputModule(BaseChannelModule):
     def _handle_key_binding_request(self, body: bytes) -> None:
         requested = _parse_key_binding_request(body)
         supported = set(_DEFAULT_KEYCODES)
-
         if requested:
             accepted = requested & supported
             rejected = requested - supported
@@ -246,7 +181,6 @@ class InputModule(BaseChannelModule):
                 )
         else:
             self._bound_keycodes = supported
-
         resp = InputBindingResponse()
         resp.status = Status.OK
         self.send_frame(_MSG_KEY_BINDING_RESPONSE, resp.SerializeToString())
@@ -255,10 +189,6 @@ class InputModule(BaseChannelModule):
             "KeyBindingRequest → InputBindingResponse sent (%d keycodes bound)",
             len(self._bound_keycodes),
         )
-
-    # ------------------------------------------------------------------
-    # Outgoing input reports
-    # ------------------------------------------------------------------
 
     def on_input_touch(self, topic: str, payload: dict) -> None:
         if self._state not in ("OPEN", "BOUND"):
@@ -294,10 +224,6 @@ class InputModule(BaseChannelModule):
         self.send_frame(_MSG_INPUT_REPORT, report_bytes)
         self.log.debug("KeyEvent sent keycode=%d down=%s", keycode, down)
 
-    # ------------------------------------------------------------------
-    # Convenience helpers
-    # ------------------------------------------------------------------
-
     def send_touch_down(self, x: int, y: int, pointer_id: int = 0, disp_channel_id: int = 0) -> None:
         self.on_input_touch("", {"action": ACTION_DOWN, "pointers": [[x, y, pointer_id]], "disp_channel_id": disp_channel_id})
 
@@ -313,18 +239,10 @@ class InputModule(BaseChannelModule):
     def send_key_up(self, keycode: int, metastate: int = 0, disp_channel_id: int = 0) -> None:
         self.on_input_key("", {"keycode": keycode, "down": False, "metastate": metastate, "disp_channel_id": disp_channel_id})
 
-    # ------------------------------------------------------------------
-    # State helper
-    # ------------------------------------------------------------------
-
     def _set_state(self, new_state: str) -> None:
         self._state = new_state
         self.bus.publish("input.state", {"state": new_state})
         self.log.info("input.state → %s", new_state)
-
-    # ------------------------------------------------------------------
-    # run() override
-    # ------------------------------------------------------------------
 
     def run(self) -> None:
         self.bus.subscribe("aa.session.active",   self.on_aa_session_active)
@@ -335,8 +253,7 @@ class InputModule(BaseChannelModule):
 
 
 # ---------------------------------------------------------------------------
-# Minimal hand-rolled protobuf helpers  (no proto dependency)
-# Used only for InputReport / TouchEvent / KeyEvent payload encoding.
+# Minimal hand-rolled protobuf helpers
 # ---------------------------------------------------------------------------
 
 def _read_varint(buf: bytes, pos: int) -> tuple[int | None, int]:
