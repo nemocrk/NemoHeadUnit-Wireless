@@ -178,17 +178,20 @@ def on_frame_send(topic: str, payload: dict) -> None:
         log.warning("on_frame_send: no active relay, dropping frame (ch=%s)",
                     payload.get("channel_id"))
         return
-    log.info(f"on_frame_send: sending frame on ch={payload.get('channel_id')}, flags=0x{payload.get('flags', 0):02X}, encrypted={bool(payload.get('flags', 0) & _FLAG_ENCRYPTED)}, payload_len={len(payload.get('payload_hex', '')) // 2}")
     try:
         channel_id  = int(payload["channel_id"])
         flags       = int(payload["flags"])
         encrypted   = bool(flags & _FLAG_ENCRYPTED)
         raw_payload = bytes.fromhex(payload["payload_hex"])
+        frame_data   = payload.get("frame_data", {})
     except (KeyError, ValueError) as exc:
         log.error("on_frame_send: malformed payload — %s", exc)
         return
 
     # AA wire format: [channel:1B][flags:1B][len:2B_BE][payload]
+    log.debug(f"on_frame_send: calculated plain_hex_bytes={(struct.pack('>BBH', channel_id, flags, len(raw_payload)) + (raw_payload if len(raw_payload) < 300 else raw_payload[:300] + b'...')).hex()}")
+    frame_data_for_log = {**frame_data, 'payload_hex': payload.get('payload_hex', '')[:600] + ('...' if len(payload.get('payload_hex', '')) > 600 else '')}
+    log.debug(f"on_frame_send: frame_data={frame_data_for_log}")
     if encrypted:
         if _cryptor is None or not _cryptor.is_active():
             log.warning("on_frame_send: encryption requested but cryptor not active — sending unencrypted")
@@ -205,6 +208,7 @@ def on_frame_send(topic: str, payload: dict) -> None:
     try:
         with _write_lock:
             relay.send_raw(frame)
+            log.debug(f"on_frame_send: sent frame on ch={payload.get('channel_id')}, flags=0x{payload.get('flags', 0):02X}, encrypted={bool(payload.get('flags', 0) & _FLAG_ENCRYPTED)}, payload_len={len(payload.get('payload_hex', '')) // 2}")
     except Exception as exc:
         log.error("on_frame_send: socket write failed — %s", exc)
 

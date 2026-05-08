@@ -157,7 +157,8 @@ _FLOAT_TYPES = {
 _FLAG_FIRST     = 0x01
 _FLAG_LAST      = 0x02
 _FLAG_ENCRYPTED = 0x08
-_FLAG_FULL      = _FLAG_FIRST | _FLAG_LAST | _FLAG_ENCRYPTED  # 0x0B
+_FLAG_CONTROL   = 0x04  
+_FLAG_FULL      = _FLAG_FIRST | _FLAG_LAST  # 0x0B
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +230,7 @@ def encode_aa_frame(
     payload = struct.pack(">H", message_id) + proto_body
     return {
         "channel_id":  channel_id,
-        "flags":       _FLAG_FULL,
+        "flags":       _FLAG_FULL | (_FLAG_CONTROL if control else 0) | _FLAG_ENCRYPTED,
         "payload_hex": payload.hex(),
     }
 

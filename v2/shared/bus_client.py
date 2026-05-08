@@ -84,7 +84,11 @@ class BusClient:
                     if len(frames) < 2:
                         continue
                     topic = frames[0].decode()
-                    payload = json.loads(frames[1].decode())
+                    try:
+                        payload = json.loads(frames[1].decode())
+                    except json.JSONDecodeError:
+                        self.log.warning(f"Received invalid JSON payload on topic '{topic}', skipping. Payload: {frames[1]}")
+                        continue
                     handler = self._subscriptions.get(topic)
                     if handler:
                         handler(topic, payload)
