@@ -23,7 +23,7 @@ Module contract:
                 config.changed       (auto via ConfigClient)
                 aa.channel.open     {channel_id, ...}
                 aa.channel.close    {channel_id}
-                aa.frame.ch<ch_id>    raw bytes
+                aa.frame.ch<ch_id>  {channel_id, message_id, encrypted, payload_hex}
                 aa.session.shutdown  {}
                 channel_<channel_id>.set_volume  {volume: int}  0-100 percent
   Publishes   : channel_manager.module_ready  {name, priority}
@@ -31,49 +31,6 @@ Module contract:
                 audio.state          {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
   Config keys : audio_device   enum  "default"  PulseAudio sink name (pactl list sinks short)
                 max_unacked    int   1           AVChannelSetupResponse.max_unacked
-
-Flow:
-  1. BaseChannelModule parses CLI and populates self.channel_config from SDR.
-  2. On channel_manager.module_start: cfg.get(schema) triggers config load + _init().
-     NOTE: on_config_loaded() may arrive before OR after _init() completes (async bus).
-     _open_stream() is therefore called both at end of _init() and at end of
-     on_config_loaded() (guarded by _init_done) to guarantee the stream is always
-     opened with the most up-to-date params.
-  3. _init(): read codec params from self.channel_config, open pyav codec context
-     if needed, spawn pacat subprocess for PulseAudio/PipeWire output.
-  4. BaseChannelModule handles aa.channel.open/close and aa.frame.ch<channel_id>.
-  5. on_frame(): decode AA frame header, dispatch by message_id, write PCM.
-  6. on_config_changed("audio_device" | "max_unacked"): re-open stream on the fly.
-  7. on_aa_session_shutdown: reset state + session_id to IDLE.
-  8. on_set_volume(): resolve pacat sink-input index via pactl, then call
-     pactl set-sink-input-volume to adjust per-channel volume without
-     affecting other channels or the global sink volume.
-
-Readiness:
-  channel_manager.module_ready is emitted lazily by BaseChannelModule._try_publish_ready()
-  once _init_done AND _config_loaded AND _is_ready() AND channel_config is
-  not None are all True.  _is_ready() returns True only when the pacat subprocess
-  is running, so channel_manager never unblocks the phone before audio
-  is operational.
-
-Audio backend:
-  PCM bytes are written to a persistent pacat subprocess via stdin.
-  pacat speaks directly to PulseAudio / PipeWire, bypassing PortAudio/ALSA
-  exclusive-access issues.  A threading.Lock guards stdin writes for
-  thread safety across concurrent channel processes.
-
-Volume control:
-  Per-channel volume is controlled via pactl set-sink-input-volume targeting
-  the sink-input associated with the pacat PID.  _resolve_sink_input() parses
-  'pactl list sink-inputs short' to find the sink-input index for self._proc.pid.
-  _sink_input_index is cached after the first successful resolution and cleared
-  on _close_stream().
-
-Codec support:
-  MEDIA_CODEC_AUDIO_PCM          — raw PCM, written directly to pacat stdin
-  MEDIA_CODEC_AUDIO_AAC          — AAC, decoded via pyav before writing
-  MEDIA_CODEC_AUDIO_AAC_LC_ADTS  — AAC-LC ADTS, decoded via pyav before writing
-  Unknown codecs                 — logged as error, audio data dropped
 """
 
 from __future__ import annotations
@@ -86,29 +43,26 @@ from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# sys.path bootstrap — identical to audio / video
+# sys.path bootstrap
 # ---------------------------------------------------------------------------
-_HERE         = Path(__file__).parent          # v2/modules/channel_modules/audio/
-_CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
-_MODULES      = _CHANNEL_MODS.parent           # v2/modules/
-_V2           = _MODULES.parent                # v2/
-_PROTOS       = _V2 / "protos"                 # v2/protos/
+_HERE         = Path(__file__).parent
+_CHANNEL_MODS = _HERE.parent
+_MODULES      = _CHANNEL_MODS.parent
+_V2           = _MODULES.parent
+_PROTOS       = _V2 / "protos"
 
 for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import av                                      # noqa: E402  (PyAV / FFmpeg)
+import av                                      # noqa: E402
 
 from shared.config_schema import field_enum, field_int  # noqa: E402
-from shared.proto_utils import (               # noqa: E402
-    decode_aa_frame,
-    parse_media_with_timestamp,
-)
+from shared.proto_utils import parse_media_with_timestamp  # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Proto imports — generated from v2/protos/oaa/
+# Proto imports
 # ---------------------------------------------------------------------------
 from oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessage                  # noqa: E402
 from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage                 # noqa: E402
@@ -138,7 +92,6 @@ _CODEC_PCM         = MediaCodecType.MEDIA_CODEC_AUDIO_PCM
 _CODEC_AAC_LC      = MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC
 _CODEC_AAC_LC_ADTS = MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC_ADTS
 
-# Codecs that require pyav decoding
 _AAC_CODECS = (_CODEC_AAC_LC, _CODEC_AAC_LC_ADTS)
 
 # ---------------------------------------------------------------------------
@@ -147,44 +100,9 @@ _AAC_CODECS = (_CODEC_AAC_LC, _CODEC_AAC_LC_ADTS)
 
 
 class AudioModule(BaseChannelModule):
-    """
-    Single-channel AA audio module with pacat (PulseAudio/PipeWire) output.
-
-    One process per channel; all parameters (channel_id, SDR bytes) are
-    provided via CLI by channel_manager at spawn time and parsed by
-    BaseChannelModule into self.CHANNEL_ID and self.channel_config.
-
-    Codec parameters are read from self.channel_config in _init().
-    AAC / AAC-LC ADTS frames are decoded via pyav before writing PCM to
-    the pacat subprocess stdin.  PCM frames are written directly.
-
-    All outgoing AA frames are sent via self.send_frame(message_id, proto_body)
-    which is provided by BaseChannelModule and always sets the encrypted flag
-    consistently for post-handshake channel traffic.
-
-    session_id lifecycle:
-      - Set to 0 at construction and on channel close / session shutdown.
-      - Populated from AVChannelStartIndication.session on StartIndication.
-      - Used in every AVMediaAckIndication sent to the phone.
-
-    max_unacked:
-      - Configurable via config key "max_unacked" (default 1).
-      - Sent to the phone in AVChannelSetupResponse.
-      - Controls how many unacknowledged media frames the phone may send.
-
-    Volume control:
-      - Subscribes to channel_<channel_id>.set_volume {volume: int} (0-100).
-      - Resolves the pacat sink-input index via pactl and applies volume
-        with pactl set-sink-input-volume, affecting only this channel.
-    """
-
-    MODULE_NAME: str = "channel_audio"   # overridden by --module-name CLI
-    CHANNEL_ID:  int = -1                 # overridden by --channel-id CLI
+    MODULE_NAME: str = "channel_audio"
+    CHANNEL_ID:  int = -1
     PRIORITY:    int = 1
-
-    # ------------------------------------------------------------------
-    # Config schema
-    # ------------------------------------------------------------------
 
     def get_schema(self) -> dict:
         return {
@@ -199,56 +117,24 @@ class AudioModule(BaseChannelModule):
             ),
         }
 
-    # ------------------------------------------------------------------
-    # Construction
-    # ------------------------------------------------------------------
-
     def __init__(self) -> None:
         super().__init__()
-
-        # Audio params — populated from self.channel_config in _init()
         self._sample_rate:   int = 48000
         self._bit_depth:     int = 16
         self._channel_count: int = 2
         self._codec:         int = _CODEC_AAC_LC
-
-        # Runtime state
         self._state:      str = "IDLE"
         self._session_id: int = 0
-
-        # pacat subprocess handle + write lock
         self._proc:      subprocess.Popen | None = None
         self._proc_lock: threading.Lock          = threading.Lock()
-
-        # PulseAudio sink-input index for per-channel volume control.
-        # Resolved lazily on first set_volume call and cached until _close_stream().
         self._sink_input_index: int | None = None
-
-        # PyAV codec context for AAC decoding (None when PCM)
         self._av_codec_ctx: Any | None = None
         self._av_codec:     Any | None = None
-
-    # ------------------------------------------------------------------
-    # Readiness gate — channel_manager.module_ready only when pacat is running
-    # ------------------------------------------------------------------
 
     def _is_ready(self) -> bool:
         return self._proc is not None
 
-    # ------------------------------------------------------------------
-    # _init hook — called by BaseChannelModule after cfg.get() is dispatched
-    # ------------------------------------------------------------------
-
     def _init(self) -> None:
-        """
-        Read audio params from self.channel_config (populated by base from SDR).
-        Opens pyav codec context and spawns pacat subprocess.
-
-        NOTE: on_config_loaded() may arrive before or after _init() due to
-        async bus delivery.  _open_stream() is called here with SDR params,
-        and again in on_config_loaded() (guarded by _init_done) so the stream
-        is always opened/reopened with the correct persisted device.
-        """
         cfg = self.channel_config
         if cfg is not None:
             configs = cfg.get("av_channel", {}).get("audio_configs", [])
@@ -270,7 +156,6 @@ class AudioModule(BaseChannelModule):
                 )
         else:
             self.log.warning("_init: channel_config is None — using default audio params")
-
         self._open_av_codec()
         self._open_stream()
 
@@ -279,16 +164,8 @@ class AudioModule(BaseChannelModule):
         self._close_av_codec()
         self._set_state("IDLE")
 
-    # ------------------------------------------------------------------
-    # Config callbacks
-    # ------------------------------------------------------------------
-
     def on_config_loaded(self, config: dict) -> None:
-        # super() merges config into self._config, sets _config_loaded=True
-        # and calls _try_publish_ready().
         super().on_config_loaded(config)
-        # Reopen stream with persisted device only after _init() has set
-        # the correct sample_rate / channels from SDR.
         if self._init_done:
             self._open_stream()
         self._try_publish_ready()
@@ -301,26 +178,12 @@ class AudioModule(BaseChannelModule):
         elif key == "max_unacked":
             self.log.info("max_unacked changed to %r", value)
 
-    # ------------------------------------------------------------------
-    # Session lifecycle
-    # ------------------------------------------------------------------
-
     def on_aa_session_shutdown(self, topic: str, payload: dict) -> None:
         self._session_id = 0
         self._set_state("IDLE")
         self.log.info("AA session shutdown — ch=%d reset", self.CHANNEL_ID)
 
-    # ------------------------------------------------------------------
-    # Volume control
-    # ------------------------------------------------------------------
-
     def on_set_volume(self, topic: str, payload: dict) -> None:
-        """Handle channel_<channel_id>.set_volume {volume: int} (0-100).
-
-        Resolves the pacat sink-input index (cached after first resolution)
-        and calls pactl set-sink-input-volume to apply per-channel volume
-        without affecting other channels or the global sink volume.
-        """
         volume = payload.get("volume")
         if not isinstance(volume, int) or not (0 <= volume <= 100):
             self.log.warning(
@@ -328,11 +191,9 @@ class AudioModule(BaseChannelModule):
                 self.CHANNEL_ID, payload,
             )
             return
-
         if self._proc is None:
             self.log.warning("on_set_volume: pacat not running on ch=%d — ignoring", self.CHANNEL_ID)
             return
-
         sink_input = self._resolve_sink_input()
         if sink_input is None:
             self.log.warning(
@@ -340,38 +201,21 @@ class AudioModule(BaseChannelModule):
                 self.CHANNEL_ID, self._proc.pid,
             )
             return
-
         try:
             subprocess.run(
                 ["pactl", "set-sink-input-volume", str(sink_input), f"{volume}%"],
                 check=True, timeout=2,
             )
-            self.log.info(
-                "Volume ch=%d sink-input=%d → %d%%",
-                self.CHANNEL_ID, sink_input, volume,
-            )
+            self.log.info("Volume ch=%d sink-input=%d → %d%%", self.CHANNEL_ID, sink_input, volume)
         except Exception as exc:
             self.log.warning("on_set_volume: pactl failed ch=%d — %s", self.CHANNEL_ID, exc)
 
     def _resolve_sink_input(self) -> int | None:
-        """Return the PulseAudio sink-input index for the current pacat process.
-
-        Parses 'pactl list sink-inputs short' and matches by PID found in
-        'pactl list sink-inputs' properties.  Result is cached in
-        self._sink_input_index until _close_stream() clears it.
-
-        Returns None if the sink-input cannot be found (e.g. pacat not yet
-        registered with PulseAudio, or pactl unavailable).
-        """
         if self._sink_input_index is not None:
             return self._sink_input_index
-
         if self._proc is None:
             return None
-
         pid = self._proc.pid
-
-        # Allow up to 500ms for pacat to register with PulseAudio after spawn
         for _ in range(5):
             try:
                 result = subprocess.run(
@@ -388,16 +232,11 @@ class AudioModule(BaseChannelModule):
                             current_index = None
                     elif current_index is not None and f"application.process.id = \"{pid}\"" in line:
                         self._sink_input_index = current_index
-                        self.log.debug(
-                            "_resolve_sink_input: ch=%d pid=%d → sink-input=%d",
-                            self.CHANNEL_ID, pid, current_index,
-                        )
                         return self._sink_input_index
             except Exception as exc:
                 self.log.debug("_resolve_sink_input: pactl error — %s", exc)
                 return None
             time.sleep(0.1)
-
         return None
 
     # ------------------------------------------------------------------
@@ -413,32 +252,26 @@ class AudioModule(BaseChannelModule):
         self._set_state("IDLE")
         self.log.info("Channel %d closed — session_id reset", channel_id)
 
-    def on_frame(self, channel_id: int, data: bytes) -> None:
-        """Dispatch incoming frame by AA message_id."""
-        result = decode_aa_frame(data)
-        self.log.debug("Decoded frame header on ch=%d: %d", channel_id, result[0] if result else 0)
-        if result is None:
-            self.log.error("on_frame: malformed payload on ch=%d — dropping", channel_id)
-            return
-
-        message_id, body = result
+    def on_frame(self, channel_id: int, message_id: int, encrypted: bool, data: bytes) -> None:
+        """Dispatch incoming frame by AA message_id (already extracted by tcp_server)."""
+        self.log.debug("on_frame ch=%d msg=0x%04x enc=%s len=%d", channel_id, message_id, encrypted, len(data))
 
         if message_id == _MSG_AV_CHANNEL_SETUP_REQUEST:
-            self._handle_setup_request(body)
+            self._handle_setup_request(data)
         elif message_id == _MSG_CHANNEL_OPEN_REQUEST:
-            self._handle_open_request(body)
+            self._handle_open_request(data)
         elif message_id == _MSG_AV_CHANNEL_START_INDICATION:
-            self._handle_start_indication(body)
+            self._handle_start_indication(data)
         elif message_id == _MSG_AV_CHANNEL_STOP_INDICATION:
-            self._handle_stop_indication(body)
+            self._handle_stop_indication(data)
         elif message_id == _MSG_AV_CHANNEL_AV_MEDIA_INDICATION:
-            self._handle_media(body)
+            self._handle_media(data)
         elif message_id == _MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION:
-            self._handle_media_with_timestamp(body)
+            self._handle_media_with_timestamp(data)
         else:
             self.log.debug(
                 "Unhandled audio msg_id=0x%04x ch=%d len=%d",
-                message_id, channel_id, len(body),
+                message_id, channel_id, len(data),
             )
 
     # ------------------------------------------------------------------
@@ -466,11 +299,6 @@ class AudioModule(BaseChannelModule):
         self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)
 
     def _handle_start_indication(self, body: bytes) -> None:
-        """
-        Parse AVChannelStartIndication to extract session_id.
-        The phone sends this before the first media frame; session_id
-        must be stored here so ACKs are valid from the very first frame.
-        """
         try:
             msg = AVChannelStartIndication()
             msg.ParseFromString(body)
@@ -494,7 +322,6 @@ class AudioModule(BaseChannelModule):
     def _handle_media_with_timestamp(self, body: bytes) -> None:
         if self._state not in ("OPEN", "PLAYING"):
             self._set_state("PLAYING")
-        # body: field1=timestamp (fixed64), field2=audio data (bytes)
         ts_us, encoded = parse_media_with_timestamp(body)
         self.log.debug("MediaWithTimestamp ch=%d ts_us=%d len=%d", self.CHANNEL_ID, ts_us, len(encoded))
         self._send_media_ack()
@@ -518,7 +345,6 @@ class AudioModule(BaseChannelModule):
     # ------------------------------------------------------------------
 
     def _open_av_codec(self) -> None:
-        """Open pyav codec context for AAC / AAC-LC ADTS; close it for PCM."""
         self._close_av_codec()
         if self._codec not in _AAC_CODECS:
             self.log.info("Codec %s — no pyav decoder needed", self._codec)
@@ -548,32 +374,20 @@ class AudioModule(BaseChannelModule):
             self._av_codec     = None
 
     def _open_stream(self) -> None:
-        """Spawn a pacat subprocess for PulseAudio/PipeWire output.
-
-        pacat is invoked with --format matching the bit depth from SDR,
-        --channels and --rate from codec config, and optionally --device
-        for a named PulseAudio sink.  Falls back to the PA default sink
-        if the requested device fails.
-        """
         self._close_stream()
         device = self._config.get("audio_device", "default")
         fmt = {8: "u8", 16: "s16le", 24: "s24le", 32: "s32le"}.get(self._bit_depth, "s16le")
-
-        # Build candidate list: named sink first, then PA default
         candidates = [] if device == "default" else [device]
-        candidates.append(None)  # None → omit --device → pacat uses PA default sink
-
+        candidates.append(None)
         for candidate in candidates:
             cmd = [
-                "pacat",
-                "--playback",
+                "pacat", "--playback",
                 f"--format={fmt}",
                 f"--channels={self._channel_count}",
                 f"--rate={self._sample_rate}",
             ]
             if candidate is not None:
                 cmd.append(f"--device={candidate}")
-
             try:
                 proc = subprocess.Popen(
                     cmd,
@@ -582,7 +396,7 @@ class AudioModule(BaseChannelModule):
                     stderr=subprocess.DEVNULL,
                 )
                 self._proc = proc
-                self._sink_input_index = None  # invalidate cached index on new spawn
+                self._sink_input_index = None
                 self.log.info(
                     "pacat spawned: device=%r rate=%d channels=%d fmt=%s pid=%d",
                     candidate or "default", self._sample_rate, self._channel_count, fmt, proc.pid,
@@ -590,7 +404,6 @@ class AudioModule(BaseChannelModule):
                 return
             except Exception as exc:
                 self.log.warning("_open_stream: device=%r failed — %s", candidate, exc)
-
         self.log.error(
             "_open_stream: all candidates exhausted. Available sinks: %s",
             _list_audio_devices(),
@@ -612,10 +425,8 @@ class AudioModule(BaseChannelModule):
             self._sink_input_index = None
 
     def _write_audio(self, encoded: bytes) -> None:
-        """Decode (if AAC / AAC-LC ADTS) and write raw PCM bytes to pacat stdin."""
         if not encoded:
             return
-
         if self._codec in _AAC_CODECS:
             pcm = self._decode_aac(encoded)
         elif self._codec == _CODEC_PCM:
@@ -626,7 +437,6 @@ class AudioModule(BaseChannelModule):
                 self._codec, self.CHANNEL_ID,
             )
             return
-
         if not pcm or self._proc is None:
             return
         try:
@@ -640,7 +450,6 @@ class AudioModule(BaseChannelModule):
             self.log.warning("pacat write error ch=%d — %s", self.CHANNEL_ID, exc)
 
     def _decode_aac(self, adts_frame: bytes) -> bytes:
-        """Decode a single AAC / AAC-LC ADTS frame to interleaved signed-16 PCM."""
         if self._av_codec_ctx is None:
             return b""
         try:
@@ -655,10 +464,6 @@ class AudioModule(BaseChannelModule):
             self.log.warning("AAC decode error ch=%d — %s", self.CHANNEL_ID, exc)
             return b""
 
-    # ------------------------------------------------------------------
-    # State helper
-    # ------------------------------------------------------------------
-
     def _set_state(self, new_state: str) -> None:
         if self._state == new_state:
             return
@@ -668,10 +473,6 @@ class AudioModule(BaseChannelModule):
             "state":      new_state,
         })
         self.log.info("audio.state ch=%d → %s", self.CHANNEL_ID, new_state)
-
-    # ------------------------------------------------------------------
-    # run() override: add session shutdown + volume subscriptions
-    # ------------------------------------------------------------------
 
     def run(self) -> None:
         self.bus.subscribe("aa.session.shutdown", self.on_aa_session_shutdown)
@@ -683,15 +484,10 @@ class AudioModule(BaseChannelModule):
 
 
 # ---------------------------------------------------------------------------
-# Audio device discovery (PulseAudio/PipeWire via pactl)
+# Audio device discovery
 # ---------------------------------------------------------------------------
 
 def _list_audio_devices() -> list[str]:
-    """Return available PulseAudio/PipeWire sink names via pactl, always starting with 'default'.
-
-    Parses 'pactl list sinks short' output to enumerate available sinks.
-    Silently returns ['default'] if pactl is unavailable or no sinks found.
-    """
     try:
         result = subprocess.run(
             ["pactl", "list", "sinks", "short"],
