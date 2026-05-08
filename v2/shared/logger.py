@@ -131,7 +131,7 @@ def run_subprocess_and_log(logger: Logger, *popenargs,
             pipe.close()
 
         if capture_output:
-            t1 = threading.Thread(target=reader, args=(process.stdout, logger.info, "[subprocess stdout]", stdout_lines))
+            t1 = threading.Thread(target=reader, args=(process.stdout, logger.debug, "[subprocess stdout]", stdout_lines))
             t2 = threading.Thread(target=reader, args=(process.stderr, logger.error, "[subprocess stderr]", stderr_lines))
             t1.start()
             t2.start()
