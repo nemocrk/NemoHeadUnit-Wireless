@@ -28,7 +28,7 @@ Module contract:
   Publishes   : channel_manager.module_ready  {name, priority}
                 aa.frame.send        bytes  (via BaseChannelModule.send_frame)
                 audio.state          {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
-  Config keys : audio_device   enum  "default"  sounddevice output device name
+  Config keys : audio_device   enum  "default"  PulseAudio sink name (pactl list sinks short)
                 max_unacked    int   1           AVChannelSetupResponse.max_unacked
 
 Flow:
@@ -39,7 +39,7 @@ Flow:
      on_config_loaded() (guarded by _init_done) to guarantee the stream is always
      opened with the most up-to-date params.
   3. _init(): read codec params from self.channel_config, open pyav codec context
-     if needed, open sounddevice RawOutputStream.
+     if needed, spawn pacat subprocess for PulseAudio/PipeWire output.
   4. BaseChannelModule handles aa.channel.open/close and aa.frame.ch<channel_id>.
   5. on_frame(): decode AA frame header, dispatch by message_id, write PCM.
   6. on_config_changed("audio_device" | "max_unacked"): re-open stream on the fly.
@@ -48,12 +48,18 @@ Flow:
 Readiness:
   channel_manager.module_ready is emitted lazily by BaseChannelModule._try_publish_ready()
   once _init_done AND _config_loaded AND _is_ready() AND channel_config is
-  not None are all True.  _is_ready() returns True only when the sounddevice
-  stream is open, so channel_manager never unblocks the phone before audio
+  not None are all True.  _is_ready() returns True only when the pacat subprocess
+  is running, so channel_manager never unblocks the phone before audio
   is operational.
 
+Audio backend:
+  PCM bytes are written to a persistent pacat subprocess via stdin.
+  pacat speaks directly to PulseAudio / PipeWire, bypassing PortAudio/ALSA
+  exclusive-access issues.  A threading.Lock guards stdin writes for
+  thread safety across concurrent channel processes.
+
 Codec support:
-  MEDIA_CODEC_AUDIO_PCM          — raw PCM, written directly to sounddevice
+  MEDIA_CODEC_AUDIO_PCM          — raw PCM, written directly to pacat stdin
   MEDIA_CODEC_AUDIO_AAC          — AAC, decoded via pyav before writing
   MEDIA_CODEC_AUDIO_AAC_LC_ADTS  — AAC-LC ADTS, decoded via pyav before writing
   Unknown codecs                 — logged as error, audio data dropped
@@ -61,14 +67,16 @@ Codec support:
 
 from __future__ import annotations
 
+import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
 # sys.path bootstrap — identical to audio / video
 # ---------------------------------------------------------------------------
-_HERE         = Path(__file__).parent          # v2/modules/channel_modules/_template/
+_HERE         = Path(__file__).parent          # v2/modules/channel_modules/audio/
 _CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
 _MODULES      = _CHANNEL_MODS.parent           # v2/modules/
 _V2           = _MODULES.parent                # v2/
@@ -78,7 +86,6 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import sounddevice as sd                       # noqa: E402  (python-sounddevice)
 import av                                      # noqa: E402  (PyAV / FFmpeg)
 
 from shared.config_schema import field_enum, field_int  # noqa: E402
@@ -129,7 +136,7 @@ _AAC_CODECS = (_CODEC_AAC_LC, _CODEC_AAC_LC_ADTS)
 
 class AudioModule(BaseChannelModule):
     """
-    Single-channel AA audio module with sounddevice (PortAudio) output.
+    Single-channel AA audio module with pacat (PulseAudio/PipeWire) output.
 
     One process per channel; all parameters (channel_id, SDR bytes) are
     provided via CLI by channel_manager at spawn time and parsed by
@@ -137,7 +144,7 @@ class AudioModule(BaseChannelModule):
 
     Codec parameters are read from self.channel_config in _init().
     AAC / AAC-LC ADTS frames are decoded via pyav before writing PCM to
-    the sounddevice stream.  PCM frames are written directly.
+    the pacat subprocess stdin.  PCM frames are written directly.
 
     All outgoing AA frames are sent via self.send_frame(message_id, proto_body)
     which is provided by BaseChannelModule and always sets the encrypted flag
@@ -192,19 +199,20 @@ class AudioModule(BaseChannelModule):
         self._state:      str = "IDLE"
         self._session_id: int = 0
 
-        # sounddevice RawOutputStream handle
-        self._stream: sd.RawOutputStream | None = None
+        # pacat subprocess handle + write lock
+        self._proc:      subprocess.Popen | None = None
+        self._proc_lock: threading.Lock          = threading.Lock()
 
         # PyAV codec context for AAC decoding (None when PCM)
         self._av_codec_ctx: Any | None = None
         self._av_codec:     Any | None = None
 
     # ------------------------------------------------------------------
-    # Readiness gate — channel_manager.module_ready only when stream is open
+    # Readiness gate — channel_manager.module_ready only when pacat is running
     # ------------------------------------------------------------------
 
     def _is_ready(self) -> bool:
-        return self._stream is not None
+        return self._proc is not None
 
     # ------------------------------------------------------------------
     # _init hook — called by BaseChannelModule after cfg.get() is dispatched
@@ -213,7 +221,7 @@ class AudioModule(BaseChannelModule):
     def _init(self) -> None:
         """
         Read audio params from self.channel_config (populated by base from SDR).
-        Opens pyav codec context and sounddevice RawOutputStream.
+        Opens pyav codec context and spawns pacat subprocess.
 
         NOTE: on_config_loaded() may arrive before or after _init() due to
         async bus delivery.  _open_stream() is called here with SDR params,
@@ -429,51 +437,69 @@ class AudioModule(BaseChannelModule):
             self._av_codec     = None
 
     def _open_stream(self) -> None:
+        """Spawn a pacat subprocess for PulseAudio/PipeWire output.
+
+        pacat is invoked with --format matching the bit depth from SDR,
+        --channels and --rate from codec config, and optionally --device
+        for a named PulseAudio sink.  Falls back to the PA default sink
+        if the requested device fails.
+        """
         self._close_stream()
         device = self._config.get("audio_device", "default")
-        dtype = {8: "int8", 16: "int16", 24: "int24", 32: "int32"}.get(self._bit_depth, "int16")
+        fmt = {8: "u8", 16: "s16le", 24: "s24le", 32: "s32le"}.get(self._bit_depth, "s16le")
 
-        # Build candidate list: named device first, then None (system default), then enumerated
-        if device == "default":
-            candidates = [None]  # sounddevice picks the OS default
-        else:
-            candidates = [device, None]  # try requested device, fall back to OS default
+        # Build candidate list: named sink first, then PA default
+        candidates = [] if device == "default" else [device]
+        candidates.append(None)  # None → omit --device → pacat uses PA default sink
 
         for candidate in candidates:
+            cmd = [
+                "pacat",
+                "--playback",
+                f"--format={fmt}",
+                f"--channels={self._channel_count}",
+                f"--rate={self._sample_rate}",
+            ]
+            if candidate is not None:
+                cmd.append(f"--device={candidate}")
+
             try:
-                self._stream = sd.RawOutputStream(
-                    samplerate=self._sample_rate,
-                    channels=self._channel_count,
-                    dtype=dtype,
-                    blocksize=1024,
-                    device=candidate,
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
-                self._stream.start()
+                self._proc = proc
                 self.log.info(
-                    "sounddevice RawOutputStream opened: device=%r rate=%d channels=%d dtype=%s",
-                    candidate or "default", self._sample_rate, self._channel_count, dtype,
+                    "pacat spawned: device=%r rate=%d channels=%d fmt=%s pid=%d",
+                    candidate or "default", self._sample_rate, self._channel_count, fmt, proc.pid,
                 )
                 return
-            except sd.PortAudioError as exc:
+            except Exception as exc:
                 self.log.warning("_open_stream: device=%r failed — %s", candidate, exc)
 
         self.log.error(
-            "_open_stream: all candidates exhausted. Available output devices: %s",
+            "_open_stream: all candidates exhausted. Available sinks: %s",
             _list_audio_devices(),
         )
-        self._stream = None
+        self._proc = None
 
     def _close_stream(self) -> None:
-        if self._stream is not None:
+        if self._proc is not None:
             try:
-                self._stream.stop()
-                self._stream.close()
+                self._proc.stdin.close()
             except Exception:
                 pass
-            self._stream = None
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=2)
+            except Exception:
+                pass
+            self._proc = None
 
     def _write_audio(self, encoded: bytes) -> None:
-        """Decode (if AAC / AAC-LC ADTS) and write raw PCM bytes to sounddevice stream."""
+        """Decode (if AAC / AAC-LC ADTS) and write raw PCM bytes to pacat stdin."""
         if not encoded:
             return
 
@@ -488,12 +514,17 @@ class AudioModule(BaseChannelModule):
             )
             return
 
-        if not pcm or self._stream is None:
+        if not pcm or self._proc is None:
             return
         try:
-            self._stream.write(pcm)
-        except sd.PortAudioError as exc:
-            self.log.warning("sounddevice write error ch=%d — %s", self.CHANNEL_ID, exc)
+            with self._proc_lock:
+                self._proc.stdin.write(pcm)
+                self._proc.stdin.flush()
+        except BrokenPipeError:
+            self.log.warning("pacat stdin broken on ch=%d — closing stream", self.CHANNEL_ID)
+            self._close_stream()
+        except Exception as exc:
+            self.log.warning("pacat write error ch=%d — %s", self.CHANNEL_ID, exc)
 
     def _decode_aac(self, adts_frame: bytes) -> bytes:
         """Decode a single AAC / AAC-LC ADTS frame to interleaved signed-16 PCM."""
@@ -535,21 +566,26 @@ class AudioModule(BaseChannelModule):
 
 
 # ---------------------------------------------------------------------------
-# Audio device discovery (sounddevice)
+# Audio device discovery (PulseAudio/PipeWire via pactl)
 # ---------------------------------------------------------------------------
 
 def _list_audio_devices() -> list[str]:
-    """Return available output device names via sounddevice, always starting with 'default'.
+    """Return available PulseAudio/PipeWire sink names via pactl, always starting with 'default'.
 
-    Enumerates all PortAudio output devices (ALSA, PulseAudio, JACK, PipeWire…).
-    Silently returns ['default'] if sounddevice is unavailable or no devices found.
+    Parses 'pactl list sinks short' output to enumerate available sinks.
+    Silently returns ['default'] if pactl is unavailable or no sinks found.
     """
     try:
+        result = subprocess.run(
+            ["pactl", "list", "sinks", "short"],
+            capture_output=True, text=True, timeout=3,
+        )
         devices = ["default"]
-        for info in sd.query_devices():
-            if info["max_output_channels"] > 0:
-                name = info["name"]
-                if name not in devices:
+        for line in result.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                name = parts[1].strip()
+                if name and name not in devices:
                     devices.append(name)
         return devices
     except Exception:
