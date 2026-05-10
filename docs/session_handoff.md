@@ -283,3 +283,66 @@ grep "codec_data received" logs/deploy.log
 grep "prebuffer.*flushing" logs/deploy.log
 grep "PCM write.*peak" logs/deploy.log  # peak deve essere > 0
 ```
+
+---
+
+## 2026-05-10 - video_ui: modulo display PyQt6 + GStreamer
+
+**What changed:**
+
+| File | Commit | Descrizione |
+|---|---|---|
+| `v2/modules/channel_modules/video/main.py` | [6999c32](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/6999c3263d90c1af0d4690fb7f1836942b6f5857) | `publish_frames` default `False` → `True` (video_ui richiede frame sul bus) |
+| `v2/modules/video_ui/__init__.py` | [67ab91e](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/67ab91e87b87d276f2ec920c7244131378b0fd83) | Package scaffold |
+| `v2/modules/video_ui/main.py` | [1500244](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/15002444b5cd2a8fe43430f63c1ac9a6e616afbb) | Implementazione completa |
+
+### Architettura `video_ui/main.py`
+
+**Decoder (runtime probe, nessuna config):**
+1. `vaapidecodebin` — Intel VAAPI HW decode (tutti i SoC Atom moderni)
+2. `avdec_h264` — FFmpeg SW decode (gst-plugins-libav)
+3. `decodebin` — autodetect GStreamer
+4. Nessun GStreamer → ffplay subprocess (non integrato in Qt)
+
+**Renderer:**
+- Primario: `appsink caps=NV12` → `_NV12GLWidget(QOpenGLWidget)` con shader GLSL Y+UV (zero CPU copy)
+- Fallback: `videoconvert → appsink caps=RGB` → `_RGBLabelWidget(QLabel)`
+
+**Placeholder (nessuno stream attivo):**
+- Orologio digitale `HH:MM:SS` aggiornato ogni secondo via `QTimer`
+- Indicatore stato connessione con dot colorato + testo:
+
+| Stato interno | Colore | Testo |
+|---|---|---|
+| `WAITING_BT` | 🔴 rosso | In attesa di connessione BT |
+| `HANDSHAKE` | 🟡 giallo | Handshake AA in corso |
+| `STREAMING` | 🟢 verde | Stream attivo |
+| `INTERRUPTED` | 🔴 rosso | Stream interrotto |
+
+**State machine `_conn_state`:**
+```
+WAITING_BT → bluetooth.pairing.completed → HANDSHAKE
+HANDSHAKE  → video.state=PLAYING         → STREAMING
+STREAMING  → video.state=IDLE/STOPPED    → INTERRUPTED
+any        → aa.session.shutdown          → WAITING_BT
+```
+
+**Bus topics:**
+- Subscrizioni: `system.*`, `video.frame`, `video.state`, `aa.session.*`, `bluetooth.pairing.completed`
+- Pubblica: `system.module_ready`, `system.ready`, `video.ui.winid`
+
+**Why:**
+Il modulo `video` pubblicava frame sul bus (`video.frame`) ma non esisteva nessun
+consumatore. `video_ui` è il display layer: riceve i frame base64, li decodifica
+via GStreamer e li renderizza con GLSL (NV12 = zero copia CPU) o QLabel (RGB fallback).
+Il placeholder con orologio e stato connessione sostituisce lo schermo nero durante
+l'attesa di connessione BT o handshake AA.
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Verificare import su hardware: `python -c "from video_ui.main import VideoWidget; print('OK')"`
+2. Aggiungere test unitari `tests/v2/test_video_ui.py`:
+   - `test_conn_state_transitions` (mock bus, verifica label color/text per ogni transizione)
+   - `test_push_frame_no_gst` (senza GStreamer installato, push_frame non solleva eccezioni)
+3. Registrare `video_ui` nel launcher principale accanto a `video`, `audio`, `av_input`
