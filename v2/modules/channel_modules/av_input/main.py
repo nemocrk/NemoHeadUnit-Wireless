@@ -395,17 +395,63 @@ class AVInputModule(BaseChannelModule):
 # ---------------------------------------------------------------------------
 
 def _list_mic_devices() -> list[str]:
+    """Return available PulseAudio/PipeWire source names.
+
+    Uses wpctl (PipeWire-native, ~10 ms) as primary method.  Falls back to
+    pactl list sources short if wpctl is unavailable or returns no devices.
+    Monitor sources (.monitor) are excluded — they capture sink output, not mic input.
+    """
+    devices = _list_mic_devices_wpctl()
+    if len(devices) > 1:
+        return devices
+    return _list_mic_devices_pactl()
+
+
+def _list_mic_devices_wpctl() -> list[str]:
+    try:
+        result = subprocess.run(
+            ["wpctl", "status"],
+            capture_output=True, text=True, timeout=1,
+        )
+        devices: list[str] = ["default"]
+        in_sources = False
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if "Sources:" in stripped:
+                in_sources = True
+                continue
+            if not in_sources:
+                continue
+            # wpctl uses tree-drawing chars; a blank line or a non-indented
+            # section header means we have left the Sources block.
+            if not stripped or (stripped.endswith(":") and "│" not in line and "├" not in line and "└" not in line):
+                break
+            # Each source line looks like:
+            #   │      49. alsa_input.platform-bytcr_rt5640.HiFi__hw_rt5640__source [vol: 1.00]
+            # Extract the name token (second dot-separated segment, first word).
+            dot_idx = line.find(".")
+            if dot_idx == -1:
+                continue
+            name = line[dot_idx + 1:].strip().split()[0].rstrip(",")
+            if name and ".monitor" not in name and name not in devices:
+                devices.append(name)
+        return devices
+    except Exception:
+        return ["default"]
+
+
+def _list_mic_devices_pactl() -> list[str]:
     try:
         result = subprocess.run(
             ["pactl", "list", "sources", "short"],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True, text=True, timeout=1,
         )
         devices = ["default"]
         for line in result.stdout.splitlines():
             parts = line.split("\t")
             if len(parts) >= 2:
                 name = parts[1].strip()
-                if name and name not in devices and ".monitor" not in name:
+                if name and ".monitor" not in name and name not in devices:
                     devices.append(name)
         return devices
     except Exception:
