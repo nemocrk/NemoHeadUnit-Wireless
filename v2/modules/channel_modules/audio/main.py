@@ -96,6 +96,12 @@ _CODEC_AAC_LC_ADTS = MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC_ADTS
 
 _AAC_CODECS = (_CODEC_AAC_LC, _CODEC_AAC_LC_ADTS)
 
+# Inline prebuffer threshold: accumulate ~100 ms of PCM before sending to pacat.
+# Computed at runtime from sample_rate / channel_count / bit_depth; this is the
+# fallback used when _init has not yet run (16-bit stereo 48 kHz → 9600 bytes).
+_PREBUFFER_MS = 100
+_PREBUFFER_BYTES_DEFAULT = int(48000 * 2 * 2 * _PREBUFFER_MS / 1000)  # 9600
+
 # ---------------------------------------------------------------------------
 # AudioModule
 # ---------------------------------------------------------------------------
@@ -134,6 +140,15 @@ class AudioModule(BaseChannelModule):
         self._av_codec:     Any | None = None
         self._media_debug_count: int = 0
         self._pcm_debug_count: int = 0
+        # AAC codec_data (AudioSpecificConfig, 2 bytes) received via
+        # AV_MEDIA_INDICATION before actual audio frames.  Reset on
+        # StopIndication so a fresh one is expected if AA restarts.
+        self._aac_codec_data: bytes | None = None
+        # Inline PCM prebuffer: accumulate _prebuffer_threshold bytes before
+        # writing to pacat.stdin to avoid underrun on stream start.
+        self._prebuffer: list[bytes] = []
+        self._prebuffer_bytes: int = 0
+        self._prebuffer_threshold: int = _PREBUFFER_BYTES_DEFAULT
 
     def _is_ready(self) -> bool:
         return self._proc is not None
@@ -161,12 +176,22 @@ class AudioModule(BaseChannelModule):
                 )
         else:
             self.log.warning("_init: channel_config is None — using default audio params")
+        # Recompute prebuffer threshold from actual stream params.
+        bytes_per_sec = self._sample_rate * self._channel_count * (self._bit_depth // 8)
+        self._prebuffer_threshold = int(bytes_per_sec * _PREBUFFER_MS / 1000)
+        self.log.debug(
+            "_init: prebuffer_threshold=%d bytes (%d ms) ch=%d",
+            self._prebuffer_threshold, _PREBUFFER_MS, self.CHANNEL_ID,
+        )
         self._open_av_codec()
         self._open_stream()
 
     def _cleanup(self) -> None:
         self._close_stream()
         self._close_av_codec()
+        self._aac_codec_data = None
+        self._prebuffer.clear()
+        self._prebuffer_bytes = 0
         self._set_state("IDLE")
 
     def on_config_loaded(self, config: dict) -> None:
@@ -185,6 +210,9 @@ class AudioModule(BaseChannelModule):
 
     def on_aa_session_shutdown(self, topic: str, payload: dict) -> None:
         self._session_id = 0
+        self._aac_codec_data = None
+        self._prebuffer.clear()
+        self._prebuffer_bytes = 0
         self._set_state("IDLE")
         self.log.info("AA session shutdown — ch=%d reset", self.CHANNEL_ID)
 
@@ -254,6 +282,9 @@ class AudioModule(BaseChannelModule):
 
     def on_channel_close(self, channel_id: int) -> None:
         self._session_id = 0
+        self._aac_codec_data = None
+        self._prebuffer.clear()
+        self._prebuffer_bytes = 0
         self._set_state("IDLE")
         self.log.info("Channel %d closed — session_id reset", channel_id)
 
@@ -321,8 +352,16 @@ class AudioModule(BaseChannelModule):
 
     def _handle_stop_indication(self, body: bytes) -> None:
         self._session_id = 0
+        # Reset codec_data and prebuffer: a fresh codec_data frame is expected
+        # if AA resumes the stream after a stop.
+        self._aac_codec_data = None
+        self._prebuffer.clear()
+        self._prebuffer_bytes = 0
         self._set_state("STOPPED")
-        self.log.info("AVChannelStopIndication ch=%d — session_id reset, state → STOPPED", self.CHANNEL_ID)
+        self.log.info(
+            "AVChannelStopIndication ch=%d — session_id/codec_data/prebuffer reset, state → STOPPED",
+            self.CHANNEL_ID,
+        )
 
     def _handle_media_with_timestamp(self, body: bytes) -> None:
         if self._state not in ("OPEN", "PLAYING"):
@@ -333,6 +372,44 @@ class AudioModule(BaseChannelModule):
         self._write_audio(encoded)
 
     def _handle_media(self, body: bytes) -> None:
+        """Handle AV_MEDIA_INDICATION.
+
+        AA sends one codec_data frame (AudioSpecificConfig, exactly 2 bytes)
+        before actual audio data.  The frame layout is:
+
+            [8 bytes timestamp header][2 bytes ASC]
+
+        We detect it by stripping the 8-byte header and checking the remaining
+        payload length.  The ASC is stored and prepended to every subsequent
+        AAC_LC frame fed to pyav so that the decoder can initialise correctly.
+        If another codec_data arrives (e.g. after a stream restart) we simply
+        update the stored value.
+        """
+        _TS_HEADER = 8  # bytes — same layout as AV_MEDIA_WITH_TIMESTAMP_INDICATION
+
+        if len(body) > _TS_HEADER:
+            payload = body[_TS_HEADER:]
+        else:
+            payload = body
+
+        if len(payload) == 2 and self._codec in _AAC_CODECS:
+            # This is an AudioSpecificConfig (codec_data) frame.
+            if self._aac_codec_data != payload:
+                self._aac_codec_data = payload
+                self.log.info(
+                    "AV_MEDIA_INDICATION: codec_data received ch=%d asc=%s",
+                    self.CHANNEL_ID, payload.hex(),
+                )
+            else:
+                self.log.debug(
+                    "AV_MEDIA_INDICATION: codec_data unchanged ch=%d asc=%s",
+                    self.CHANNEL_ID, payload.hex(),
+                )
+            # ACK the codec_data frame and do not pass it to the audio pipeline.
+            self._send_media_ack()
+            return
+
+        # Regular media frame arriving via AV_MEDIA_INDICATION (uncommon but possible).
         self.log.debug(
             "AV_MEDIA_INDICATION ch=%d body=%s — ACK sent, parsing codec",
             self.CHANNEL_ID, body.hex(),
@@ -340,8 +417,8 @@ class AudioModule(BaseChannelModule):
         if self._state not in ("OPEN", "PLAYING"):
             self._set_state("PLAYING")
         self._send_media_ack()
-        self._log_media_sample("Media", body, body, 0)
-        self._write_audio(body)
+        self._log_media_sample("Media", body, payload, 0)
+        self._write_audio(payload)
 
     def _send_media_ack(self) -> None:
         ack = AVMediaAckIndication()
@@ -395,6 +472,8 @@ class AudioModule(BaseChannelModule):
                 f"--format={fmt}",
                 f"--channels={self._channel_count}",
                 f"--rate={self._sample_rate}",
+                f"--client-name=NemoHU",
+                f"--stream-name=ch{self.CHANNEL_ID}",
             ]
             if candidate is not None:
                 cmd.append(f"--device={candidate}")
@@ -408,8 +487,9 @@ class AudioModule(BaseChannelModule):
                 self._proc = proc
                 self._sink_input_index = None
                 self.log.info(
-                    "pacat spawned: device=%r rate=%d channels=%d fmt=%s pid=%d",
-                    candidate or "default", self._sample_rate, self._channel_count, fmt, proc.pid,
+                    "pacat spawned: device=%r rate=%d channels=%d fmt=%s pid=%d name=NemoHU/ch%d",
+                    candidate or "default", self._sample_rate, self._channel_count, fmt,
+                    proc.pid, self.CHANNEL_ID,
                 )
                 return
             except Exception as exc:
@@ -450,6 +530,26 @@ class AudioModule(BaseChannelModule):
         if not pcm or self._proc is None:
             return
         self._log_pcm_sample(pcm)
+
+        # Inline prebuffer: accumulate PCM until threshold is reached, then
+        # flush everything at once to avoid underrun on stream start.
+        if self._prebuffer_bytes < self._prebuffer_threshold:
+            self._prebuffer.append(pcm)
+            self._prebuffer_bytes += len(pcm)
+            if self._prebuffer_bytes < self._prebuffer_threshold:
+                self.log.debug(
+                    "prebuffer ch=%d accumulated=%d threshold=%d",
+                    self.CHANNEL_ID, self._prebuffer_bytes, self._prebuffer_threshold,
+                )
+                return
+            # Threshold reached — flush the whole buffer in one write.
+            pcm = b"".join(self._prebuffer)
+            self._prebuffer.clear()
+            self.log.info(
+                "prebuffer ch=%d threshold reached (%d bytes) — flushing to pacat",
+                self.CHANNEL_ID, len(pcm),
+            )
+
         try:
             with self._proc_lock:
                 self._proc.stdin.write(pcm)
@@ -461,10 +561,22 @@ class AudioModule(BaseChannelModule):
             self.log.warning("pacat write error ch=%d — %s", self.CHANNEL_ID, exc)
 
     def _decode_aac(self, adts_frame: bytes) -> bytes:
+        """Decode one AAC frame to raw s16le PCM.
+
+        For AAC_LC (raw, no ADTS header), pyav needs the AudioSpecificConfig
+        (ASC) to initialise the decoder.  We prepend the stored codec_data to
+        every frame.  For AAC_LC_ADTS the ADTS header already carries the
+        necessary info, so codec_data is not prepended.
+        """
         if self._av_codec_ctx is None:
             return b""
+
+        feed = adts_frame
+        if self._codec == _CODEC_AAC_LC and self._aac_codec_data:
+            feed = self._aac_codec_data + adts_frame
+
         try:
-            packet = av.Packet(adts_frame)
+            packet = av.Packet(feed)
             pcm_chunks: list[bytes] = []
             for frame in self._av_codec_ctx.decode(packet):
                 layout = "stereo" if self._channel_count > 1 else "mono"
