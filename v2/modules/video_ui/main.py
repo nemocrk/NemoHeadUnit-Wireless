@@ -20,11 +20,15 @@ Module contract:
                 video.ui.winid          {winid: int}  — for future touch_input module
 
 Decoder strategy (runtime probe, no config required):
-  1. vaapidecodebin  — Intel VAAPI hardware decode (all modern Atom SoCs)
-  2. avdec_h264      — FFmpeg software decode (gst-plugins-libav)
-  3. decodebin       — GStreamer autodetect fallback
-  If GStreamer is not available at all, falls back to ffplay subprocess
-  (no Qt embedding, separate window — limited functionality).
+  1. vaapih264dec  — VA-API HW decode via i965 driver (Intel Bay Trail)
+                     NB: usiamo vaapih264dec, NON vaapidecodebin.
+                     vaapidecodebin usa DMA-buf e triggera un assert nel
+                     driver i965 su Bay Trail (i965_check_alloc_surface_bo).
+                     vaapih264dec usa superficie YUV420 classica, stabile.
+  2. vah264dec     — VA-API HW decode via iHD driver (Broadwell+)
+                     Non disponibile su Bay Trail (iHD init failed).
+  3. avdec_h264    — FFmpeg SW decode (gst-plugins-libav / conda)
+  Se GStreamer non è disponibile, la finestra mostra solo il placeholder.
 
 Rendering:
   Primary  : appsink caps=NV12 → QOpenGLWidget with GLSL Y+UV shader (zero CPU copy)
@@ -52,11 +56,13 @@ Fix notes (2026-05-10 rev2):
     invocations on plain methods that are not registered Qt slots).
   - set_streaming(True) is now triggered by the first decoded sample arriving
     from GStreamer (_on_new_sample) rather than on video.state=PLAYING.
-    This avoids showing a black renderer widget before the pipeline has
-    produced any output (SPS/PPS config frames do not produce a decoded sample,
-    so the switch only happens when pixels are actually ready).
-  - Diagnostic log lines added in push_frame and _on_new_sample to make
-    pipeline flow visible in logs/deploy.log without spamming every frame.
+  - Diagnostic log lines added in push_frame and _on_new_sample.
+
+Fix notes (2026-05-10 rev3):
+  - Rimosso vaapidecodebin dalla probe: su Bay Trail con driver i965 triggera
+    un assertion fault in i965_check_alloc_surface_bo (DMA-buf format mismatch).
+  - Nuovo ordine probe: vaapih264dec (i965 HW) → vah264dec (iHD HW) → avdec_h264 (SW).
+  - vaapih264dec non usa DMA-buf, quindi è stabile su i965.
 """
 
 from __future__ import annotations
@@ -130,61 +136,65 @@ _STATE_LABELS = {
 # GStreamer pipeline builder
 # ---------------------------------------------------------------------------
 
+# Candidati decoder in ordine di preferenza.
+# Ogni entry: (element_name, label, needs_h264parse)
+#
+# vaapidecodebin ESCLUSO: usa DMA-buf internamente e triggera un assertion
+# fault nel driver i965 su Bay Trail (i965_check_alloc_surface_bo).
+# vaapih264dec usa superficie YUV classica — stabile su i965.
+_DECODER_CANDIDATES = [
+    ("vaapih264dec", "VA-API HW i965 (vaapih264dec)",  True),
+    ("vah264dec",    "VA-API HW iHD (vah264dec)",      True),
+    ("avdec_h264",   "FFmpeg SW (avdec_h264)",          True),
+]
+
+
 def _build_pipeline(use_gl: bool) -> "tuple[Gst.Pipeline | None, str]":
     """
     Probe available decoders and build the best pipeline.
     Returns (pipeline, render_format) where render_format is 'NV12' or 'RGB'.
-    Returns (None, '') if GStreamer is unavailable.
+    Returns (None, '') if GStreamer is unavailable or no decoder found.
     """
     if not _GST_AVAILABLE:
         return None, ""
 
     fmt = "NV12" if use_gl else "RGB"
 
-    # Probe decoder elements in preference order
-    if Gst.ElementFactory.find("vaapidecodebin"):
-        decoder_element = "vaapidecodebin"
-        log.info("GStreamer decoder: vaapidecodebin (Intel VAAPI HW)")
-    elif Gst.ElementFactory.find("avdec_h264"):
-        decoder_element = "avdec_h264"
-        log.info("GStreamer decoder: avdec_h264 (FFmpeg SW)")
-    else:
-        decoder_element = "decodebin"
-        log.info("GStreamer decoder: decodebin (autodetect)")
+    # Log tutti i candidati per diagnostica
+    for name, label, _ in _DECODER_CANDIDATES:
+        found = Gst.ElementFactory.find(name) is not None
+        log.debug("decoder probe: %-20s %s", name, "OK" if found else "not found")
 
-    # vaapidecodebin includes its own parse+decode — no h264parse before it.
-    # avdec_h264 needs h264parse upstream.
-    # decodebin handles everything internally.
-    if decoder_element == "vaapidecodebin":
-        pipeline_desc = (
-            f"appsrc name=src is-live=true format=time "
-            f"caps=video/x-h264,stream-format=byte-stream,alignment=au "
-            f"! {decoder_element} "
-            f"! videoconvert "
-            f"! video/x-raw,format={fmt} "
-            f"! appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
+    # Seleziona il primo disponibile
+    chosen_name  = None
+    chosen_label = None
+    needs_parse  = True
+    for name, label, np in _DECODER_CANDIDATES:
+        if Gst.ElementFactory.find(name):
+            chosen_name  = name
+            chosen_label = label
+            needs_parse  = np
+            break
+
+    if chosen_name is None:
+        log.warning(
+            "Nessun decoder H264 trovato (vaapih264dec / vah264dec / avdec_h264). "
+            "Installa gst-plugins-vaapi o gst-plugins-libav nell'env conda."
         )
-    elif decoder_element == "avdec_h264":
-        pipeline_desc = (
-            f"appsrc name=src is-live=true format=time "
-            f"caps=video/x-h264,stream-format=byte-stream,alignment=au "
-            f"! h264parse "
-            f"! {decoder_element} "
-            f"! videoconvert "
-            f"! video/x-raw,format={fmt} "
-            f"! appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
-        )
-    else:
-        # decodebin: no explicit caps negotiation after it
-        pipeline_desc = (
-            f"appsrc name=src is-live=true format=time "
-            f"caps=video/x-h264,stream-format=byte-stream,alignment=au "
-            f"! h264parse "
-            f"! {decoder_element} name=dec "
-            f"! videoconvert "
-            f"! video/x-raw,format={fmt} "
-            f"! appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
-        )
+        return None, ""
+
+    log.info("GStreamer decoder selezionato: %s", chosen_label)
+
+    parse_frag = "! h264parse " if needs_parse else ""
+    pipeline_desc = (
+        f"appsrc name=src is-live=true format=time "
+        f"caps=video/x-h264,stream-format=byte-stream,alignment=au "
+        f"{parse_frag}"
+        f"! {chosen_name} "
+        f"! videoconvert "
+        f"! video/x-raw,format={fmt} "
+        f"! appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
+    )
 
     try:
         pipeline = Gst.parse_launch(pipeline_desc)
@@ -240,7 +250,6 @@ class _NV12GLWidget(QOpenGLWidget):
         self._vbo    = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-    # FIX: @pyqtSlot è obbligatorio — QMetaObject.invokeMethod ignora metodi non registrati
     @pyqtSlot(bytes, int, int)
     def push_nv12(self, data: bytes, width: int, height: int) -> None:
         self._frame_data = data
@@ -334,7 +343,6 @@ class _RGBLabelWidget(QLabel):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setStyleSheet("background: black;")
 
-    # FIX: @pyqtSlot obbligatorio per QMetaObject.invokeMethod
     @pyqtSlot(bytes, int, int)
     def push_rgb(self, data: bytes, width: int, height: int) -> None:
         img = QImage(data, width, height, width * 3, QImage.Format.Format_RGB888)
@@ -415,9 +423,9 @@ class VideoWidget(QWidget):
         self._gl_widget:  _NV12GLWidget   | None = None
         self._rgb_widget: _RGBLabelWidget | None = None
         self._use_gl            = False
-        self._first_frame_shown = False   # FIX: ritarda set_streaming al primo sample
-        self._frames_pushed     = 0       # diagnostica
-        self._frames_decoded    = 0       # diagnostica
+        self._first_frame_shown = False
+        self._frames_pushed     = 0
+        self._frames_decoded    = 0
 
         self._stack = QStackedWidget(self)
         layout = QVBoxLayout(self)
@@ -445,7 +453,7 @@ class VideoWidget(QWidget):
         pipeline, fmt = _build_pipeline(use_gl=gl_ok)
 
         if pipeline is None:
-            log.warning("GStreamer not available — video_ui will show placeholder only")
+            log.warning("GStreamer pipeline non disponibile — solo placeholder")
             return
 
         self._pipeline   = pipeline
@@ -476,9 +484,9 @@ class VideoWidget(QWidget):
 
         gst_bus = pipeline.get_bus()
         gst_bus.add_signal_watch()
-        gst_bus.connect("message::error",             self._on_gst_error)
-        gst_bus.connect("message::eos",               self._on_gst_eos)
-        gst_bus.connect("message::state-changed",     self._on_gst_state_changed)
+        gst_bus.connect("message::error",         self._on_gst_error)
+        gst_bus.connect("message::eos",           self._on_gst_eos)
+        gst_bus.connect("message::state-changed", self._on_gst_state_changed)
 
     def _on_gst_error(self, _bus, message) -> None:
         err, dbg = message.parse_error()
@@ -496,8 +504,6 @@ class VideoWidget(QWidget):
 
     # ------------------------------------------------------------------
     # Frame ingestion
-    # FIX: @pyqtSlot registra il metodo come slot Qt — indispensabile per
-    #      QMetaObject.invokeMethod dal thread bus ZMQ.
     # ------------------------------------------------------------------
 
     @pyqtSlot(str, bool)
@@ -549,9 +555,6 @@ class VideoWidget(QWidget):
                 self._frames_decoded, width, height, len(frame_bytes),
             )
 
-        # FIX: mostra il renderer solo al primo frame decodificato reale,
-        # non su video.state=PLAYING (la pipeline potrebbe non aver ancora
-        # prodotto output al momento dell'evento di stato).
         if not self._first_frame_shown:
             self._first_frame_shown = True
             log.info("First decoded frame ready — switching to renderer widget")
@@ -683,7 +686,6 @@ def on_video_frame(topic: str, payload: dict) -> None:
         return
     data_b64  = payload.get("data_b64", "")
     is_config = bool(payload.get("is_config", False))
-    # FIX: Q_ARG(str, ...) e Q_ARG(bool, ...) — tipi esatti del @pyqtSlot
     QMetaObject.invokeMethod(
         _window.video, "push_frame",
         Qt.ConnectionType.QueuedConnection,
@@ -696,8 +698,6 @@ def on_video_state(topic: str, payload: dict) -> None:
     state = payload.get("state", "")
     if state == "PLAYING":
         _set_conn_state(_STATE_STREAMING)
-        # NON chiamiamo set_streaming(True) qui — lo farà _on_new_sample
-        # al primo frame decodificato reale.
     elif state in ("IDLE", "STOPPED"):
         if _conn_state == _STATE_STREAMING:
             _set_conn_state(_STATE_INTERRUPTED)
