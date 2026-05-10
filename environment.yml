@@ -73,3 +73,5 @@ dependencies:
     # Generates *_pb2.py from .proto files in third_party/open-android-auto
     - grpcio-tools>=1.62
     - protobuf>=4.25
+    # Logging — Rust-backed async logger; replaces stdlib logging in shared/logger.py
+    - logly>=0.1.6
