@@ -151,7 +151,7 @@ class VideoModule(BaseChannelModule):
                 max=16,
             ),
             "publish_frames": field_bool(
-                default=False,
+                default=True,  # video_ui subscribes video.frame — frames must be on the bus
             ),
         }
 
@@ -343,7 +343,7 @@ class VideoModule(BaseChannelModule):
             self._publish_video_frame(ts_us=ts_us, data=data, is_config=False)
 
     def _publish_video_frame(self, *, ts_us: int, data: bytes, is_config: bool) -> None:
-        publish_frames = bool(self._config.get("publish_frames", False))
+        publish_frames = bool(self._config.get("publish_frames", True))
         if publish_frames:
             self.bus.publish("video.frame", {
                 "channel_id": self.CHANNEL_ID,
