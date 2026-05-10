@@ -23,13 +23,13 @@ Module contract:
                 aa.channel.close    {channel_id}
                 aa.frame.ch<ch_id>  {channel_id, message_id, encrypted, payload_hex}
                 aa.session.shutdown {}
+                audio.source.selected  {source: str}  — from audio_manager
   Publishes   : channel_manager.module_ready  {name, priority}
                 aa.frame.send        bytes  (via BaseChannelModule.send_frame)
                 av_input.state       {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
                 av_input.mic_started {channel_id}
                 av_input.mic_stopped {channel_id}
-  Config keys : mic_device    enum  "default"  PulseAudio source name
-                max_unacked   int   1           AVChannelSetupResponse.max_unacked
+  Config keys : max_unacked   int   1           AVChannelSetupResponse.max_unacked
 """
 
 from __future__ import annotations
@@ -55,8 +55,8 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from shared.config_schema import field_enum, field_int           # noqa: E402
-from shared.proto_utils import build_media_with_timestamp        # noqa: E402
+from shared.config_schema import field_int                         # noqa: E402
+from shared.proto_utils import build_media_with_timestamp          # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -86,8 +86,8 @@ _MSG_AV_MEDIA_ACK               = AVChannelMessage.AV_MEDIA_ACK_INDICATION
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-_CHUNK_BYTES  = 2048
-_MAX_RETRIES  = 3
+_CHUNK_BYTES   = 2048
+_MAX_RETRIES   = 3
 _RETRY_BACKOFF = 0.5
 
 
@@ -106,10 +106,6 @@ class AVInputModule(BaseChannelModule):
 
     def get_schema(self) -> dict:
         return {
-            "mic_device": field_enum(
-                default="default",
-                choices=_list_mic_devices(),
-            ),
             "max_unacked": field_int(
                 default=1,
                 min=1,
@@ -127,8 +123,11 @@ class AVInputModule(BaseChannelModule):
         self._channel_count: int = self._CHANNEL_COUNT
         self._pacat_ok: bool = False
         self._proc: subprocess.Popen | None = None
-        self._stop_event:  threading.Event      = threading.Event()
-        self._send_queue:  queue.SimpleQueue     = queue.SimpleQueue()
+        # Selected source — updated by audio.source.selected from audio_manager.
+        # None means use pacat default.
+        self._selected_source: str | None = None
+        self._stop_event:    threading.Event      = threading.Event()
+        self._send_queue:    queue.SimpleQueue     = queue.SimpleQueue()
         self._reader_thread: threading.Thread | None = None
 
     def _is_ready(self) -> bool:
@@ -172,14 +171,32 @@ class AVInputModule(BaseChannelModule):
 
     def on_config_changed(self, key: str, value: Any) -> None:
         super().on_config_changed(key, value)
-        if key == "mic_device":
-            self.log.info("mic_device changed to %r", value)
-            if self._capturing:
-                self._stop_stream(publish=False)
-                self._start_stream()
-        elif key == "max_unacked":
+        if key == "max_unacked":
             self.log.info("max_unacked changed to %r", value)
             self._max_unacked = int(value)
+
+    def on_audio_source_selected(self, topic: str, payload: dict) -> None:
+        """Handle audio.source.selected published by audio_manager.
+
+        Restarts the pacat --record stream on the newly selected source
+        if it changed and capture is currently active.
+        """
+        source = payload.get("source", "default")
+        if source == "default":
+            source = None
+        if source == self._selected_source:
+            return
+        self.log.info(
+            "audio.source.selected ch=%d: %r → %r%s",
+            self.CHANNEL_ID,
+            self._selected_source,
+            source,
+            " — restarting capture" if self._capturing else "",
+        )
+        self._selected_source = source
+        if self._capturing:
+            self._stop_stream(publish=False)
+            self._start_stream()
 
     def on_aa_session_shutdown(self, topic: str, payload: dict) -> None:
         self._stop_stream(publish=True)
@@ -261,7 +278,9 @@ class AVInputModule(BaseChannelModule):
     def _start_stream(self, retry: int = 0) -> None:
         self._stop_stream(publish=False)
         self._stop_event.clear()
-        device = self._config.get("mic_device", "default")
+        # Use the source selected by audio_manager via audio.source.selected bus event.
+        # None / "default" → let pacat use the PulseAudio default source.
+        source = self._selected_source
         fmt    = {8: "u8", 16: "s16le", 24: "s24le", 32: "s32le"}.get(self._bit_depth, "s16le")
         cmd = [
             "pacat", "--record",
@@ -269,8 +288,8 @@ class AVInputModule(BaseChannelModule):
             f"--channels={self._channel_count}",
             f"--rate={self._sample_rate}",
         ]
-        if device != "default":
-            cmd.append(f"--device={device}")
+        if source and source != "default":
+            cmd.append(f"--device={source}")
         try:
             self._proc = subprocess.Popen(
                 cmd,
@@ -288,7 +307,7 @@ class AVInputModule(BaseChannelModule):
         self.bus.publish("av_input.mic_started", {"channel_id": self.CHANNEL_ID})
         self.log.info(
             "pacat --record spawned: device=%r rate=%d channels=%d fmt=%s pid=%d",
-            device, self._sample_rate, self._channel_count, fmt, self._proc.pid,
+            source or "default", self._sample_rate, self._channel_count, fmt, self._proc.pid,
         )
         self._reader_thread = threading.Thread(
             target=self._mic_reader,
@@ -386,76 +405,9 @@ class AVInputModule(BaseChannelModule):
         self.log.info("av_input.state ch=%d → %s", self.CHANNEL_ID, new_state)
 
     def run(self) -> None:
-        self.bus.subscribe("aa.session.shutdown", self.on_aa_session_shutdown)
+        self.bus.subscribe("aa.session.shutdown",   self.on_aa_session_shutdown)
+        self.bus.subscribe("audio.source.selected", self.on_audio_source_selected)
         super().run()
-
-
-# ---------------------------------------------------------------------------
-# Mic device discovery
-# ---------------------------------------------------------------------------
-
-def _list_mic_devices() -> list[str]:
-    """Return available PulseAudio/PipeWire source names.
-
-    Uses wpctl (PipeWire-native, ~10 ms) as primary method.  Falls back to
-    pactl list sources short if wpctl is unavailable or returns no devices.
-    Monitor sources (.monitor) are excluded — they capture sink output, not mic input.
-    """
-    devices = _list_mic_devices_wpctl()
-    if len(devices) > 1:
-        return devices
-    return _list_mic_devices_pactl()
-
-
-def _list_mic_devices_wpctl() -> list[str]:
-    try:
-        result = subprocess.run(
-            ["wpctl", "status"],
-            capture_output=True, text=True, timeout=1,
-        )
-        devices: list[str] = ["default"]
-        in_sources = False
-        for line in result.stdout.splitlines():
-            stripped = line.strip()
-            if "Sources:" in stripped:
-                in_sources = True
-                continue
-            if not in_sources:
-                continue
-            # wpctl uses tree-drawing chars; a blank line or a non-indented
-            # section header means we have left the Sources block.
-            if not stripped or (stripped.endswith(":") and "│" not in line and "├" not in line and "└" not in line):
-                break
-            # Each source line looks like:
-            #   │      49. alsa_input.platform-bytcr_rt5640.HiFi__hw_rt5640__source [vol: 1.00]
-            # Extract the name token (second dot-separated segment, first word).
-            dot_idx = line.find(".")
-            if dot_idx == -1:
-                continue
-            name = line[dot_idx + 1:].strip().split()[0].rstrip(",")
-            if name and ".monitor" not in name and name not in devices:
-                devices.append(name)
-        return devices
-    except Exception:
-        return ["default"]
-
-
-def _list_mic_devices_pactl() -> list[str]:
-    try:
-        result = subprocess.run(
-            ["pactl", "list", "sources", "short"],
-            capture_output=True, text=True, timeout=1,
-        )
-        devices = ["default"]
-        for line in result.stdout.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                name = parts[1].strip()
-                if name and ".monitor" not in name and name not in devices:
-                    devices.append(name)
-        return devices
-    except Exception:
-        return ["default"]
 
 
 # ---------------------------------------------------------------------------
