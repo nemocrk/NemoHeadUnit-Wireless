@@ -73,3 +73,5 @@ dependencies:
     # Generates *_pb2.py from .proto files in third_party/open-android-auto
     - grpcio-tools>=1.62
     - protobuf>=4.25
+    # Logging — async structured logger (Python 3.14 compatible); replaces logly
+    - loguru>=0.7.3
