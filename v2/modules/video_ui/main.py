@@ -33,10 +33,10 @@ Rendering:
 Placeholder (no active stream):
   - Digital clock HH:MM:SS, updated every second via QTimer
   - Connection state indicator: coloured dot (●) + text label
-    ● red   — In attesa di connessione BT
+    ● red    — In attesa di connessione BT
     ● yellow — Handshake AA in corso
     ● green  — Stream attivo
-    ● red   — Stream interrotto  (after STOPPED/IDLE post-session)
+    ● red    — Stream interrotto  (after STOPPED/IDLE post-session)
 
 State machine (internal _conn_state):
   WAITING_BT   → bluetooth.pairing.completed → HANDSHAKE
@@ -45,6 +45,18 @@ State machine (internal _conn_state):
   STREAMING    → video.state=IDLE/STOPPED    → INTERRUPTED
   INTERRUPTED  → aa.session.shutdown         → WAITING_BT
   any          → aa.session.shutdown         → WAITING_BT
+
+Fix notes (2026-05-10 rev2):
+  - push_frame / push_nv12 / push_rgb decorated with @pyqtSlot so that
+    QMetaObject.invokeMethod actually dispatches them (PyQt6 silently drops
+    invocations on plain methods that are not registered Qt slots).
+  - set_streaming(True) is now triggered by the first decoded sample arriving
+    from GStreamer (_on_new_sample) rather than on video.state=PLAYING.
+    This avoids showing a black renderer widget before the pipeline has
+    produced any output (SPS/PPS config frames do not produce a decoded sample,
+    so the switch only happens when pixels are actually ready).
+  - Diagnostic log lines added in push_frame and _on_new_sample to make
+    pipeline flow visible in logs/deploy.log without spamming every frame.
 """
 
 from __future__ import annotations
@@ -66,10 +78,10 @@ for _p in (_V2, _MODULES):
 from PyQt6.QtCore import (                                              # noqa: E402
     Qt, QTimer, QMetaObject, Q_ARG, pyqtSlot, QSize,
 )
-from PyQt6.QtGui import QFont, QColor, QImage, QPixmap                 # noqa: E402
+from PyQt6.QtGui import QFont, QImage, QPixmap                         # noqa: E402
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget                        # noqa: E402
 from PyQt6.QtWidgets import (                                           # noqa: E402
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout,
     QLabel, QSizePolicy, QStackedWidget,
 )
 
@@ -118,7 +130,7 @@ _STATE_LABELS = {
 # GStreamer pipeline builder
 # ---------------------------------------------------------------------------
 
-def _build_pipeline(use_gl: bool) -> tuple["Gst.Pipeline | None", str]:
+def _build_pipeline(use_gl: bool) -> "tuple[Gst.Pipeline | None, str]":
     """
     Probe available decoders and build the best pipeline.
     Returns (pipeline, render_format) where render_format is 'NV12' or 'RGB'.
@@ -127,32 +139,22 @@ def _build_pipeline(use_gl: bool) -> tuple["Gst.Pipeline | None", str]:
     if not _GST_AVAILABLE:
         return None, ""
 
-    fmt        = "NV12" if use_gl else "RGB"
-    caps_str   = f"video/x-raw,format={fmt}"
+    fmt = "NV12" if use_gl else "RGB"
 
     # Probe decoder elements in preference order
-    decoder_element: str
     if Gst.ElementFactory.find("vaapidecodebin"):
         decoder_element = "vaapidecodebin"
         log.info("GStreamer decoder: vaapidecodebin (Intel VAAPI HW)")
     elif Gst.ElementFactory.find("avdec_h264"):
-        decoder_element = "avdec_h264 ! h264parse"
+        decoder_element = "avdec_h264"
         log.info("GStreamer decoder: avdec_h264 (FFmpeg SW)")
     else:
         decoder_element = "decodebin"
         log.info("GStreamer decoder: decodebin (autodetect)")
 
-    pipeline_desc = (
-        f"appsrc name=src is-live=true format=time "
-        f"caps=video/x-h264,stream-format=byte-stream,alignment=au "
-        f"! h264parse "
-        f"! {decoder_element} "
-        f"! videoconvert "
-        f"! video/x-raw,format={fmt} "
-        f"! appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
-    )
-
-    # vaapidecodebin already includes its own parse+decode; skip h264parse before it
+    # vaapidecodebin includes its own parse+decode — no h264parse before it.
+    # avdec_h264 needs h264parse upstream.
+    # decodebin handles everything internally.
     if decoder_element == "vaapidecodebin":
         pipeline_desc = (
             f"appsrc name=src is-live=true format=time "
@@ -162,12 +164,34 @@ def _build_pipeline(use_gl: bool) -> tuple["Gst.Pipeline | None", str]:
             f"! video/x-raw,format={fmt} "
             f"! appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
         )
+    elif decoder_element == "avdec_h264":
+        pipeline_desc = (
+            f"appsrc name=src is-live=true format=time "
+            f"caps=video/x-h264,stream-format=byte-stream,alignment=au "
+            f"! h264parse "
+            f"! {decoder_element} "
+            f"! videoconvert "
+            f"! video/x-raw,format={fmt} "
+            f"! appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
+        )
+    else:
+        # decodebin: no explicit caps negotiation after it
+        pipeline_desc = (
+            f"appsrc name=src is-live=true format=time "
+            f"caps=video/x-h264,stream-format=byte-stream,alignment=au "
+            f"! h264parse "
+            f"! {decoder_element} name=dec "
+            f"! videoconvert "
+            f"! video/x-raw,format={fmt} "
+            f"! appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
+        )
 
     try:
         pipeline = Gst.parse_launch(pipeline_desc)
+        log.info("GStreamer pipeline built: %s", pipeline_desc)
         return pipeline, fmt
     except Exception as exc:
-        log.warning(f"GStreamer pipeline build failed: {exc}")
+        log.warning("GStreamer pipeline build failed: %s", exc)
         return None, ""
 
 # ---------------------------------------------------------------------------
@@ -213,10 +237,11 @@ class _NV12GLWidget(QOpenGLWidget):
         self._prog   = None
         self._tex_y  = None
         self._tex_uv = None
-        self._vao    = None
         self._vbo    = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+    # FIX: @pyqtSlot è obbligatorio — QMetaObject.invokeMethod ignora metodi non registrati
+    @pyqtSlot(bytes, int, int)
     def push_nv12(self, data: bytes, width: int, height: int) -> None:
         self._frame_data = data
         self._width      = width
@@ -234,17 +259,24 @@ class _NV12GLWidget(QOpenGLWidget):
             sh = GL.glCreateShader(kind)
             GL.glShaderSource(sh, src)
             GL.glCompileShader(sh)
+            if not GL.glGetShaderiv(sh, GL.GL_COMPILE_STATUS):
+                log.warning("GLSL compile error: %s", GL.glGetShaderInfoLog(sh))
             GL.glAttachShader(prog, sh)
         GL.glLinkProgram(prog)
+        if not GL.glGetProgramiv(prog, GL.GL_LINK_STATUS):
+            log.warning("GLSL link error: %s", GL.glGetProgramInfoLog(prog))
         self._prog = prog
 
         self._tex_y  = GL.glGenTextures(1)
         self._tex_uv = GL.glGenTextures(1)
 
+        import numpy as np  # type: ignore
         verts = np.array([-1, -1, 1, -1, -1, 1, 1, 1], dtype=np.float32)
         self._vbo = GL.glGenBuffers(1)
         GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._vbo)
         GL.glBufferData(GL.GL_ARRAY_BUFFER, verts.nbytes, verts, GL.GL_STATIC_DRAW)
+        log.info("_NV12GLWidget: OpenGL initialised prog=%s tex_y=%s tex_uv=%s",
+                 self._prog, self._tex_y, self._tex_uv)
 
     def paintGL(self) -> None:
         if self._frame_data is None or self._width == 0:
@@ -252,10 +284,12 @@ class _NV12GLWidget(QOpenGLWidget):
         GL = self._GL
         import numpy as np  # type: ignore
 
-        w, h   = self._width, self._height
-        y_size = w * h
-        y_data  = np.frombuffer(self._frame_data[:y_size],         dtype=np.uint8).reshape(h, w)
-        uv_data = np.frombuffer(self._frame_data[y_size:y_size + y_size // 2], dtype=np.uint8).reshape(h // 2, w // 2, 2)
+        w, h    = self._width, self._height
+        y_size  = w * h
+        y_data  = np.frombuffer(self._frame_data[:y_size], dtype=np.uint8).reshape(h, w)
+        uv_data = np.frombuffer(
+            self._frame_data[y_size:y_size + y_size // 2], dtype=np.uint8
+        ).reshape(h // 2, w // 2, 2)
 
         GL.glClear(GL.GL_COLOR_BUFFER_BIT)
         GL.glUseProgram(self._prog)
@@ -265,9 +299,12 @@ class _NV12GLWidget(QOpenGLWidget):
             (self._tex_uv, 1, uv_data, GL.GL_RG),
         ):
             GL.glActiveTexture(GL.GL_TEXTURE0 + unit)
-            GL.glBindTexture(GL.GL_TEXTURE2D, tex)
-            GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, fmt, data.shape[1], data.shape[0],
-                            0, fmt, GL.GL_UNSIGNED_BYTE, data)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+            GL.glTexImage2D(
+                GL.GL_TEXTURE_2D, 0, fmt,
+                data.shape[1], data.shape[0],
+                0, fmt, GL.GL_UNSIGNED_BYTE, data,
+            )
             GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
             GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
 
@@ -297,6 +334,8 @@ class _RGBLabelWidget(QLabel):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setStyleSheet("background: black;")
 
+    # FIX: @pyqtSlot obbligatorio per QMetaObject.invokeMethod
+    @pyqtSlot(bytes, int, int)
     def push_rgb(self, data: bytes, width: int, height: int) -> None:
         img = QImage(data, width, height, width * 3, QImage.Format.Format_RGB888)
         pix = QPixmap.fromImage(img).scaled(
@@ -357,6 +396,10 @@ class VideoWidget(QWidget):
     Root widget. Contains:
       - QStackedWidget with pages: [0] placeholder, [1] video renderer
       - GStreamer pipeline (NV12 GL primary, RGB label fallback)
+
+    set_streaming(True) is called automatically by _on_new_sample when the
+    first decoded frame is ready — NOT on video.state=PLAYING — so the
+    renderer widget is only shown once pixels are actually available.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -364,15 +407,17 @@ class VideoWidget(QWidget):
         self.setMinimumSize(QSize(640, 400))
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        self._conn_state = _STATE_WAITING_BT
-        self._render_fmt = ""
-        self._pipeline   = None
-        self._appsrc     = None
-        self._appsink    = None
-        self._gst_thread = None
-        self._gl_widget: _NV12GLWidget | None = None
+        self._render_fmt        = ""
+        self._pipeline          = None
+        self._appsrc            = None
+        self._appsink           = None
+        self._gst_thread        = None
+        self._gl_widget:  _NV12GLWidget   | None = None
         self._rgb_widget: _RGBLabelWidget | None = None
-        self._use_gl     = False
+        self._use_gl            = False
+        self._first_frame_shown = False   # FIX: ritarda set_streaming al primo sample
+        self._frames_pushed     = 0       # diagnostica
+        self._frames_decoded    = 0       # diagnostica
 
         self._stack = QStackedWidget(self)
         layout = QVBoxLayout(self)
@@ -389,9 +434,8 @@ class VideoWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _init_gstreamer(self) -> None:
-        # Try GL renderer first; fall back to RGB label
         try:
-            from OpenGL import GL  # noqa: F401 — just probe availability
+            from OpenGL import GL  # noqa: F401
             import numpy           # noqa: F401
             gl_ok = True
         except ImportError:
@@ -402,7 +446,6 @@ class VideoWidget(QWidget):
 
         if pipeline is None:
             log.warning("GStreamer not available — video_ui will show placeholder only")
-            self._render_fmt = ""
             return
 
         self._pipeline   = pipeline
@@ -423,19 +466,19 @@ class VideoWidget(QWidget):
         self._appsink.connect("new-sample", self._on_new_sample)
 
         pipeline.set_state(Gst.State.PLAYING)
-        log.info("GStreamer pipeline started (format=%s)", fmt)
+        log.info("GStreamer pipeline PLAYING (format=%s use_gl=%s)", fmt, self._use_gl)
 
-        # GLib main loop for bus messages (EOS, errors)
         self._glib_loop  = GLib.MainLoop()
         self._gst_thread = threading.Thread(
             target=self._glib_loop.run, daemon=True, name="GstGLib"
         )
         self._gst_thread.start()
 
-        bus = pipeline.get_bus()
-        bus.add_signal_watch()
-        bus.connect("message::error", self._on_gst_error)
-        bus.connect("message::eos",   self._on_gst_eos)
+        gst_bus = pipeline.get_bus()
+        gst_bus.add_signal_watch()
+        gst_bus.connect("message::error",             self._on_gst_error)
+        gst_bus.connect("message::eos",               self._on_gst_eos)
+        gst_bus.connect("message::state-changed",     self._on_gst_state_changed)
 
     def _on_gst_error(self, _bus, message) -> None:
         err, dbg = message.parse_error()
@@ -444,23 +487,42 @@ class VideoWidget(QWidget):
     def _on_gst_eos(self, _bus, _message) -> None:
         log.info("GStreamer EOS")
 
+    def _on_gst_state_changed(self, _bus, message) -> None:
+        if message.src == self._pipeline:
+            old, new, _pending = message.parse_state_changed()
+            log.info("GStreamer pipeline: %s → %s",
+                     Gst.Element.state_get_name(old),
+                     Gst.Element.state_get_name(new))
+
     # ------------------------------------------------------------------
-    # Frame ingestion (called from bus ZMQ thread via QMetaObject)
+    # Frame ingestion
+    # FIX: @pyqtSlot registra il metodo come slot Qt — indispensabile per
+    #      QMetaObject.invokeMethod dal thread bus ZMQ.
     # ------------------------------------------------------------------
 
+    @pyqtSlot(str, bool)
     def push_frame(self, data_b64: str, is_config: bool) -> None:
-        """Decode base64 payload and push bytes into GStreamer appsrc."""
+        """Decode base64 payload and push raw H264 bytes into GStreamer appsrc."""
         if self._appsrc is None:
             return
         try:
             raw = base64.b64decode(data_b64)
-        except Exception:
+        except Exception as exc:
+            log.warning("push_frame: base64 decode error — %s", exc)
             return
 
         buf = Gst.Buffer.new_wrapped(raw)
         ret = self._appsrc.emit("push-buffer", buf)
+
+        self._frames_pushed += 1
+        if is_config or self._frames_pushed <= 5 or self._frames_pushed % 300 == 0:
+            log.debug(
+                "push_frame #%d is_config=%s len=%d appsrc_ret=%s",
+                self._frames_pushed, is_config, len(raw), ret,
+            )
+
         if ret != Gst.FlowReturn.OK:
-            log.warning("appsrc push-buffer returned %s", ret)
+            log.warning("appsrc push-buffer returned %s (frame #%d)", ret, self._frames_pushed)
 
     def _on_new_sample(self, sink) -> "Gst.FlowReturn":
         """GStreamer callback: pull decoded frame and schedule Qt repaint."""
@@ -468,17 +530,36 @@ class VideoWidget(QWidget):
         if sample is None:
             return Gst.FlowReturn.ERROR
 
-        caps    = sample.get_caps()
-        struct  = caps.get_structure(0)
-        width   = struct.get_value("width")
-        height  = struct.get_value("height")
-        buf     = sample.get_buffer()
+        caps   = sample.get_caps()
+        struct = caps.get_structure(0)
+        width  = struct.get_value("width")
+        height = struct.get_value("height")
+        buf    = sample.get_buffer()
         success, mapinfo = buf.map(Gst.MapFlags.READ)
         if not success:
             return Gst.FlowReturn.ERROR
 
         frame_bytes = bytes(mapinfo.data)
         buf.unmap(mapinfo)
+
+        self._frames_decoded += 1
+        if self._frames_decoded <= 3 or self._frames_decoded % 300 == 0:
+            log.debug(
+                "_on_new_sample #%d %dx%d len=%d",
+                self._frames_decoded, width, height, len(frame_bytes),
+            )
+
+        # FIX: mostra il renderer solo al primo frame decodificato reale,
+        # non su video.state=PLAYING (la pipeline potrebbe non aver ancora
+        # prodotto output al momento dell'evento di stato).
+        if not self._first_frame_shown:
+            self._first_frame_shown = True
+            log.info("First decoded frame ready — switching to renderer widget")
+            QMetaObject.invokeMethod(
+                self, "set_streaming",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(bool, True),
+            )
 
         if self._use_gl and self._gl_widget is not None:
             QMetaObject.invokeMethod(
@@ -505,7 +586,11 @@ class VideoWidget(QWidget):
 
     @pyqtSlot(bool)
     def set_streaming(self, active: bool) -> None:
+        if not active:
+            self._first_frame_shown = False
         self._stack.setCurrentIndex(1 if (active and self._render_fmt) else 0)
+        log.info("set_streaming(%s) → stack index %d", active,
+                 1 if (active and self._render_fmt) else 0)
 
     @pyqtSlot(str, str)
     def set_conn_state(self, color: str, text: str) -> None:
@@ -571,7 +656,7 @@ def _set_conn_state(new_state: str) -> None:
 # ---------------------------------------------------------------------------
 
 def on_system_readytostart() -> None:
-    log.info(f"system.readytostart — announcing priority {PRIORITY}")
+    log.info("system.readytostart — announcing priority %d", PRIORITY)
     bus.publish("system.module_ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
@@ -579,13 +664,10 @@ def on_system_start(topic: str, payload: dict) -> None:
     if payload.get("priority") != PRIORITY:
         return
     log.info("system.start priority=2 — video_ui ready")
-
-    # Publish winid for future touch_input module
     if _window:
         winid = int(_window.video.winId())
         bus.publish("video.ui.winid", {"winid": winid})
         log.info("video.ui.winid published: %d", winid)
-
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
@@ -601,14 +683,21 @@ def on_video_frame(topic: str, payload: dict) -> None:
         return
     data_b64  = payload.get("data_b64", "")
     is_config = bool(payload.get("is_config", False))
-    _invoke(_window.video, "push_frame", data_b64, is_config)
+    # FIX: Q_ARG(str, ...) e Q_ARG(bool, ...) — tipi esatti del @pyqtSlot
+    QMetaObject.invokeMethod(
+        _window.video, "push_frame",
+        Qt.ConnectionType.QueuedConnection,
+        Q_ARG(str, data_b64),
+        Q_ARG(bool, is_config),
+    )
 
 
 def on_video_state(topic: str, payload: dict) -> None:
     state = payload.get("state", "")
     if state == "PLAYING":
         _set_conn_state(_STATE_STREAMING)
-        _invoke(_window.video if _window else None, "set_streaming", True)
+        # NON chiamiamo set_streaming(True) qui — lo farà _on_new_sample
+        # al primo frame decodificato reale.
     elif state in ("IDLE", "STOPPED"):
         if _conn_state == _STATE_STREAMING:
             _set_conn_state(_STATE_INTERRUPTED)
