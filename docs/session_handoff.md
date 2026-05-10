@@ -213,3 +213,73 @@ Sostituire `- logly>=0.1.6` con `- loguru>=0.7.3` nella sezione pip.
 python -c "from shared.logger import get_logger, attach_bus; log = get_logger('test'); log.info('ok'); print('logger OK')"
 grep -c "invalid JSON payload" logs/deploy.log  # atteso: 0
 ```
+
+---
+
+## 2026-05-10 - AudioModule: codec_data AAC, pacat naming, inline prebuffer
+
+**What changed:**
+
+`v2/modules/channel_modules/audio/main.py` — tre fix alla pipeline audio per
+rendere effettivamente udibile l'audio Android Auto.
+
+### 1. Capture e re-inject del codec_data AAC (`_handle_media` + `_decode_aac`)
+
+AA invia un frame speciale (`AV_MEDIA_INDICATION`) prima di qualsiasi frame audio:
+```
+[8 byte timestamp header][2 byte AudioSpecificConfig (ASC)]
+```
+Senza l'ASC, `pyav` non riesce ad inizializzare il decoder AAC_LC e restituisce
+silenzio (`b""`) per ogni frame successivo.
+
+| Aspetto | Prima | Dopo |
+|---|---|---|
+| codec_data detection | ❌ assente — frame da 2B trattato come audio | ✅ strip 8B ts, check `len == 2`, salvato in `_aac_codec_data` |
+| `_decode_aac` per AAC_LC | `av.Packet(adts_frame)` — decoder non inizializzato | `av.Packet(aac_codec_data + adts_frame)` — ASC prepeso a ogni frame |
+| `_decode_aac` per AAC_LC_ADTS | invariato | invariato (ADTS header è autosufficiente) |
+| Reset codec_data | n/a | reset in `_handle_stop_indication`, `on_channel_close`, `on_aa_session_shutdown`, `_cleanup` |
+| Codec_data multi-arrivo | n/a | aggiornato se AA lo rimanda (es. dopo stream restart) |
+
+### 2. Naming pacat nel mixer (`_open_stream`)
+
+Aggiunto `--client-name=NemoHU` e `--stream-name=ch{channel_id}` al comando
+`pacat`. I canali appaiono ora etichettati in `pavucontrol` e in
+`pactl list sink-inputs`.
+
+### 3. Inline PCM prebuffer da 100 ms (`_write_audio`)
+
+Accumulo PCM in `_prebuffer: list[bytes]` fino al raggiungimento di
+`_prebuffer_threshold` (calcolato da `sample_rate × channels × (bit_depth/8) × 0.1`).
+Al primo superamento della soglia, flush dell'intero buffer in un'unica write
+su `pacat.stdin`. Evita underrun all'avvio dello stream senza thread dedicati.
+
+Il prebuffer viene resettato insieme al codec_data ad ogni stop/close/shutdown.
+
+**Why:**
+- Senza il codec_data prepeso, `pyav` `aac` decoder riceveva frame raw AAC_LC
+  senza AudioSpecificConfig e non decodificava nulla: zero PCM → silenzio totale.
+- Il naming in `pavucontrol` era `pacat` generico per tutti i canali, rendendo
+  impossibile distinguere media/speech/system nel mixer.
+- Il write immediato frame-per-frame causava underrun e glitch all'avvio dello
+  stream (comportamento noto da v1 `av_core.hpp` `audio_prebuffer_ms=100`).
+
+**Status:** Completed
+
+**Commit:** [3999a36](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/3999a369ae15930b79d4b4929fb2b93c1151f63e)
+
+**Next 1-3 steps:**
+1. Testare su hardware: verificare che `peak > 0` e `zero_ratio < 0.5` nei log PCM write dei primi 8 frame
+2. Se il codec_data non arriva o arriva con struttura diversa (es. no ts header), aggiustare la detection in `_handle_media`
+3. Aggiungere test unitari in `tests/v2/test_audio.py`:
+   - `test_codec_data_capture` (verifica che frame da 2B venga salvato e non passato al decoder)
+   - `test_decode_aac_prepends_codec_data` (mock pyav, verifica feed = asc + frame)
+   - `test_prebuffer_flushes_at_threshold` (verifica write singola dopo N frame)
+
+**Verification commands:**
+```bash
+python -c "from channel_modules.audio.main import AudioModule; print('import OK')"
+# Su hardware, nei log cerca:
+grep "codec_data received" logs/deploy.log
+grep "prebuffer.*flushing" logs/deploy.log
+grep "PCM write.*peak" logs/deploy.log  # peak deve essere > 0
+```
