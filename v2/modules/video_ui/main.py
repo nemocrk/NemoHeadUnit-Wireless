@@ -27,7 +27,7 @@ Decoder strategy (runtime probe, no config required):
                      vaapih264dec usa superficie YUV420 classica, stabile.
   2. vah264dec     — VA-API HW decode via iHD driver (Broadwell+)
                      Non disponibile su Bay Trail (iHD init failed).
-  3. avdec_h264    — FFmpeg SW decode (gst-plugins-libav / conda)
+  3. avdec_h264    — FFmpeg SW decode (gst-libav / conda)
   Se GStreamer non è disponibile, la finestra mostra solo il placeholder.
 
 Rendering:
@@ -63,6 +63,33 @@ Fix notes (2026-05-10 rev3):
     un assertion fault in i965_check_alloc_surface_bo (DMA-buf format mismatch).
   - Nuovo ordine probe: vaapih264dec (i965 HW) → vah264dec (iHD HW) → avdec_h264 (SW).
   - vaapih264dec non usa DMA-buf, quindi è stabile su i965.
+
+Fix notes (2026-05-10 rev4 — anti-artefatti):
+  Obiettivo: nessun artefatto anche in scene con movimento veloce.
+  Preferenza esplicita: meglio saltare frame (scena accelerata) che mostrare
+  macrobloc corrotti.
+
+  Problema originale:
+    appsink drop=true scartava frame GIA' DECODIFICATI quando Qt era lento.
+    Il decoder perdeva i frame di riferimento P/B → macrobloc nei frame
+    successivi.
+
+  Soluzione:
+  1. Queue leaky=downstream PRIMA del decoder (sui dati H264 compressi).
+     In caso di backpressure si butta il pacchetto compresso più vecchio
+     prima che entri nel decoder. Il decoder riceve sempre sequenze complete
+     → nessun frame di riferimento mancante → nessun artefatto.
+     Dimensione: max-size-buffers=8, ~80ms @30fps — abbastanza da assorbire
+     jitter del bus ZMQ senza introdurre latenza percettibile.
+  2. appsink drop=false, max-buffers=4.
+     I frame già decodificati non vengono mai scartati. Se Qt non riesce
+     a consumarli abbastanza velocemente, il backpressure risale fino alla
+     queue leaky che butta i compressi — non i decodificati.
+  3. PTS monotono su ogni Gst.Buffer in push_frame.
+     Senza PTS alcuni decoder (vaapih264dec in particolare) possono
+     riordinare i frame in modo errato su scene ad alto movimento.
+     Il PTS è calcolato da un contatore interno (non dal clock di sistema)
+     per evitare drift quando i frame non arrivano a ritmo costante.
 """
 
 from __future__ import annotations
@@ -148,12 +175,28 @@ _DECODER_CANDIDATES = [
     ("avdec_h264",   "FFmpeg SW (avdec_h264)",          True),
 ]
 
+# Dimensione della queue leaky prima del decoder.
+# 8 buffer @ 30fps = ~267ms di margine per assorbire jitter ZMQ.
+# In caso di backpressure si butta il pacchetto compresso più vecchio
+# (leaky=downstream) prima che entri nel decoder — nessun artefatto.
+_LEAKY_QUEUE_BUFFERS = 8
+
+# Framerate nominale assunto per il calcolo del PTS (Android Auto è sempre 30fps).
+_FRAME_DURATION_NS = 1_000_000_000 // 30   # 33_333_333 ns
+
 
 def _build_pipeline(use_gl: bool) -> "tuple[Gst.Pipeline | None, str]":
     """
     Probe available decoders and build the best pipeline.
     Returns (pipeline, render_format) where render_format is 'NV12' or 'RGB'.
     Returns (None, '') if GStreamer is unavailable or no decoder found.
+
+    Pipeline topology:
+      appsrc → h264parse → queue(leaky=downstream) → decoder → videoconvert
+               → appsink(drop=false)
+
+    La queue leaky scarta compressi in eccesso PRIMA del decoder.
+    L'appsink non scarta mai frame già decodificati.
     """
     if not _GST_AVAILABLE:
         return None, ""
@@ -168,32 +211,36 @@ def _build_pipeline(use_gl: bool) -> "tuple[Gst.Pipeline | None, str]":
     # Seleziona il primo disponibile
     chosen_name  = None
     chosen_label = None
-    needs_parse  = True
-    for name, label, np in _DECODER_CANDIDATES:
+    for name, label, _ in _DECODER_CANDIDATES:
         if Gst.ElementFactory.find(name):
             chosen_name  = name
             chosen_label = label
-            needs_parse  = np
             break
 
     if chosen_name is None:
         log.warning(
             "Nessun decoder H264 trovato (vaapih264dec / vah264dec / avdec_h264). "
-            "Installa gst-plugins-vaapi o gst-plugins-libav nell'env conda."
+            "Installa gst-plugins-vaapi o gst-libav nell'env conda."
         )
         return None, ""
 
     log.info("GStreamer decoder selezionato: %s", chosen_label)
 
-    parse_frag = "! h264parse " if needs_parse else ""
+    # Queue leaky=downstream: in backpressure butta il buffer compresso più
+    # vecchio prima che entri nel decoder. Il decoder non perde mai riferimenti.
+    # appsink drop=false: i frame già decodificati non vengono mai scartati.
     pipeline_desc = (
         f"appsrc name=src is-live=true format=time "
         f"caps=video/x-h264,stream-format=byte-stream,alignment=au "
-        f"{parse_frag}"
+        f"! h264parse "
+        f"! queue name=predec leaky=downstream "
+        f"    max-size-buffers={_LEAKY_QUEUE_BUFFERS} "
+        f"    max-size-time=0 max-size-bytes=0 "
         f"! {chosen_name} "
         f"! videoconvert "
         f"! video/x-raw,format={fmt} "
-        f"! appsink name=sink emit-signals=true sync=false max-buffers=2 drop=true"
+        f"! appsink name=sink emit-signals=true sync=false "
+        f"    max-buffers=4 drop=false"
     )
 
     try:
@@ -426,6 +473,9 @@ class VideoWidget(QWidget):
         self._first_frame_shown = False
         self._frames_pushed     = 0
         self._frames_decoded    = 0
+        # Contatore PTS monotono: evita drift se i frame non arrivano a ritmo costante.
+        # Usato in push_frame per assegnare un PTS crescente ad ogni Gst.Buffer.
+        self._pts_counter: int  = 0
 
         self._stack = QStackedWidget(self)
         layout = QVBoxLayout(self)
@@ -508,7 +558,13 @@ class VideoWidget(QWidget):
 
     @pyqtSlot(str, bool)
     def push_frame(self, data_b64: str, is_config: bool) -> None:
-        """Decode base64 payload and push raw H264 bytes into GStreamer appsrc."""
+        """Decode base64 payload and push raw H264 bytes into GStreamer appsrc.
+
+        Assegna un PTS monotono ad ogni buffer. Senza PTS vaapih264dec può
+        riordinare i frame in modo errato su scene ad alto movimento.
+        Il PTS è calcolato dal contatore interno _pts_counter (non dal clock
+        di sistema) per evitare drift quando i frame non arrivano a ritmo costante.
+        """
         if self._appsrc is None:
             return
         try:
@@ -518,13 +574,27 @@ class VideoWidget(QWidget):
             return
 
         buf = Gst.Buffer.new_wrapped(raw)
+
+        # PTS monotono: ogni frame avanza di _FRAME_DURATION_NS (1/30s).
+        # I frame di config (SPS/PPS) non incrementano il contatore.
+        if not is_config:
+            buf.pts      = self._pts_counter * _FRAME_DURATION_NS
+            buf.duration = _FRAME_DURATION_NS
+            self._pts_counter += 1
+        else:
+            buf.pts      = Gst.CLOCK_TIME_NONE
+            buf.duration = Gst.CLOCK_TIME_NONE
+
         ret = self._appsrc.emit("push-buffer", buf)
 
         self._frames_pushed += 1
         if is_config or self._frames_pushed <= 5 or self._frames_pushed % 300 == 0:
             log.debug(
-                "push_frame #%d is_config=%s len=%d appsrc_ret=%s",
-                self._frames_pushed, is_config, len(raw), ret,
+                "push_frame #%d is_config=%s len=%d pts=%s appsrc_ret=%s",
+                self._frames_pushed, is_config,
+                len(raw),
+                buf.pts if not is_config else "NONE",
+                ret,
             )
 
         if ret != Gst.FlowReturn.OK:
@@ -591,6 +661,7 @@ class VideoWidget(QWidget):
     def set_streaming(self, active: bool) -> None:
         if not active:
             self._first_frame_shown = False
+            self._pts_counter       = 0     # reset PTS al prossimo stream
         self._stack.setCurrentIndex(1 if (active and self._render_fmt) else 0)
         log.info("set_streaming(%s) → stack index %d", active,
                  1 if (active and self._render_fmt) else 0)
