@@ -120,7 +120,7 @@ class BusClient:
             self._drop_by_topic.items(), key=lambda x: x[1], reverse=True
         )[:3]
         top_str = ", ".join(f"{t}:{n}" for t, n in top_drops) if top_drops else "none"
-        self.log.info(
+        self.log.debug(
             "BUS STATS | recv=%d  pub_ok=%d  pub_drop=%d (%.1f%%)  "
             "top_drop_topics=[%s]",
             self._stat_recv, self._stat_pub_ok, self._stat_pub_drop,
