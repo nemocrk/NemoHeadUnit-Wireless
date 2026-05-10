@@ -25,12 +25,11 @@ Module contract:
                 aa.channel.close    {channel_id}
                 aa.frame.ch<ch_id>  {channel_id, message_id, encrypted, payload_hex}
                 aa.session.shutdown  {}
-                channel_<channel_id>.set_volume  {volume: int}  0-100 percent
+                audio.sink.selected  {sink: str}   — from audio_manager
   Publishes   : channel_manager.module_ready  {name, priority}
                 aa.frame.send        bytes  (via BaseChannelModule.send_frame)
                 audio.state          {channel_id, state}  IDLE|SETUP|OPEN|PLAYING|STOPPED
-  Config keys : audio_device   enum  "default"  PulseAudio sink name (pactl list sinks short)
-                max_unacked    int   1           AVChannelSetupResponse.max_unacked
+  Config keys : max_unacked    int   1           AVChannelSetupResponse.max_unacked
 """
 
 from __future__ import annotations
@@ -58,7 +57,7 @@ for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
 
 import av                                      # noqa: E402
 
-from shared.config_schema import field_enum, field_int  # noqa: E402
+from shared.config_schema import field_int  # noqa: E402
 from shared.proto_utils import parse_media_with_timestamp  # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 
@@ -114,10 +113,6 @@ class AudioModule(BaseChannelModule):
 
     def get_schema(self) -> dict:
         return {
-            "audio_device": field_enum(
-                default="default",
-                choices=_list_audio_devices(),
-            ),
             "max_unacked": field_int(
                 default=1,
                 min=1,
@@ -139,6 +134,9 @@ class AudioModule(BaseChannelModule):
         self._av_codec:     Any | None = None
         self._media_debug_count: int = 0
         self._pcm_debug_count: int = 0
+        # Selected sink — updated by audio.sink.selected from audio_manager.
+        # None means use pacat default.
+        self._selected_sink: str | None = None
         # AAC codec_data (AudioSpecificConfig, 2 bytes) received via
         # AV_MEDIA_INDICATION before actual audio frames.  Persists across
         # StopIndication — reset only on aa.session.shutdown or _cleanup.
@@ -201,11 +199,26 @@ class AudioModule(BaseChannelModule):
 
     def on_config_changed(self, key: str, value: Any) -> None:
         super().on_config_changed(key, value)
-        if key == "audio_device":
-            self.log.info("audio_device changed to %r — reopening stream", value)
-            self._open_stream()
-        elif key == "max_unacked":
+        if key == "max_unacked":
             self.log.info("max_unacked changed to %r", value)
+
+    def on_audio_sink_selected(self, topic: str, payload: dict) -> None:
+        """Handle audio.sink.selected published by audio_manager.
+
+        Reopens the pacat stream on the newly selected sink if it changed.
+        """
+        sink = payload.get("sink", "default")
+        if sink == "default":
+            sink = None
+        if sink == self._selected_sink:
+            return
+        self.log.info(
+            "audio.sink.selected ch=%d: %r → %r — reopening stream",
+            self.CHANNEL_ID, self._selected_sink, sink,
+        )
+        self._selected_sink = sink
+        if self._proc is not None:
+            self._open_stream()
 
     def on_aa_session_shutdown(self, topic: str, payload: dict) -> None:
         self._session_id = 0
@@ -214,26 +227,6 @@ class AudioModule(BaseChannelModule):
         self._prebuffer_bytes = 0
         self._set_state("IDLE")
         self.log.info("AA session shutdown — ch=%d reset", self.CHANNEL_ID)
-
-    def on_set_volume(self, topic: str, payload: dict) -> None:
-        volume = payload.get("volume")
-        if not isinstance(volume, int) or not (0 <= volume <= 100):
-            self.log.warning(
-                "on_set_volume: invalid payload on ch=%d — expected {volume: 0-100}, got %r",
-                self.CHANNEL_ID, payload,
-            )
-            return
-        if self._proc is None:
-            self.log.warning("on_set_volume: pacat not running on ch=%d — ignoring", self.CHANNEL_ID)
-            return
-        try:
-            subprocess.run(
-                ["wpctl", "set-volume", "@DEFAULT_SINK@", f"{volume}%"],
-                check=True, timeout=1,
-            )
-            self.log.info("Volume ch=%d @DEFAULT_SINK@ → %d%%", self.CHANNEL_ID, volume)
-        except Exception as exc:
-            self.log.warning("on_set_volume: wpctl failed ch=%d — %s", self.CHANNEL_ID, exc)
 
     # ------------------------------------------------------------------
     # BaseChannelModule abstract interface
@@ -427,10 +420,14 @@ class AudioModule(BaseChannelModule):
 
     def _open_stream(self) -> None:
         self._close_stream()
-        device = self._config.get("audio_device", "default")
+        # Use the sink selected by audio_manager via audio.sink.selected bus event.
+        # None / "default" → let pacat use the PulseAudio default sink.
+        sink = self._selected_sink
         fmt = {8: "u8", 16: "s16le", 24: "s24le", 32: "s32le"}.get(self._bit_depth, "s16le")
-        candidates = [] if device == "default" else [device]
-        candidates.append(None)
+        candidates: list[str | None] = []
+        if sink and sink != "default":
+            candidates.append(sink)
+        candidates.append(None)  # PulseAudio/PipeWire default
         for candidate in candidates:
             cmd = [
                 "pacat", "--playback",
@@ -458,10 +455,7 @@ class AudioModule(BaseChannelModule):
                 return
             except Exception as exc:
                 self.log.warning("_open_stream: device=%r failed — %s", candidate, exc)
-        self.log.error(
-            "_open_stream: all candidates exhausted. Available sinks: %s",
-            _list_audio_devices(),
-        )
+        self.log.error("_open_stream: all candidates exhausted")
         self._proc = None
 
     def _close_stream(self) -> None:
@@ -600,43 +594,16 @@ class AudioModule(BaseChannelModule):
 
     def run(self) -> None:
         self.bus.subscribe("aa.session.shutdown", self.on_aa_session_shutdown)
-        self.bus.subscribe(
-            f"channel_{self.CHANNEL_ID}.set_volume",
-            self.on_set_volume,
-        )
+        self.bus.subscribe("audio.sink.selected", self.on_audio_sink_selected)
         super().run()
 
 
 # ---------------------------------------------------------------------------
-# Audio device discovery
+# Module-level helpers
 # ---------------------------------------------------------------------------
 
-def _list_audio_devices() -> list[str]:
-    try:
-        result = subprocess.run(
-            ["pactl", "list", "sinks", "short"],
-            capture_output=True, text=True, timeout=1,
-        )
-        devices = ["default"]
-        for line in result.stdout.splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 2:
-                name = parts[1].strip()
-                if name and name not in devices:
-                    devices.append(name)
-        return devices
-    except Exception:
-        return ["default"]
-
-
 def _normalise_audio_codec(raw: Any, audio_type: Any) -> int:
-    """Return a numeric MediaCodecType for the SDR audio config.
-
-    The AA AudioConfig proto used here has no codec field, so parsed SDR
-    configs often carry None/"" even when our schema mentions a codec.  In
-    that case Android Auto audio frames are treated as PCM, matching the
-    advertised sample rate / bit depth / channel count.
-    """
+    """Return a numeric MediaCodecType for the SDR audio config."""
     if isinstance(raw, int):
         return raw
     if isinstance(raw, str) and raw:
