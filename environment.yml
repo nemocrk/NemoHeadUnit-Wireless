@@ -42,9 +42,8 @@ dependencies:
   # base e py314.
   #
   # Decoder H264 disponibili dopo l'installazione:
-  #   avdec_h264   — FFmpeg SW decode       (da gst-plugins-ugly)
-  #                  NB: su conda-forge il pacchetto si chiama
-  #                  gst-plugins-ugly, NON gst-plugins-libav.
+  #   avdec_h264   — FFmpeg SW decode       (da gst-libav)
+  #                  NB: su conda-forge il pacchetto si chiama gst-libav.
   #   vaapih264dec — VA-API HW decode i965  (da gst-plugins-vaapi)
   #                  Stabile su Bay Trail con driver i965.
   #                  NB: usare vaapih264dec, NON vaapidecodebin
@@ -58,7 +57,7 @@ dependencies:
   #   export GST_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/gstreamer-1.0
   # -----------------------------------------------------------------------
   - gst-python            # gi.repository.Gst Python bindings (conda-forge)
-  - gst-plugins-ugly      # avdec_h264 — FFmpeg SW H264 decoder
+  - gst-libav             # avdec_h264 — FFmpeg SW H264 decoder
   - gst-plugins-vaapi     # vaapih264dec / vah264dec — VA-API HW H264 decoder
   - gst-plugins-bad       # h264parse, qsv encoder, ecc.
 
