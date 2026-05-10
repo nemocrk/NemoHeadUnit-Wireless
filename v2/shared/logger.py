@@ -1,12 +1,12 @@
 """
 NemoHeadUnit-Wireless v2 — Logger
-Per-module verbosity control — backed by logly (Rust async backend).
+Per-module verbosity control — backed by loguru (async enqueue backend).
 
 Usage:
     from shared.logger import get_logger
     log = get_logger("my_module")
     log.info("hello")
-    log.set_verbosity("DEBUG")   # str level name
+    log.set_verbosity("DEBUG")   # str level name or logging.DEBUG int
 
 Bus forwarding (optional, call once from main.py or any entry point):
     from shared.logger import attach_bus
@@ -14,14 +14,15 @@ Bus forwarding (optional, call once from main.py or any entry point):
     # All subsequent log calls on any Logger will also publish on log.entry
 """
 
-import logging  # kept only for LogLevel enum compatibility
+import logging  # kept only for LogLevel enum + set_verbosity int compatibility
 import os
 import subprocess
+import sys
 import threading
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
-from logly import logger as _root_logger
+from loguru import logger as _root_logger
 
 if TYPE_CHECKING:
     from shared.bus_client import BusClient
@@ -32,17 +33,21 @@ if TYPE_CHECKING:
 
 _DEFAULT_LEVEL: str = "DEBUG" if os.getenv("DEBUG") else "INFO"
 
-# Configure logly root once at import time.
-# async console output: the Rust backend batches writes so module threads
-# are never blocked on a StreamHandler.emit() call.
-_root_logger.configure(
+# Remove loguru's default stderr sink and replace with an async stdout sink.
+# enqueue=True means all writes happen in a background thread — module
+# threads are never blocked on I/O when calling log.info() etc.
+_root_logger.remove()
+_CONSOLE_SINK_ID: int = _root_logger.add(
+    sys.stdout,
     level=_DEFAULT_LEVEL,
-    color=True,
-    show_time=True,
-    show_module=True,
-    show_function=False,
-    show_filename=False,
-    show_lineno=False,
+    colorize=True,
+    format=(
+        "<green>{time:HH:mm:ss.SSS}</green> | "
+        "<level>{level: <8}</level> | "
+        "<cyan>{extra[module]:<22}</cyan> | "
+        "{message}"
+    ),
+    enqueue=True,   # async: write thread never blocks callers
 )
 
 # ---------------------------------------------------------------------------
@@ -59,7 +64,7 @@ class LogLevel(IntEnum):
     CRITICAL = logging.CRITICAL
 
 
-# Map stdlib int levels → logly string levels
+# Map stdlib int levels → loguru string levels
 _INT_TO_STR: dict[int, str] = {
     logging.DEBUG:    "DEBUG",
     logging.INFO:     "INFO",
@@ -70,66 +75,65 @@ _INT_TO_STR: dict[int, str] = {
 
 
 def _level_str(level: int | str) -> str:
-    """Normalise an int or string level to the logly string form."""
+    """Normalise an int or string level to the loguru string form."""
     if isinstance(level, str):
         return level.upper()
     return _INT_TO_STR.get(level, "INFO")
 
 
 # ---------------------------------------------------------------------------
-# Bus callback — registered once via attach_bus()
+# Bus sink — registered once via attach_bus()
 # ---------------------------------------------------------------------------
 
-_bus_callback_id: int | None = None
+_bus_sink_id: int | None = None
 
 
 def attach_bus(bus: "BusClient") -> None:
     """
-    Register a logly callback that publishes every record on the ZMQ bus
-    as a `log.entry` message.
+    Register a loguru sink that publishes every record on the ZMQ bus
+    as a ``log.entry`` message.
 
-    Safe to call multiple times — the previous callback is removed first.
+    The sink runs with ``enqueue=True`` so the ZMQ publish never blocks
+    the module thread that called log.info() / log.debug() etc.
+
+    Safe to call multiple times — the previous sink is removed first.
     Call this once after the ZMQ bus is connected (e.g. from main.py).
 
     Payload: {module: str, level: str, message: str, ts: float}
     """
-    global _bus_callback_id
+    global _bus_sink_id
 
-    # Remove previous callback if any
-    if _bus_callback_id is not None:
+    # Remove previous sink if any
+    if _bus_sink_id is not None:
         try:
-            _root_logger.remove_callback(_bus_callback_id)
+            _root_logger.remove(_bus_sink_id)
         except Exception:  # noqa: BLE001
             pass
-        _bus_callback_id = None
+        _bus_sink_id = None
 
-    def _bus_sink(record: dict) -> None:
+    def _bus_sink(message) -> None:  # loguru Message object
         if not getattr(bus, "_running", False):
             return
         try:
-            # logly timestamp is an ISO string; convert to float for
-            # compatibility with the existing log_viewer payload contract.
-            import datetime as _dt
-            ts_raw = record.get("timestamp", "")
-            try:
-                ts = _dt.datetime.fromisoformat(ts_raw).timestamp()
-            except Exception:  # noqa: BLE001
-                import time
-                ts = time.time()
+            r = message.record
             bus.publish("log.entry", {
-                "module":  record.get("module", "unknown"),
-                "level":   record.get("level",  "INFO").upper(),
-                "message": record.get("message", ""),
-                "ts":      ts,
+                "module":  r["extra"].get("module", r["name"]),
+                "level":   r["level"].name,
+                "message": r["message"],
+                "ts":      r["time"].timestamp(),
             })
         except Exception:  # noqa: BLE001
             pass  # never let bus errors break logging
 
-    _bus_callback_id = _root_logger.add_callback(_bus_sink)
+    _bus_sink_id = _root_logger.add(
+        _bus_sink,
+        level=_DEFAULT_LEVEL,
+        enqueue=True,   # ZMQ publish in background thread — never blocks callers
+    )
 
 
 # ---------------------------------------------------------------------------
-# Logger — thin proxy around a logly bound logger
+# Logger — thin proxy around a loguru bound logger
 # ---------------------------------------------------------------------------
 
 class Logger:
@@ -137,28 +141,26 @@ class Logger:
     Per-module logger with independent verbosity control.
     Each v2 module should obtain its instance via get_logger().
 
-    The underlying logly proxy is created via logger.bind(module=name),
-    which tags every record with the module name without spawning a new
-    root logger — all records still flow through the single Rust sink.
+    The underlying loguru proxy is created via logger.bind(module=name),
+    which tags every record with the module name.  All records flow
+    through the single async stdout sink (and optional bus sink).
     """
 
     def __init__(self, name: str, level: int = logging.INFO) -> None:
-        self.name  = name
+        self.name   = name
         self._proxy = _root_logger.bind(module=name)
-        # Level stored as int for set_verbosity() compatibility.
-        # Actual filtering is done by reconfiguring the logly root.
-        self.level = logging.DEBUG if os.getenv("DEBUG") else level
+        self.level  = logging.DEBUG if os.getenv("DEBUG") else level
 
     # ------------------------------------------------------------------
     # Verbosity control
     # ------------------------------------------------------------------
 
     def set_verbosity(self, level: int | str) -> None:
-        """Set this module's effective log level.
+        """Set the effective log level (reconfigures the global loguru root).
 
         Accepts stdlib int levels (logging.DEBUG etc.) or string names.
-        Note: logly controls level globally; this reconfigures the root.
-        For per-module filtering use the log_viewer UI filter instead.
+        Per-module filtering at the sink level is not supported by loguru's
+        design; use the log_viewer UI filter for runtime filtering.
         """
         if isinstance(level, int):
             self.level = level
@@ -166,7 +168,20 @@ class Logger:
         else:
             level_str  = level.upper()
             self.level = getattr(logging, level_str, logging.INFO)
-        _root_logger.configure(level=level_str)
+        # Update both sinks to the new level
+        _root_logger.remove(_CONSOLE_SINK_ID)
+        globals()["_CONSOLE_SINK_ID"] = _root_logger.add(
+            sys.stdout,
+            level=level_str,
+            colorize=True,
+            format=(
+                "<green>{time:HH:mm:ss.SSS}</green> | "
+                "<level>{level: <8}</level> | "
+                "<cyan>{extra[module]:<22}</cyan> | "
+                "{message}"
+            ),
+            enqueue=True,
+        )
 
     def get_verbosity(self) -> int:
         return self.level
@@ -202,7 +217,7 @@ class Logger:
 # ---------------------------------------------------------------------------
 
 class LoggerManager:
-    """Centralized registry of all v2 loggers."""
+    """Centralised registry of all v2 loggers."""
 
     _loggers: dict[str, Logger] = {}
 
@@ -233,14 +248,14 @@ class LoggerManager:
 def get_logger(name: str, level: int = logging.INFO, bus: "BusClient" = None) -> Logger:
     """Get or create a logger for the given module name.
 
-    If `bus` is provided, attach_bus() is called immediately so this
-    module's records are forwarded to the bus from the first log call.
-    Passing bus=None is valid — call attach_bus() separately at any time.
+    If ``bus`` is provided, :func:`attach_bus` is called immediately so
+    this module's records are forwarded to the bus from the first log call.
+    Passing ``bus=None`` is valid — call :func:`attach_bus` separately.
     """
-    logger = LoggerManager.get_logger(name, level)
+    logger_instance = LoggerManager.get_logger(name, level)
     if bus is not None:
         attach_bus(bus)
-    return logger
+    return logger_instance
 
 
 def set_verbosity(module_name: str, level: int) -> None:
