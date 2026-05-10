@@ -135,14 +135,13 @@ class AudioModule(BaseChannelModule):
         self._session_id: int = 0
         self._proc:      subprocess.Popen | None = None
         self._proc_lock: threading.Lock          = threading.Lock()
-        self._sink_input_index: int | None = None
         self._av_codec_ctx: Any | None = None
         self._av_codec:     Any | None = None
         self._media_debug_count: int = 0
         self._pcm_debug_count: int = 0
         # AAC codec_data (AudioSpecificConfig, 2 bytes) received via
-        # AV_MEDIA_INDICATION before actual audio frames.  Reset on
-        # StopIndication so a fresh one is expected if AA restarts.
+        # AV_MEDIA_INDICATION before actual audio frames.  Persists across
+        # StopIndication — reset only on aa.session.shutdown or _cleanup.
         self._aac_codec_data: bytes | None = None
         # Inline PCM prebuffer: accumulate _prebuffer_threshold bytes before
         # writing to pacat.stdin to avoid underrun on stream start.
@@ -227,50 +226,14 @@ class AudioModule(BaseChannelModule):
         if self._proc is None:
             self.log.warning("on_set_volume: pacat not running on ch=%d — ignoring", self.CHANNEL_ID)
             return
-        sink_input = self._resolve_sink_input()
-        if sink_input is None:
-            self.log.warning(
-                "on_set_volume: could not resolve sink-input for ch=%d pid=%d — ignoring",
-                self.CHANNEL_ID, self._proc.pid,
-            )
-            return
         try:
             subprocess.run(
-                ["pactl", "set-sink-input-volume", str(sink_input), f"{volume}%"],
-                check=True, timeout=2,
+                ["wpctl", "set-volume", "@DEFAULT_SINK@", f"{volume}%"],
+                check=True, timeout=1,
             )
-            self.log.info("Volume ch=%d sink-input=%d → %d%%", self.CHANNEL_ID, sink_input, volume)
+            self.log.info("Volume ch=%d @DEFAULT_SINK@ → %d%%", self.CHANNEL_ID, volume)
         except Exception as exc:
-            self.log.warning("on_set_volume: pactl failed ch=%d — %s", self.CHANNEL_ID, exc)
-
-    def _resolve_sink_input(self) -> int | None:
-        if self._sink_input_index is not None:
-            return self._sink_input_index
-        if self._proc is None:
-            return None
-        pid = self._proc.pid
-        for _ in range(5):
-            try:
-                result = subprocess.run(
-                    ["pactl", "list", "sink-inputs"],
-                    capture_output=True, text=True, timeout=3,
-                )
-                current_index: int | None = None
-                for line in result.stdout.splitlines():
-                    line = line.strip()
-                    if line.startswith("Sink Input #"):
-                        try:
-                            current_index = int(line.split("#")[1])
-                        except ValueError:
-                            current_index = None
-                    elif current_index is not None and f"application.process.id = \"{pid}\"" in line:
-                        self._sink_input_index = current_index
-                        return self._sink_input_index
-            except Exception as exc:
-                self.log.debug("_resolve_sink_input: pactl error — %s", exc)
-                return None
-            time.sleep(0.1)
-        return None
+            self.log.warning("on_set_volume: wpctl failed ch=%d — %s", self.CHANNEL_ID, exc)
 
     # ------------------------------------------------------------------
     # BaseChannelModule abstract interface
@@ -282,7 +245,6 @@ class AudioModule(BaseChannelModule):
 
     def on_channel_close(self, channel_id: int) -> None:
         self._session_id = 0
-        self._aac_codec_data = None
         self._prebuffer.clear()
         self._prebuffer_bytes = 0
         self._set_state("IDLE")
@@ -352,15 +314,18 @@ class AudioModule(BaseChannelModule):
 
     def _handle_stop_indication(self, body: bytes) -> None:
         self._session_id = 0
-        # Reset codec_data and prebuffer: a fresh codec_data frame is expected
-        # if AA resumes the stream after a stop.
-        self._aac_codec_data = None
+        # codec_data persists across StopIndication: AA reuses the same ASC
+        # when resuming the stream, so we keep it to avoid a missing-codec_data
+        # window if on_media_indication does not re-arrive.
+        # Reset only on aa.session.shutdown or _cleanup.
         self._prebuffer.clear()
         self._prebuffer_bytes = 0
         self._set_state("STOPPED")
         self.log.info(
-            "AVChannelStopIndication ch=%d — session_id/codec_data/prebuffer reset, state → STOPPED",
+            "AVChannelStopIndication ch=%d — session_id/prebuffer reset, state → STOPPED"
+            " (codec_data preserved: %s)",
             self.CHANNEL_ID,
+            self._aac_codec_data.hex() if self._aac_codec_data else "None",
         )
 
     def _handle_media_with_timestamp(self, body: bytes) -> None:
@@ -485,7 +450,6 @@ class AudioModule(BaseChannelModule):
                     stderr=subprocess.DEVNULL,
                 )
                 self._proc = proc
-                self._sink_input_index = None
                 self.log.info(
                     "pacat spawned: device=%r rate=%d channels=%d fmt=%s pid=%d name=NemoHU/ch%d",
                     candidate or "default", self._sample_rate, self._channel_count, fmt,
@@ -512,7 +476,6 @@ class AudioModule(BaseChannelModule):
             except Exception:
                 pass
             self._proc = None
-            self._sink_input_index = None
 
     def _write_audio(self, encoded: bytes) -> None:
         if not encoded:
