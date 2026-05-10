@@ -12,20 +12,40 @@ Bus forwarding (optional, call once from main.py or any entry point):
     from shared.logger import attach_bus
     attach_bus(bus)   # BusClient instance
     # All subsequent log calls on any Logger will also publish on log.entry
+
+Handler architecture:
+
+  Stdout sink (loguru, enqueue=True)
+    log.info() returns immediately — loguru's internal thread owns stdout.
+    Never blocks the calling module thread on I/O.
+
+  Bus sink (loguru callback + dedicated drain thread)
+    The loguru sink callback does only queue.put_nowait() — O(1), never blocks.
+    A single dedicated daemon thread drains the queue and calls
+    send_multipart() on its OWN ZMQ PUB socket, never shared with any
+    BusClient instance.  This eliminates the send_multipart race condition
+    that caused interleaved frames when two threads wrote to the same socket:
+      symptom: topic='log.entry' payload=b'config.get'  (wrong payload)
+               topic='config.get' payload=b'log.entry'  (wrong topic)
 """
 
+import json
 import logging  # kept only for LogLevel enum + set_verbosity int compatibility
 import os
+import queue
 import subprocess
 import sys
 import threading
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
+import zmq
 from loguru import logger as _root_logger
 
 if TYPE_CHECKING:
     from shared.bus_client import BusClient
+
+BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
 
 # ---------------------------------------------------------------------------
 # Global level — honoured by DEBUG env var
@@ -82,28 +102,38 @@ def _level_str(level: int | str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Bus sink — registered once via attach_bus()
+# Bus sink state — dedicated queue + drain thread, created by attach_bus()
 # ---------------------------------------------------------------------------
 
-_bus_sink_id: int | None = None
+_bus_sink_id:     int | None            = None
+_bus_queue:       queue.SimpleQueue     = queue.SimpleQueue()
+_bus_drain_thread: threading.Thread | None = None
+_bus_running:     bool                  = False
+_bus_zmq_ctx:     zmq.Context | None    = None
+_bus_zmq_pub:     zmq.Socket | None     = None
 
 
-def attach_bus(bus: "BusClient") -> None:
+def attach_bus(bus: "BusClient") -> None:  # noqa: ARG001  (bus param kept for API compat)
     """
-    Register a loguru sink that publishes every record on the ZMQ bus
-    as a ``log.entry`` message.
+    Set up the bus log sink.
 
-    The sink runs with ``enqueue=True`` so the ZMQ publish never blocks
-    the module thread that called log.info() / log.debug() etc.
+    Creates a DEDICATED ZMQ PUB socket (never shared with any BusClient)
+    and a single daemon drain thread that is the sole caller of
+    send_multipart().  The loguru sink callback only does queue.put_nowait()
+    — O(1), never blocks the module thread.
 
-    Safe to call multiple times — the previous sink is removed first.
-    Call this once after the ZMQ bus is connected (e.g. from main.py).
+    Safe to call multiple times — stops the previous drain thread first.
+    The ``bus`` parameter is kept for API compatibility but is no longer
+    used: the sink manages its own ZMQ connection.
 
-    Payload: {module: str, level: str, message: str, ts: float}
+    Call once after the ZMQ broker is running (e.g. from main.py).
     """
-    global _bus_sink_id
+    global _bus_sink_id, _bus_queue, _bus_drain_thread
+    global _bus_running, _bus_zmq_ctx, _bus_zmq_pub
 
-    # Remove previous sink if any
+    # ------------------------------------------------------------------
+    # Tear down previous sink if attach_bus() is called more than once
+    # ------------------------------------------------------------------
     if _bus_sink_id is not None:
         try:
             _root_logger.remove(_bus_sink_id)
@@ -111,24 +141,65 @@ def attach_bus(bus: "BusClient") -> None:
             pass
         _bus_sink_id = None
 
+    if _bus_running:
+        _bus_running = False
+        if _bus_drain_thread is not None:
+            _bus_drain_thread.join(timeout=1.0)
+        if _bus_zmq_pub is not None:
+            _bus_zmq_pub.close(linger=0)
+        if _bus_zmq_ctx is not None:
+            _bus_zmq_ctx.term()
+
+    # ------------------------------------------------------------------
+    # Fresh queue, dedicated ZMQ socket, drain thread
+    # ------------------------------------------------------------------
+    _bus_queue    = queue.SimpleQueue()
+    _bus_running  = True
+    _bus_zmq_ctx  = zmq.Context()
+    _bus_zmq_pub  = _bus_zmq_ctx.socket(zmq.PUB)
+    _bus_zmq_pub.setsockopt(zmq.SNDHWM, 5000)
+    _bus_zmq_pub.setsockopt(zmq.LINGER, 0)
+    _bus_zmq_pub.connect(BROKER_PUB_ADDR)
+
+    def _drain() -> None:
+        """Sole owner of _bus_zmq_pub — never races with any other thread."""
+        while _bus_running:
+            try:
+                payload = _bus_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                _bus_zmq_pub.send_multipart(
+                    [b"log.entry", json.dumps(payload).encode()],
+                    flags=zmq.NOBLOCK,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # never let bus errors break logging
+
+    _bus_drain_thread = threading.Thread(
+        target=_drain, daemon=True, name="BusLogSink-drain"
+    )
+    _bus_drain_thread.start()
+
+    # ------------------------------------------------------------------
+    # Loguru sink: only enqueues — never touches the ZMQ socket directly
+    # ------------------------------------------------------------------
     def _bus_sink(message) -> None:  # loguru Message object
-        if not getattr(bus, "_running", False):
-            return
         try:
             r = message.record
-            bus.publish("log.entry", {
+            _bus_queue.put_nowait({
                 "module":  r["extra"].get("module", r["name"]),
                 "level":   r["level"].name,
                 "message": r["message"],
                 "ts":      r["time"].timestamp(),
             })
         except Exception:  # noqa: BLE001
-            pass  # never let bus errors break logging
+            pass
 
     _bus_sink_id = _root_logger.add(
         _bus_sink,
         level=_DEFAULT_LEVEL,
-        enqueue=True,   # ZMQ publish in background thread — never blocks callers
+        enqueue=True,
     )
 
 
@@ -168,7 +239,7 @@ class Logger:
         else:
             level_str  = level.upper()
             self.level = getattr(logging, level_str, logging.INFO)
-        # Update both sinks to the new level
+        # Update console sink to the new level
         _root_logger.remove(_CONSOLE_SINK_ID)
         globals()["_CONSOLE_SINK_ID"] = _root_logger.add(
             sys.stdout,
@@ -279,20 +350,7 @@ def run_subprocess_and_log(
     check=False,
     **kwargs,
 ):
-    """Run a subprocess and log its stdout/stderr lines in real time.
-
-    Args:
-        logger: Logger instance used to emit subprocess output.
-        *popenargs: Positional arguments forwarded to subprocess.Popen.
-        input: Optional text input for the subprocess stdin.
-        capture_output: If True, captures and returns stdout + stderr.
-        timeout: Optional timeout in seconds.
-        check: If True, raises CalledProcessError on non-zero exit code.
-        **kwargs: Additional keyword arguments for subprocess.Popen.
-
-    Returns:
-        subprocess.CompletedProcess
-    """
+    """Run a subprocess and log its stdout/stderr lines in real time."""
     kwargs.pop("text", None)
     bufsize = kwargs.pop("bufsize", 1)
 
