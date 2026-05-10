@@ -26,6 +26,7 @@ dependencies:
   # GUI
   # -----------------------------------------------------------------------
   - pyqt6>=6.7           # Qt6 bindings + QtBusBridge
+  - pyopengl              # OpenGL bindings per _NV12GLWidget (GLSL renderer)
 
   # -----------------------------------------------------------------------
   # Bluetooth / DBus (system packages preferred; pip fallback below)
@@ -33,12 +34,28 @@ dependencies:
   - dbus-python           # Python DBus bindings for BluetoothManager
 
   # -----------------------------------------------------------------------
-  # Media (optional — GStreamer Python bindings)
-  # Install system GStreamer plugins separately:
-  #   sudo apt install gstreamer1.0-plugins-{base,good,bad,ugly} \
-  #                    gstreamer1.0-libav gstreamer1.0-tools
+  # Media — GStreamer stack
+  #
+  # gst-python porta il binding gi.repository.Gst ma NON i plugin codec.
+  # I tre pacchetti sotto portano nell'env conda gli stessi plugin
+  # disponibili di sistema, evitando il GST_PLUGIN_PATH mismatch tra
+  # base e py314.
+  #
+  # Decoder H264 disponibili dopo l'installazione:
+  #   avdec_h264   — FFmpeg SW decode       (da gst-plugins-libav)
+  #   vah264dec    — VA-API HW decode iHD   (da gst-plugins-vaapi)
+  #                  NB: usare iHD, NON i965 (i965 ha assert bug su Bay Trail)
+  #                  Impostare: LIBVA_DRIVER_NAME=iHD prima di avviare
+  #   h264parse    — già incluso in gst-plugins-bad
+  #
+  # Se preferisci restare sui plugin di sistema ed evitare la duplicazione,
+  # rimuovi i tre pacchetti sotto e imposta invece:
+  #   export GST_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/gstreamer-1.0
   # -----------------------------------------------------------------------
-  - gst-python            # gi.repository.Gst bindings (conda-forge)
+  - gst-python            # gi.repository.Gst Python bindings (conda-forge)
+  - gst-plugins-libav     # avdec_h264 — FFmpeg SW H264 decoder
+  - gst-plugins-vaapi     # vah264dec  — VA-API HW H264 decoder (iHD driver)
+  - gst-plugins-bad       # h264parse, qsv encoder, ecc.
 
   # -----------------------------------------------------------------------
   # Audio backend (channel_modules/audio)
