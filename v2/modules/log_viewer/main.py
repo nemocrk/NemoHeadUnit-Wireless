@@ -4,6 +4,13 @@ NemoHeadUnit-Wireless v2 — log_viewer module
 Standalone PyQt6 window that displays log entries published on the bus
 in real-time by any module.
 
+Performance note:
+  on_log_entry() accumulates records in a thread-safe deque.
+  A QTimer fires every LOG_FLUSH_INTERVAL_MS ms on the Qt main thread
+  and drains the deque with a single bulk-append into the QTextEdit.
+  This replaces the previous per-record QMetaObject.invokeMethod() call,
+  which caused UI stalls under high log throughput (12+ concurrent modules).
+
 Module contract:
   Name        : log_viewer
   Priority    : 2  (UI level)
@@ -19,8 +26,10 @@ Module contract:
 
 import sys
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 
 _HERE    = Path(__file__).parent
 _MODULES = _HERE.parent
@@ -31,9 +40,9 @@ if str(_V2) not in sys.path:
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
-from PyQt6.QtCore import Qt, QMetaObject, Q_ARG, pyqtSlot          # noqa: E402
-from PyQt6.QtGui import QColor, QTextCharFormat, QTextCursor, QFont # noqa: E402
-from PyQt6.QtWidgets import (                                        # noqa: E402
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot                        # noqa: E402
+from PyQt6.QtGui import QColor, QTextCharFormat, QTextCursor, QFont  # noqa: E402
+from PyQt6.QtWidgets import (                                         # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QTextEdit, QStatusBar,
 )
@@ -50,6 +59,10 @@ from shared.config_schema import field_int     # noqa: E402
 MODULE_NAME = "log_viewer"
 PRIORITY    = 2  # UI level
 
+# Flush interval: drain the record buffer and update the QTextEdit every N ms.
+# 250 ms gives ~4 redraws/s which is visually responsive without thrashing Qt.
+LOG_FLUSH_INTERVAL_MS = 250
+
 log = get_logger(MODULE_NAME)
 bus = BusClient(module_name=MODULE_NAME)
 cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
@@ -57,13 +70,11 @@ cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 # ---------------------------------------------------------------------------
 # Config schema
 # ---------------------------------------------------------------------------
-# config_manager derives defaults from field.default — no separate _DEFAULTS needed.
 
 _SCHEMA = {
     "max_lines": field_int(default=500, min=50, max=10000),
 }
 
-# In-RAM config: seed from schema defaults.
 _config: dict = {k: v.default for k, v in _SCHEMA.items()}
 
 # ---------------------------------------------------------------------------
@@ -77,6 +88,17 @@ _LEVEL_COLORS: dict[str, str] = {
     "ERROR":    "#e05050",
     "CRITICAL": "#ff4444",
 }
+
+_LEVEL_ORDER = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+
+# ---------------------------------------------------------------------------
+# Thread-safe record buffer
+# ---------------------------------------------------------------------------
+# on_log_entry() (bus thread) appends here.
+# _flush_buffer()  (Qt main thread, via QTimer) drains and renders.
+
+_record_buffer: deque[tuple[str, str, str, str]] = deque()
+_buffer_lock: Lock = Lock()
 
 # ---------------------------------------------------------------------------
 # Config callbacks
@@ -110,7 +132,7 @@ class LogViewerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Log Viewer — NemoHeadUnit v2")
-        self._line_count = 0
+        self._line_count  = 0
         self._filter_level = "ALL"
         self._build_ui()
 
@@ -160,46 +182,71 @@ class LogViewerWindow(QMainWindow):
         self.setStatusBar(self._status)
         self._status.showMessage("In attesa di system.start…")
 
-    @pyqtSlot(str)
-    def set_status(self, message: str):
-        self._status.showMessage(message)
+    # ------------------------------------------------------------------
+    # Timer-driven flush (Qt main thread only)
+    # ------------------------------------------------------------------
 
-    @pyqtSlot(str, str, str, str)
-    def append_log_line(self, ts: str, module: str, level: str, message: str):
-        _level_order = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+    @pyqtSlot()
+    def flush_log_buffer(self) -> None:
+        """Drain the record buffer and bulk-append lines to the QTextEdit.
 
-        if self._filter_level != "ALL":
-            try:
-                if _level_order.index(level) < _level_order.index(self._filter_level):
-                    return
-            except ValueError:
-                pass
+        Called by a QTimer every LOG_FLUSH_INTERVAL_MS ms on the Qt thread,
+        so no QMetaObject.invokeMethod() is needed per record.
+        """
+        with _buffer_lock:
+            if not _record_buffer:
+                return
+            batch = list(_record_buffer)
+            _record_buffer.clear()
 
-        color = _LEVEL_COLORS.get(level, "#d4d4d4")
-        line  = f"[{ts}] [{module:>20}] [{level:<8}] {message}"
+        max_lines = int(_config.get("max_lines", 500))
 
+        # Apply level filter and build text+format pairs
         cursor = self._log_area.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
 
-        fmt = QTextCharFormat()
-        fmt.setForeground(QColor(color))
-        cursor.setCharFormat(fmt)
-        cursor.insertText(line + "\n")
+        appended = 0
+        for ts, module, level, message in batch:
+            if self._filter_level != "ALL":
+                try:
+                    if _LEVEL_ORDER.index(level) < _LEVEL_ORDER.index(self._filter_level):
+                        continue
+                except ValueError:
+                    pass
 
-        self._line_count += 1
-        max_lines = int(_config.get("max_lines", 500))
+            color = _LEVEL_COLORS.get(level, "#d4d4d4")
+            line  = f"[{ts}] [{module:>20}] [{level:<8}] {message}"
+
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(color))
+            cursor.setCharFormat(fmt)
+            cursor.insertText(line + "\n")
+            appended += 1
+
+        self._line_count += appended
+
+        # Trim excess lines
         if self._line_count > max_lines:
+            excess = self._line_count - max_lines
             cursor.movePosition(QTextCursor.MoveOperation.Start)
             cursor.movePosition(
                 QTextCursor.MoveOperation.Down,
                 QTextCursor.MoveMode.KeepAnchor,
-                self._line_count - max_lines,
+                excess,
             )
             cursor.removeSelectedText()
             self._line_count = max_lines
 
         scrollbar = self._log_area.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+    # ------------------------------------------------------------------
+    # Slots
+    # ------------------------------------------------------------------
+
+    @pyqtSlot(str)
+    def set_status(self, message: str):
+        self._status.showMessage(message)
 
     def _on_clear_clicked(self):
         self._log_area.clear()
@@ -212,18 +259,11 @@ class LogViewerWindow(QMainWindow):
 
 
 # ---------------------------------------------------------------------------
-# Module-level window reference
+# Module-level window / app references
 # ---------------------------------------------------------------------------
 
 _window: LogViewerWindow | None = None
-
-
-def _invoke(slot_name: str, *args):
-    if _window is None:
-        return
-    q_args = [Q_ARG(type(a), a) for a in args]
-    QMetaObject.invokeMethod(_window, slot_name, Qt.ConnectionType.QueuedConnection, *q_args)
-
+_app:    QApplication    | None = None
 
 # ---------------------------------------------------------------------------
 # Bus handlers
@@ -242,9 +282,9 @@ def on_system_start(topic: str, payload: dict) -> None:
         return
 
     log.info(f"system.start priority={PRIORITY} — log_viewer ready")
-    # schema= is sufficient: config_manager derives defaults from field.default.
     cfg.get(schema=_SCHEMA)
-    _invoke("set_status", "Sistema pronto. In ascolto log…")
+    if _window is not None:
+        _window.set_status("Sistema pronto. In ascolto log…")
 
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
@@ -255,31 +295,34 @@ def on_system_start(topic: str, payload: dict) -> None:
 
 def on_system_stop(topic: str, payload: dict) -> None:
     log.info("system.stop — log_viewer exiting")
-    _invoke("set_status", "Sistema in arresto…")
+    if _window is not None:
+        _window.set_status("Sistema in arresto…")
     bus.stop()
-    # _app.quit() must be called from the Qt main thread.
-    # Using invokeMethod with QueuedConnection ensures it is dispatched
-    # onto the event loop, regardless of which thread receives system.stop.
-    if _app:
-        QMetaObject.invokeMethod(_app, "quit", Qt.ConnectionType.QueuedConnection)
+    if _app is not None:
+        from PyQt6.QtCore import QMetaObject, Qt as _Qt
+        QMetaObject.invokeMethod(_app, "quit", _Qt.ConnectionType.QueuedConnection)
 
 
 def on_log_entry(topic: str, payload: dict) -> None:
+    """Bus callback — runs on the bus thread.
+
+    Records are appended to the shared deque and rendered in bulk by
+    LogViewerWindow.flush_log_buffer() on the Qt main thread every
+    LOG_FLUSH_INTERVAL_MS ms.
+    """
     raw_ts  = payload.get("ts", time.time())
     module  = str(payload.get("module", "unknown"))
-    level   = str(payload.get("level", "INFO")).upper()
+    level   = str(payload.get("level",  "INFO")).upper()
     message = str(payload.get("message", ""))
     ts_str  = datetime.fromtimestamp(raw_ts).strftime("%H:%M:%S.%f")[:-3]
 
-    _invoke("append_log_line", ts_str, module, level, message)
+    with _buffer_lock:
+        _record_buffer.append((ts_str, module, level, message))
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-
-_app: QApplication | None = None
-
 
 def run() -> None:
     global _app, _window
@@ -293,14 +336,20 @@ def run() -> None:
     bus.subscribe("system.stop",         on_system_stop)
     bus.subscribe("log.entry",           on_log_entry)
 
-    bus_thread = bus.start(blocking=False)
+    bus.start(blocking=False)
     time.sleep(0.05)
     on_system_readytostart()
 
     _app = QApplication(sys.argv)
     _window = LogViewerWindow()
-    _window.apply_default_geometry(_app)  # right half, full height
+    _window.apply_default_geometry(_app)
     _window.show()
+
+    # QTimer drives the buffer flush on the Qt main thread.
+    flush_timer = QTimer()
+    flush_timer.setInterval(LOG_FLUSH_INTERVAL_MS)
+    flush_timer.timeout.connect(_window.flush_log_buffer)
+    flush_timer.start()
 
     log.info("log_viewer window open")
     sys.exit(_app.exec())
