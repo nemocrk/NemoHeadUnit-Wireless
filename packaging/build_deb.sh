@@ -249,7 +249,9 @@ dpkg-deb --info "${OUTPUT_DIR}/${DEB_FILENAME}"
 
 echo
 echo "--- dpkg-deb --contents (first 40 lines) ---"
-dpkg-deb --contents "${OUTPUT_DIR}/${DEB_FILENAME}" | head -n 40
+# Usa una subshell con set +o pipefail per evitare il "Broken pipe"
+# che dpkg-deb emette quando head chiude la pipe prima della fine.
+{ dpkg-deb --contents "${OUTPUT_DIR}/${DEB_FILENAME}" || true; } | head -n 40
 
 # ---------------------------------------------------------------------------
 # Done
