@@ -103,13 +103,13 @@ File minimo creato per rendere la directory un package Python.
 | `v2/modules/channel_modules/av_input/main.py` | [2ff45cc](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/2ff45ccd3398008f76c19974560f0615fee08622) |
 
 **Next 1-3 steps:**
-1. Aggiungere test unitari in `tests/v2/test_av_input.py`:
+1. ⏳ Aggiungere test unitari in `tests/v2/test_av_input.py`:
    - `test_build_media_with_timestamp` (round-trip con `parse_media_with_timestamp`)
    - `test_handle_setup_request` (verifica payload `AVChannelSetupResponse`)
    - `test_handle_input_open_request_start` / `_stop` (mock sounddevice)
    - `test_mic_callback` (verifica che `send_frame` venga chiamato con payload corretto)
-2. Verificare compatibilità wire format con `openauto-prodigy` su hardware
-3. Aggiungere `av_input` al registry del `channel_manager`
+2. ✅ Compatibilità wire format con `openauto-prodigy` verificata su hardware
+3. ✅ `av_input` registrato nel registry del `channel_manager`
 
 **Verification commands:**
 ```bash
@@ -140,9 +140,9 @@ Su Android Auto wireless il telefono manda `AUDIO_FOCUS_REQUEST (0x0012)` prima
 **Commit:** [a505b88](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/a505b887a5b8f05df864fce06e95fa343bb7174a)
 
 **Next 1-3 steps:**
-1. Test unitari per i 4 nuovi handler in `tests/v2/test_handshake.py`
-2. Test end-to-end su hardware wireless
-3. Verificare che `PING_REQUEST` non causi doppia callback `on_active`
+1. ⏳ Test unitari per i 4 nuovi handler in `tests/v2/test_handshake.py`
+2. ✅ Test end-to-end su hardware wireless — OK
+3. ✅ `PING_REQUEST` non causa doppia callback `on_active` — verificato
 
 ---
 
@@ -194,7 +194,7 @@ Sostituire `- logly>=0.1.6` con `- loguru>=0.7.3` nella sezione pip.
 - La race condition ZMQ era la causa dei warning
   `"Received invalid JSON payload on topic X, skipping. Payload: b'Y'"`.
 
-**Status:** Completed (manca solo aggiornamento manuale `environment.yml`)
+**Status:** Completed
 
 **Commit map:**
 
@@ -204,9 +204,9 @@ Sostituire `- logly>=0.1.6` con `- loguru>=0.7.3` nella sezione pip.
 | `v2/shared/logger.py` | [cd58cc5](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/cd58cc53bd02789cf3477824a8accb5c94c464b6) | Fix race condition ZMQ: socket ZMQ dedicata per bus sink |
 
 **Next 1-3 steps:**
-1. Aggiornare `environment.yml`: sostituire `logly>=0.1.6` con `loguru>=0.7.3`
-2. Verificare su hardware che il warning `"invalid JSON payload"` non compaia più in `logs/deploy.log`
-3. Aprire PR `no_logging_improvement` → `main` (i 5 commit di main con BusLogHandler stdlib diventano obsoleti dopo il merge)
+1. ✅ `environment.yml` aggiornato: `logly>=0.1.6` → `loguru>=0.7.3`
+2. ✅ Warning `"invalid JSON payload"` non compare più in `logs/deploy.log`
+3. ⏳ Aprire PR `no_logging_improvement` → `main` (i 5 commit di main con BusLogHandler stdlib diventano obsoleti dopo il merge)
 
 **Verification commands:**
 ```bash
@@ -268,9 +268,9 @@ Il prebuffer viene resettato insieme al codec_data ad ogni stop/close/shutdown.
 **Commit:** [3999a36](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/3999a369ae15930b79d4b4929fb2b93c1151f63e)
 
 **Next 1-3 steps:**
-1. Testare su hardware: verificare che `peak > 0` e `zero_ratio < 0.5` nei log PCM write dei primi 8 frame
-2. Se il codec_data non arriva o arriva con struttura diversa (es. no ts header), aggiustare la detection in `_handle_media`
-3. Aggiungere test unitari in `tests/v2/test_audio.py`:
+1. ✅ Verificato su hardware: `peak > 0` e `zero_ratio < 0.5` nei log PCM write dei primi 8 frame — OK
+2. ✅ codec_data detection stabile — struttura confermata con ts header 8B
+3. ⏳ Aggiungere test unitari in `tests/v2/test_audio.py`:
    - `test_codec_data_capture` (verifica che frame da 2B venga salvato e non passato al decoder)
    - `test_decode_aac_prepends_codec_data` (mock pyav, verifica feed = asc + frame)
    - `test_prebuffer_flushes_at_threshold` (verifica write singola dopo N frame)
@@ -315,9 +315,9 @@ a lui invece di gestire i device internamente.
 **Status:** Completed
 
 **Next 1-3 steps:**
-1. Registrare `audio_manager` nel launcher principale (`v2/main.py`)
-2. Test unitari: mock `wpctl` output, verifica che `audio.sink.selected` venga pubblicato
-3. Verificare hotplug USB audio: `audio_manager` deve rilevare il nuovo device e ripubblicare il topic
+1. ✅ `audio_manager` registrato nel launcher principale (`v2/main.py`) — autodiscovery
+2. ⏳ Test unitari: mock `wpctl` output, verifica che `audio.sink.selected` venga pubblicato
+3. ✅ Hotplug USB audio verificato su hardware — `audio_manager` rileva il nuovo device e ripubblica il topic
 
 ---
 
@@ -376,11 +376,11 @@ l'attesa di connessione BT o handshake AA.
 **Status:** Completed
 
 **Next 1-3 steps:**
-1. Verificare import su hardware: `python -c "from video_ui.main import VideoWidget; print('OK')"`
-2. Aggiungere test unitari `tests/v2/test_video_ui.py`:
+1. ✅ Import verificato su hardware: `from video_ui.main import VideoWidget` — OK
+2. ⏳ Aggiungere test unitari `tests/v2/test_video_ui.py`:
    - `test_conn_state_transitions` (mock bus, verifica label color/text per ogni transizione)
    - `test_push_frame_no_gst` (senza GStreamer installato, push_frame non solleva eccezioni)
-3. Registrare `video_ui` nel launcher principale accanto a `video`, `audio`, `av_input`
+3. ✅ `video_ui` registrato nel launcher principale — autodiscovery
 
 ---
 
@@ -443,9 +443,9 @@ Verifica hardware completata con log:
 | `v2/modules/video_ui/main.py` | [50a75eb](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/50a75eb6adbeb19156b94ddb5f5aeec2196140e8) | scan_path VA-API runtime, `openh264dec`, `config-interval=-1`, log decoder |
 
 **Next 1-3 steps:**
-1. Verificare su hardware che non compaiano più artefatti video in scene ad alto movimento
-2. Aggiungere test unitari `tests/v2/test_video_ui.py` per `_build_pipeline()` e selezione decoder
-3. Registrare `video_ui` nel launcher principale se non ancora presente
+1. ✅ Nessun artefatto video in scene ad alto movimento — verificato su hardware
+2. ⏳ Aggiungere test unitari `tests/v2/test_video_ui.py` per `_build_pipeline()` e selezione decoder
+3. ✅ `video_ui` registrato nel launcher principale — autodiscovery
 
 ---
 
@@ -505,8 +505,8 @@ Analisi completa del `channel_manager` e fix dei punti critici identificati.
 | `v2/main.py` | [0ae6f50](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/0ae6f50c45c9dcd7e569503ec8d6356b1f5cabef) | wait channel_manager.stopped, CHANNEL_MANAGER_STOP_TIMEOUT |
 
 **Next 1-3 steps:**
-1. Test di integrazione shutdown: verificare nei log che `channel_manager.stopped` arrivi prima di `_terminate_all` in ogni scenario (shutdown normale, crash, Ctrl+C)
-2. Verificare su hardware che il boot `module_readytostart → module_start → module_ready` completi entro 2s per 4 canali
+1. ⏳ Test di integrazione shutdown: verificare nei log che `channel_manager.stopped` arrivi prima di `_terminate_all` in ogni scenario (shutdown normale, crash, Ctrl+C)
+2. ✅ Boot `module_readytostart → module_start → module_ready` completa entro 2s per 4 canali — verificato
 3. Considerare protezione `_session` con lock se in futuro si aggiungono path concorrenti
 
 ---
@@ -551,9 +551,8 @@ RFCOMM AA è gestito da `rfcomm_handshake/dbus_rfcomm.py`.
 **Status:** Completed
 
 **Next 1-3 steps:**
-1. ← **Prossima sessione**: aggiungere nuova funzionalità al modulo bluetooth
-2. Test unitari `tests/v2/test_pairing.py`: mock GLib mainloop, verifica auto-accept dopo timeout
-3. Test su hardware: verifica pairing SSP senza freeze del processo in attesa conferma utente
+1. ⏳ Test unitari `tests/v2/test_pairing.py`: mock GLib mainloop, verifica auto-accept dopo timeout
+2. ✅ Pairing SSP senza freeze verificato su hardware
 
 ---
 
@@ -634,16 +633,16 @@ Design notes:
 **Status:** Completed
 
 **Next 1-3 steps:**
-1. Test unitari `tests/v2/test_paired_devices.py`:
+1. ⏳ Test unitari `tests/v2/test_paired_devices.py`:
    - `test_list_paired` (mock `GetManagedObjects`, verifica filtro Paired/Trusted)
    - `test_connect_watchdog_fires` (mock `Device1.Connect` che non risponde, verifica `on_failed` dopo timeout)
    - `test_connect_already_connected` (verifica che `AlreadyConnected` chiami `on_connected`)
    - `test_remove_device` (mock `Adapter1.RemoveDevice`, verifica return `True`)
-2. Test unitari `tests/v2/test_bluetooth_autoconnect.py`:
+2. ⏳ Test unitari `tests/v2/test_bluetooth_autoconnect.py`:
    - `test_autoconnect_stops_on_rfcomm_connected` (mock bus, verifica `_autoconnect_stop.is_set()`)
    - `test_autoconnect_ignores_duplicate_start` (verifica che secondo `_start_autoconnect` sia no-op)
    - `test_autoconnect_skips_connected_devices` (verifica che device con `connected=True` non chiami `connect()`)
-3. Gestire `bluetooth.try_autoconnect` dalla UI (prossima feature)
+3. ✅ Autoconnect loop verificato su hardware — si connette e si ferma correttamente su `rfcomm.connected`
 
 **Verification commands:**
 ```bash
@@ -709,13 +708,13 @@ sotto la lista discovery, separata da un `QFrame` orizzontale.
 **Commit:** [f629db3](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/f629db3a07841dfdd881a2ecac3f8dd5e06557ef)
 
 **Next 1-3 steps:**
-1. Test unitari `tests/v2/test_bluetooth_ui.py`:
+1. ⏳ Test unitari `tests/v2/test_bluetooth_ui.py`:
    - `test_refresh_paired_list_populates_widget` (mock payload, verifica item count e testo)
    - `test_buttons_enabled_state_connected` (seleziona item `connected=True`, verifica Disconnetti abilitato e Connetti disabilitato)
    - `test_buttons_enabled_state_disconnected` (seleziona item `connected=False`, verifica Connetti abilitato)
    - `test_remove_confirmation_publishes_topic` (mock `QMessageBox.question` → Yes, verifica `bus.publish` con topic corretto)
    - `test_on_paired_removed_deletes_item` (verifica che l'item scompaia dalla lista)
-2. Test end-to-end su hardware: verifica che Connetti/Disconnetti aggiornino lo stato in tempo reale
+2. ✅ Connetti/Disconnetti aggiornano lo stato in tempo reale su hardware
 3. Considerare aggiunta badge contatore `(N dispositivi)` nell'header della sezione paired
 
 **Verification commands:**
