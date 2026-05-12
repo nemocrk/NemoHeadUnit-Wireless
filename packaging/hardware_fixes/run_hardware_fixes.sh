@@ -5,6 +5,10 @@
 #   1. Esegue detect_cmd  — se exit 0, la piattaforma è riconosciuta
 #   2. Esegue fix_script  — path relativo alla directory di questo script
 #
+# Formato registry.conf:
+#   <detect_cmd> :: <fix_script>
+#   (il separatore '::' permette pipe arbitrari in detect_cmd)
+#
 # Uso:
 #   sudo bash packaging/hardware_fixes/run_hardware_fixes.sh
 #
@@ -30,11 +34,16 @@ echo -e "${CYAN}[hw-fix] Rilevamento piattaforma hardware...${NC}"
 
 MATCH_COUNT=0
 
-while IFS='|' read -r detect_cmd fix_script; do
-    # Salta righe vuote e commenti
-    detect_cmd="$(echo "$detect_cmd" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    fix_script="$(echo "$fix_script" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-    [[ -z "$detect_cmd" || "$detect_cmd" == \#* ]] && continue
+# Leggi le righe non-commento tramite awk che splitta su '::'
+# Output: detect_cmd<TAB>fix_script
+while IFS=$'\t' read -r detect_cmd fix_script; do
+    # strip spazi residui
+    detect_cmd="${detect_cmd#"${detect_cmd%%[![:space:]]*}"}"
+    detect_cmd="${detect_cmd%"${detect_cmd##*[![:space:]]}"}"  
+    fix_script="${fix_script#"${fix_script%%[![:space:]]*}"}"
+    fix_script="${fix_script%"${fix_script##*[![:space:]]}"}"  
+
+    [[ -z "$detect_cmd" ]] && continue
     [[ -z "$fix_script" ]] && continue
 
     # Esegui detect_cmd
@@ -52,7 +61,11 @@ while IFS='|' read -r detect_cmd fix_script; do
         chmod +x "$FIX_PATH"
         bash "$FIX_PATH"
     fi
-done < <(grep -v '^[[:space:]]*#' "$REGISTRY" | grep -v '^[[:space:]]*$')
+done < <(
+    grep -v '^[[:space:]]*#' "$REGISTRY" \
+    | grep -v '^[[:space:]]*$' \
+    | awk -F '::' '{ print $1 "\t" $2 }'
+)
 
 if [ $MATCH_COUNT -eq 0 ]; then
     echo -e "${CYAN}[hw-fix] Nessuna piattaforma specifica rilevata — nessun fix necessario.${NC}"
