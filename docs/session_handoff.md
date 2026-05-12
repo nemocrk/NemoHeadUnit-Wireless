@@ -346,3 +346,68 @@ l'attesa di connessione BT o handshake AA.
    - `test_conn_state_transitions` (mock bus, verifica label color/text per ogni transizione)
    - `test_push_frame_no_gst` (senza GStreamer installato, push_frame non solleva eccezioni)
 3. Registrare `video_ui` nel launcher principale accanto a `video`, `audio`, `av_input`
+
+---
+
+## 2026-05-12 - video_ui decoder probe estesa + env fix + log decoder scelto
+
+**What changed:**
+
+### 1. `environment.yml` — fix dipendenze decoder compatibili con conda-forge
+
+| Aspetto | Prima | Dopo |
+|---|---|---|
+| VA-API in conda | `gst-plugins-vaapi` | rimosso (non esiste su conda-forge) |
+| Decoder SW | `avdec_h264` | `avdec_h264` + `openh264dec` |
+| Pacchetti env | `gst-libav`, `gst-plugins-bad` | `gst-libav`, `gst-plugins-bad`, `openh264` |
+
+### 2. `v2/modules/video_ui/main.py` — probe decoder estesa
+
+Nuova priorità decoder runtime:
+1. `vaapih264dec` — VA-API HW i965
+2. `vah264dec` — VA-API HW iHD
+3. `openh264dec` — Cisco SW decoder
+4. `avdec_h264` — FFmpeg SW fallback
+
+Aggiunto `_try_load_system_vaapi()` che usa `Gst.Registry.scan_path()` per caricare
+`vaapih264dec` dai plugin GStreamer di sistema (`/usr/lib/*/gstreamer-1.0`) anche
+quando il decoder non è presente nell'env conda.
+
+### 3. Anti-artefatti residui
+
+`h264parse` ora usa `config-interval=-1`, così reinserisce SPS/PPS prima di ogni
+IDR frame. Dopo qualsiasi drop della queue leaky il decoder riceve un IDR completo
+si risincronizza immediatamente senza macrobloc corrotti.
+
+### 4. Log esplicito decoder scelto
+
+All'avvio `video_ui` logga il decoder selezionato, il tipo HW/SW e il path di
+caricamento se VA-API arriva dai plugin di sistema.
+
+Verifica hardware completata con log:
+```text
+[VIDEO DECODER] VA-API HW i965 (vaapih264dec) (HW VA-API) — caricato da sistema: /usr/lib/x86_64-linux-gnu/gstreamer-1.0
+```
+
+**Why:**
+- `gst-plugins-vaapi` in `environment.yml` rompeva `conda env update` con
+  `PackagesNotFoundError`.
+- Bay Trail/i965 richiede `vaapih264dec`, mentre `vaapidecodebin` è instabile
+  per uso DMA-buf sul driver i965.
+- Il log esplicito del decoder serve per diagnosi immediata in deploy.
+- `config-interval=-1` elimina gli artefatti dopo i drop intenzionali della
+  queue leaky, privilegiando frame skip pulito rispetto a macrobloc corrotti.
+
+**Status:** Completed
+
+**Commit map:**
+
+| File | Commit | Descrizione |
+|---|---|---|
+| `environment.yml` | [c000777](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/c0007774c3a87bfe09fe1ed259afbde36975b3b8) | Rimuove `gst-plugins-vaapi`, aggiunge `openh264`, aggiorna docs env |
+| `v2/modules/video_ui/main.py` | [50a75eb](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/50a75eb6adbeb19156b94ddb5f5aeec2196140e8) | scan_path VA-API runtime, `openh264dec`, `config-interval=-1`, log decoder |
+
+**Next 1-3 steps:**
+1. Verificare su hardware che non compaiano più artefatti video in scene ad alto movimento
+2. Aggiungere test unitari `tests/v2/test_video_ui.py` per `_build_pipeline()` e selezione decoder
+3. Registrare `video_ui` nel launcher principale se non ancora presente
