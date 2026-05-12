@@ -6,7 +6,7 @@ Responsibilities:
   - Retrieve the default Adapter1 proxy
   - Register HFP AG, HSP HS profiles via ProfileManager1
 
-Note: AA RFCOMM profile (AA_UUID) is registered by RfcommListener in rfcomm.py
+Note: AA RFCOMM profile (AA_UUID) is registered by rfcomm_handshake/dbus_rfcomm.py
       as a proper Profile1 D-Bus object so BlueZ can deliver NewConnection() fd.
 
 This module has NO bus (ZMQ) dependency — it is a plain helper
@@ -27,7 +27,6 @@ if not os.environ.get("DBUS_SYSTEM_BUS_ADDRESS"):
 
 HFP_UUID = "0000111e-0000-1000-8000-00805f9b34fb"
 HSP_UUID = "00001108-0000-1000-8000-00805f9b34fb"
-# AA_UUID is owned by rfcomm.py — do not register here to avoid duplicate UUID error.
 
 RFCOMM_CHANNEL = 8
 
@@ -118,7 +117,7 @@ class BluezAdapter:
     def register_profiles(self) -> bool:
         """Register HFP AG and HSP HS profiles.
 
-        AA RFCOMM profile is registered separately by RfcommListener
+        AA RFCOMM profile is registered separately by rfcomm_handshake/dbus_rfcomm.py
         as a Profile1 D-Bus object so BlueZ delivers NewConnection() fd.
 
         If a profile UUID is already registered (e.g. after an unclean
@@ -160,8 +159,7 @@ class BluezAdapter:
         """Make adapter discoverable. timeout=0 → permanent."""
         if not self._initialized:
             return
-        i = 0
-        while i < 3:
+        for attempt in range(3):
             try:
                 import dbus
                 props = dbus.Interface(
@@ -171,18 +169,19 @@ class BluezAdapter:
                 props.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(enabled))
                 props.Set("org.bluez.Adapter1", "DiscoverableTimeout", dbus.UInt32(timeout))
                 log.info(f"Adapter discoverable={enabled} timeout={timeout}")
-                i = 3
+                return
             except Exception as e:
-                i += 1
-                if i == 3:
+                if attempt < 2:
+                    time.sleep(0.5)
+                else:
                     log.error(f"set_discoverable failed: {e}")
+
     def set_name(self, name: str) -> None:
         """Set the Bluetooth adapter alias (visible name during discovery)."""
         if not self._initialized:
             log.warning("set_name called before init()")
             return
-        i = 0
-        while i < 3:
+        for attempt in range(3):
             try:
                 import dbus
                 props = dbus.Interface(
@@ -191,11 +190,13 @@ class BluezAdapter:
                 )
                 props.Set("org.bluez.Adapter1", "Alias", dbus.String(name))
                 log.info(f"Adapter name set to '{name}'")
-                i = 3
+                return
             except Exception as e:
-                i += 1
-                if i == 3:
+                if attempt < 2:
+                    time.sleep(0.5)
+                else:
                     log.error(f"set_name failed: {e}")
+
     def get_adapter_address(self) -> str:
         """Return the local adapter MAC address."""
         if not self._initialized:
@@ -245,11 +246,11 @@ class BluezAdapter:
             time.sleep(1.5)
             # Power on
             props.Set("org.bluez.Adapter1", "Powered", dbus.Boolean(True))
-            
+
             # Restore basic settings
             time.sleep(0.5)
             self.register_profiles()
-            
+
             log.info("Bluetooth adapter reset complete")
             return True
         except Exception as e:
