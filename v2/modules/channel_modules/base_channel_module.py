@@ -8,13 +8,14 @@ This class enforces the v2 module contract (boot protocol + bus lifecycle)
 so that concrete channel modules only need to implement channel-specific logic.
 
 ---
-Boot protocol (inherited from v2 template convention):
+Boot protocol (mirrors v2/main.py pattern, prefix: channel_manager):
 
-  main → channel_manager.module_readytostart
-  module → channel_manager.module_ready  {name, priority}
-  main → channel_manager.module_start {priority: N}
-  module → channel_manager.module_ready         {name, priority}   ← emitted lazily
-  main → channel_manager.module_stop
+  channel_manager → channel_manager.module_readytostart   (broadcast)
+  module          → channel_manager.module_ready_to_start  {name, priority}
+  channel_manager → channel_manager.module_start           {priority: N}
+  module          → channel_manager.module_ready           {name, priority}  ← emitted lazily
+  channel_manager → channel_manager.module_stop            {}
+  module          → channel_manager.module_stopped         {name}            ← ACK before exit
 
 channel_manager.module_ready is emitted only when ALL of the following are true:
   1. _init() has completed
@@ -239,16 +240,17 @@ class BaseChannelModule(ABC):
     # ------------------------------------------------------------------
 
     def _on_channel_manager_module_readytostart(self) -> None:
-        self.log.info(f"channel_manager.module_ready_to_start — announcing priority {self.PRIORITY}")
+        self.log.info(f"channel_manager.module_readytostart — announcing priority {self.PRIORITY}")
         self.bus.publish("channel_manager.module_ready_to_start", {
             "name":     self.MODULE_NAME,
             "priority": self.PRIORITY,
         })
 
     def _on_channel_manager_module_start(self, topic: str, payload: dict) -> None:
-        if payload.get("name") != self.MODULE_NAME:
+        # Filter by priority level — mirrors main.py system.start pattern.
+        if payload.get("priority") != self.PRIORITY:
             return
-        self.log.info(f"channel_manager.module_start name={self.MODULE_NAME} priority={self.PRIORITY} — initialising...")
+        self.log.info(f"channel_manager.module_start priority={self.PRIORITY} — initialising {self.MODULE_NAME}...")
         schema = self.get_schema()
         if schema:
             self.cfg.get(schema=schema)
@@ -259,6 +261,9 @@ class BaseChannelModule(ABC):
     def _on_channel_manager_module_stop(self, topic: str, payload: dict) -> None:
         self.log.info("channel_manager.module_stop — cleaning up...")
         self._cleanup()
+        # ACK before stopping the bus so channel_manager can coordinate shutdown.
+        self.bus.publish("channel_manager.module_stopped", {"name": self.MODULE_NAME})
+        self.log.info(f"channel_manager.module_stopped published for {self.MODULE_NAME}")
         self.bus.stop()
 
     # ------------------------------------------------------------------
