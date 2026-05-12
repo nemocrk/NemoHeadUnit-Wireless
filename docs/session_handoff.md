@@ -291,7 +291,7 @@ grep "PCM write.*peak" logs/deploy.log  # peak deve essere > 0
 **What changed:**
 
 | File | Commit | Descrizione |
-|---|---|---|
+|---|---|
 | `v2/modules/channel_modules/video/main.py` | [6999c32](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/6999c3263d90c1af0d4690fb7f1836942b6f5857) | `publish_frames` default `False` → `True` (video_ui richiede frame sul bus) |
 | `v2/modules/video_ui/__init__.py` | [67ab91e](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/67ab91e87b87d276f2ec920c7244131378b0fd83) | Package scaffold |
 | `v2/modules/video_ui/main.py` | [1500244](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/15002444b5cd2a8fe43430f63c1ac9a6e616afbb) | Implementazione completa |
@@ -411,3 +411,65 @@ Verifica hardware completata con log:
 1. Verificare su hardware che non compaiano più artefatti video in scene ad alto movimento
 2. Aggiungere test unitari `tests/v2/test_video_ui.py` per `_build_pipeline()` e selezione decoder
 3. Registrare `video_ui` nel launcher principale se non ancora presente
+
+---
+
+## 2026-05-12 - channel_manager: analisi + fix boot/shutdown
+
+**What changed:**
+
+Analisi completa del `channel_manager` e fix dei punti critici identificati.
+
+### Decisioni prese durante l'analisi
+
+| # | Decisione | Motivazione |
+|---|---|---|
+| A | `CHILDREN_READYTOSTART_WINDOW = 5s` | Tempo raccolta `module_ready_to_start` da tutti i child |
+| B | `sleep(0.3)` → `sleep(0.5)` in `shutdown()` | Osservato cleanup ~130ms; margine di sicurezza aumentato |
+| C | Nessuna modifica — doppio cleanup su `system.stop` non esiste | `aa.session.shutdown` e `system.stop` sono path mutuamente esclusivi |
+| D | Boot protocol allineato a `v2/main.py` con prefix `channel_manager` | Coerenza architetturale |
+
+### Modifiche applicate
+
+**`v2/main.py`** — [commit 0ae6f50](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/0ae6f50c45c9dcd7e569503ec8d6356b1f5cabef)
+- Aggiunta costante `CHANNEL_MANAGER_STOP_TIMEOUT = 5.0s`
+- Aggiunta funzione `_wait_channel_manager_stopped(timeout)`: sottoscrive `channel_manager.stopped`, aspetta max 5s, fall-through su timeout
+- `_start_shutdown_listener`: sostituisce `time.sleep(0.5)` con `_wait_channel_manager_stopped()` prima di `_terminate_all()`
+- Log esplicito se ACK ricevuto o timeout
+
+**`v2/modules/channel_modules/base_channel_module.py`** — già allineato al nuovo contratto
+- `_on_channel_manager_module_start` filtra per `priority` (non `name`) — mirrors `main.py`
+- `_on_channel_manager_module_stop` pubblica `channel_manager.module_stopped {name}` come ACK
+- Boot protocol nel docstring aggiornato
+
+**`v2/modules/channel_manager/main.py`** — già corretto, nessuna modifica necessaria
+- `CHILDREN_READY_TIMEOUT = 10.0s` ✅
+- `sleep(0.5)` in `shutdown()` ✅
+- Pubblica `channel_manager.stopped` ✅
+- `on_module_ready_to_start` → risponde con `module_start {priority}` ✅
+
+### Punti invariati (decisione intenzionale)
+
+- Crash channel_module → `system.shutdown` → app killed: comportamento corretto, nessun recovery
+- Shutdown non segue priority inversa: accettabile dato che i child si fermano su `module_stop` broadcast
+- `_session` variabile module-level non protetta: race teorica ma non riproducibile con un solo bus loop thread
+
+**Why:**
+- Il `sleep(0.5)` fisso in `_start_shutdown_listener` non garantiva che `channel_manager`
+  avesse finito di fermare i child prima di `_terminate_all()`. Con `_wait_channel_manager_stopped`
+  il main aspetta l'ACK esplicito (max 5s) ed è resiliente anche in caso di hang.
+- `base_channel_module` filtrava `module_start` per `name` invece che per `priority`,
+  rompendo il boot protocol multi-priority mirrors di `v2/main.py`.
+
+**Status:** Completed
+
+**Commit map:**
+
+| File | Commit | Descrizione |
+|---|---|---|
+| `v2/main.py` | [0ae6f50](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/0ae6f50c45c9dcd7e569503ec8d6356b1f5cabef) | wait channel_manager.stopped, CHANNEL_MANAGER_STOP_TIMEOUT |
+
+**Next 1-3 steps:**
+1. Test di integrazione shutdown: verificare nei log che `channel_manager.stopped` arrivi prima di `_terminate_all` in ogni scenario (shutdown normale, crash, Ctrl+C)
+2. Verificare su hardware che il boot `module_readytostart → module_start → module_ready` completi entro 2s per 4 canali
+3. Considerare protezione `_session` con lock se in futuro si aggiungono path concorrenti
