@@ -12,19 +12,23 @@ No ZMQ dependency — callbacks notify main.py which publishes on the bus.
 Pairing flow (SSP — used by Android/modern devices):
   1. pair(address) is called → calls Device1.Pair() ASYNC (no timeout)
   2. BlueZ calls RequestConfirmation(device, passkey) on the agent
-  3. Agent stores passkey, fires on_pin_requested, blocks on _confirm_event
-  4. User sees passkey on both phone and host UI, calls confirm(address, pin)
-  5. confirm() sets _confirm_event → RequestConfirmation returns → Pair() completes
+  3. Agent stores passkey, fires on_pin_requested
+  4. A background thread waits up to AUTO_ACCEPT_TIMEOUT_S for user input.
+     If no confirm/reject arrives within the timeout, pairing is auto-accepted.
+  5. User (or auto-accept) sets _confirm_event → background thread resolves
+     the pending D-Bus reply via the stored reply_handler/error_handler.
   6. _pair_reply_handler fires → device is trusted → on_pairing_completed called
 
 Legacy PIN flow (older headsets that call RequestPinCode):
   1. BlueZ calls RequestPinCode → agent returns a generated PIN
   2. User types PIN on the remote device
 
-Key design note:
-  Device1.Pair() is called with async reply_handler/error_handler so that
-  dbus-python never applies its ~25 s timeout while we are waiting for the
-  user to confirm the passkey on screen.
+Key design notes:
+  - Device1.Pair() is called with async reply_handler/error_handler so that
+    dbus-python never applies its ~25 s timeout while waiting for confirmation.
+  - RequestConfirmation returns immediately to the GLib mainloop; the actual
+    D-Bus reply is sent later from a background thread via stored callbacks.
+    This keeps the GLib thread free to dispatch Cancel and other agent methods.
 """
 
 import sys
@@ -42,6 +46,7 @@ log = get_logger("bluetooth.pairing")
 
 AGENT_PATH = "/org/nemo/agent"
 PAIRING_CAPABILITY = "DisplayYesNo"
+AUTO_ACCEPT_TIMEOUT_S = 5  # seconds before auto-accepting if no user input
 
 
 class PairingAgent:
@@ -72,6 +77,11 @@ class PairingAgent:
 
         self._confirm_event = threading.Event()
         self._confirm_accepted = False
+
+        # Stored D-Bus reply callbacks for async RequestConfirmation.
+        # Set by _handle_confirm_request, consumed by _confirm_worker.
+        self._dbus_reply_handler: Callable | None = None
+        self._dbus_error_handler: Callable | None = None
 
     # ------------------------------------------------------------------
     # Agent registration
@@ -213,29 +223,77 @@ class PairingAgent:
             self.on_pin_requested(addr, pin)
         return pin
 
-    def _handle_confirm_request(self, device_path: str, passkey: int) -> bool:
+    def _handle_confirm_request(
+        self,
+        device_path: str,
+        passkey: int,
+        reply_handler: Callable,
+        error_handler: Callable,
+    ) -> None:
         """
-        SSP flow: called by GLib mainloop when BlueZ invokes RequestConfirmation.
-        Blocks (in GLib thread) until user calls confirm() or reject().
+        SSP flow: called by the GLib mainloop when BlueZ invokes
+        RequestConfirmation.
+
+        Returns immediately to keep the GLib thread free. A background
+        thread (_confirm_worker) waits for user input (or auto-accepts
+        after AUTO_ACCEPT_TIMEOUT_S seconds) and sends the D-Bus reply
+        via the stored reply_handler / error_handler.
         """
-        import dbus.exceptions
         addr = self._path_to_address(device_path)
         pin = str(passkey).zfill(6)
         self._pending_pin = pin
         self._pending_address = addr
+        self._confirm_event.clear()
+        self._confirm_accepted = False
+        self._dbus_reply_handler = reply_handler
+        self._dbus_error_handler = error_handler
+
         log.info(f"BlueZ SSP confirm request for {addr} — passkey={pin} (show to user)")
         if self.on_pin_requested:
             self.on_pin_requested(addr, pin)
 
-        confirmed = self._confirm_event.wait(timeout=60)
-        if not confirmed or not self._confirm_accepted:
-            log.warning(f"Pairing rejected or timed out for {addr}")
-            raise dbus.exceptions.DBusException(
-                "org.bluez.Error.Rejected",
-                "User rejected or confirmation timed out",
+        t = threading.Thread(
+            target=self._confirm_worker,
+            args=(addr,),
+            daemon=True,
+            name=f"pairing-confirm-{addr}",
+        )
+        t.start()
+        # Return immediately — GLib mainloop stays unblocked.
+
+    def _confirm_worker(self, addr: str) -> None:
+        """
+        Waits for user input up to AUTO_ACCEPT_TIMEOUT_S, then auto-accepts.
+        Sends the pending D-Bus reply and cleans up stored callbacks.
+        """
+        import dbus.exceptions
+
+        confirmed = self._confirm_event.wait(timeout=AUTO_ACCEPT_TIMEOUT_S)
+
+        reply_handler = self._dbus_reply_handler
+        error_handler = self._dbus_error_handler
+        self._dbus_reply_handler = None
+        self._dbus_error_handler = None
+
+        if not confirmed:
+            log.info(
+                f"No user input for {addr} within {AUTO_ACCEPT_TIMEOUT_S}s — auto-accepting"
             )
-        log.info(f"Passkey accepted for {addr}")
-        return True
+            self._confirm_accepted = True
+
+        if self._confirm_accepted:
+            log.info(f"Passkey accepted for {addr}")
+            if reply_handler:
+                reply_handler()
+        else:
+            log.warning(f"Pairing rejected for {addr}")
+            if error_handler:
+                error_handler(
+                    dbus.exceptions.DBusException(
+                        "org.bluez.Error.Rejected",
+                        "User rejected pairing",
+                    )
+                )
 
     def _handle_cancel(self) -> None:
         log.info("Agent Cancel — aborting pending confirmation")
@@ -292,7 +350,7 @@ class _DBusAgent:
         self,
         bus,
         on_pin_code: Callable[[str], str],
-        on_confirm: Callable[[str, int], bool],
+        on_confirm: Callable,
         on_cancel: Callable[[], None],
     ):
         try:
@@ -310,9 +368,16 @@ class _DBusAgent:
                 def RequestPinCode(self_, device):
                     return self_._on_pin_code(str(device))
 
-                @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
-                def RequestConfirmation(self_, device, passkey):
-                    self_._on_confirm(str(device), int(passkey))
+                @dbus.service.method(
+                    "org.bluez.Agent1",
+                    in_signature="ou",
+                    out_signature="",
+                    async_callbacks=("reply_handler", "error_handler"),
+                )
+                def RequestConfirmation(self_, device, passkey, reply_handler, error_handler):
+                    self_._on_confirm(
+                        str(device), int(passkey), reply_handler, error_handler
+                    )
 
                 @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
                 def RequestPasskey(self_, device):
