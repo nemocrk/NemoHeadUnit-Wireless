@@ -51,8 +51,9 @@ BUS_HWM = 1000
 BROKER_STARTUP_DELAY  = 0.5   # s — wait for broker to bind
 MODULE_STARTUP_DELAY  = 0.2   # s — between module launches
 GRACE_PERIOD          = 5.0   # s — wait for self-exit before SIGTERM
-READYTOSTART_WINDOW   = 10.0   # s — collect system.module_ready replies
+READYTOSTART_WINDOW   = 10.0  # s — collect system.module_ready replies
 MODULE_READY_TIMEOUT  = 5.0   # s — per-module timeout for system.ready
+CHANNEL_MANAGER_STOP_TIMEOUT = 5.0  # s — wait for channel_manager.stopped before force-kill
 
 log = get_logger("main")
 
@@ -275,6 +276,39 @@ def _start_get_modules_responder(
 # system.shutdown listener
 # ---------------------------------------------------------------------------
 
+def _wait_channel_manager_stopped(timeout: float) -> bool:
+    """
+    Subscribe to channel_manager.stopped and block until it arrives or timeout.
+    Returns True if the ACK was received, False on timeout.
+    Called from the shutdown listener thread after system.stop is published.
+    """
+    ctx = zmq.Context()
+    sub = ctx.socket(zmq.SUB)
+    sub.connect(BROKER_SUB_ADDR)
+    sub.setsockopt_string(zmq.SUBSCRIBE, "channel_manager.stopped")
+    time.sleep(0.05)  # allow SUB to connect
+
+    deadline = time.monotonic() + timeout
+    received = False
+    while time.monotonic() < deadline:
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            break
+        if not sub.poll(timeout=min(remaining_ms, 200)):
+            continue
+        try:
+            frames = sub.recv_multipart(flags=zmq.NOBLOCK)
+            if len(frames) >= 1 and frames[0] == b"channel_manager.stopped":
+                received = True
+                break
+        except (zmq.ZMQError, zmq.Again):
+            continue
+
+    sub.close(linger=0)
+    ctx.term()
+    return received
+
+
 def _start_shutdown_listener(
     processes: list[tuple[str, subprocess.Popen]],
     pub: zmq.Socket,
@@ -284,8 +318,11 @@ def _start_shutdown_listener(
 ) -> threading.Thread:
     """
     Listen for system.shutdown on the bus.
-    On receipt: publish system.stop, terminate all module processes, then
-    signal the main thread via stop_event so it can terminate the broker.
+    On receipt:
+      1. Publish system.stop
+      2. Wait for channel_manager.stopped (max CHANNEL_MANAGER_STOP_TIMEOUT)
+      3. Call _terminate_all() on all module processes
+      4. Signal main thread via stop_event for broker teardown
 
     NOTE: sys.exit() from a secondary thread only raises SystemExit in that
     thread — it does NOT terminate the process. The main thread is responsible
@@ -312,14 +349,27 @@ def _start_shutdown_listener(
             sub.close(linger=0)
             ctx.term()
 
-            # Publish system.stop before setting stop_event so the main loop
-            # does not exit while modules are still receiving the message.
+            # 1. Publish system.stop so all modules begin cleanup
             try:
                 _publish(pub, "system.stop", {"reason": "system.shutdown"})
-                time.sleep(0.5)  # give modules time to handle system.stop
             except Exception as e:
                 log.warning(f"Could not publish system.stop: {e}")
 
+            # 2. Wait for channel_manager to finish stopping its children
+            log.info(
+                f"Waiting for channel_manager.stopped "
+                f"(timeout={CHANNEL_MANAGER_STOP_TIMEOUT}s)..."
+            )
+            ack = _wait_channel_manager_stopped(CHANNEL_MANAGER_STOP_TIMEOUT)
+            if ack:
+                log.info("channel_manager.stopped received — proceeding to _terminate_all")
+            else:
+                log.warning(
+                    "channel_manager.stopped not received within "
+                    f"{CHANNEL_MANAGER_STOP_TIMEOUT}s — force-killing all modules"
+                )
+
+            # 3. Force-kill any remaining module processes
             _terminate_all(processes)
 
             try:
@@ -328,7 +378,7 @@ def _start_shutdown_listener(
             except Exception:
                 pass
 
-            # Signal the main thread: it will terminate the broker and exit.
+            # 4. Signal the main thread: it will terminate the broker and exit.
             stop_event.set()
             return
 
