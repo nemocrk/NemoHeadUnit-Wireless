@@ -17,7 +17,7 @@ set -euo pipefail
 
 APP_DIR="/opt/nemo-headunit"
 SERVICE_NAME="org.nemo.APManager.service"
-GROUP_NAME="nemo"
+GROUP_NAME="ap_manager"
 
 log() { echo "[nemo-headunit postinst] $*"; }
 
