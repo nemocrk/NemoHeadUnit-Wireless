@@ -29,15 +29,16 @@ Handler architecture:
                topic='config.get' payload=b'log.entry'  (wrong topic)
 
   Semaphore cleanup
-    loguru with enqueue=True on a custom sink allocates a multiprocessing.Queue
-    internally, which holds a POSIX semaphore.  Without explicit removal the
-    semaphore is leaked at process exit, triggering:
+    loguru with enqueue=True allocates a multiprocessing.Queue internally
+    for EACH sink, which holds a POSIX semaphore.  Without explicit removal
+    both the console sink and the bus sink leak their semaphore at process
+    exit, triggering:
       UserWarning: resource_tracker: There appear to be N leaked semaphore objects
-    Fix: attach_bus() registers an atexit handler (_atexit_detach_bus) that
-    calls _root_logger.remove(_bus_sink_id) before the process dies.  This
-    triggers loguru's internal Queue.close() / JoinableQueue join, releasing
-    the semaphore cleanly.  Works for normal exit and SIGTERM; SIGKILL is
-    unrecoverable by design.
+    Fix: _atexit_cleanup() is registered once (at module import for the console
+    sink, and inside attach_bus() for the bus sink).  It removes both sinks
+    before the process dies, triggering loguru's internal Queue cleanup and
+    releasing all POSIX semaphores cleanly.
+    Works for normal exit and SIGTERM; SIGKILL is unrecoverable by design.
 """
 
 import atexit
@@ -117,34 +118,31 @@ def _level_str(level: int | str) -> str:
 # Bus sink state — dedicated queue + drain thread, created by attach_bus()
 # ---------------------------------------------------------------------------
 
-_bus_sink_id:      int | None           = None
-_bus_queue:        queue.SimpleQueue    = queue.SimpleQueue()
-_bus_drain_thread: threading.Thread | None = None
-_bus_running:      bool                 = False
-_bus_zmq_ctx:      zmq.Context | None   = None
-_bus_zmq_pub:      zmq.Socket | None    = None
+_bus_sink_id:       int | None          = None
+_bus_queue:         queue.SimpleQueue   = queue.SimpleQueue()
+_bus_drain_thread:  threading.Thread | None = None
+_bus_running:       bool                = False
+_bus_zmq_ctx:       zmq.Context | None  = None
+_bus_zmq_pub:       zmq.Socket | None   = None
 _atexit_registered: bool                = False
 
 
-def _atexit_detach_bus() -> None:
+def _atexit_cleanup() -> None:
     """
-    Registered by attach_bus() via atexit.register().
+    Registered via atexit.register() — runs before process exit.
 
-    Removes the loguru bus sink before the process exits.  This triggers
-    loguru’s internal multiprocessing.Queue cleanup, which releases the
-    underlying POSIX semaphore and silences the resource_tracker warning:
+    Removes BOTH loguru sinks (console + bus) so that their internal
+    multiprocessing.Queue instances are closed and the underlying POSIX
+    semaphores are released, silencing:
 
         UserWarning: resource_tracker: There appear to be N leaked semaphore objects
 
-    Also stops the drain thread and closes the dedicated ZMQ socket so
-    the process exits cleanly without dangling file descriptors.
-
+    Also stops the bus drain thread and closes the dedicated ZMQ socket.
     Safe to call multiple times (idempotent).
     """
     global _bus_sink_id, _bus_running, _bus_zmq_pub, _bus_zmq_ctx
 
-    # Remove loguru sink first — this flushes the internal enqueue thread
-    # and closes the multiprocessing.Queue, releasing the POSIX semaphore.
+    # --- Bus sink: remove first so loguru flushes + releases its Queue ---
     if _bus_sink_id is not None:
         try:
             _root_logger.remove(_bus_sink_id)
@@ -152,7 +150,7 @@ def _atexit_detach_bus() -> None:
             pass
         _bus_sink_id = None
 
-    # Stop drain thread
+    # Stop bus drain thread
     _bus_running = False
 
     # Close ZMQ resources
@@ -169,6 +167,22 @@ def _atexit_detach_bus() -> None:
             pass
         _bus_zmq_ctx = None
 
+    # --- Console sink: remove to release its enqueue semaphore too ---
+    # _CONSOLE_SINK_ID may have been reassigned by set_verbosity(); read
+    # from globals() to always get the current value.
+    console_id = globals().get("_CONSOLE_SINK_ID")
+    if console_id is not None:
+        try:
+            _root_logger.remove(console_id)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# Register cleanup at module-import time so the console sink semaphore is
+# always released even in processes that never call attach_bus().
+atexit.register(_atexit_cleanup)
+_atexit_registered = True   # prevents a second register() inside attach_bus()
+
 
 def attach_bus(bus: "BusClient") -> None:  # noqa: ARG001  (bus param kept for API compat)
     """
@@ -183,14 +197,13 @@ def attach_bus(bus: "BusClient") -> None:  # noqa: ARG001  (bus param kept for A
     The ``bus`` parameter is kept for API compatibility but is no longer
     used: the sink manages its own ZMQ connection.
 
-    Registers an atexit handler (_atexit_detach_bus) on first call to ensure
-    the loguru enqueue sink’s internal multiprocessing.Queue is released
-    before process exit, preventing POSIX semaphore leaks.
+    The atexit cleanup (_atexit_cleanup) is registered once at module-import
+    time and covers both this sink and the console sink.
 
     Call once after the ZMQ broker is running (e.g. from main.py).
     """
     global _bus_sink_id, _bus_queue, _bus_drain_thread
-    global _bus_running, _bus_zmq_ctx, _bus_zmq_pub, _atexit_registered
+    global _bus_running, _bus_zmq_ctx, _bus_zmq_pub
 
     # ------------------------------------------------------------------
     # Tear down previous sink if attach_bus() is called more than once
@@ -262,14 +275,6 @@ def attach_bus(bus: "BusClient") -> None:  # noqa: ARG001  (bus param kept for A
         level=_DEFAULT_LEVEL,
         enqueue=True,
     )
-
-    # ------------------------------------------------------------------
-    # Register atexit cleanup (once per process) so that loguru releases
-    # the multiprocessing.Queue POSIX semaphore before process exit.
-    # ------------------------------------------------------------------
-    if not _atexit_registered:
-        atexit.register(_atexit_detach_bus)
-        _atexit_registered = True
 
 
 # ---------------------------------------------------------------------------
