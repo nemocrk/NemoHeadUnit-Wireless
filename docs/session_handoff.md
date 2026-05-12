@@ -653,3 +653,72 @@ grep "Autoconnect loop started" logs/deploy.log
 grep "Autoconnect: connected to" logs/deploy.log
 grep "Autoconnect loop stopped" logs/deploy.log
 ```
+
+---
+
+## 2026-05-12 - bluetooth_ui: sezione dispositivi accoppiati + controlli autoconnect
+
+**What changed:**
+
+`v2/modules/bluetooth_ui/main.py` — aggiunta sezione in-page "Dispositivi accoppiati"
+sotto la lista discovery, separata da un `QFrame` orizzontale.
+
+### UI aggiunta
+
+| Elemento | Descrizione |
+|---|---|
+| `_paired_list` (`QListWidget`) | Lista device accoppiati con stato 🟢/⚪ e tag `✓trusted` |
+| Bottone **🔄 Aggiorna** | Pubblica `bluetooth.paired.list {}` → aggiorna lista |
+| Bottone **⚡ Riavvia Autoconnect** | Pubblica `bluetooth.try_autoconnect {}` |
+| Bottone **🔌 Connetti** | Abilitato solo se device selezionato e `connected=False` |
+| Bottone **⛔ Disconnetti** | Abilitato solo se device selezionato e `connected=True` |
+| Bottone **🗑 Rimuovi** | Abilitato se device selezionato; mostra `QMessageBox` di conferma |
+
+### Comportamento smart
+
+- Al `system.start` viene pubblicato automaticamente `bluetooth.paired.list` → lista popolata senza click
+- `_refresh_item_state(address, connected)` aggiorna label e flag `UserRole+1` in-place su eventi `connected/disconnected` senza re-fetch
+- `_update_paired_buttons()` ricalcola enable/disable ad ogni cambio selezione o evento bus
+- `refresh_paired_list(devices_repr)` riceve `repr(list[dict])` via `invokeMethod` (unico tipo passabile: `str`) e usa `ast.literal_eval` per deserializzare
+
+### Nuovi slot Qt (`@pyqtSlot`)
+
+| Slot | Trigger |
+|---|---|
+| `refresh_paired_list(str)` | `bluetooth.paired.devices` |
+| `on_paired_connected(str)` | `bluetooth.paired.connected` |
+| `on_paired_disconnected(str)` | `bluetooth.paired.disconnected` |
+| `on_paired_removed(str)` | `bluetooth.paired.removed` |
+| `on_paired_failed(str, str)` | `bluetooth.paired.failed` |
+
+### Nuove subscriptions bus
+
+`bluetooth.paired.devices`, `bluetooth.paired.connected`, `bluetooth.paired.disconnected`,
+`bluetooth.paired.removed`, `bluetooth.paired.failed`
+
+**Why:**
+- L'unica UI bluetooth era il pairing di nuovi device. Per la gestione quotidiana
+  (reconnect manuale, rimozione device vecchi, debug autoconnect) era necessario
+  intervenire da CLI o da un altro strumento.
+- La sezione in-page evita una finestra separata mantenendo il flusso lineare:
+  scan → pair → gestisci accoppiati, tutto in una sola finestra.
+- Il populate automatico su `system.start` riduce i click necessari all'avvio.
+
+**Status:** Completed
+
+**Commit:** [f629db3](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/f629db3a07841dfdd881a2ecac3f8dd5e06557ef)
+
+**Next 1-3 steps:**
+1. Test unitari `tests/v2/test_bluetooth_ui.py`:
+   - `test_refresh_paired_list_populates_widget` (mock payload, verifica item count e testo)
+   - `test_buttons_enabled_state_connected` (seleziona item `connected=True`, verifica Disconnetti abilitato e Connetti disabilitato)
+   - `test_buttons_enabled_state_disconnected` (seleziona item `connected=False`, verifica Connetti abilitato)
+   - `test_remove_confirmation_publishes_topic` (mock `QMessageBox.question` → Yes, verifica `bus.publish` con topic corretto)
+   - `test_on_paired_removed_deletes_item` (verifica che l'item scompaia dalla lista)
+2. Test end-to-end su hardware: verifica che Connetti/Disconnetti aggiornino lo stato in tempo reale
+3. Considerare aggiunta badge contatore `(N dispositivi)` nell'header della sezione paired
+
+**Verification commands:**
+```bash
+python -c "from bluetooth_ui.main import BluetoothPairingWindow; print('import OK')"
+```
