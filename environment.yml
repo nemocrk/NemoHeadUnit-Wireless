@@ -37,29 +37,31 @@ dependencies:
   # Media — GStreamer stack
   #
   # gst-python porta il binding gi.repository.Gst ma NON i plugin codec.
-  # I tre pacchetti sotto portano nell'env conda gli stessi plugin
-  # disponibili di sistema, evitando il GST_PLUGIN_PATH mismatch tra
-  # base e py314.
   #
   # Decoder H264 disponibili dopo l'installazione:
-  #   avdec_h264   — FFmpeg SW decode       (da gst-libav)
-  #                  NB: su conda-forge il pacchetto si chiama gst-libav.
-  #   vaapih264dec — VA-API HW decode i965  (da gst-plugins-vaapi)
-  #                  Stabile su Bay Trail con driver i965.
-  #                  NB: usare vaapih264dec, NON vaapidecodebin
-  #                  (vaapidecodebin usa DMA-buf e triggera assert i965).
-  #   vah264dec    — VA-API HW decode iHD   (da gst-plugins-vaapi)
-  #                  Non disponibile su Bay Trail (iHD init failed).
-  #   h264parse    — già incluso in gst-plugins-bad
+  #   avdec_h264   — FFmpeg SW decode          (da gst-libav)
+  #   openh264dec  — Cisco openh264 SW decode   (da openh264 + gst-plugins-bad)
+  #                  Più leggero di avdec_h264 su hardware x86 datato.
   #
-  # Se preferisci restare sui plugin di sistema ed evitare la duplicazione,
-  # rimuovi i tre pacchetti sotto e imposta invece:
-  #   export GST_PLUGIN_PATH=/usr/lib/x86_64-linux-gnu/gstreamer-1.0
+  # Decoder VA-API (HW accelerato) — NON inclusi nell'env conda:
+  #   gst-plugins-vaapi non è pacchettizzato su conda-forge.
+  #   video_ui/_build_pipeline usa Gst.Registry.scan_path() a runtime per
+  #   caricare vaapih264dec / vah264dec dai plugin GStreamer di sistema
+  #   (/usr/lib/x86_64-linux-gnu/gstreamer-1.0) se disponibili.
+  #   Su macchine senza VA-API la probe fallisce silenziosamente e
+  #   l'applicazione scende automaticamente a openh264dec → avdec_h264.
+  #
+  #   Per installare i plugin VA-API di sistema (una tantum sul target HW):
+  #     sudo apt install gstreamer1.0-vaapi
+  #
+  #   NB: usare vaapih264dec, NON vaapidecodebin.
+  #       vaapidecodebin usa DMA-buf e triggera assert nel driver i965
+  #       su Bay Trail (i965_check_alloc_surface_bo).
   # -----------------------------------------------------------------------
   - gst-python            # gi.repository.Gst Python bindings (conda-forge)
   - gst-libav             # avdec_h264 — FFmpeg SW H264 decoder
-  - gst-plugins-vaapi     # vaapih264dec / vah264dec — VA-API HW H264 decoder
-  - gst-plugins-bad       # h264parse, qsv encoder, ecc.
+  - gst-plugins-bad       # h264parse, openh264dec, ecc.
+  - openh264              # Cisco openh264 — SW decoder leggero per x86 datato
 
   # -----------------------------------------------------------------------
   # Audio backend (channel_modules/audio)
