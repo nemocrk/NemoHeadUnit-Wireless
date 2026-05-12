@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+
+<!--
+  /usr/share/polkit-1/actions/org.nemo.APManager.policy
+
+  PolicyKit action definitions for the NemoHeadUnit AP Manager service.
+
+  Access model:
+    - Members of the 'ap_manager' Unix group can call Start/Stop/Status
+      without a password prompt (implicit authorisation = "yes").
+    - Any other user on the local console is asked for admin credentials
+      (implicit = "auth_admin").
+    - Remote / non-console sessions are denied by default.
+
+  Install:
+    sudo cp org.nemo.APManager.policy /usr/share/polkit-1/actions/
+    (polkitd picks up changes automatically — no restart needed)
+-->
+
+<policyconfig>
+
+  <vendor>NemoHeadUnit</vendor>
+  <vendor_url>https://github.com/nemocrk/NemoHeadUnit-Wireless</vendor_url>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Start                                                               -->
+  <!-- ------------------------------------------------------------------ -->
+  <action id="org.nemo.apmanager.start">
+    <description>Start the WiFi Access Point</description>
+    <message>Authentication is required to start the WiFi Access Point.</message>
+    <defaults>
+      <!-- Members of ap_manager group: allowed without password -->
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Stop                                                                -->
+  <!-- ------------------------------------------------------------------ -->
+  <action id="org.nemo.apmanager.stop">
+    <description>Stop the WiFi Access Point</description>
+    <message>Authentication is required to stop the WiFi Access Point.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <!-- ------------------------------------------------------------------ -->
+  <!-- Status (read-only — includes WPA key, so still protected)           -->
+  <!-- ------------------------------------------------------------------ -->
+  <action id="org.nemo.apmanager.status">
+    <description>Query WiFi Access Point status</description>
+    <message>Authentication is required to read AP status (includes WPA key).</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>
