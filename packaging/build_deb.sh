@@ -23,6 +23,8 @@
 #           org.nemo.APManager.conf
 #         /usr/share/polkit-1/actions/
 #           org.nemo.APManager.policy
+#         /etc/polkit-1/rules.d/
+#           org.nemo.bluetooth.rules
 #   5.  Builds the .deb with FPM
 #   6.  Runs dpkg-deb --info + dpkg-deb --contents to verify the package
 #
@@ -90,6 +92,7 @@ ENV_YML="${REPO_ROOT}/environment.yml"
 SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps.txt"
 POSTINST="${REPO_ROOT}/packaging/postinst"
 PRERM="${REPO_ROOT}/packaging/prerm"
+BT_RULES="${REPO_ROOT}/packaging/org.nemo.bluetooth.rules"
 
 SERVICES_SRC="${REPO_ROOT}/services/ap_manager_service"
 
@@ -197,6 +200,12 @@ POLKIT_STAGE="${STAGE_DIR}/usr/share/polkit-1/actions"
 mkdir -p "${POLKIT_STAGE}"
 log "  Copying PolicyKit policy"
 cp "${SERVICES_SRC}/org.nemo.APManager.policy" "${POLKIT_STAGE}/"
+
+# —— /etc/polkit-1/rules.d/ ——
+POLKIT_RULES_STAGE="${STAGE_DIR}/etc/polkit-1/rules.d"
+mkdir -p "${POLKIT_RULES_STAGE}"
+log "  Copying polkit JS rules"
+cp "${BT_RULES}" "${POLKIT_RULES_STAGE}/"
 
 # ---------------------------------------------------------------------------
 # Step 5 — Build --depends list from system-deps.txt
