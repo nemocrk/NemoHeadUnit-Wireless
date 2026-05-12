@@ -18,6 +18,7 @@ set -euo pipefail
 APP_DIR="/opt/nemo-headunit"
 SERVICE_NAME="org.nemo.APManager.service"
 GROUP_NAME="ap_manager"
+HW_FIX_RUNNER="${APP_DIR}/hardware_fixes/run_hardware_fixes.sh"
 
 log() { echo "[nemo-headunit postinst] $*"; }
 
@@ -67,6 +68,17 @@ configure)
     systemctl start "${SERVICE_NAME}" || {
         log "WARNING: service failed to start — check: journalctl -u ${SERVICE_NAME} -n 50"
     }
+
+    # ------------------------------------------------------------------
+    # 6. Platform-specific hardware fixes
+    # ------------------------------------------------------------------
+    if [ -f "${HW_FIX_RUNNER}" ]; then
+        log "Running platform hardware fixes"
+        chmod +x "${HW_FIX_RUNNER}"
+        bash "${HW_FIX_RUNNER}" || log "WARNING: hardware fix runner exited with errors — check output above."
+    else
+        log "No hardware fix runner found at ${HW_FIX_RUNNER} — skipped."
+    fi
 
     log "Installation complete."
     log "  To add a user to the '${GROUP_NAME}' group:"
