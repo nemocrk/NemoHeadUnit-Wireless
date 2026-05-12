@@ -1,0 +1,94 @@
+#!/bin/bash
+# packaging/postinst
+#
+# dpkg post-installation script for nemo-headunit.
+# Called by dpkg automatically after all files are unpacked.
+#
+# Arguments:
+#   $1 = "configure"  (first install or upgrade)
+#   $1 = "abort-*"    (rollback scenario)
+#
+# Philosophy:
+#   - Idempotent: safe to run multiple times (upgrades).
+#   - Never interactive: no prompts, no stdin reads.
+#   - Log to journald-friendly stdout only.
+
+set -euo pipefail
+
+APP_DIR="/opt/nemo-headunit"
+SERVICE_NAME="org.nemo.APManager.service"
+GROUP_NAME="nemo"
+
+log() { echo "[nemo-headunit postinst] $*"; }
+
+case "$1" in
+
+configure)
+    # ------------------------------------------------------------------
+    # 1. Create system group if absent
+    # ------------------------------------------------------------------
+    if ! getent group "${GROUP_NAME}" &>/dev/null; then
+        log "Creating system group '${GROUP_NAME}'"
+        groupadd --system "${GROUP_NAME}"
+    else
+        log "Group '${GROUP_NAME}' already exists — skipped."
+    fi
+
+    # ------------------------------------------------------------------
+    # 2. Fix permissions on the installed app directory
+    # ------------------------------------------------------------------
+    log "Setting permissions on ${APP_DIR}"
+    chown -R root:root "${APP_DIR}"
+    chmod -R a+rX,u+w "${APP_DIR}"
+    # The Conda env Python interpreter must be executable
+    chmod +x "${APP_DIR}/env/bin/python"
+
+    # ------------------------------------------------------------------
+    # 3. Fix permissions on privileged service script
+    # ------------------------------------------------------------------
+    chmod 700 "${APP_DIR}/services/ap_manager_service/ap_manager_service.py"
+
+    # ------------------------------------------------------------------
+    # 4. Reload D-Bus so it picks up the new policy
+    # ------------------------------------------------------------------
+    log "Reloading D-Bus configuration"
+    systemctl reload dbus 2>/dev/null || true
+
+    # ------------------------------------------------------------------
+    # 5. Reload systemd and enable + start the AP manager service
+    # ------------------------------------------------------------------
+    log "Reloading systemd daemon"
+    systemctl daemon-reload
+
+    log "Enabling ${SERVICE_NAME}"
+    systemctl enable "${SERVICE_NAME}"
+
+    log "Starting ${SERVICE_NAME}"
+    systemctl start "${SERVICE_NAME}" || {
+        log "WARNING: service failed to start — check: journalctl -u ${SERVICE_NAME} -n 50"
+    }
+
+    log "Installation complete."
+    log "  To add a user to the '${GROUP_NAME}' group:"
+    log "    sudo usermod -aG ${GROUP_NAME} <username>"
+    log "  (user must log out and back in for the group to take effect)"
+    ;;
+
+upgrade)
+    # dpkg calls configure for upgrades too, but some tools call upgrade
+    # explicitly — just restart the service to pick up the new binary.
+    log "Upgrade detected — restarting ${SERVICE_NAME}"
+    systemctl restart "${SERVICE_NAME}" || true
+    ;;
+
+abort-upgrade | abort-install | abort-remove)
+    log "Aborting installation / upgrade. No cleanup performed."
+    ;;
+
+*)
+    log "Unknown argument: $1 — ignoring."
+    ;;
+
+esac
+
+exit 0
