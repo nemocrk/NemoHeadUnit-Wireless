@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# install.sh — Install the NemoHeadUnit AP Manager D-Bus service
+# install.sh — Manual installation of the NemoHeadUnit AP Manager D-Bus service
 #
-# Must be run as root:
-#   sudo bash install.sh
+# ⚠️  USE THIS SCRIPT ONLY FOR MANUAL / DEVELOPMENT INSTALLS.
+#     If you have a .deb package, use that instead:
+#       sudo apt install ./nemo-headunit_*.deb
+#     The .deb handles everything this script does, plus upgrade/remove lifecycle.
+#
+# Must be run as root from the repo root or the services/ap_manager_service/ dir:
+#   sudo bash services/ap_manager_service/install.sh
 #
 # What this script does:
 #   1. Creates the ap_manager Unix group
-#   2. Copies the service to /opt/nemo/services/
+#   2. Copies ap_manager_service.py to /opt/nemo-headunit/services/ap_manager_service/
 #   3. Installs D-Bus policy       → /etc/dbus-1/system.d/
 #   4. Installs PolicyKit policy    → /usr/share/polkit-1/actions/
 #   5. Installs systemd unit        → /etc/systemd/system/
@@ -21,7 +26,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Paths
-SERVICE_INSTALL_DIR="/opt/nemo/services/ap_manager_service"
+SERVICE_INSTALL_DIR="/opt/nemo-headunit/services/ap_manager_service"
 DBUS_POLICY_DIR="/etc/dbus-1/system.d"
 POLKIT_ACTIONS_DIR="/usr/share/polkit-1/actions"
 SYSTEMD_DIR="/etc/systemd/system"
@@ -65,8 +70,8 @@ echo "      Done."
 
 # ---------------------------------------------------------------------------
 echo "[5/6] Installing systemd unit to ${SYSTEMD_DIR}"
-# Inline-patch ExecStart path to match the actual install dir
-sed "s|/opt/nemo/services/ap_manager_service|${SERVICE_INSTALL_DIR}|g" \
+# Patch ExecStart to match the actual install dir
+sed "s|ExecStart=.*ap_manager_service.py|ExecStart=/opt/nemo-headunit/env/bin/python ${SERVICE_INSTALL_DIR}/ap_manager_service.py|g" \
     "${SCRIPT_DIR}/org.nemo.APManager.service" \
     > "${SYSTEMD_DIR}/${SERVICE_NAME}"
 chown root:root "${SYSTEMD_DIR}/${SERVICE_NAME}"
