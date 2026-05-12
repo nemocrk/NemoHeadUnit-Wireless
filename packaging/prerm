@@ -1,0 +1,38 @@
+#!/bin/bash
+# packaging/prerm
+#
+# dpkg pre-removal script for nemo-headunit.
+# Called before dpkg removes any files.
+#
+# Arguments:
+#   $1 = "remove"   (package being removed)
+#   $1 = "upgrade"  (being replaced by a newer version)
+
+set -euo pipefail
+
+SERVICE_NAME="org.nemo.APManager.service"
+
+log() { echo "[nemo-headunit prerm] $*"; }
+
+case "$1" in
+
+remove)
+    log "Stopping and disabling ${SERVICE_NAME}"
+    systemctl stop    "${SERVICE_NAME}" 2>/dev/null || true
+    systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
+    log "Done."
+    ;;
+
+upgrade)
+    # During upgrade dpkg installs the new version first, then calls
+    # old-version's prerm upgrade. Just stop — postinst will restart.
+    log "Upgrade: stopping ${SERVICE_NAME} before replacement"
+    systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+    ;;
+
+*)
+    ;;
+
+esac
+
+exit 0
