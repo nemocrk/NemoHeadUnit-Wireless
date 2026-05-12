@@ -1,0 +1,91 @@
+# packaging/system-deps.txt
+#
+# APT system dependencies for NemoHeadUnit-Wireless.
+#
+# Format: one package per line.
+# Lines starting with # are comments.
+# Blank lines are ignored.
+#
+# This file is read by packaging/build_deb.sh to:
+#   1. Declare --depends entries in the .deb (runtime deps, auto-installed
+#      by apt when the user runs: sudo apt install ./nemo-headunit_*.deb)
+#   2. Install them locally before building, to satisfy FPM's dependency
+#      resolution and Conda env creation.
+#
+# Rules:
+#   - List ONLY packages needed at RUNTIME on the target machine.
+#   - Do NOT list build-only tools (fpm, conda, curl…) — those belong in
+#     the CI/dev machine setup, not in the .deb.
+#   - Minimum version constraints are expressed as: pkg (>= version)
+#     FPM passes these verbatim to dpkg's Depends: field.
+#
+# ────────────────────────────────────────────────────────────────────────
+# D-Bus & PolicyKit
+# ────────────────────────────────────────────────────────────────────────
+dbus
+policykit-1
+
+# ────────────────────────────────────────────────────────────────────────
+# Bluetooth stack
+# bluez        — bluetoothd, hcitool, hciconfig, rfcomm
+# bluez-tools  — bt-device, bt-adapter (optional helpers)
+# ────────────────────────────────────────────────────────────────────────
+bluez
+bluez-tools
+
+# ────────────────────────────────────────────────────────────────────────
+# WiFi AP stack
+# hostapd      — IEEE 802.11 AP / WPA daemon
+# dnsmasq      — DHCP + DNS for the AP subnet
+# iproute2     — ip(8): address/link/route management
+# iw           — iw(8): nl80211 wireless configuration
+# rfkill       — rfkill(8): toggle RF hardware
+# ────────────────────────────────────────────────────────────────────────
+hostapd
+dnsmasq
+iproute2
+iw
+rfkill
+
+# ────────────────────────────────────────────────────────────────────────
+# Network Manager (used by hostapd_helper for NM integration)
+# ────────────────────────────────────────────────────────────────────────
+network-manager
+
+# ────────────────────────────────────────────────────────────────────────
+# Audio backend
+# pulseaudio-utils  — pacat, pactl (PCM output + volume control)
+# ────────────────────────────────────────────────────────────────────────
+pulseaudio-utils
+
+# ────────────────────────────────────────────────────────────────────────
+# GStreamer system plugins
+# These are NOT in the Conda env (no conda-forge packaging for vaapi/v4l2).
+# Loaded at runtime via Gst.Registry.scan_path() from the system plugin dir.
+#
+# gstreamer1.0-plugins-base  — core elements (alsasink, videoscale, …)
+# gstreamer1.0-plugins-good  — v4l2src, rtpjpegdepay, …
+# gstreamer1.0-plugins-bad   — h264parse, nvcodec, …
+# gstreamer1.0-plugins-ugly  — x264enc (optional)
+# gstreamer1.0-vaapi         — vaapih264dec (HW accelerated, optional)
+# gstreamer1.0-libav         — avdec_h264 SW fallback
+# ────────────────────────────────────────────────────────────────────────
+gstreamer1.0-plugins-base
+gstreamer1.0-plugins-good
+gstreamer1.0-plugins-bad
+gstreamer1.0-vaapi
+gstreamer1.0-libav
+
+# ────────────────────────────────────────────────────────────────────────
+# GLib runtime — required by dbus-python + GObject bindings inside Conda
+# libglib2.0-0 is almost always present, but declare it for edge cases
+# ────────────────────────────────────────────────────────────────────────
+libglib2.0-0
+
+# ────────────────────────────────────────────────────────────────────────
+# Qt6 runtime libraries
+# PyQt6 ships its own Qt6 libs inside the Conda env, but the system
+# libEGL / libGL are needed for the OpenGL widget (_NV12GLWidget).
+# ────────────────────────────────────────────────────────────────────────
+libgl1
+libegl1
