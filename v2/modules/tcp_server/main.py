@@ -60,7 +60,7 @@ Flow:
        c. deinit() cryptor (reset SSLObject)
        d. Publish aa.session.restarting → oaa_control_channel sends VERSION_REQUEST
   9. On socket close → publishes tcp.session.closed
-  10. On system.stop  → server + relay + cryptor + assembler shutdown
+  10. On system.stop  → join _server_thread → server + relay + cryptor + assembler shutdown
 
   TLS note: Android Auto negotiates encryption in-band on channel 0 (msgId 0x0003).
   The TCP socket is always plain. AACryptor is now owned by tcp_server.
@@ -111,10 +111,11 @@ _PUBLISH_FULL_FRAME_RECEIVED = os.getenv("AA_FRAME_RECEIVED_FULL") == "1"
 # Module state
 # ---------------------------------------------------------------------------
 
-_server:    Optional[TCPServer]     = None
-_relay:     Optional[FrameRelay]    = None
-_cryptor:   Optional[AACryptor]     = None
-_assembler: Optional[FrameAssembler] = None
+_server:        Optional[TCPServer]      = None
+_relay:         Optional[FrameRelay]     = None
+_cryptor:       Optional[AACryptor]      = None
+_assembler:     Optional[FrameAssembler] = None
+_server_thread: Optional[threading.Thread] = None   # track _start_server thread for join on stop
 _server_starting = False
 _server_lock = threading.Lock()
 _write_lock  = threading.Lock()
@@ -151,6 +152,15 @@ def on_system_start(topic: str, payload: dict) -> None:
 def on_system_stop(topic: str, payload: dict) -> None:
     log.info("system.stop received — shutting down TCP server")
     _teardown()
+    # Join _server_thread before bus.stop() so that any in-flight
+    # _on_session_closed() call (which does bus.publish) completes while
+    # the ZMQ socket is still open.  Without this join, bus.stop() can
+    # close the socket while the daemon thread is still inside publish(),
+    # causing ZMQError: Socket operation on non-socket.
+    t = _server_thread
+    if t is not None and t.is_alive():
+        log.debug("on_system_stop: joining _server_thread (timeout=3s)")
+        t.join(timeout=3.0)
     bus.stop()
 
 
@@ -159,7 +169,7 @@ def on_system_stop(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def on_handshake_completed(topic: str, payload: dict) -> None:
-    global _server_starting
+    global _server_starting, _server_thread
     device_address = payload.get("device_address", "")
     phone_ip       = payload.get("phone_ip", "")
 
@@ -174,6 +184,7 @@ def on_handshake_completed(topic: str, payload: dict) -> None:
 
     log.info(f"Handshake completed from {device_address} (phone_ip={phone_ip}) — starting TCP server")
     t = threading.Thread(target=_start_server, daemon=True)
+    _server_thread = t
     t.start()
 
 
