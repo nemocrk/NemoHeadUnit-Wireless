@@ -71,6 +71,15 @@ class BluezAdapter:
         self._initialized = False
 
     # ------------------------------------------------------------------
+    # Public accessor — used by main.py and paired_devices.py
+    # ------------------------------------------------------------------
+
+    @property
+    def bus(self):
+        """Return the dbus.SystemBus instance, or None if not yet initialised."""
+        return self._bus
+
+    # ------------------------------------------------------------------
     # Initialisation
     # ------------------------------------------------------------------
 
