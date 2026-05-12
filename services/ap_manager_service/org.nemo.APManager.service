@@ -1,0 +1,35 @@
+[Unit]
+Description=NemoHeadUnit WiFi Access Point Manager (D-Bus service)
+Documentation=https://github.com/nemocrk/NemoHeadUnit-Wireless
+After=network.target dbus.service polkit.service
+Requires=dbus.service
+
+[Service]
+Type=dbus
+BusName=org.nemo.APManager
+
+# Run as root — required for hostapd, dnsmasq, ip, rfkill, nmcli
+User=root
+Group=root
+
+# Absolute path — adjust if installed elsewhere
+ExecStart=/usr/bin/python3 /opt/nemo/services/ap_manager_service/ap_manager_service.py
+
+Restart=on-failure
+RestartSec=3
+
+# Give enough time for stop to flush subprocesses
+TimeoutStopSec=15
+
+# Stdout/stderr go to journald — readable with:
+#   journalctl -u org.nemo.APManager.service -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ap-manager-service
+
+# Minimal environment — explicit PATH covers hostapd, dnsmasq, ip, iw, rfkill, nmcli
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target
