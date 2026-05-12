@@ -23,7 +23,7 @@ Configuration keys (v2/config/hostapd_helper.yaml):
   ssid              str    default: AndroidAutoAP
   hw_mode           enum   default: a  (a=5GHz, g=2.4GHz)
   channel           int    default: 36  (min=1, max=196)
-  ap_password       str    default: "" (empty = random per session)
+  ap_password       str    default: "" (empty = random per session, chosen by service)
   subnet            str    default: 10.0.0
   gateway_ip        str    default: 10.0.0.1
   dhcp_range_start  str    default: 10.0.0.10
@@ -32,20 +32,21 @@ Configuration keys (v2/config/hostapd_helper.yaml):
   monitor_timeout   int    default: 30  (min=5, max=120)
 
 Flow:
-  1. bluetooth.rfcomm.connected  → start APManager (create AP)
-  2. APMonitor polls until AP is confirmed active
-  3. On confirmed → publish hostapd.ready with full params
-  4. rfcomm_handshake module reads hostapd.ready and proceeds
-  5. On system.stop (or AP failure) → APManager.stop()
+  1. bluetooth.rfcomm.connected  → call Start() on D-Bus ap_manager_service
+  2. ap_manager_service emits APStarted signal → publish hostapd.ready
+  3. rfcomm_handshake module reads hostapd.ready and proceeds
+  4. On system.stop (or APFailed signal) → call Stop() on D-Bus ap_manager_service
 
-Internal helpers (no ZMQ):
-  ap_manager.py  — writes hostapd.conf + dnsmasq.conf, starts subprocesses
-  ap_monitor.py  — polls interface until AP mode confirmed
+Backend:
+  All privileged operations (hostapd, dnsmasq, ip, rfkill, nmcli, systemctl)
+  are executed by org.nemo.APManager D-Bus system service (runs as root).
+  This module communicates with it over the system bus without any sudo.
 """
 
 import sys
 from pathlib import Path
 import time
+import threading
 
 _HERE    = Path(__file__).parent   # v2/modules/hostapd_helper/
 _MODULES = _HERE.parent            # v2/modules/
@@ -56,13 +57,14 @@ if str(_V2) not in sys.path:
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
-from shared.bus_client import BusClient              # noqa: E402
-from shared.logger import get_logger     # noqa: E402
-from shared.config_client import ConfigClient        # noqa: E402
-from shared.config_schema import field_enum, field_int, field_string  # noqa: E402
+import dbus                                                  # noqa: E402
+import dbus.mainloop.glib                                    # noqa: E402
+from gi.repository import GLib                               # noqa: E402
 
-from hostapd_helper.ap_manager import APManager, APConfig   # noqa: E402
-from hostapd_helper.ap_monitor import APMonitor             # noqa: E402
+from shared.bus_client import BusClient                      # noqa: E402
+from shared.logger import get_logger                         # noqa: E402
+from shared.config_client import ConfigClient                # noqa: E402
+from shared.config_schema import field_enum, field_int, field_string  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -76,9 +78,16 @@ log = get_logger(MODULE_NAME, bus=bus)
 cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 
 # ---------------------------------------------------------------------------
+# D-Bus service constants
+# ---------------------------------------------------------------------------
+
+_DBUS_BUS_NAME    = "org.nemo.APManager"
+_DBUS_OBJECT_PATH = "/org/nemo/APManager"
+_DBUS_INTERFACE   = "org.nemo.APManager"
+
+# ---------------------------------------------------------------------------
 # Config schema
 # ---------------------------------------------------------------------------
-# config_manager derives defaults from field.default — no separate _DEFAULTS needed.
 
 _SCHEMA = {
     "interface":        field_string(default="wlan0"),
@@ -94,16 +103,170 @@ _SCHEMA = {
     "monitor_timeout":  field_int(default=30, min=5, max=120),
 }
 
-# In-RAM config: seed from schema defaults.
 _config: dict = {k: v.default for k, v in _SCHEMA.items()}
 
 # ---------------------------------------------------------------------------
 # Module state
 # ---------------------------------------------------------------------------
 
-_ap_manager: APManager | None = None
-_ap_monitor: APMonitor | None = None
 _ap_ready_params: dict | None = None
+_glib_loop: GLib.MainLoop | None = None
+_glib_thread: threading.Thread | None = None
+
+# ---------------------------------------------------------------------------
+# D-Bus AP client
+# ---------------------------------------------------------------------------
+
+class _DBusAPClient:
+    """
+    Thin wrapper around the org.nemo.APManager D-Bus service.
+    Exposes start(), stop(), is_running(), get_params(), get_key()
+    with the same semantics as the old APManager class.
+    """
+
+    def __init__(self, system_bus: dbus.SystemBus):
+        self._bus = system_bus
+
+    def _proxy(self):
+        obj = self._bus.get_object(_DBUS_BUS_NAME, _DBUS_OBJECT_PATH)
+        return dbus.Interface(obj, _DBUS_INTERFACE)
+
+    def start(self, config: dict) -> tuple[bool, str]:
+        """
+        Call Start(config: a{sv}) on the service.
+        Returns (True, "") on success or raises dbus.DBusException.
+        """
+        dbus_config = {k: dbus.String(str(v)) if not isinstance(v, int)
+                       else dbus.Int32(v)
+                       for k, v in config.items()}
+        return self._proxy().Start(dbus_config)
+
+    def stop(self) -> tuple[bool, str]:
+        """Call Stop() on the service. Returns (True, "") on success."""
+        return self._proxy().Stop()
+
+    def status(self) -> dict:
+        """
+        Call Status() and return a normalised dict:
+          {state, ssid, bssid, gateway_ip, key, dhcp_clients}
+        """
+        state, ssid, bssid, gateway_ip, key, dhcp_clients = self._proxy().Status()
+        return {
+            "state":        str(state),
+            "ssid":         str(ssid),
+            "bssid":        str(bssid),
+            "gateway_ip":   str(gateway_ip),
+            "key":          str(key),
+            "dhcp_clients": int(dhcp_clients),
+        }
+
+    def is_running(self) -> bool:
+        try:
+            s = self.status()
+            return s["state"] == "running"
+        except dbus.DBusException:
+            return False
+
+
+_dbus_system_bus: dbus.SystemBus | None = None
+_ap_client: _DBusAPClient | None = None
+
+
+def _ensure_dbus() -> _DBusAPClient:
+    """
+    Initialise the GLib main loop (needed for D-Bus signals) and return
+    the _DBusAPClient singleton.  Safe to call multiple times.
+    """
+    global _dbus_system_bus, _ap_client, _glib_loop, _glib_thread
+
+    if _ap_client is not None:
+        return _ap_client
+
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    _dbus_system_bus = dbus.SystemBus()
+    _ap_client = _DBusAPClient(_dbus_system_bus)
+
+    # GLib loop runs in a daemon thread to dispatch D-Bus signals
+    _glib_loop = GLib.MainLoop()
+    _glib_thread = threading.Thread(
+        target=_glib_loop.run,
+        name="glib-dbus-loop",
+        daemon=True,
+    )
+    _glib_thread.start()
+    log.debug("GLib main loop started for D-Bus signals")
+
+    return _ap_client
+
+# ---------------------------------------------------------------------------
+# D-Bus signal handlers
+# ---------------------------------------------------------------------------
+
+def _on_dbus_ap_started(params: dict) -> None:
+    """
+    Received APStarted signal from ap_manager_service.
+    params contains: ssid, bssid, interface, gateway_ip (NO key).
+    We call Status() to get the key and build the full hostapd.ready payload.
+    """
+    global _ap_ready_params
+    log.info(f"APStarted signal received: {dict(params)}")
+    try:
+        status = _ap_client.status()
+        full_params = {
+            "ssid":          status["ssid"],
+            "key":           status["key"],
+            "bssid":         status["bssid"],
+            "interface":     str(params.get("interface", _config["interface"])),
+            "gateway_ip":    status["gateway_ip"],
+            "security_mode": 8,   # WPA2_PERSONAL
+            "ap_type":       1,   # AP_TYPE_DYNAMIC
+        }
+        _ap_ready_params = full_params
+        log.info(f"AP ready: ssid={full_params['ssid']} bssid={full_params['bssid']}")
+        bus.publish("hostapd.ready", full_params)
+    except dbus.DBusException as e:
+        log.error(f"Could not retrieve AP status after APStarted: {e}")
+        bus.publish("hostapd.failed", {"error": str(e)})
+
+
+def _on_dbus_ap_stopped() -> None:
+    global _ap_ready_params
+    log.info("APStopped signal received")
+    _ap_ready_params = None
+    bus.publish("hostapd.stopped", {})
+
+
+def _on_dbus_ap_failed(reason: str) -> None:
+    global _ap_ready_params
+    log.error(f"APFailed signal received: {reason}")
+    _ap_ready_params = None
+    bus.publish("hostapd.failed", {"error": str(reason)})
+
+
+def _subscribe_dbus_signals() -> None:
+    """Connect GLib signal handlers to the org.nemo.APManager D-Bus signals."""
+    _dbus_system_bus.add_signal_receiver(
+        _on_dbus_ap_started,
+        signal_name="APStarted",
+        dbus_interface=_DBUS_INTERFACE,
+        bus_name=_DBUS_BUS_NAME,
+        path=_DBUS_OBJECT_PATH,
+    )
+    _dbus_system_bus.add_signal_receiver(
+        _on_dbus_ap_stopped,
+        signal_name="APStopped",
+        dbus_interface=_DBUS_INTERFACE,
+        bus_name=_DBUS_BUS_NAME,
+        path=_DBUS_OBJECT_PATH,
+    )
+    _dbus_system_bus.add_signal_receiver(
+        _on_dbus_ap_failed,
+        signal_name="APFailed",
+        dbus_interface=_DBUS_INTERFACE,
+        bus_name=_DBUS_BUS_NAME,
+        path=_DBUS_OBJECT_PATH,
+    )
+    log.debug("D-Bus signal receivers registered")
 
 # ---------------------------------------------------------------------------
 # ConfigClient callbacks
@@ -131,20 +294,20 @@ def _on_config_changed(key: str, value) -> None:
     log.info(f"Config changed: {key} = {value!r}")
 
 
-def _build_ap_config() -> APConfig:
-    return APConfig(
-        interface=        str(_config["interface"]),
-        ssid=             str(_config["ssid"]),
-        key=              str(_config["ap_password"]),
-        hw_mode=          str(_config["hw_mode"]),
-        channel=          int(_config["channel"]),
-        subnet=           str(_config["subnet"]),
-        gateway_ip=       str(_config["gateway_ip"]),
-        dhcp_range_start= str(_config["dhcp_range_start"]),
-        dhcp_range_end=   str(_config["dhcp_range_end"]),
-        country_code=     str(_config["country_code"]),
-    )
-
+def _build_dbus_config() -> dict:
+    """Build the a{sv} dict to pass to Start()."""
+    return {
+        "interface":        str(_config["interface"]),
+        "ssid":             str(_config["ssid"]),
+        "key":              str(_config["ap_password"]),
+        "hw_mode":          str(_config["hw_mode"]),
+        "channel":          int(_config["channel"]),
+        "subnet":           str(_config["subnet"]),
+        "gateway_ip":       str(_config["gateway_ip"]),
+        "dhcp_range_start": str(_config["dhcp_range_start"]),
+        "dhcp_range_end":   str(_config["dhcp_range_end"]),
+        "country_code":     str(_config["country_code"]),
+    }
 
 # ---------------------------------------------------------------------------
 # Boot protocol handlers
@@ -163,8 +326,12 @@ def on_system_start(topic: str, payload: dict) -> None:
         return
 
     log.info(f"system.start priority={PRIORITY} — initialising hostapd_helper")
-    # schema= is sufficient: config_manager derives defaults from field.default.
     cfg.get(schema=_SCHEMA)
+
+    # Initialise D-Bus connection and subscribe to AP signals
+    _ensure_dbus()
+    _subscribe_dbus_signals()
+    log.info("D-Bus connection to ap_manager_service established")
 
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
@@ -176,85 +343,83 @@ def on_system_start(topic: str, payload: dict) -> None:
 def on_system_stop(topic: str, payload: dict) -> None:
     log.info("system.stop received — tearing down AP")
     _teardown()
+    if _glib_loop and _glib_loop.is_running():
+        _glib_loop.quit()
     bus.stop()
-
 
 # ---------------------------------------------------------------------------
 # bluetooth.rfcomm.connected → AP lifecycle
 # ---------------------------------------------------------------------------
 
 def on_rfcomm_connected(topic: str, payload: dict) -> None:
-    global _ap_manager, _ap_monitor
-
     device_address = payload.get("device_address", "unknown")
-    log.info(f"RFCOMM connected from {device_address} — starting AP")
+    log.info(f"RFCOMM connected from {device_address} — starting AP via D-Bus service")
 
-    if _ap_manager and _ap_manager.is_running():
-        params = _ap_ready_params or _ap_manager.get_params()
-        log.info(f"AP already running for RFCOMM reconnect from {device_address} — reusing it")
-        bus.publish("hostapd.ready", params)
+    client = _ensure_dbus()
+
+    if client.is_running():
+        params = _ap_ready_params
+        if params:
+            log.info(f"AP already running for RFCOMM reconnect from {device_address} — reusing it")
+            bus.publish("hostapd.ready", params)
+        else:
+            # AP running but we have no cached params — fetch from service
+            try:
+                status = client.status()
+                log.info(f"AP already running, fetched status: {status}")
+                bus.publish("hostapd.ready", {
+                    "ssid":          status["ssid"],
+                    "key":           status["key"],
+                    "bssid":         status["bssid"],
+                    "interface":     str(_config["interface"]),
+                    "gateway_ip":    status["gateway_ip"],
+                    "security_mode": 8,
+                    "ap_type":       1,
+                })
+            except dbus.DBusException as e:
+                log.error(f"Could not fetch AP status on reconnect: {e}")
+                bus.publish("hostapd.failed", {"error": str(e)})
         return
 
-    if _ap_monitor:
-        log.info(f"AP startup already in progress for RFCOMM reconnect from {device_address}")
-        return
-
-    ap_cfg = _build_ap_config()
-    _ap_manager = APManager(ap_cfg)
-
+    ap_dbus_config = _build_dbus_config()
     bus.publish("hostapd.starting", {
-        "ssid":      ap_cfg.ssid,
-        "interface": ap_cfg.interface,
+        "ssid":      ap_dbus_config["ssid"],
+        "interface": ap_dbus_config["interface"],
     })
 
-    if not _ap_manager.start():
-        _ap_manager = None
-        bus.publish("hostapd.failed", {"error": "APManager.start() failed"})
-        return
-
-    _ap_monitor = APMonitor(
-        ap_manager=_ap_manager,
-        on_ready_cb=_on_ap_ready,
-        on_failed_cb=_on_ap_failed,
-        timeout=float(_config["monitor_timeout"]),
-    )
-    _ap_monitor.start()
-
-
-# ---------------------------------------------------------------------------
-# APMonitor callbacks → bus events
-# ---------------------------------------------------------------------------
-
-def _on_ap_ready(params: dict) -> None:
-    global _ap_ready_params
-    _ap_ready_params = params
-    log.info(f"AP ready: ssid={params.get('ssid')} bssid={params.get('bssid')}")
-    bus.publish("hostapd.ready", params)
-
-
-def _on_ap_failed(reason: str) -> None:
-    log.error(f"AP failed: {reason}")
-    _teardown()
-    bus.publish("hostapd.failed", {"error": reason})
-
+    try:
+        client.start(ap_dbus_config)
+        # hostapd.ready will be published by _on_dbus_ap_started
+        # when the service emits the APStarted signal
+        log.info("Start() called on ap_manager_service — waiting for APStarted signal")
+    except dbus.DBusException as e:
+        error_name = e.get_dbus_name()
+        error_msg  = str(e)
+        if error_name == "org.nemo.APManager.Error.AlreadyRunning":
+            log.warning("ap_manager_service reports AP already running — fetching status")
+            on_rfcomm_connected(topic, payload)  # recurse once to reuse running AP
+        else:
+            log.error(f"ap_manager_service Start() failed [{error_name}]: {error_msg}")
+            bus.publish("hostapd.failed", {"error": error_msg})
 
 # ---------------------------------------------------------------------------
 # Teardown helper
 # ---------------------------------------------------------------------------
 
 def _teardown() -> None:
-    global _ap_manager, _ap_monitor, _ap_ready_params
-    log.info("Tearing down AP and monitor")
-    if _ap_monitor:
-        _ap_monitor.stop()
-        _ap_monitor = None
-    if _ap_manager:
-        _ap_manager.stop()
-        _ap_manager = None
+    global _ap_ready_params
+    log.info("Tearing down AP via D-Bus service")
     _ap_ready_params = None
-    log.info("AP and monitor stopped")
-    bus.publish("hostapd.stopped", {})
-
+    if _ap_client is None:
+        return
+    try:
+        if _ap_client.is_running():
+            _ap_client.stop()
+            log.info("Stop() called on ap_manager_service")
+        else:
+            log.info("AP was not running — nothing to stop")
+    except dbus.DBusException as e:
+        log.warning(f"Stop() on ap_manager_service failed: {e}")
 
 # ---------------------------------------------------------------------------
 # Entry point
