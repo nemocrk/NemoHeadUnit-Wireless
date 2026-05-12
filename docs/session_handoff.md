@@ -286,6 +286,41 @@ grep "PCM write.*peak" logs/deploy.log  # peak deve essere > 0
 
 ---
 
+## 2026-05-10 - audio_manager: gestore centralizzato device audio e volume
+
+**What changed:**
+
+`v2/modules/audio_manager/` — nuovo modulo centralizzato per la selezione del
+dispositivo audio e il controllo del volume. `audio` e `av_input` delegano
+a lui invece di gestire i device internamente.
+
+| File | Commit | Descrizione |
+|---|---|---|
+| `v2/modules/audio_manager/__init__.py` | [14b69b6](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/14b69b60f3ec961b750c0b9d8e97ae7187492f42) | Package scaffold |
+| `v2/modules/audio_manager/main.py` | [c9cdba3](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/c9cdba365663b6079c301279d326439712bbdedc) | Implementazione completa |
+| `v2/modules/channel_modules/audio/main.py` | [e3aecd7](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/e3aecd7175ac782825d891a2944fe00f70cadd68) | Rimozione `_list_audio_devices`/`on_set_volume`; subscribe `audio.sink.selected` |
+| `v2/modules/channel_modules/av_input/main.py` | [ddbe694](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/ddbe694028af237bf3202e4acd443223dcead34d) | Rimozione `_list_mic_devices_*`; subscribe `audio.source.selected` |
+| `v2/modules/channel_modules/av_input/main.py` | [b7d75de](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/b7d75dedc80214b9eb65481d3a86b58369cb7a08) | `pactl list sources` → `wpctl` per device discovery |
+
+**Bus topics pubblicati da `audio_manager`:**
+- `audio.sink.selected` — device PulseAudio sink selezionato per la riproduzione
+- `audio.source.selected` — device PulseAudio source selezionato per il mic
+
+**Why:**
+- `audio` e `av_input` scoprivano e selezionavano i device ciascuno per conto
+  proprio, con logica duplicata e possibili race in caso di hotplug.
+- `audio_manager` centralizza discovery (`wpctl`), selezione e volume; gli altri
+  moduli si limitano a reagire ai topic `audio.*.selected`.
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Registrare `audio_manager` nel launcher principale (`v2/main.py`)
+2. Test unitari: mock `wpctl` output, verifica che `audio.sink.selected` venga pubblicato
+3. Verificare hotplug USB audio: `audio_manager` deve rilevare il nuovo device e ripubblicare il topic
+
+---
+
 ## 2026-05-10 - video_ui: modulo display PyQt6 + GStreamer
 
 **What changed:**
@@ -473,3 +508,49 @@ Analisi completa del `channel_manager` e fix dei punti critici identificati.
 1. Test di integrazione shutdown: verificare nei log che `channel_manager.stopped` arrivi prima di `_terminate_all` in ogni scenario (shutdown normale, crash, Ctrl+C)
 2. Verificare su hardware che il boot `module_readytostart → module_start → module_ready` completi entro 2s per 4 canali
 3. Considerare protezione `_session` con lock se in futuro si aggiungono path concorrenti
+
+---
+
+## 2026-05-12 - bluetooth: sleep retry, GLib non-blocking, rimozione rfcomm.py
+
+**What changed:**
+
+Tre fix al modulo bluetooth emersi dall'analisi del codice prima di aggiungere
+nuove funzionalità.
+
+### 1. `bluez_adapter.py` — sleep 0.5s tra retry D-Bus ([b130854](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/b13085415bee3524443ac765916a5a9113caa598))
+
+`set_discoverable()` e `set_name()` eseguivano i 3 retry istantaneamente (~0ms).
+Aggiunto `time.sleep(0.5)` tra i tentativi per rendere il retry effettivo in caso
+di BlueZ temporaneamente occupato.
+
+### 2. `pairing.py` — GLib mainloop non bloccato durante RequestConfirmation ([a89fad1](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/a89fad1c20c016e22e1694102dd6e03227d62dc0))
+
+`_handle_confirm_request` bloccava il thread GLib indefinitamente in attesa
+dell'input utente, impedendo il dispatch di qualsiasi altro callback D-Bus
+(Cancel, ecc.).
+
+Fix: `_handle_confirm_request` ritorna immediatamente; un thread dedicato
+`_confirm_worker` attende l'input utente fino a `AUTO_ACCEPT_TIMEOUT_S = 5s`,
+dopodiché auto-accetta. Reply/error handler D-Bus salvati come attributi e
+consumati dal worker thread.
+
+### 3. `bluetooth/rfcomm.py` — rimosso dead code ([a3bb150](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/a3bb150b415e5b2c4b5363a14ac73a533e57edfa))
+
+`RfcommListener` non veniva mai istanziato in `bluetooth/main.py`. Il profilo
+RFCOMM AA è gestito da `rfcomm_handshake/dbus_rfcomm.py`.
+
+**Why:**
+- I retry istantanei non servivano a nulla in caso di BlueZ busy (tipicamente
+  ritorna dopo 200-400ms).
+- Il blocco del GLib thread durante il pairing impediva a BlueZ di inviare altri
+  metodi all'agent (Cancel) e potenzialmente bloccava l'intera sessione D-Bus.
+- `rfcomm.py` era codice morto che creava confusione sulla responsabilità del
+  profilo RFCOMM.
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. ← **Prossima sessione**: aggiungere nuova funzionalità al modulo bluetooth
+2. Test unitari `tests/v2/test_pairing.py`: mock GLib mainloop, verifica auto-accept dopo timeout
+3. Test su hardware: verifica pairing SSP senza freeze del processo in attesa conferma utente
