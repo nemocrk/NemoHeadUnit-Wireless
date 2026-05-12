@@ -27,8 +27,20 @@ Handler architecture:
     that caused interleaved frames when two threads wrote to the same socket:
       symptom: topic='log.entry' payload=b'config.get'  (wrong payload)
                topic='config.get' payload=b'log.entry'  (wrong topic)
+
+  Semaphore cleanup
+    loguru with enqueue=True on a custom sink allocates a multiprocessing.Queue
+    internally, which holds a POSIX semaphore.  Without explicit removal the
+    semaphore is leaked at process exit, triggering:
+      UserWarning: resource_tracker: There appear to be N leaked semaphore objects
+    Fix: attach_bus() registers an atexit handler (_atexit_detach_bus) that
+    calls _root_logger.remove(_bus_sink_id) before the process dies.  This
+    triggers loguru's internal Queue.close() / JoinableQueue join, releasing
+    the semaphore cleanly.  Works for normal exit and SIGTERM; SIGKILL is
+    unrecoverable by design.
 """
 
+import atexit
 import json
 import logging  # kept only for LogLevel enum + set_verbosity int compatibility
 import os
@@ -105,12 +117,57 @@ def _level_str(level: int | str) -> str:
 # Bus sink state — dedicated queue + drain thread, created by attach_bus()
 # ---------------------------------------------------------------------------
 
-_bus_sink_id:     int | None            = None
-_bus_queue:       queue.SimpleQueue     = queue.SimpleQueue()
+_bus_sink_id:      int | None           = None
+_bus_queue:        queue.SimpleQueue    = queue.SimpleQueue()
 _bus_drain_thread: threading.Thread | None = None
-_bus_running:     bool                  = False
-_bus_zmq_ctx:     zmq.Context | None    = None
-_bus_zmq_pub:     zmq.Socket | None     = None
+_bus_running:      bool                 = False
+_bus_zmq_ctx:      zmq.Context | None   = None
+_bus_zmq_pub:      zmq.Socket | None    = None
+_atexit_registered: bool                = False
+
+
+def _atexit_detach_bus() -> None:
+    """
+    Registered by attach_bus() via atexit.register().
+
+    Removes the loguru bus sink before the process exits.  This triggers
+    loguru’s internal multiprocessing.Queue cleanup, which releases the
+    underlying POSIX semaphore and silences the resource_tracker warning:
+
+        UserWarning: resource_tracker: There appear to be N leaked semaphore objects
+
+    Also stops the drain thread and closes the dedicated ZMQ socket so
+    the process exits cleanly without dangling file descriptors.
+
+    Safe to call multiple times (idempotent).
+    """
+    global _bus_sink_id, _bus_running, _bus_zmq_pub, _bus_zmq_ctx
+
+    # Remove loguru sink first — this flushes the internal enqueue thread
+    # and closes the multiprocessing.Queue, releasing the POSIX semaphore.
+    if _bus_sink_id is not None:
+        try:
+            _root_logger.remove(_bus_sink_id)
+        except Exception:  # noqa: BLE001
+            pass
+        _bus_sink_id = None
+
+    # Stop drain thread
+    _bus_running = False
+
+    # Close ZMQ resources
+    if _bus_zmq_pub is not None:
+        try:
+            _bus_zmq_pub.close(linger=0)
+        except Exception:  # noqa: BLE001
+            pass
+        _bus_zmq_pub = None
+    if _bus_zmq_ctx is not None:
+        try:
+            _bus_zmq_ctx.term()
+        except Exception:  # noqa: BLE001
+            pass
+        _bus_zmq_ctx = None
 
 
 def attach_bus(bus: "BusClient") -> None:  # noqa: ARG001  (bus param kept for API compat)
@@ -126,10 +183,14 @@ def attach_bus(bus: "BusClient") -> None:  # noqa: ARG001  (bus param kept for A
     The ``bus`` parameter is kept for API compatibility but is no longer
     used: the sink manages its own ZMQ connection.
 
+    Registers an atexit handler (_atexit_detach_bus) on first call to ensure
+    the loguru enqueue sink’s internal multiprocessing.Queue is released
+    before process exit, preventing POSIX semaphore leaks.
+
     Call once after the ZMQ broker is running (e.g. from main.py).
     """
     global _bus_sink_id, _bus_queue, _bus_drain_thread
-    global _bus_running, _bus_zmq_ctx, _bus_zmq_pub
+    global _bus_running, _bus_zmq_ctx, _bus_zmq_pub, _atexit_registered
 
     # ------------------------------------------------------------------
     # Tear down previous sink if attach_bus() is called more than once
@@ -201,6 +262,14 @@ def attach_bus(bus: "BusClient") -> None:  # noqa: ARG001  (bus param kept for A
         level=_DEFAULT_LEVEL,
         enqueue=True,
     )
+
+    # ------------------------------------------------------------------
+    # Register atexit cleanup (once per process) so that loguru releases
+    # the multiprocessing.Queue POSIX semaphore before process exit.
+    # ------------------------------------------------------------------
+    if not _atexit_registered:
+        atexit.register(_atexit_detach_bus)
+        _atexit_registered = True
 
 
 # ---------------------------------------------------------------------------
