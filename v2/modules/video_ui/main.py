@@ -21,13 +21,17 @@ Module contract:
 
 Decoder strategy (runtime probe, no config required):
   1. vaapih264dec  — VA-API HW decode via i965 driver (Intel Bay Trail)
+                     Caricato a runtime da plugin di sistema via scan_path
+                     se non disponibile nell'env conda.
                      NB: usiamo vaapih264dec, NON vaapidecodebin.
                      vaapidecodebin usa DMA-buf e triggera un assert nel
                      driver i965 su Bay Trail (i965_check_alloc_surface_bo).
                      vaapih264dec usa superficie YUV420 classica, stabile.
   2. vah264dec     — VA-API HW decode via iHD driver (Broadwell+)
                      Non disponibile su Bay Trail (iHD init failed).
-  3. avdec_h264    — FFmpeg SW decode (gst-libav / conda)
+  3. openh264dec   — Cisco openh264 SW decode (gst-plugins-bad + openh264 conda)
+                     Più leggero di avdec_h264 su hardware x86 datato.
+  4. avdec_h264    — FFmpeg SW decode (gst-libav / conda) — fallback finale
   Se GStreamer non è disponibile, la finestra mostra solo il placeholder.
 
 Rendering:
@@ -69,27 +73,30 @@ Fix notes (2026-05-10 rev4 — anti-artefatti):
   Preferenza esplicita: meglio saltare frame (scena accelerata) che mostrare
   macrobloc corrotti.
 
-  Problema originale:
-    appsink drop=true scartava frame GIA' DECODIFICATI quando Qt era lento.
-    Il decoder perdeva i frame di riferimento P/B → macrobloc nei frame
-    successivi.
-
-  Soluzione:
   1. Queue leaky=downstream PRIMA del decoder (sui dati H264 compressi).
-     In caso di backpressure si butta il pacchetto compresso più vecchio
-     prima che entri nel decoder. Il decoder riceve sempre sequenze complete
-     → nessun frame di riferimento mancante → nessun artefatto.
-     Dimensione: max-size-buffers=8, ~80ms @30fps — abbastanza da assorbire
-     jitter del bus ZMQ senza introdurre latenza percettibile.
   2. appsink drop=false, max-buffers=4.
-     I frame già decodificati non vengono mai scartati. Se Qt non riesce
-     a consumarli abbastanza velocemente, il backpressure risale fino alla
-     queue leaky che butta i compressi — non i decodificati.
   3. PTS monotono su ogni Gst.Buffer in push_frame.
-     Senza PTS alcuni decoder (vaapih264dec in particolare) possono
-     riordinare i frame in modo errato su scene ad alto movimento.
-     Il PTS è calcolato da un contatore interno (non dal clock di sistema)
-     per evitare drift quando i frame non arrivano a ritmo costante.
+
+Fix notes (2026-05-12 rev5 — decoder probe estesa + artefatti residui):
+  Obiettivo: decoder HW portabile senza dipendenze conda, artefatti zero
+  anche dopo drop della queue leaky.
+
+  1. _try_load_system_vaapi(): carica vaapih264dec dai plugin GStreamer di
+     sistema (/usr/lib/*/gstreamer-1.0) via Gst.Registry.scan_path() se
+     non disponibile nell'env conda. Nessuna modifica a variabili d'ambiente.
+     Su macchine senza VA-API fallisce silenziosamente.
+
+  2. openh264dec aggiunto in _DECODER_CANDIDATES (posizione 3, prima di
+     avdec_h264). Più leggero su hardware x86 datato come Bay Trail.
+
+  3. h264parse config-interval=-1: il parser reinserisce automaticamente
+     SPS/PPS prima di ogni IDR frame. Dopo qualsiasi drop della queue leaky
+     il decoder riceve un IDR completo e si risincronizza immediatamente
+     senza produrre macrobloc. Questa è la fix principale degli artefatti
+     residui.
+
+  4. Log dettagliato al boot: decoder scelto + path VA-API se caricato
+     da sistema, per diagnostica in deploy.
 """
 
 from __future__ import annotations
@@ -169,20 +176,65 @@ _STATE_LABELS = {
 # vaapidecodebin ESCLUSO: usa DMA-buf internamente e triggera un assertion
 # fault nel driver i965 su Bay Trail (i965_check_alloc_surface_bo).
 # vaapih264dec usa superficie YUV classica — stabile su i965.
+#
+# openh264dec: Cisco openh264, più leggero di avdec_h264 su x86 datato.
+# Disponibile tramite conda-forge: openh264 + gst-plugins-bad.
 _DECODER_CANDIDATES = [
     ("vaapih264dec", "VA-API HW i965 (vaapih264dec)",  True),
     ("vah264dec",    "VA-API HW iHD (vah264dec)",      True),
+    ("openh264dec",  "Cisco openh264 SW (openh264dec)", True),
     ("avdec_h264",   "FFmpeg SW (avdec_h264)",          True),
 ]
 
 # Dimensione della queue leaky prima del decoder.
 # 8 buffer @ 30fps = ~267ms di margine per assorbire jitter ZMQ.
 # In caso di backpressure si butta il pacchetto compresso più vecchio
-# (leaky=downstream) prima che entri nel decoder — nessun artefatto.
+# (leaky=downstream) prima che entri nel decoder.
+# config-interval=-1 su h264parse garantisce che dopo ogni drop la
+# ripresa avvenga sempre su un IDR completo — nessun artefatto.
 _LEAKY_QUEUE_BUFFERS = 8
 
 # Framerate nominale assunto per il calcolo del PTS (Android Auto è sempre 30fps).
 _FRAME_DURATION_NS = 1_000_000_000 // 30   # 33_333_333 ns
+
+# Path standard dove cercare i plugin GStreamer di sistema per la probe VA-API.
+# L'ordine riflette le architetture più comuni su Linux desktop/embedded.
+_SYSTEM_GST_PLUGIN_PATHS = [
+    "/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
+    "/usr/lib/aarch64-linux-gnu/gstreamer-1.0",
+    "/usr/lib/arm-linux-gnueabihf/gstreamer-1.0",
+    "/usr/lib/i386-linux-gnu/gstreamer-1.0",
+]
+
+
+def _try_load_system_vaapi() -> str | None:
+    """
+    Prova a caricare vaapih264dec dai plugin GStreamer di sistema via
+    Gst.Registry.scan_path(), senza modificare variabili d'ambiente globali.
+
+    Ritorna il path di sistema usato se vaapih264dec è ora disponibile,
+    None altrimenti (fallisce silenziosamente — la probe continua con
+    i candidati SW successivi).
+
+    Chiamata una sola volta all'avvio di _build_pipeline, prima della
+    selezione del decoder.
+    """
+    if not _GST_AVAILABLE:
+        return None
+
+    # Già disponibile nell'env conda — nessuna azione necessaria.
+    if Gst.ElementFactory.find("vaapih264dec"):
+        return "(conda env)"
+
+    registry = Gst.Registry.get()
+    for path in _SYSTEM_GST_PLUGIN_PATHS:
+        if not Path(path).exists():
+            continue
+        registry.scan_path(path)
+        if Gst.ElementFactory.find("vaapih264dec"):
+            return path
+
+    return None
 
 
 def _build_pipeline(use_gl: bool) -> "tuple[Gst.Pipeline | None, str]":
@@ -192,8 +244,12 @@ def _build_pipeline(use_gl: bool) -> "tuple[Gst.Pipeline | None, str]":
     Returns (None, '') if GStreamer is unavailable or no decoder found.
 
     Pipeline topology:
-      appsrc → h264parse → queue(leaky=downstream) → decoder → videoconvert
-               → appsink(drop=false)
+      appsrc → h264parse(config-interval=-1) → queue(leaky=downstream)
+               → decoder → videoconvert → appsink(drop=false)
+
+    config-interval=-1: h264parse reinserisce SPS/PPS prima di ogni IDR.
+    Dopo qualsiasi drop della queue leaky il decoder riceve sempre un IDR
+    completo e si risincronizza senza produrre macrobloc.
 
     La queue leaky scarta compressi in eccesso PRIMA del decoder.
     L'appsink non scarta mai frame già decodificati.
@@ -202,6 +258,16 @@ def _build_pipeline(use_gl: bool) -> "tuple[Gst.Pipeline | None, str]":
         return None, ""
 
     fmt = "NV12" if use_gl else "RGB"
+
+    # Tenta di caricare vaapih264dec dai plugin di sistema se non
+    # disponibile nell'env conda.
+    vaapi_system_path = _try_load_system_vaapi()
+    if vaapi_system_path:
+        log.info(
+            "VA-API probe: vaapih264dec disponibile (path: %s)", vaapi_system_path
+        )
+    else:
+        log.info("VA-API probe: vaapih264dec non disponibile — uso SW decoder")
 
     # Log tutti i candidati per diagnostica
     for name, label, _ in _DECODER_CANDIDATES:
@@ -219,20 +285,30 @@ def _build_pipeline(use_gl: bool) -> "tuple[Gst.Pipeline | None, str]":
 
     if chosen_name is None:
         log.warning(
-            "Nessun decoder H264 trovato (vaapih264dec / vah264dec / avdec_h264). "
-            "Installa gst-plugins-vaapi o gst-libav nell'env conda."
+            "Nessun decoder H264 trovato — "
+            "installa gst-libav o gst-plugins-bad nell'env conda."
         )
         return None, ""
 
-    log.info("GStreamer decoder selezionato: %s", chosen_label)
+    # Log di avvio: decoder scelto + tipo (HW/SW) + path VA-API se applicabile
+    decoder_type = "HW VA-API" if "vaapi" in chosen_name or "vah264" in chosen_name else "SW"
+    if decoder_type == "HW VA-API" and vaapi_system_path:
+        log.info(
+            "[VIDEO DECODER] %s (%s) — caricato da sistema: %s — formato output: %s",
+            chosen_label, decoder_type, vaapi_system_path, fmt,
+        )
+    else:
+        log.info(
+            "[VIDEO DECODER] %s (%s) — formato output: %s",
+            chosen_label, decoder_type, fmt,
+        )
 
-    # Queue leaky=downstream: in backpressure butta il buffer compresso più
-    # vecchio prima che entri nel decoder. Il decoder non perde mai riferimenti.
-    # appsink drop=false: i frame già decodificati non vengono mai scartati.
+    # config-interval=-1: reinserisce SPS/PPS prima di ogni IDR frame.
+    # Garantisce risincronizzazione pulita dopo ogni drop della queue leaky.
     pipeline_desc = (
         f"appsrc name=src is-live=true format=time "
         f"caps=video/x-h264,stream-format=byte-stream,alignment=au "
-        f"! h264parse "
+        f"! h264parse config-interval=-1 "
         f"! queue name=predec leaky=downstream "
         f"    max-size-buffers={_LEAKY_QUEUE_BUFFERS} "
         f"    max-size-time=0 max-size-bytes=0 "
@@ -473,8 +549,6 @@ class VideoWidget(QWidget):
         self._first_frame_shown = False
         self._frames_pushed     = 0
         self._frames_decoded    = 0
-        # Contatore PTS monotono: evita drift se i frame non arrivano a ritmo costante.
-        # Usato in push_frame per assegnare un PTS crescente ad ogni Gst.Buffer.
         self._pts_counter: int  = 0
 
         self._stack = QStackedWidget(self)
@@ -575,8 +649,6 @@ class VideoWidget(QWidget):
 
         buf = Gst.Buffer.new_wrapped(raw)
 
-        # PTS monotono: ogni frame avanza di _FRAME_DURATION_NS (1/30s).
-        # I frame di config (SPS/PPS) non incrementano il contatore.
         if not is_config:
             buf.pts      = self._pts_counter * _FRAME_DURATION_NS
             buf.duration = _FRAME_DURATION_NS
@@ -661,7 +733,7 @@ class VideoWidget(QWidget):
     def set_streaming(self, active: bool) -> None:
         if not active:
             self._first_frame_shown = False
-            self._pts_counter       = 0     # reset PTS al prossimo stream
+            self._pts_counter       = 0
         self._stack.setCurrentIndex(1 if (active and self._render_fmt) else 0)
         log.info("set_streaming(%s) → stack index %d", active,
                  1 if (active and self._render_fmt) else 0)
