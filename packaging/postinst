@@ -12,15 +12,38 @@
 #   - Idempotent: safe to run multiple times (upgrades).
 #   - Never interactive: no prompts, no stdin reads.
 #   - Log to journald-friendly stdout only.
+#
+# Conda env strategy:
+#   The .deb ships environment.yml, NOT a pre-built env.
+#   postinst builds the env on the target machine so that all native libs
+#   (glibc, ALSA, VA-API...) are compiled for the actual target OS,
+#   avoiding ABI mismatches and segfaults across distro versions.
 
 set -euo pipefail
 
 APP_DIR="/opt/nemo-headunit"
+CONDA_ENV_DIR="${APP_DIR}/env"
+ENV_YML="${APP_DIR}/environment.yml"
+BOOTSTRAP_CONDA="${APP_DIR}/bootstrap_conda.sh"
 SERVICE_NAME="org.nemo.APManager.service"
 GROUP_NAME="ap_manager"
 HW_FIX_RUNNER="${APP_DIR}/hardware_fixes/run_hardware_fixes.sh"
 
 log() { echo "[nemo-headunit postinst] $*"; }
+
+# Trova conda nel PATH o in /opt/miniconda3
+find_conda() {
+    if command -v conda &>/dev/null; then
+        command -v conda
+        return 0
+    fi
+    if [ -x "/opt/miniconda3/bin/conda" ]; then
+        export PATH="/opt/miniconda3/bin:${PATH}"
+        echo "/opt/miniconda3/bin/conda"
+        return 0
+    fi
+    return 1
+}
 
 case "$1" in
 
@@ -36,27 +59,71 @@ configure)
     fi
 
     # ------------------------------------------------------------------
-    # 2. Fix permissions on the installed app directory
+    # 2. Bootstrap conda if missing
+    # ------------------------------------------------------------------
+    if ! find_conda &>/dev/null; then
+        if [ -f "${BOOTSTRAP_CONDA}" ]; then
+            log "conda non trovato — eseguo bootstrap_conda.sh"
+            chmod +x "${BOOTSTRAP_CONDA}"
+            bash "${BOOTSTRAP_CONDA}"
+        else
+            log "WARNING: conda non trovato e bootstrap_conda.sh assente."
+            log "         Installa conda manualmente e ri-esegui:"
+            log "           conda env create --prefix ${CONDA_ENV_DIR} --file ${ENV_YML}"
+        fi
+    else
+        log "conda trovato: $(find_conda)"
+    fi
+
+    # ------------------------------------------------------------------
+    # 3. Build Conda env on target (idempotent)
+    # ------------------------------------------------------------------
+    CONDA_BIN="$(find_conda || true)"
+
+    if [ -n "${CONDA_BIN}" ]; then
+        if [ -d "${CONDA_ENV_DIR}" ]; then
+            log "Conda env già presente in ${CONDA_ENV_DIR} — aggiornamento"
+            "${CONDA_BIN}" env update \
+                --prefix "${CONDA_ENV_DIR}" \
+                --file   "${ENV_YML}" \
+                --prune  \
+                --quiet
+        else
+            log "Creazione Conda env in ${CONDA_ENV_DIR} (potrebbe richiedere qualche minuto)"
+            "${CONDA_BIN}" env create \
+                --prefix "${CONDA_ENV_DIR}" \
+                --file   "${ENV_YML}" \
+                --quiet
+        fi
+        log "Conda env pronto."
+    else
+        log "WARNING: impossibile creare il Conda env — conda non disponibile."
+        log "         Il servizio non si avvierà finché l'env non è presente."
+    fi
+
+    # ------------------------------------------------------------------
+    # 4. Fix permissions on the installed app directory
     # ------------------------------------------------------------------
     log "Setting permissions on ${APP_DIR}"
     chown -R root:root "${APP_DIR}"
     chmod -R a+rX,u+w "${APP_DIR}"
-    # The Conda env Python interpreter must be executable
-    chmod +x "${APP_DIR}/env/bin/python"
+    if [ -x "${CONDA_ENV_DIR}/bin/python" ]; then
+        chmod +x "${CONDA_ENV_DIR}/bin/python"
+    fi
 
     # ------------------------------------------------------------------
-    # 3. Fix permissions on privileged service script
+    # 5. Fix permissions on privileged service script
     # ------------------------------------------------------------------
     chmod 700 "${APP_DIR}/services/ap_manager_service/ap_manager_service.py"
 
     # ------------------------------------------------------------------
-    # 4. Reload D-Bus so it picks up the new policy
+    # 6. Reload D-Bus so it picks up the new policy
     # ------------------------------------------------------------------
     log "Reloading D-Bus configuration"
     systemctl reload dbus 2>/dev/null || true
 
     # ------------------------------------------------------------------
-    # 5. Reload systemd and enable + start the AP manager service
+    # 7. Reload systemd and enable + start the AP manager service
     # ------------------------------------------------------------------
     log "Reloading systemd daemon"
     systemctl daemon-reload
@@ -70,7 +137,7 @@ configure)
     }
 
     # ------------------------------------------------------------------
-    # 6. Platform-specific hardware fixes
+    # 8. Platform-specific hardware fixes
     # ------------------------------------------------------------------
     if [ -f "${HW_FIX_RUNNER}" ]; then
         log "Running platform hardware fixes"
@@ -87,8 +154,6 @@ configure)
     ;;
 
 upgrade)
-    # dpkg calls configure for upgrades too, but some tools call upgrade
-    # explicitly — just restart the service to pick up the new binary.
     log "Upgrade detected — restarting ${SERVICE_NAME}"
     systemctl restart "${SERVICE_NAME}" || true
     ;;
