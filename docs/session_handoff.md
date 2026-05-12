@@ -721,3 +721,43 @@ sotto la lista discovery, separata da un `QFrame` orizzontale.
 ```bash
 python -c "from bluetooth_ui.main import BluetoothPairingWindow; print('import OK')"
 ```
+
+---
+
+## 2026-05-12 - packaging: org.nemo.bluetooth.rules distribuito via deb e install.sh
+
+**What changed:**
+
+`packaging/org.nemo.bluetooth.rules` (PolicyKit JS rules per BlueZ) ora viene
+installato correttamente sia dal pacchetto `.deb` che dall'installer manuale.
+
+### `packaging/build_deb.sh` — [commit a76bc07](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/a76bc07ace98785130af0c0f048301677dd3451d)
+
+| Aspetto | Modifica |
+|---|---|
+| Nuova variabile | `BT_RULES="packaging/org.nemo.bluetooth.rules"` |
+| Staging | `cp "$BT_RULES" "$STAGING/etc/polkit-1/rules.d/"` dopo la copia delle policy |
+| `postinst` | Nessuna modifica — `polkit` si aggiorna automaticamente sui file in `rules.d/` |
+
+### `services/ap_manager_service/install.sh` — [commit bf529fe](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/bf529fe58b3e4db7c6f606205376a2fa1ca14435)
+
+| Aspetto | Modifica |
+|---|---|
+| Nuova variabile | `POLKIT_RULES_DIR="/etc/polkit-1/rules.d"` |
+| Nuova variabile | `REPO_ROOT` (calcolata con `cd ../..` dal `SCRIPT_DIR`) |
+| Nuovo step 5/7 | `cp "$REPO_ROOT/packaging/org.nemo.bluetooth.rules" "$POLKIT_RULES_DIR/"` |
+| Rinumerazione | Vecchi step 5→6, 6→7 |
+
+**Why:**
+- La `.rules` file era presente in `packaging/` ma non veniva mai copiata né
+  dal `.deb` né da `install.sh` → l'agent BlueZ non aveva i permessi PolicyKit
+  necessari per operare come servizio non-root.
+- La fix è chirurgica: nessuna modifica alla logica esistente, solo aggiunta
+  del file mancante nella pipeline di distribuzione.
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. ✅ Verificare con `pkcheck` che i permessi BlueZ siano corretti dopo install
+2. ⏳ Scrivere test unitari pendenti (vedere sezioni precedenti)
+3. ⏳ Aprire PR `no_logging_improvement` → `main`
