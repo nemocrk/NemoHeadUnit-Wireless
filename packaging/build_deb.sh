@@ -13,10 +13,11 @@
 #   4.  Assembles a staging directory (build/stage/) mirroring the
 #       final filesystem layout:
 #         /opt/nemo-headunit/
-#           env/            ← full Conda environment
-#           v2/             ← application source (v2/)
-#           services/       ← ap_manager_service
-#           bus_broker.py   ← ZMQ bus broker entry point
+#           env/              ← full Conda environment
+#           v2/               ← application source (v2/)
+#           services/         ← ap_manager_service
+#           hardware_fixes/   ← platform-specific fix scripts + registry
+#           bus_broker.py     ← ZMQ bus broker entry point
 #         /usr/lib/systemd/system/
 #           org.nemo.APManager.service
 #         /etc/dbus-1/system.d/
@@ -93,6 +94,7 @@ SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps.txt"
 POSTINST="${REPO_ROOT}/packaging/postinst"
 PRERM="${REPO_ROOT}/packaging/prerm"
 BT_RULES="${REPO_ROOT}/packaging/org.nemo.bluetooth.rules"
+HW_FIXES_SRC="${REPO_ROOT}/packaging/hardware_fixes"
 
 SERVICES_SRC="${REPO_ROOT}/services/ap_manager_service"
 
@@ -170,6 +172,11 @@ cp -a "${SERVICES_SRC}" "${APP_OPT}/services/ap_manager_service"
 
 log "  Copying bus_broker.py"
 cp "${REPO_ROOT}/bus_broker.py" "${APP_OPT}/bus_broker.py"
+
+log "  Copying hardware_fixes/"
+cp -a "${HW_FIXES_SRC}" "${APP_OPT}/hardware_fixes"
+chmod +x "${APP_OPT}/hardware_fixes/run_hardware_fixes.sh"
+find "${APP_OPT}/hardware_fixes" -name 'fix_*.sh' -exec chmod +x {} \;
 
 # Remove test files, __pycache__, .pyc from staged source
 log "  Pruning test files and bytecode from staged source"
