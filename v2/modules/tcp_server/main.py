@@ -416,7 +416,7 @@ def _on_raw_frame(channel_id: int, flags: int, payload: bytes, total_size: int) 
     if result is None:
         return
 
-    channel_id, flags, assembled = result
+    channel_id, flags, assembled, total_size = result
 
     # Save original encrypted flag — echoed to subscribers
     encrypted = bool(flags & _FLAG_ENCRYPTED)
@@ -445,6 +445,11 @@ def _on_raw_frame(channel_id: int, flags: int, payload: bytes, total_size: int) 
         log.error("_on_raw_frame: ch=%d assembled payload too short (%d bytes) — dropping",
                   channel_id, len(assembled))
         return
+    if total_size and len(assembled) != total_size:
+        log.warning(
+            "_on_raw_frame: ch=%d assembled_len=%d differs from declared total_size=%d",
+            channel_id, len(assembled), total_size,
+        )
     message_id = struct.unpack_from(">H", assembled, 0)[0]
     body       = assembled[2:]
 

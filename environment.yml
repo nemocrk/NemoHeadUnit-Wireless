@@ -62,6 +62,8 @@ dependencies:
   - gst-libav             # avdec_h264 — FFmpeg SW H264 decoder
   - gst-plugins-bad       # h264parse, openh264dec, ecc.
   - openh264              # Cisco openh264 — SW decoder leggero per x86 datato
+  - gst-plugins-base 
+  - gst-plugins-good
 
   # -----------------------------------------------------------------------
   # Audio backend (channel_modules/audio)

@@ -243,10 +243,10 @@ class FrameAssembler:
         flags: int,
         payload: bytes,
         total_size: int = 0,
-    ) -> Optional[tuple[int, int, bytes]]:
+    ) -> Optional[tuple[int, int, bytes, int]]:
         """Feed one raw frame into the assembler.
 
-        Returns (channel_id, flags, assembled_payload) when the message is
+        Returns (channel_id, flags, assembled_payload, total_size) when the message is
         complete, or None if more frames are expected.
 
         frame_type rules:
@@ -259,7 +259,7 @@ class FrameAssembler:
 
         if frame_type == _FT_BULK:
             # Fast path — most frames
-            return (channel_id, flags, payload)
+            return (channel_id, flags, payload, total_size)
 
         if frame_type == _FT_FIRST:
             # Start or restart accumulation for this channel
@@ -285,16 +285,10 @@ class FrameAssembler:
         if frame_type == _FT_LAST:
             assembled = b"".join(buf.chunks)
             saved_flags = buf.first_flags
-            if buf.total_size and len(assembled) != buf.total_size:
-                import logging
-                logging.getLogger("tcp_server.frame_codec").warning(
-                    "FrameAssembler: ch=%d assembled_len=%d differs from declared total_size=%d",
-                    channel_id, len(assembled), buf.total_size,
-                )
             del self._buffers[channel_id]
             # Return with BULK frame_type so consumers don't need to special-case
             out_flags = (saved_flags & ~0x03) | _FT_BULK
-            return (channel_id, out_flags, assembled)
+            return (channel_id, out_flags, assembled, buf.total_size)
 
         # MIDDLE — keep accumulating
         return None

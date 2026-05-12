@@ -4,22 +4,11 @@
 # then avvia automaticamente main.py con log rotation e output live.
 #
 # Usage:
-#   bash scripts/deploy_remote.sh --sync-env <user> <host>
+#   bash scripts/deploy_remote.sh [--sync-env] [--omni-fix] <user> <host>
 #
 # Example:
+#   bash scripts/deploy_remote.sh --sync-env --omni-fix hpuser 192.168.1.50
 #   bash scripts/deploy_remote.sh --sync-env pi 192.168.1.42
-#
-# Requirements (local):
-#   - ssh access configured (key-based recommended)
-#   - rsync installed locally
-#
-# What this script does:
-#   1. Ruota i log locali (deploy.log, keep ultimi 5)
-#   2. Crea la directory remota se non esiste
-#   3. Syncs v2/ and environment.yml to ~/NemoHeadUnit-Wireless on the remote
-#   4. Installs Miniconda if not present (no root required)
-#   5. Creates/updates the Conda environment from environment.yml
-#   6. Avvia main.py via SSH con output live + tee su log
 
 set -euo pipefail
 
@@ -30,38 +19,60 @@ KEEP=5
 LOGFILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/logs/deploy.log"
 REMOTE_DIR="NemoHeadUnit-Wireless"
 SYNC_ENV_FLAG=0
+OMNI_FIX_FLAG=0
+REMOTE_USER=""
+REMOTE_HOST=""
 
 # ---------------------------------------------------------------------------
-# Args
+# Args Parsing
 # ---------------------------------------------------------------------------
 show_help() {
-  echo "Usage: $0 --sync-env <user> <host>"
+  echo "Usage: $0 [--sync-env] [--omni-fix] <user> <host>"
   echo ""
   echo "Options:"
-  echo "  --sync-env    Enable Step 4 (Conda environment setup)"
-  echo "  --help        Show this help message"
+  echo "  --sync-env    Sincronizza environment.yml e configura Conda"
+  echo "  --omni-fix    Applica ottimizzazioni audio/C-States per HP OMNI 10 (Intel Bay Trail)"
+  echo "  --help        Mostra questo messaggio"
   echo ""
   echo "Example:"
-  echo "  $0 --sync-env pi 192.168.1.42"
+  echo "  $0 --sync-env --omni-fix hpuser 192.168.1.50"
   exit 0
 }
 
-# Parse arguments: --sync-env is a positional option
-if [ $# -ge 1 ] && [ "$1" = "--sync-env" ]; then
-  SYNC_ENV_FLAG=1
-  shift
-fi
+# Parsing robusto degli argomenti
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --sync-env)
+      SYNC_ENV_FLAG=1
+      shift
+      ;;
+    --omni-fix)
+      OMNI_FIX_FLAG=1
+      shift
+      ;;
+    --help|-h)
+      show_help
+      ;;
+    *)
+      if [ -z "$REMOTE_USER" ]; then
+        REMOTE_USER="$1"
+      elif [ -z "$REMOTE_HOST" ]; then
+        REMOTE_HOST="$1"
+      else
+        echo "Errore: Troppi argomenti posizionali."
+        show_help
+      fi
+      shift
+      ;;
+  esac
+done
 
-# Check for required arguments
-if [ $# -lt 2 ]; then
-  echo "Error: Missing required arguments"
+if [ -z "$REMOTE_USER" ] || [ -z "$REMOTE_HOST" ]; then
+  echo "Errore: Mancano utente o host."
   show_help
 fi
 
-REMOTE_USER="$1"
-REMOTE_HOST="$2"
 REMOTE="$REMOTE_USER@$REMOTE_HOST"
-
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ---------------------------------------------------------------------------
@@ -95,54 +106,139 @@ echo ""
 # ---------------------------------------------------------------------------
 # Step 1: Crea directory remota
 # ---------------------------------------------------------------------------
-echo "[1/5] Preparing remote directory..."
+echo "[1/6] Preparing remote directory..."
 ssh "$REMOTE" "mkdir -p /home/$REMOTE_USER/$REMOTE_DIR/v2"
 echo "[OK] Remote directory ready."
 echo ""
 
 # ---------------------------------------------------------------------------
-# Step 2: Sync v2/ + environment.yml
+# Step 2: Ottimizzazioni HP OMNI 10 (Bay Trail) - OPZIONALE
 # ---------------------------------------------------------------------------
-echo "[2/5] Syncing v2/ to remote..."
-rm $REPO_ROOT/v2/config/*.yaml || true
+if [ "$OMNI_FIX_FLAG" = "1" ]; then
+  echo "[2/6] Applicazione ottimizzazioni per HP OMNI 10..."
+  
+  # Scriviamo lo script temporaneo sul server remoto tramite heredoc
+  ssh "$REMOTE" "cat > /tmp/omni_fix.sh" << 'EOF'
+#!/bin/bash
+AUDIO_CHANGED=0
+GRUB_CHANGED=0
+AUDIO_CONF="/etc/modprobe.d/baytrail-audio-fix.conf"
+GRUB_FILE="/etc/default/grub"
+
+echo "Controllo fix per il loop audio..."
+if ! grep -q "options snd_sof sof_debug=1" "$AUDIO_CONF" 2>/dev/null; then
+    echo "options snd_sof sof_debug=1" | sudo tee -a "$AUDIO_CONF" > /dev/null
+    AUDIO_CHANGED=1
+fi
+if ! grep -q "options snd-intel-dspcfg dsp_driver=2" "$AUDIO_CONF" 2>/dev/null; then
+    echo "options snd-intel-dspcfg dsp_driver=2" | sudo tee -a "$AUDIO_CONF" > /dev/null
+    AUDIO_CHANGED=1
+fi
+
+echo "Controllo fix per il freeze di sistema (C-States)..."
+if [ -f "$GRUB_FILE" ]; then
+    if ! grep -q "intel_idle.max_cstate=1" "$GRUB_FILE"; then
+        sudo sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 intel_idle.max_cstate=1"/' "$GRUB_FILE"
+        GRUB_CHANGED=1
+    fi
+fi
+
+if [ $GRUB_CHANGED -eq 1 ]; then
+    echo "Aggiornamento di GRUB in corso..."
+    sudo update-grub
+fi
+
+if [ $AUDIO_CHANGED -eq 1 ] ||[ $GRUB_CHANGED -eq 1 ]; then
+    echo "[!] Modifiche di sistema applicate. Sarà necessario un riavvio in seguito."
+else
+    echo "[OK] Sistema HP OMNI 10 già ottimizzato."
+fi
+EOF
+
+  # Eseguiamo lo script remoto allocando un TTY (-t) così sudo può chiedere la password se serve
+  ssh -t "$REMOTE" "bash /tmp/omni_fix.sh && rm /tmp/omni_fix.sh"
+  echo ""
+else
+  echo "[2/6] Ottimizzazioni hardware ignorate (usa --omni-fix per abilitare)."
+  echo ""
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3: Sync v2/ + environment.yml
+# ---------------------------------------------------------------------------
+echo "[3/6] Syncing v2/ to remote..."
+rm "$REPO_ROOT"/v2/config/*.yaml 2>/dev/null || true
 rsync -avz --delete \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
   -e ssh \
   "$REPO_ROOT/v2/" "$REMOTE:/home/$REMOTE_USER/$REMOTE_DIR/v2/"
+echo ""
+
 if [ "$SYNC_ENV_FLAG" = "1" ]; then
-
-echo "[2/5] Syncing environment.yml to remote..."
-rsync -avz \
-  -e ssh \
-  "$REPO_ROOT/environment.yml" "$REMOTE:/home/$REMOTE_USER/$REMOTE_DIR/environment.yml"
-echo ""
+  echo "[3.5/6] Syncing environment.yml to remote..."
+  rsync -avz \
+    -e ssh \
+    "$REPO_ROOT/environment.yml" "$REMOTE:/home/$REMOTE_USER/$REMOTE_DIR/environment.yml"
+  echo ""
 
 # ---------------------------------------------------------------------------
-# Step 3: Miniconda (no root)
+# Step 4: Miniconda + Libmamba Solver (Speed boost)
 # ---------------------------------------------------------------------------
-echo "[3/5] Checking Miniconda on remote..."
-ssh "$REMOTE" bash <<'ENDSSH'
-set -euo pipefail
-if command -v conda &>/dev/null || [ -x "$HOME/miniconda3/bin/conda" ]; then
-  echo "[OK] Conda already installed."
-else
-  echo "[INFO] Installing Miniconda (no root)..."
-  ARCH=$(uname -m)
-  MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-${ARCH}.sh"
-  wget -q "$MINICONDA_URL" -O /tmp/miniconda.sh
-  bash /tmp/miniconda.sh -b -p "$HOME/miniconda3"
-  rm /tmp/miniconda.sh
-  "$HOME/miniconda3/bin/conda" init bash
-  echo "[OK] Miniconda installed."
-fi
+  echo "[4/6] Checking Miniconda and Solver on remote..."
+  ssh "$REMOTE" bash <<'ENDSSH'
+  set -euo pipefail
+  CONDA_BIN="$HOME/miniconda3/bin/conda"
+  
+  # 1. Installazione Miniconda (se manca)
+  if ! command -v conda &>/dev/null && [ ! -x "$CONDA_BIN" ]; then
+    echo "[INFO] Installing Miniconda..."
+    ARCH=$(uname -m)
+    wget -q "https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-${ARCH}.sh" -O /tmp/miniconda.sh
+    bash /tmp/miniconda.sh -b -p "$HOME/miniconda3"
+    rm /tmp/miniconda.sh
+    "$CONDA_BIN" init bash
+  fi
+
+  eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
+
+  # 2. Installazione libmamba-solver (se manca)
+  if ! conda list -n base conda-libmamba-solver | grep -q "conda-libmamba-solver"; then
+    echo "[INFO] Installing libmamba solver..."
+    conda install -n base conda-libmamba-solver -y --quiet
+  else
+    echo "[OK] libmamba solver already installed."
+  fi
+
+  # 3. Configurazione Solver e Canali (solo se diversi)
+  CURRENT_SOLVER=$(conda config --show solver --json | grep '"solver":' | cut -d'"' -f4 || echo "classic")
+  if [ "$CURRENT_SOLVER" != "libmamba" ]; then
+    echo "[INFO] Setting libmamba as default solver..."
+    conda config --set solver libmamba
+    conda config --set max_parallel_downloads 10
+    conda config --set connect_timeout 10
+  fi
+
+  # 4. Configurazione Canali (rimuove defaults, aggiunge conda-forge)
+  if conda config --show channels | grep -q "defaults"; then
+    echo "[INFO] Cleaning channels (removing defaults, adding conda-forge)..."
+    conda config --remove channels defaults || true
+    conda config --add channels conda-forge
+    conda config --set channel_priority strict
+    # Pulisce gli indici solo se cambiano i canali, per evitare overhead
+    conda clean -i -y
+  fi
+
+  echo "[OK] Conda environment logic ready."
 ENDSSH
-echo ""
+
+  echo ""
+
 
 # ---------------------------------------------------------------------------
-# Step 4: Conda environment + avvio (enabled with --sync-env flag)
+# Step 5: Conda environment + avvio
 # ---------------------------------------------------------------------------
-  echo "[4/5] Creating/updating Conda environment (py314)..."
+  echo "[5/6] Creating/updating Conda environment (py314)..."
   ssh "$REMOTE" bash <<'ENDSSH'
   set -euo pipefail
   eval "$($HOME/miniconda3/bin/conda shell.bash hook)"
@@ -157,16 +253,36 @@ echo ""
   echo "[OK] Conda environment ready."
 ENDSSH
   echo ""
+else
+  echo "[4/6 & 5/6] Conda env setup ignorato (usa --sync-env per abilitare)."
+  echo ""
 fi
 
 # ---------------------------------------------------------------------------
-# Step 5: Avvio automatico main.py (output live + tee log remoto)
+# Step 6: Avvio automatico main.py (output live + tee log remoto)
 # ---------------------------------------------------------------------------
-echo "[5/5] Avvio main.py sulla macchina remota..."
+echo "[6/6] Avvio main.py sulla macchina remota..."
 echo "      (Ctrl+C per interrompere — il log rimane in $LOGFILE)"
 echo ""
-exec ssh -t "$REMOTE" \
-  "source ~/miniconda3/etc/profile.d/conda.sh && \
-   conda activate py314 && \
-   cd ~/NemoHeadUnit-Wireless/v2 && \
-   DEBUG=1 DISPLAY=:0 DBUS_SYSTEM_BUS_ADDRESS=\"unix:path=/run/dbus/system_bus_socket\" python -m main"
+exec ssh -t "$REMOTE" '
+  source ~/miniconda3/etc/profile.d/conda.sh &&
+  conda activate py314 &&
+  cd ~/NemoHeadUnit-Wireless/v2 &&
+  export DEBUG=1 DISPLAY=:0 DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket &&
+  
+  # 1. Start Python fully in the background, safe from disconnections
+  nohup python -m main > ~/NemoHeadUnit-Wireless/deploy_remote.log 2>&1 &
+  PYTHON_PID=$!
+  
+  # 2. Catch Ctrl+C locally and explicitly forward it to Python
+  trap "echo -e \"\n[SSH] Caught Ctrl+C! Forwarding gracefully to Python (PID: $PYTHON_PID)...\"; kill -INT $PYTHON_PID" INT
+  
+  # 3. Stream the logs live. The --pid flag tells tail to exit automatically when Python stops!
+  tail --pid=$PYTHON_PID -n 0 -f ~/NemoHeadUnit-Wireless/deploy_remote.log &
+  
+  # 4. Wait for Python to finish. If we press Ctrl+C, wait is interrupted, 
+  # the trap fires, and the loop ensures we resume waiting for graceful shutdown.
+  while kill -0 $PYTHON_PID 2>/dev/null; do
+      wait $PYTHON_PID
+  done
+'
