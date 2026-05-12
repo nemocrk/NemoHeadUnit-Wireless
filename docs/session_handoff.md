@@ -326,7 +326,7 @@ a lui invece di gestire i device internamente.
 **What changed:**
 
 | File | Commit | Descrizione |
-|---|---|
+|---|---|---|
 | `v2/modules/channel_modules/video/main.py` | [6999c32](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/6999c3263d90c1af0d4690fb7f1836942b6f5857) | `publish_frames` default `False` → `True` (video_ui richiede frame sul bus) |
 | `v2/modules/video_ui/__init__.py` | [67ab91e](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/67ab91e87b87d276f2ec920c7244131378b0fd83) | Package scaffold |
 | `v2/modules/video_ui/main.py` | [1500244](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/15002444b5cd2a8fe43430f63c1ac9a6e616afbb) | Implementazione completa |
@@ -554,3 +554,102 @@ RFCOMM AA è gestito da `rfcomm_handshake/dbus_rfcomm.py`.
 1. ← **Prossima sessione**: aggiungere nuova funzionalità al modulo bluetooth
 2. Test unitari `tests/v2/test_pairing.py`: mock GLib mainloop, verifica auto-accept dopo timeout
 3. Test su hardware: verifica pairing SSP senza freeze del processo in attesa conferma utente
+
+---
+
+## 2026-05-12 - bluetooth: paired_devices + autoconnect esponenziale
+
+**What changed:**
+
+Aggiunta gestione completa dei device già accoppiati e loop di auto-reconnect
+al modulo bluetooth.
+
+### File modificati/aggiunti
+
+| File | Descrizione |
+|---|---|
+| `v2/modules/bluetooth/paired_devices.py` | **Nuovo** — wrapper BlueZ D-Bus per device paired/trusted |
+| `v2/modules/bluetooth/main.py` | **Modificato** — nuovi topic, autoconnect loop, config keys |
+
+### `paired_devices.py` — API pubblica
+
+| Funzione | Descrizione |
+|---|---|
+| `list_paired(bus)` | Tutti i `Device1` con `Paired=True` o `Trusted=True` da `GetManagedObjects` |
+| `get_info(bus, address)` | Dict `{address, name, connected, trusted, paired}` per singolo device |
+| `remove(bus, address)` | `Adapter1.RemoveDevice` — ritorna `bool` |
+| `connect(bus, address, timeout_s, on_connected, on_failed)` | `Device1.Connect()` async + thread watchdog (default 8s) |
+| `disconnect(bus, address, on_disconnected, on_failed)` | `Device1.Disconnect()` async |
+
+Design notes:
+- BlueZ è l'unica source of truth — nessuna cache locale
+- `connect()` usa `reply_handler`/`error_handler` GLib + watchdog daemon thread
+- `AlreadyConnected` in `connect()` e `NotConnected` in `disconnect()` trattati come successo
+
+### Autoconnect loop (`_autoconnect_loop` in `main.py`)
+
+- **Thread dedicato** `bt-autoconnect` (daemon), controllato da `_autoconnect_stop: threading.Event`
+- **Logica**: cicla su tutti i device `Paired/Trusted`, skipping quelli già `connected=True`; tenta `Device1.Connect()` con timeout configurabile; al termine del giro dorme `backoff`, poi raddoppia fino a `cap`
+- **Start**: all'avvio (`_on_config_loaded`) + su `bluetooth.try_autoconnect`
+- **Stop**: `bluetooth.rfcomm.connected` → `_stop_autoconnect()` (una volta per sessione, non riparte automaticamente)
+- **Ignorato**: `bluetooth.try_autoconnect` se loop già attivo (`_autoconnect_active=True`)
+- **system.stop**: `_stop_autoconnect("system.stop")` nel shutdown
+
+### Nuove config keys (`bluetooth.yaml`)
+
+| Key | Tipo | Default | Note |
+|---|---|---|---|
+| `autoconnect_enabled` | bool | `true` | Disabilita completamente il loop se `false` |
+| `autoconnect_connect_timeout_s` | int | `8` | Timeout esplicito per `Device1.Connect()` (min 2, max 30) |
+| `autoconnect_backoff_initial_s` | int | `5` | Backoff iniziale tra giri (min 1, max 30) |
+| `autoconnect_backoff_cap_s` | int | `60` | Cap massimo backoff (min 10, max 300) |
+
+### Nuovi bus topics
+
+| Dir | Topic | Payload | Azione |
+|---|---|---|---|
+| Sub | `bluetooth.rfcomm.connected` | `{device_address}` | Stoppa autoconnect loop |
+| Sub | `bluetooth.try_autoconnect` | `{}` | Avvia loop se non attivo |
+| Sub | `bluetooth.paired.list` | `{}` | → pub `bluetooth.paired.devices` |
+| Sub | `bluetooth.paired.remove` | `{device_address}` | → pub `bluetooth.paired.removed` o `bluetooth.paired.failed` |
+| Sub | `bluetooth.paired.connect` | `{device_address}` | → pub `bluetooth.paired.connected` o `bluetooth.paired.failed` |
+| Sub | `bluetooth.paired.disconnect` | `{device_address}` | → pub `bluetooth.paired.disconnected` o `bluetooth.paired.failed` |
+| Pub | `bluetooth.paired.devices` | `{devices: [{address, name, connected, trusted}]}` | |
+| Pub | `bluetooth.paired.removed` | `{device_address}` | |
+| Pub | `bluetooth.paired.connected` | `{device_address}` | |
+| Pub | `bluetooth.paired.disconnected` | `{device_address}` | |
+| Pub | `bluetooth.paired.failed` | `{device_address, error}` | |
+
+**Why:**
+- Il telefono Android non si riconnette autonomamente all'HU dopo un riavvio —
+  è necessario che sia l'HU a tentare `Device1.Connect()` attivamente.
+- Il backoff esponenziale evita di saturare D-Bus con retry continui quando
+  nessun device è in range.
+- Il loop si ferma su `bluetooth.rfcomm.connected` perché a quel punto
+  l'handshake AA gestisce il resto della sessione — ulteriori tentativi
+  di connect sarebbero superflui e potenzialmente interferenti.
+- `paired_devices.py` è separato da `main.py` per testabilità: non ha
+  dipendenze ZMQ e può essere testato con un mock `dbus.SystemBus`.
+
+**Status:** Completed
+
+**Next 1-3 steps:**
+1. Test unitari `tests/v2/test_paired_devices.py`:
+   - `test_list_paired` (mock `GetManagedObjects`, verifica filtro Paired/Trusted)
+   - `test_connect_watchdog_fires` (mock `Device1.Connect` che non risponde, verifica `on_failed` dopo timeout)
+   - `test_connect_already_connected` (verifica che `AlreadyConnected` chiami `on_connected`)
+   - `test_remove_device` (mock `Adapter1.RemoveDevice`, verifica return `True`)
+2. Test unitari `tests/v2/test_bluetooth_autoconnect.py`:
+   - `test_autoconnect_stops_on_rfcomm_connected` (mock bus, verifica `_autoconnect_stop.is_set()`)
+   - `test_autoconnect_ignores_duplicate_start` (verifica che secondo `_start_autoconnect` sia no-op)
+   - `test_autoconnect_skips_connected_devices` (verifica che device con `connected=True` non chiami `connect()`)
+3. Gestire `bluetooth.try_autoconnect` dalla UI (prossima feature)
+
+**Verification commands:**
+```bash
+python -c "import bluetooth.paired_devices as pd; print('import OK')"
+# Su hardware, nei log cerca:
+grep "Autoconnect loop started" logs/deploy.log
+grep "Autoconnect: connected to" logs/deploy.log
+grep "Autoconnect loop stopped" logs/deploy.log
+```
