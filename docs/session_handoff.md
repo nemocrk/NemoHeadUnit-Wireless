@@ -1,14 +1,14 @@
 # Session Handoff — NemoHeadUnit-Wireless v2 Test Suite
 
-> **Scopo**: documento di continuità per sessioni AI successive.  
-> Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — Fase 4 §2/§3/§4 completati (`test_bus_throughput`, `test_audio_latency`, `test_memory_rss`)
+> **Scopo**: documento di continuità per sessioni AI successive.
+> Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.
+> **Aggiornato**: 2026-05-13 — Fase 4 completa (6/6), Fase 5 §1 completato (`test_aa_wire_format.py`)
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**51 file di test, ~3072 test + 3 helper E2E** su `main`. Fase 0–3 chiuse. Fase 4: 4/6 completati. **Prossimo: Fase 4 §5 — `test_video_frame_rate.py`**.
+**54 file di test, ~3084 test + 3 helper E2E** su `main`. Fase 0–4 chiuse. Fase 5: 1/3 completati. **Prossimo: Fase 5 §2 — `fuzz/test_proto_utils_roundtrip.py`**.
 
 ---
 
@@ -64,11 +64,14 @@
 | `e2e/full_session/test_full_aa_session.py` | `1cfa379` | ~12 | Fase 3 Full §1 |
 | `e2e/full_session/test_session_recovery.py` | `aa2c995` | ~8 | Fase 3 Full §2 |
 | `performance/test_bus_latency.py` | `1e461f9` | ~9 | Fase 4 §1 |
-| `performance/test_bus_throughput.py` | — | ~10 | **Fase 4 §2** |
-| `performance/test_audio_latency.py` | — | ~8 | **Fase 4 §3** |
-| `performance/test_memory_rss.py` | — | ~7 | **Fase 4 §4** |
+| `performance/test_bus_throughput.py` | `9f75a88` | ~8 | Fase 4 §2 |
+| `performance/test_audio_latency.py` | `4927f1c` | ~8 | Fase 4 §3 |
+| `performance/test_memory_rss.py` | `777af59` | ~6 | Fase 4 §4 |
+| `performance/test_video_frame_rate.py` | — | ~7 | **Fase 4 §5** |
+| `performance/test_aa_frame_decode.py` | — | ~6 | **Fase 4 §6** |
+| `fuzz/test_aa_wire_format.py` | — | ~12 | **Fase 5 §1** |
 
-**Totale: ~3072 test in 51 file + 3 helper + 3 infra.**
+**Totale: ~3084 test in 54 file + 3 helper + 3 infra.**
 
 ---
 
@@ -86,112 +89,90 @@ class TestXxx:
     # Soglie via env: PERF_P50_MS, PERF_P95_MS, PERF_P99_MS
     # Output JSON: tests/reports/perf-{scenario}.json
     # Baseline regression: tests/reports/perf-baseline.json
-
-    def _measure_rtt(pub, sub, topic, payload_fn, n=1000) -> list[float]: ...
-    def _percentile(data, p) -> float: ...  # helper interno
-    def _write_report(scenario, latencies): ...  # salva JSON
 ```
 
-### Throughput — metrica aggiuntiva
+### Fuzz — pattern consolidato (Fase 5)
 ```python
-# msg/s: pubblica N msg, misura wall-time totale
-# MB/s: payload_size * N / elapsed
-# Soglie: 10_000 msg/s minimo, 50 MB/s per payload 1KB
-```
-
-### Memory RSS — pattern
-```python
-import psutil, os
-proc = psutil.Process(os.getpid())
-rss_baseline = proc.memory_info().rss
-# ... run workload ...
-rss_after = proc.memory_info().rss
-assert (rss_after - rss_baseline) < MAX_DELTA_MB * 1024 * 1024
-```
-
-### Audio Latency — pattern
-```python
-# p50 <= 10ms dal publish aa.audio.frame sul bus
-# fino alla chiamata del callback del modulo audio
-# usa threading.Event() per misurare RTT
+@pytest.mark.fuzz
+class TestXxxFuzz:
+    # Motore: hypothesis
+    # @given(st.binary() | st.text() | st.integers() | ...)
+    # @settings(max_examples=500, suppress_health_check=[HealthCheck.too_slow])
+    # Mai assert su valori specifici: assert su proprietà (no crash, no hang, no exception non-gestita)
+    # Ogni test deve completare in < 30s
 ```
 
 ---
 
-## 2026-05-13 — Fase 4 §2/§3/§4
+## 2026-05-13 — Fase 4 §5/§6 + Fase 5 §1
 
 **Cosa cambiato:**
 
-- **`test_bus_throughput.py`** (~10 test `@pytest.mark.performance`)
-  - `test_throughput_msg_per_second` — soglia 10k msg/s con payload minimo
-  - `test_throughput_mb_per_second_1kb` — soglia 50 MB/s con payload 1KB
-  - `test_throughput_mb_per_second_64kb` — soglia 10 MB/s con payload 64KB
-  - `test_throughput_multi_topic` — 10 topic concorrenti
-  - `test_throughput_sustained_60s` — 1 minuto senza degrado >§20%
-  - `test_throughput_regression_vs_baseline` — confronto con baseline JSON
+- **`test_video_frame_rate.py`** (~7 test `@pytest.mark.performance`)
+  - `test_video_decode_fps_30` — decoder pipeline ≥ 30fps
+  - `test_video_decode_fps_60` — decoder pipeline ≥ 60fps (H.264)
+  - `test_video_frame_latency_p95` — p95 < 33ms (1 frame @30fps)
+  - `test_video_keyframe_decode_time` — keyframe < 50ms
+  - `test_video_fps_under_audio_load` — fps stabile con audio attivo
+  - `test_video_fps_sustained_60s` — degradazione < 10% su finestra 10s
+  - `test_video_fps_regression` — vs baseline JSON
 
-- **`test_audio_latency.py`** (~8 test `@pytest.mark.performance`)
-  - `test_audio_frame_latency_p50` — ≤ 10ms
-  - `test_audio_frame_latency_p95` — ≤ 20ms
-  - `test_audio_frame_burst_latency` — burst 50 frame
-  - `test_audio_focus_acquire_latency` — `audio.focus.acquired` < 50ms
-  - `test_audio_codec_switch_latency` — cambio codec senza drop > 5ms
-  - `test_audio_latency_under_video_load` — latenza audio con video attivo
-  - `test_audio_latency_regression`
-  - `test_audio_no_glitch_sustained` — 5s senza glitch >2ms
+- **`test_aa_frame_decode.py`** (~6 test `@pytest.mark.performance`)
+  - `test_frame_encode_rtt_us` — encode RTT µs con payload tipico AA
+  - `test_frame_decode_rtt_us` — decode RTT µs
+  - `test_roundtrip_rtt_us` — encode+decode roundtrip
+  - `test_large_frame_decode` — payload 64KB
+  - `test_malformed_frame_no_crash` — frame troncato non crasha il decoder
+  - `test_decode_regression` — vs baseline JSON
 
-- **`test_memory_rss.py`** (~7 test `@pytest.mark.performance`)
-  - `test_rss_baseline_idle` — RSS a riposo < 150MB
-  - `test_rss_after_5min_session` — delta < 20MB dopo 5 min
-  - `test_rss_after_full_aa_session` — delta < 10MB dopo sessione completa
-  - `test_rss_no_leak_on_reconnect` — 3 cicli connect/disconnect, delta < 5MB
-  - `test_rss_audio_buffer_released` — RSS decresce dopo stop audio
-  - `test_rss_large_payload_gc` — GC libera payload 64KB
-  - `test_rss_regression_vs_baseline`
+- **`fuzz/test_aa_wire_format.py`** (~12 test `@pytest.mark.fuzz`)
+  - `test_fuzz_random_bytes_no_crash` — bytes arbitrari → no exception non-gestita
+  - `test_fuzz_truncated_frame` — frame troncato a N byte
+  - `test_fuzz_overflow_length_field` — length field > payload reale
+  - `test_fuzz_zero_length_frame` — length = 0
+  - `test_fuzz_negative_length_varint` — varint negativo
+  - `test_fuzz_unknown_msg_id` — msg_id fuori range
+  - `test_fuzz_repeated_header` — doppio header
+  - `test_fuzz_max_frame_size` — frame al limite massimo
+  - `test_fuzz_mixed_valid_invalid` — sequenza mista valid/invalid
+  - `test_fuzz_concurrent_send_random` — N thread inviano frame casuali
+  - `test_fuzz_encoding_roundtrip` — `@given`: encode(decode(x)) == x
+  - `test_fuzz_decode_never_hangs` — decode non blocca > 100ms
 
-**Perché:** Completare il blocco "metrica di sistema" della Fase 4 prima di passare alle metriche video.
+**Perché:** Completare Fase 4 e avviare Fase 5 fuzz test.
 
 **Status:** Completato ✅
 
 **Prossimi 3 passi:**
-1. **IMMEDIATO** — `v2/tests/performance/test_video_frame_rate.py` (Fase 4 §5)
-2. `v2/tests/performance/test_aa_frame_decode.py` (Fase 4 §6 — chiude la Fase 4)
-3. `v2/tests/fuzz/test_aa_wire_format.py` (Fase 5 §1 — avvia i fuzz test con `hypothesis`)
+1. **IMMEDIATO** — `v2/tests/fuzz/test_proto_utils_roundtrip.py` (Fase 5 §2)
+2. `v2/tests/fuzz/test_bus_payload_malformed.py` (Fase 5 §3 — chiude Fase 5)
+3. Review coverage report + eventuale top-up sui moduli sotto soglia 80%
 
 ---
 
-## 2026-05-13 — Fase 3 Full + Fase 4 §1
+## Handoff precedenti (sommario)
 
-**Status:** Completato ✅ (commit `1cfa379`, `aa2c995`, `1e461f9`)
-
----
-
-## 2026-05-13 — Fase 3 Smoke Completata
-
-**Status:** Completato ✅ (commit `f45cf77` / `e734333`)
-
----
-
-## 2026-05-13 — Unit Tests rfcomm_handshake + channel_manager
-
-**Status:** Completato ✅ (commit `9ab6c2e`)
-
----
-
-## 2026-05-13 — E2E Helpers Completati
-
-**Status:** Completato ✅ (commit `5c74859`, `bab116c`, `637631d`)
+| Data | Cosa | Status |
+|---|---|---|
+| 2026-05-13 | Fase 4 §2/§3/§4 (`throughput`, `audio_latency`, `memory_rss`) | ✅ |
+| 2026-05-13 | Fase 3 Full + Fase 4 §1 (`bus_latency`) | ✅ |
+| 2026-05-13 | Fase 3 Smoke §2/§3 | ✅ |
+| 2026-05-13 | Unit rfcomm_handshake + channel_manager | ✅ |
+| 2026-05-13 | E2E Helpers | ✅ |
 
 ---
 
 ## Comandi Utili
 
 ```bash
-# Performance (tutti)
-pytest -m performance -v --json-report
+# Fuzz (tutti)
+pytest -m fuzz -v
 
-# Performance singolo scenario
-pytest v2/tests/performance/test_bus_throughput.py -v
+# Fuzz singolo file
+pytest v2/tests/fuzz/test_aa_wire_format.py -v
+
+# Performance
+pytest -m performance -v --json-report
 
 # Smoke CI
 pytest -m e2e_smoke -v
