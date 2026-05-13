@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `412541a`
+> **Aggiornato**: 2026-05-13 — commit `acb6dce`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente completata: **12 file di test, 679 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull'hardware reale.
+Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente completata: **13 file di test, 767 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull'hardware reale.
 
 ---
 
@@ -31,77 +31,55 @@ Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente co
 | `v2/tests/unit/oaa_control_channel/test_service_discovery.py` | `4e7a28d` | 72 | SEMANTIC_DEFAULTS struct, _apply_defaults_to_schema, build_from_schema_cfg BT/WiFi inject, channels_from_sdr_bytes round-trip/av_type/audio_type, message_from_sdr_bytes |
 | `v2/tests/unit/modules/channel_manager/test_channel_manager.py` | `4f90f8a` | 78 | registry resolve×16+module_name×5, ChannelManagerSession start/readiness/shutdown/crash, module-level handlers×14 |
 | `v2/tests/unit/modules/tcp_server/test_tcp_server.py` | `412541a` | 84 | frame_codec helpers×9+encode×13, FrameAssembler×12, boot handlers×4, handshake_completed×3, frame_send×4, TLS handlers×7, _on_raw_frame×6, session restart×6 |
+| `v2/tests/unit/modules/audio_manager/test_audio_manager.py` | `acb6dce` | 88 | enum helpers×16, enumerate fallback×4, _build_schema×5, sink_input_index×3, volume_control×5, _refresh_devices×4, config_loaded×5, config_changed×8, volume_set×6, ch_volume_set×4, boot×6 |
 
-**Totale: 679 test in 12 file di test + 3 file infrastruttura.**
+**Totale: 767 test in 13 file di test + 3 file infrastruttura.**
 
 ---
 
 ## Pattern Architetturali Stabiliti (da rispettare)
 
-### Fixture `_patch_module` (per moduli con singleton a livello di modulo)
+### Fixture `am` (per audio_manager/main.py — subprocess + bus + cfg mockati)
 
-I moduli `main.py` (es. `oaa_control_channel/main.py`) usano singleton globali (`bus`, `log`, `cfg`, `_handshake`). Il pattern usato è:
-
-```python
-@pytest.fixture(autouse=True)
-def _patch_module(monkeypatch):
-    mock_bus = MagicMock()
-    with patch("shared.bus_client.BusClient", return_value=mock_bus), ...:
-        if mod_name in sys.modules:
-            del sys.modules[mod_name]
-        import oaa_control_channel.main as mod
-        importlib.reload(mod)
-        mod.bus = mock_bus
-        yield mod, mock_bus, mock_cfg
-```
-
-**Regola**: ogni test riceve un modulo fresco via `importlib.reload()` + `autouse=True`.
-
-### Fixture `ts` (per tcp_server/main.py — molti singleton I/O)
-
-`tcp_server/main.py` ha molti singleton (`_server`, `_relay`, `_cryptor`, `_assembler`, `_server_starting`, `_restart_pending`, `_shutdown_ack_event`). La fixture `ts` è per-test e li resetta tutti esplicitamente dopo il reload:
+`audio_manager/main.py` usa `subprocess.run` per wpctl/pactl. La fixture `am` patcha `subprocess.run` a livello di modulo e resetta esplicitamente lo stato:
 
 ```python
 @pytest.fixture()
-def ts():
-    with patch("tcp_server.server.TCPServer", mock_server_cls), \
-         patch("tcp_server.frame_relay.FrameRelay", mock_relay_cls), \
-         patch("tcp_server.aa_cryptor.AACryptor", mock_cryptor_cls), \
-         patch("tcp_server.frame_codec.FrameAssembler", mock_assembler_cls):
-        import modules.tcp_server.main as mod
+def am():
+    mock_run = MagicMock(return_value=_make_run_result(""))
+    with patch("shared.bus_client.BusClient", return_value=mock_bus), \
+         patch("subprocess.run", mock_run):
+        import modules.audio_manager.main as mod
         importlib.reload(mod)
-        mod._server = None
-        mod._relay = None
-        mod._cryptor = None
-        mod._assembler = None
-        mod._server_starting = False
-        mod._restart_pending = False
-        mod._shutdown_ack_event.clear()
-        yield mod, mock_bus, ...
+        mod._sinks = ["default"]; mod._sources = ["default"]
+        mod._config = {...defaults...}
+        yield mod, mock_bus, mock_cfg, mock_run
 ```
 
-**Regola**: `_on_raw_frame` viene testata usando `FrameAssembler` reale (non mockato) injettato direttamente su `mod._assembler` — più fedele alla logica di assemblaggio. TLS e socket sono sempre mockati.
+**Regola**: i test che verificano un comando specifico (es. wpctl/pactl) usano `patch.object(mod, "enumerate_sinks")` oppure un `patch("subprocess.run")` locale dentro il test, sovrascrivendo il default della fixture.
 
-### Fixture `cm` (per channel_manager/main.py — OOP + Launcher mock)
+**Pattern helper utile**: `_payload(mock_bus, topic)` per leggere il primo payload di una publish.
 
-```python
-def _make_session(mod, mock_launcher_instance):
-    session = mod.ChannelManagerSession()
-    session._launcher = mock_launcher_instance  # inject diretto
-    return session
-```
+### Fixture `ts` (per tcp_server/main.py)
+Reset esplicito di 7 singleton + `_shutdown_ack_event.clear()`. `FrameAssembler` reale su `mod._assembler` nei test di `_on_raw_frame`.
 
-**Regola**: `ChannelManagerSession._launcher` injettato direttamente post-`__init__`.
+### Fixture `cm` (per channel_manager/main.py)
+`session._launcher = mock_launcher_instance` inject diretto post-`__init__`.
 
 ### Fixture `scope="module"` per moduli stateless
-
-`frame_codec.py` e `registry.py` sono stateless puri — `scope="module"`, import reale, nessuno stub.
+`frame_codec.py`, `registry.py`, `serializer.py`, `service_discovery.py` — nessun singleton mutabile.
 
 ### Helper di asserzione riutilizzabili
 
 ```python
-def _published_topics(bus) -> list[str]:
-    return [c.args[0] for c in bus.publish.call_args_list]
+def _topics(mock_bus) -> list[str]:
+    return [c.args[0] for c in mock_bus.publish.call_args_list]
+
+def _payload(mock_bus, topic: str) -> dict:
+    for c in mock_bus.publish.call_args_list:
+        if c.args[0] == topic:
+            return c.args[1]
+    return {}
 ```
 
 ---
@@ -114,7 +92,7 @@ def _published_topics(bus) -> list[str]:
 | **1 — Unit Test §1.1 Shared** | 🟡 Parziale | `test_proto_utils.py` ✅, `test_bus_client.py` ✅, `test_config_client.py` ✅, `test_logger.py` ❌ mancante |
 | **1 — Unit Test §1.2 Base** | ✅ Completa | `test_base_channel_module.py` ✅ |
 | **1 — Unit Test §1.3 Channel specifici** | 🟡 Parziale | `test_audio_module.py` ✅, `test_video_module.py` ✅, `av_input/bluetooth/input/sensor/wifi` ❌ mancanti |
-| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | `oaa_cc_main` ✅, `handshake` ✅, `serializer` ✅, `service_discovery` ✅, `channel_manager` ✅, `tcp_server` ✅, `audio_manager` ❌ **PROSSIMO**, `video_ui` ❌, `bluetooth/*` ❌, `config_manager` ❌, altri ❌ |
+| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | `oaa_cc_main` ✅, `handshake` ✅, `serializer` ✅, `service_discovery` ✅, `channel_manager` ✅, `tcp_server` ✅, `audio_manager` ✅, `video_ui` ❌ **PROSSIMO**, `bluetooth/*` ❌, `config_manager` ❌, altri ❌ |
 | **2 — Integration** | ❌ Non iniziata | — |
 | **3 — E2E** | ❌ Non iniziata | — |
 | **4 — Performance** | ❌ Non iniziata | — |
@@ -124,16 +102,16 @@ def _published_topics(bus) -> list[str]:
 
 ## Prossimo Passo Immediato
 
-**`test_audio_manager.py`** — `v2/modules/audio_manager/main.py`.
-Gestisce la selezione del sink audio e il routing dei canali audio MEDIA/SPEECH/SYSTEM.
+**`test_video_ui.py`** — `v2/modules/video_ui/main.py`.
+Gestisce la visualizzazione del video AA su un'interfaccia Qt/GStreamer.
 
 Ordine suggerito per completare §1.4:
 1. ~~`test_serializer.py`~~ ✅
 2. ~~`test_service_discovery.py`~~ ✅
 3. ~~`test_channel_manager.py`~~ ✅
-4. ~~`test_tcp_server.py`~~ ✅ (frame_codec×22 + FrameAssembler×12 + handlers×30 = 84 test)
-5. `test_audio_manager.py` ← **PROSSIMO**
-6. `test_video_ui.py`
+4. ~~`test_tcp_server.py`~~ ✅
+5. ~~`test_audio_manager.py`~~ ✅ (enum×20 + schema×5 + config×13 + handlers×16 + boot×6 = 88 test)
+6. `test_video_ui.py` ← **PROSSIMO**
 7. `test_bluetooth_*.py` (×3)
 8. `test_config_manager.py`
 9. Moduli secondari: `rfcomm_handshake`, `hostapd_helper`, `config_ui`, `log_viewer`
@@ -145,15 +123,14 @@ Ordine suggerito per completare §1.4:
 | Decisione | Rationale |
 |---|---|
 | `importlib.reload()` per ogni test di `main.py` | I singleton globali devono essere resettati per l'isolamento |
-| Protobuf stubbed con `types.SimpleNamespace` + `MagicMock` in `test_handshake.py` | I `.pb2` generati potrebbero non essere disponibili in ambienti CI senza compilazione |
-| Proto reali in `test_service_discovery.py` | `v2/protos/oaa/` è nel repo — import diretto più affidabile |
-| `_FakeEnum` con `__eq__` custom | I valori proto enum non sono istanze standard di Python `Enum` |
-| `autouse=True` su `_patch_module` | Garantisce isolamento automatico senza dimenticare la fixture |
-| `scope="module"` per moduli stateless | `serializer.py`, `service_discovery.py`, `frame_codec.py`, `registry.py` |
+| `subprocess.run` patchato a livello di fixture + override locale | Default sicuro (restituisce stringa vuota); test specifici iniettano stdout controllato |
+| `patch.object(mod, "enumerate_sinks")` nei test di `_refresh_devices` | Più pulito che patchare subprocess indirettamente per funzioni di alto livello |
+| `patch.object(mod, "_set_global_volume")` nei test di config | Evita dependency su wpctl nei test di logica pure (config merge, publish) |
+| `_make_run_result(stdout)` helper | Crea MagicMock con `.stdout` e `.returncode` in una riga |
+| `autouse=True` su `_patch_module` in altri moduli | Garantisce isolamento automatico |
+| `scope="module"` per moduli stateless | `frame_codec.py`, `registry.py`, `serializer.py`, `service_discovery.py` |
 | `session._launcher = mock` inject diretto | Più affidabile di `patch()` su `__init__` dopo `importlib.reload()` |
-| `mod._assembler = FrameAssembler()` reale in `_on_raw_frame` tests | Testa la logica BULK/FIRST/LAST reale senza over-mocking |
-| Reset esplicito di tutti i singleton in fixture `ts` | `tcp_server/main.py` ha 7 singleton — reset manuale più sicuro che affidarsi al reload |
-| `_shutdown_ack_event.set()` pre-impostato nei test di restart | Evita wait reali da 3s, mantiene test < 1s |
+| Reset esplicito singleton in `ts` e `am` | Moduli con molti singleton — più sicuro del solo reload |
 
 ---
 
@@ -170,7 +147,7 @@ Ordine suggerito per completare §1.4:
 
 ---
 
-*Handoff Version: 2.4*  
+*Handoff Version: 2.5*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `412541a`*  
-*Test totali scritti: 679*
+*Commit head: `acb6dce`*  
+*Test totali scritti: 767*
