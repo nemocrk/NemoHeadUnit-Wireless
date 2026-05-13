@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-La test suite di `v2/` era quasi assente al kick-off. Nelle sessioni del 2026-05-13 sono stati prodotti **10 file di test + 3 file infrastruttura** per un totale di **517 test** coperti da marker `@pytest.mark.unit`. La Fase 0 è completamente chiusa. La Fase 1 è in corso.
+Nelle sessioni del 2026-05-13 sono stati prodotti **11 file di test + 3 file infrastruttura** per un totale di **595 test** coperti da marker `@pytest.mark.unit`. La Fase 0 è completamente chiusa. La Fase 1 è in corso.
 
 L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia che blocca il merge in CI — seguendo l'architettura stratificata definita in `TEST_SUITE_ARCHITECTURE.md`.
 
@@ -77,7 +77,8 @@ Target: **< 1s per test**, coverage ≥ 80%, marker `@pytest.mark.unit`.
 | `unit/oaa_control_channel/test_handshake.py` | 62 | ✅ |
 | `unit/oaa_control_channel/test_serializer.py` | 68 | ✅ commit `ffe6314` |
 | `unit/oaa_control_channel/test_service_discovery.py` | 72 | ✅ commit `4e7a28d` |
-| `unit/modules/channel_manager/test_channel_manager.py` | — | ❌ **PROSSIMO** |
+| `unit/modules/channel_manager/test_channel_manager.py` | 78 | ✅ commit `4f90f8a` |
+| `unit/modules/tcp_server/test_tcp_server.py` | — | ❌ **PROSSIMO** |
 | `unit/modules/audio_manager/test_audio_manager.py` | — | ❌ da fare |
 | `unit/modules/video_ui/test_video_ui.py` | — | ❌ da fare |
 | `unit/modules/bluetooth/test_paired_devices.py` | — | ❌ da fare |
@@ -85,13 +86,12 @@ Target: **< 1s per test**, coverage ≥ 80%, marker `@pytest.mark.unit`.
 | `unit/modules/bluetooth/test_autoconnect.py` | — | ❌ da fare |
 | `unit/modules/bluetooth_ui/test_bluetooth_ui.py` | — | ❌ da fare |
 | `unit/modules/config_manager/test_config_manager.py` | — | ❌ da fare |
-| `unit/modules/tcp_server/test_tcp_server.py` | — | ❌ da fare |
 | `unit/modules/rfcomm_handshake/test_rfcomm_handshake.py` | — | ❌ da fare |
 | `unit/modules/hostapd_helper/test_hostapd_helper.py` | — | ❌ da fare |
 | `unit/modules/config_ui/test_config_ui.py` | — | ❌ da fare |
 | `unit/modules/log_viewer/test_log_viewer.py` | — | ❌ da fare |
 
-**Totale Fase 1 prodotto finora: 517 test in 10 file.**
+**Totale Fase 1 prodotto finora: 595 test in 11 file.**
 
 ---
 
@@ -163,13 +163,13 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 | Fase | File prodotti / totali | Test scritti | Blocca CI | Stato |
 |---|---|---|---|---|
 | 0 — Infrastruttura | 3 / 3 | — | ✅ Sì | ✅ Completa |
-| 1 — Unit Test | 10 / ~25 | 517 | ✅ Sì (≥80%) | 🟡 In corso |
+| 1 — Unit Test | 11 / ~25 | 595 | ✅ Sì (≥80%) | 🟡 In corso |
 | 2 — Integration | 0 / 6 | 0 | ✅ Sì | ❌ Todo |
 | 3 — E2E Smoke | 0 / 6 | 0 | ✅ Sì | ❌ Todo |
 | 3 — E2E Full | 0 / 2 | 0 | ❌ No | ❌ Todo |
 | 4 — Performance | 0 / 6 | 0 | ❌ No | ❌ Todo |
 | 5 — Fuzz | 0 / 3 | 0 | ❌ No | ❌ Todo |
-| **Totale** | **13 / ~51** | **517** | — | 🟡 |
+| **Totale** | **14 / ~51** | **595** | — | 🟡 |
 
 ## Ordine di Esecuzione Raccomandato (aggiornato)
 
@@ -180,17 +180,19 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 5. ~~**Fase 1 §1.4 parziale**~~ ✅ `oaa_control_channel_main`, `handshake`
 6. ~~**Fase 1 §1.4**~~ ✅ `test_serializer.py` — 68 test
 7. ~~**Fase 1 §1.4**~~ ✅ `test_service_discovery.py` — 72 test
-8. **PROSSIMO → Fase 1 §1.4**: `test_channel_manager.py`
-9. Fase 1 §1.3 resto: `av_input`, `bluetooth`, `input`, `sensor`, `wifi`
-10. Fase 1 §1.4 secondario: `tcp_server`, `audio_manager`, `video_ui`, `bluetooth/*`, `config_manager`, altri
-11. Fase 1 §1.1: `test_logger.py`
-12. **Fase 2** — Integration dopo che unit test passano
-13. **Fase 3 Smoke** — E2E smoke dopo integration
-14. **Fase 4 + 5** — Performance e fuzz in parallelo, non bloccanti
+8. ~~**Fase 1 §1.4**~~ ✅ `test_channel_manager.py` — 78 test (registry + session + handlers)
+9. **PROSSIMO → Fase 1 §1.4**: `test_tcp_server.py`
+10. Fase 1 §1.4: `test_audio_manager.py`
+11. Fase 1 §1.3 resto: `av_input`, `bluetooth`, `input`, `sensor`, `wifi`
+12. Fase 1 §1.4 secondario: `video_ui`, `bluetooth/*`, `config_manager`, `rfcomm_handshake`, `hostapd_helper`, `config_ui`, `log_viewer`
+13. Fase 1 §1.1: `test_logger.py`
+14. **Fase 2** — Integration dopo che unit test passano
+15. **Fase 3 Smoke** — E2E smoke dopo integration
+16. **Fase 4 + 5** — Performance e fuzz in parallelo, non bloccanti
 
 ---
 
-*Roadmap Version: 2.2*  
+*Roadmap Version: 2.3*  
 *Aggiornato: 2026-05-13*  
 *Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*  
 *Vedi anche: `docs/session_handoff.md` per dettagli tecnici della sessione corrente*
