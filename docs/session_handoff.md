@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `9f08aa6`
+> **Aggiornato**: 2026-05-13 — commit `2d8d861`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**33 file di test, ~2310 test** su `main`. Fase 1 Unit Test completata. Fase 2 Integration Test: 4 file completati.
+**35 file di test, ~2370 test** su `main`. Fase 1 Unit Test completata. Fase 2 Integration Test: 5 file completati.
 
 ---
 
@@ -50,9 +50,10 @@
 | `v2/tests/integration/test_bus_broker.py` | `bd326e5` | 84 | Fase 2 §1 |
 | `v2/tests/integration/test_channel_lifecycle.py` | `1734764` | 88 | Fase 2 §2 |
 | `v2/tests/integration/test_audio_manager.py` | `7e1d9be` | ~47 | Fase 2 §3 |
-| `v2/tests/integration/test_config_manager.py` | `9f08aa6` | ~50 | **NUOVO** — Fase 2 §4 |
+| `v2/tests/integration/test_config_manager.py` | `9f08aa6` | ~50 | Fase 2 §4 |
+| `v2/tests/integration/test_video_pipeline.py` | `2d8d861` | ~60 | **NUOVO** — Fase 2 §5 |
 
-**Totale: ~2310 test in 33 file di test + 3 file infrastruttura.**
+**Totale: ~2370 test in 35 file di test + 3 file infrastruttura.**
 
 ---
 
@@ -134,6 +135,15 @@ def _load_module():
 5. Validazione schema testata end-to-end: valore invalido → `config.error` pubblicato, YAML non scritto
 6. Campi strutturati (ConfigFieldList, ConfigFieldMessage) testati: nessuna validazione scalare, stored as-is
 
+### Integration Tests — Pattern video_pipeline (Fase 2 §5)
+1. PyQt6 / GStreamer / gi stubbed in `sys.modules` **pre-import** con MagicMock — nessuna finestra Qt in CI
+2. `_load_video_ui(broker)` — reload `video_ui.main` + BusTracer mock + `_window=None`
+3. `_make_video_module(broker)` — reload `channel_modules/video/main.py` + `VideoModule()` istanziata
+4. `_handle_*` chiamati direttamente su VideoModule; spy BusClient verifica topic pubblicati
+5. `_conn_state` di video_ui testato come state machine (WAITING_BT → HANDSHAKE → STREAMING → INTERRUPTED)
+6. `publish_frames=False` testato esplicitamente per verificare soppressione video.frame
+7. Wire format `_media_with_ts_bytes()` helper per costruire payload MediaWithTimestamp senza dipendenze proto
+
 ### Helper riutilizzabili (unit test)
 ```python
 def _published_topics(mock_bus) -> list[str]:
@@ -157,23 +167,23 @@ def _published_payload(mock_bus, topic: str) -> dict:
 | **1 — Unit Test §1.2 Base** | ✅ Completa | |
 | **1 — Unit Test §1.3 Channel Modules** | ✅ Completa | |
 | **1 — Unit Test §1.4 Standalone** | ✅ Completa | Include test_zmq_trace.py |
-| **2 — Integration Tests** | 🟡 In corso | broker ✅ + channel_lifecycle ✅ + audio_manager ✅ + config_manager ✅ |
+| **2 — Integration Tests** | 🟡 In corso | broker ✅ + channel_lifecycle ✅ + audio_manager ✅ + config_manager ✅ + video_pipeline ✅ |
 | **3–5** | ❌ Non iniziata | |
 
 ---
 
 ## Prossimo Passo Immediato
 
-**Fase 2 §5 — `test_video_pipeline.py`**
+**Fase 2 §6 — `test_boot_shutdown.py`**
 
-Scope: `video_ui` + `video` channel module con bus ZMQ in-process reale.
+Scope: sequenza boot completa dell'intero sistema simulato su bus in-process.
 Cosa testare:
-- `video_ui` pubblica correttamente i topic `aa.video.*` in risposta agli handler
-- `video` channel module riceve frame e li instrada correttamente
-- Sequenza start → frame → stop senza blocchi
-- Comportamento su frame malformati
+- Orchestrazione `system.readytostart` → tutti i moduli pubblicano `system.module_ready`
+- Sequenza start per priority (priority 1 → 2 → ...) con `system.start`
+- Shutdown ordinato: `system.stop` → tutti i moduli ACKano
+- Timeout handling durante boot
 
-**Prerequisito**: leggere `v2/modules/video_ui/main.py` e `v2/modules/channel_modules/video/main.py` prima di scrivere.
+**File da leggere prima**: `v2/modules/system_controller/main.py`
 
 ---
 
@@ -197,33 +207,47 @@ Cosa testare:
 | Integration audio_manager: cfg=MagicMock() | isola ConfigClient; config_manager non avviato in layer 2 |
 | Integration config_manager: CONFIG_DIR=tmp_path | ogni test ha filesystem isolato; no side-effect tra test |
 | Integration config_manager: campi strutturati stored as-is | ConfigFieldList/Message saltano validate_value(); testato esplicitamente |
+| Integration video_pipeline: PyQt6/GStreamer/gi stubbed in sys.modules | nessun display/hardware in CI |
+| Integration video_pipeline: _conn_state testato come state machine | verifica coerenza transizioni senza finestra Qt |
+| Integration video_pipeline: _media_with_ts_bytes() helper | costruisce wire format senza importare protobuf reale |
+
+---
+
+## 2026-05-13 — Fase 2 §5: test_video_pipeline integration
+
+**What changed:**
+`v2/tests/integration/test_video_pipeline.py` creato con ~60 test in 10 gruppi:
+1. video_ui — Boot protocol (readytostart, system.start priority filter, system.stop no crash)
+2. video_ui — Connection state machine (WAITING_BT→HANDSHAKE→STREAMING→INTERRUPTED, session shutdown reset)
+3. video_ui — video.state handler (PLAYING/IDLE/STOPPED/unknown/missing key)
+4. video_ui — video.frame handler (no window no crash, empty payload no crash)
+5. VideoModule — Boot/channel lifecycle (readytostart, module_start priority, module_stop, channel open/close)
+6. VideoModule — AA message dispatch (setup_request, open_request, stop_indication, focus_request, malformed/unknown msg)
+7. VideoModule — Media frame publish (handle_media SPS→is_config=True, MediaAck, media_with_timestamp, multi-frame, data_b64 decode)
+8. VideoModule — Session lifecycle (aa.session.active no state change, session.shutdown→IDLE, start_indication→PLAYING)
+9. VideoModule — Robustness (missing payload_hex, same-state no publish, _send_media_ack session_id, init codec, cleanup)
+10. Pipeline E2E (full setup→open→start→frame→stop sequence, config+IDR order, session shutdown after playing, video_ui receives PLAYING via bus)
+
+**Why:**
+Fase 2 Integration Test §5. Garantisce che il pipeline video (VideoModule + video_ui) gestisca
+correttamente l'intero lifecycle AA: handshake, frame dispatch, state machine, session reset,
+con bus ZMQ reale in-process e senza dipendenze hardware (PyQt6/GStreamer stubbed).
+
+**Status:** Completato — commit `2d8d861`
+
+**Next 1-3 steps:**
+1. `test_boot_shutdown.py` — sequenza boot completa del sistema
+2. Fase 3 — E2E tests (TCP server + AA handshake end-to-end)
+3. Coverage report — verificare soglia 80% su tutti i moduli
 
 ---
 
 ## 2026-05-13 — Fase 2 §4: test_config_manager integration
 
 **What changed:**
-`v2/tests/integration/test_config_manager.py` creato con ~50 test in 8 gruppi:
-1. Boot protocol (readytostart → module_ready, system.start priority filter, config dir creation)
-2. config.get — no YAML paths (empty, defaults seeding, schema-first seeding, idempotenza)
-3. config.get — YAML esistente + schema echo + persistenza schema tra get successivi
-4. config.set — happy path (crea YAML, aggiorna chiave, preserva chiavi esistenti, roundtrip set→get)
-5. config.set — validazione schema scalare (int coerce, min/max violation, float, enum valid/invalid, bool coerce, no-schema pass-through)
-6. config.set — campi strutturati (ConfigFieldList e ConfigFieldMessage stored as-is senza config.error)
-7. Requester echo (echoed, default empty string, multi-subscriber)
-8. Malformed payloads (module mancante, key mancante, payload vuoto — nessun crash)
-
-**Why:**
-Fase 2 Integration Test §4. Garantisce che config_manager gestisca correttamente
-persistenza YAML, schema registration, validazione scalare e structured fields
-con bus ZMQ reale in-process e filesystem isolato per test.
+`v2/tests/integration/test_config_manager.py` creato con ~50 test in 8 gruppi.
 
 **Status:** Completato — commit `9f08aa6`
-
-**Next 1-3 steps:**
-1. `test_video_pipeline.py` — Fase 2 §5
-2. `test_boot_shutdown.py` — sequenza boot completa
-3. Fase 3 — E2E tests
 
 ---
 
@@ -245,7 +269,7 @@ con bus ZMQ reale in-process e filesystem isolato per test.
 
 ---
 
-*Handoff Version: 4.4*  
+*Handoff Version: 4.5*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `9f08aa6`*  
-*Test totali scritti: ~2310*
+*Commit head: `2d8d861`*  
+*Test totali scritti: ~2370*
