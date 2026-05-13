@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-Nelle sessioni del 2026-05-13 sono stati prodotti **35 file di test + 3 file infrastruttura** per un totale di **~2370 test**. La Fase 0 e la Fase 1 sono completamente chiuse. La Fase 2 conta 5 file completati su 7.
+Nelle sessioni del 2026-05-13 sono stati prodotti **36 file di test + 3 file infrastruttura** per un totale di **~2430 test**. La Fase 0 e la Fase 1 sono completamente chiuse. La Fase 2 conta **6 file completati su 7** — manca solo `test_boot_shutdown.py`.
 
 L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia che blocca il merge in CI — seguendo l'architettura stratificata definita in `TEST_SUITE_ARCHITECTURE.md`.
 
@@ -96,7 +96,7 @@ Target: **< 1s per test**, coverage ≥ 80%, marker `@pytest.mark.unit`.
 
 ---
 
-## Fase 2 — Integration Test 🟡 IN CORSO
+## Fase 2 — Integration Test 🟡 IN CORSO (6/7)
 
 Target: **< 10s per test**, marker `@pytest.mark.integration`. Bus ZMQ reale in-process condiviso tra moduli avviati come thread.
 
@@ -109,19 +109,19 @@ Target: **< 10s per test**, marker `@pytest.mark.integration`. Bus ZMQ reale in-
 | `integration/test_channel_lifecycle.py` | 88 | `1734764` | ✅ |
 | `integration/test_audio_manager.py` | ~47 | `7e1d9be` | ✅ |
 | `integration/test_config_manager.py` | ~50 | `9f08aa6` | ✅ |
-| `integration/test_video_pipeline.py` | ~60 | `2d8d861` | ✅ **COMPLETATO** |
-| `integration/test_bluetooth_flow.py` | — | — | ❌ **PROSSIMO** |
-| `integration/test_boot_shutdown.py` | — | — | ❌ da fare |
+| `integration/test_video_pipeline.py` | ~60 | `2d8d861` | ✅ |
+| `integration/test_bluetooth_flow.py` | ~60 | `dbbc2b4` | ✅ |
+| `integration/test_boot_shutdown.py` | — | — | ❌ **PROSSIMO** |
 
-**Totale Fase 2 finora: ~329 test in 5 file.**
+**Totale Fase 2 finora: ~389 test in 6 file.**
 
 ### Pattern integration (recap)
 
-- `_load_cm` / `_load_am` / `_load_video_ui` / `_make_video_module` per reload modulo + patch indirizzi
+- `_load_*` / `_make_*` per reload modulo + patch indirizzi + BusTracer mock
 - `_make_client` + `_start_client` + `_wait` — helper condivisi
-- Handler `on_*` / `_handle_*` chiamati direttamente; spy BusClient riceve topic pubblicati
+- Handler `on_*` / `_handle_*` / callback `_on_*` chiamati direttamente; spy BusClient riceve topic pubblicati
 - `importlib.reload()` per ogni test — bus ZMQ fresco e stato modulo pulito
-- PyQt6/GStreamer/gi stubbed in `sys.modules` per video_ui senza display
+- D-Bus/BlueZ/GLib/gi + PyQt6/GStreamer stubbed in `sys.modules` per test senza hardware
 
 ---
 
@@ -179,12 +179,12 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 |---|---|---|---|---|
 | 0 — Infrastruttura | 3 / 3 | — | ✅ Sì | ✅ Completa |
 | 1 — Unit Test | 28 / 28 | 2213 | ✅ Sì (≥80%) | ✅ **Completa** |
-| 2 — Integration | 5 / 7 | ~329 | ✅ Sì | 🟡 In corso |
+| 2 — Integration | 6 / 7 | ~389 | ✅ Sì | 🟡 In corso |
 | 3 — E2E Smoke | 0 / 3 | 0 | ✅ Sì | ❌ Todo |
 | 3 — E2E Full | 0 / 2 | 0 | ❌ No | ❌ Todo |
 | 4 — Performance | 0 / 6 | 0 | ❌ No | ❌ Todo |
 | 5 — Fuzz | 0 / 3 | 0 | ❌ No | ❌ Todo |
-| **Totale** | **36 / ~54** | **~2542** | — | 🟡 |
+| **Totale** | **37 / ~54** | **~2602** | — | 🟡 |
 
 ---
 
@@ -197,14 +197,14 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 5. ⁠~~**Fase 2 §3**: `test_audio_manager.py`~~ ✅
 6. ⁠~~**Fase 2 §4**: `test_config_manager.py`~~ ✅
 7. ⁠~~**Fase 2 §5**: `test_video_pipeline.py`~~ ✅
-8. **PROSSIMO → Fase 2 §6**: `test_bluetooth_flow.py` — bluetooth pairing + A2DP flow
-9. Fase 2 §7: `test_boot_shutdown.py` — full system boot sequence
-10. **Fase 3 Smoke** — E2E smoke dopo integration
+8. ⁠~~**Fase 2 §6**: `test_bluetooth_flow.py`~~ ✅
+9. **PROSSIMO → Fase 2 §7**: `test_boot_shutdown.py` — sequenza boot completa del sistema (`system_controller`)
+10. **Fase 3 Smoke** — E2E smoke dopo il completamento integration
 11. **Fase 4 + 5** — Performance e fuzz in parallelo, non bloccanti
 
 ---
 
-*Roadmap Version: 2.6*  
+*Roadmap Version: 2.7*  
 *Aggiornato: 2026-05-13*  
 *Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*  
 *Vedi anche: `docs/session_handoff.md` per dettagli tecnici della sessione corrente*
