@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `ffe6314`
+> **Aggiornato**: 2026-05-13 — commit `4e7a28d`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente completata: **9 file di test, 445 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull'hardware reale.
+Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente completata: **10 file di test, 517 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull'hardware reale.
 
 ---
 
@@ -28,8 +28,9 @@ Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente co
 | `v2/tests/unit/oaa_control_channel/test_oaa_control_channel_main.py` | `c3d7a4a` | 54 | boot protocol, config flow, session lifecycle, frame dispatch, TLS delegation, channel_manager integration |
 | `v2/tests/unit/oaa_control_channel/test_handshake.py` | `6c99b41` | 62 | state machine completa: VERSION→TLS→AUTH→SDR→CHANNELS→ACTIVE→SHUTDOWN |
 | `v2/tests/unit/oaa_control_channel/test_serializer.py` | `ffe6314` | 68 | FrameHeader serialize/parse/roundtrip, FrameSerializer BULK/multi-frame/raw, Messenger msg_type/enc_type/serialize_and_log |
+| `v2/tests/unit/oaa_control_channel/test_service_discovery.py` | `4e7a28d` | 72 | SEMANTIC_DEFAULTS struct, _apply_defaults_to_schema, build_from_schema_cfg BT/WiFi inject, channels_from_sdr_bytes round-trip/av_type/audio_type, message_from_sdr_bytes |
 
-**Totale: 445 test in 9 file di test + 3 file infrastruttura.**
+**Totale: 517 test in 10 file di test + 3 file infrastruttura.**
 
 ---
 
@@ -56,7 +57,7 @@ def _patch_module(monkeypatch):
 
 **Regola**: ogni test riceve un modulo fresco via `importlib.reload()` + `autouse=True`. I singleton vengono iniettati direttamente nel namespace del modulo ricaricato.
 
-### Fixture `hs_factory` (per state machine pura)
+### Fixture `hs_factory` (per state machine pura con proto stubbati)
 
 Per testare `ControlChannelHandshake` senza protobuf reali:
 
@@ -74,6 +75,27 @@ def hs_factory():
 ```
 
 **Regola**: tutti i protobuf sono sostituiti con `types.SimpleNamespace` o `MagicMock`. La state machine è testata in isolamento completo.
+
+### Fixture `scope="module"` con proto reali
+
+Per moduli **stateless** che dipendono dai proto compilati presenti in `v2/protos/oaa/`:
+
+```python
+@pytest.fixture(scope="module")
+def sd():
+    if _MOD in sys.modules:
+        del sys.modules[_MOD]
+    import oaa_control_channel.service_discovery as mod
+    importlib.reload(mod)
+    return mod
+```
+
+**Regola**: usare `scope="module"` + import reale quando:
+- I proto `_pb2.py` sono disponibili nel repo (non servono stub)
+- Il modulo non ha singleton globali mutabili tra test
+- Le asserzioni beneficiano di valori proto reali (enum, ParseFromString, etc.)
+
+**Decisione per `test_service_discovery.py`**: i proto sono in `v2/protos/oaa/` → import reale. Round-trip `build_from_schema_cfg` → `channels_from_sdr_bytes` testato con `ParseFromString` reale. Nessuno stub necessario.
 
 ### Fixture `ser_mod` (per moduli senza singleton — import diretto)
 
@@ -114,7 +136,7 @@ def _published_topics(publish_fn) -> list[str]:
 | **1 — Unit Test §1.1 Shared** | 🟡 Parziale | `test_proto_utils.py` ✅, `test_bus_client.py` ✅, `test_config_client.py` ✅, `test_logger.py` ❌ mancante |
 | **1 — Unit Test §1.2 Base** | ✅ Completa | `test_base_channel_module.py` ✅ |
 | **1 — Unit Test §1.3 Channel specifici** | 🟡 Parziale | `test_audio_module.py` ✅, `test_video_module.py` ✅, `av_input/bluetooth/input/sensor/wifi` ❌ mancanti |
-| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | `test_oaa_control_channel_main.py` ✅, `test_handshake.py` ✅, `test_serializer.py` ✅, `test_service_discovery.py` ❌ **PROSSIMO**, `channel_manager` ❌, `audio_manager` ❌, `video_ui` ❌, `bluetooth/*` ❌, `tcp_server` ❌, `config_manager` ❌, altri ❌ |
+| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | `test_oaa_control_channel_main.py` ✅, `test_handshake.py` ✅, `test_serializer.py` ✅, `test_service_discovery.py` ✅, `channel_manager` ❌ **PROSSIMO**, `audio_manager` ❌, `video_ui` ❌, `bluetooth/*` ❌, `tcp_server` ❌, `config_manager` ❌, altri ❌ |
 | **2 — Integration** | ❌ Non iniziata | — |
 | **3 — E2E** | ❌ Non iniziata | — |
 | **4 — Performance** | ❌ Non iniziata | — |
@@ -124,13 +146,13 @@ def _published_topics(publish_fn) -> list[str]:
 
 ## Prossimo Passo Immediato
 
-**`test_service_discovery.py`** — builder del Service Discovery Response in `oaa_control_channel/service_discovery.py` (16 KB).  
-Logica critica per la negoziazione dei canali; usata da `handshake.py` in stato `SDR`.
+**`test_channel_manager.py`** — `v2/modules/channel_manager/channel_manager.py`.
+Orchestra tutti i `ChannelModule`; riceve SDR bytes da `oaa_control_channel`, risolve il tipo di modulo tramite `registry.resolve_module_type()`, avvia/ferma i thread per canale.
 
 Ordine suggerito per completare §1.4:
 1. ~~`test_serializer.py`~~ ✅
-2. `test_service_discovery.py`
-3. `test_channel_manager.py`
+2. ~~`test_service_discovery.py`~~ ✅
+3. `test_channel_manager.py` ← **PROSSIMO**
 4. `test_tcp_server.py`
 5. `test_audio_manager.py`
 6. `test_video_ui.py`
@@ -145,12 +167,13 @@ Ordine suggerito per completare §1.4:
 | Decisione | Rationale |
 |---|---|
 | `importlib.reload()` per ogni test di `main.py` | I singleton globali devono essere resettati per l'isolamento |
-| Protobuf stubbed con `types.SimpleNamespace` + `MagicMock` | I `.pb2` generati non sono presenti nell'ambiente di test CI |
+| Protobuf stubbed con `types.SimpleNamespace` + `MagicMock` in `test_handshake.py` | I `.pb2` generati potrebbero non essere disponibili in ambienti CI senza compilazione |
+| Proto reali in `test_service_discovery.py` | `v2/protos/oaa/` è nel repo — import diretto più affidabile e testante il comportamento reale |
 | `_FakeEnum` con `__eq__` custom | I valori proto enum non sono istanze standard di Python `Enum` |
 | Inject diretto su `mod.decode_proto` etc. | Più affidabile di `patch()` dopo `importlib.reload()` su moduli con import at module level |
 | `autouse=True` su `_patch_module` | Garantisce isolamento automatico senza dimenticare la fixture |
-| `scope="module"` per `ser_mod` in `test_serializer.py` | `serializer.py` è stateless — nessun singleton, riuso sicuro tra test nella stessa sessione |
-| Helper `_parse_bulk_frame` / `_parse_first_frame` | Evita parsing duplicato in ogni test — rende le asserzioni leggibili |
+| `scope="module"` per moduli stateless | Sia `serializer.py` che `service_discovery.py` — nessun singleton mutabile tra test |
+| Helper `_minimal_cfg` in `test_service_discovery.py` | `copy.deepcopy(SEMANTIC_DEFAULTS)` per isolare ogni test dalle modifiche agli altri |
 
 ---
 
@@ -167,7 +190,7 @@ Ordine suggerito per completare §1.4:
 
 ---
 
-*Handoff Version: 2.1*  
+*Handoff Version: 2.2*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `ffe6314`*  
-*Test totali scritti: 445*
+*Commit head: `4e7a28d`*  
+*Test totali scritti: 517*
