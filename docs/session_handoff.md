@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `7e1d9be`
+> **Aggiornato**: 2026-05-13 — commit `9f08aa6`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**32 file di test, ~2260 test** su `main`. Fase 1 Unit Test completata (inclusa copertura nuovi componenti trace). Fase 2 Integration Test: 3 file completati.
+**33 file di test, ~2310 test** su `main`. Fase 1 Unit Test completata. Fase 2 Integration Test: 4 file completati.
 
 ---
 
@@ -20,10 +20,10 @@
 | `v2/tests/pytest.ini` | `0ff487e` | — | Marker e config pytest |
 | `v2/tests/requirements-test.txt` | `0ff487e` | — | Dipendenze test |
 | `v2/tests/unit/shared/test_proto_utils.py` | precedente | 47 | |
-| `v2/tests/unit/shared/test_bus_client.py` | `db85dc8` | ~75 | **AGGIORNATO** — fix _trace, BusTracer mock, nuovi test |
+| `v2/tests/unit/shared/test_bus_client.py` | `db85dc8` | ~75 | AGGIORNATO — fix _trace, BusTracer mock, nuovi test |
 | `v2/tests/unit/shared/test_config_client.py` | precedente | 38 | |
 | `v2/tests/unit/shared/test_logger.py` | `38a2885` | 88 | |
-| `v2/tests/unit/shared/test_bus_trace.py` | `be3068e` | 72 | **NUOVO** — BusTracer |
+| `v2/tests/unit/shared/test_bus_trace.py` | `be3068e` | 72 | BusTracer |
 | `v2/tests/unit/modules/channel_modules/audio/test_audio_module.py` | precedente | 42 | |
 | `v2/tests/unit/modules/channel_modules/video/test_video_module.py` | precedente | 38 | |
 | `v2/tests/unit/modules/channel_modules/test_base_channel_module.py` | precedente | 44 | |
@@ -46,12 +46,13 @@
 | `v2/tests/unit/modules/bluetooth/test_pairing.py` | `d4973f8` | 84 | |
 | `v2/tests/unit/modules/bluetooth/test_paired_devices.py` | `6a83677` | 68 | |
 | `v2/tests/unit/modules/config_manager/test_config_manager.py` | `e1c0847` | 96 | |
-| `v2/tests/unit/modules/zmq_trace/test_zmq_trace.py` | `cdc9e6f` | 68 | **NUOVO** — zmq_trace module |
+| `v2/tests/unit/modules/zmq_trace/test_zmq_trace.py` | `cdc9e6f` | 68 | zmq_trace module |
 | `v2/tests/integration/test_bus_broker.py` | `bd326e5` | 84 | Fase 2 §1 |
 | `v2/tests/integration/test_channel_lifecycle.py` | `1734764` | 88 | Fase 2 §2 |
-| `v2/tests/integration/test_audio_manager.py` | `7e1d9be` | ~47 | **NUOVO** — Fase 2 §3 |
+| `v2/tests/integration/test_audio_manager.py` | `7e1d9be` | ~47 | Fase 2 §3 |
+| `v2/tests/integration/test_config_manager.py` | `9f08aa6` | ~50 | **NUOVO** — Fase 2 §4 |
 
-**Totale: ~2260 test in 32 file di test + 3 file infrastruttura.**
+**Totale: ~2310 test in 33 file di test + 3 file infrastruttura.**
 
 ---
 
@@ -118,12 +119,20 @@ def _load_module():
 4. Handler on_* testati via chiamata diretta + spy sul bus per verificare i topic pubblicati
 5. `cm_main.CHILDREN_READY_TIMEOUT` patchato a 0.3s per test di timeout
 
-### Integration Tests — Pattern audio_manager (’Fase 2 §3)
+### Integration Tests — Pattern audio_manager (Fase 2 §3)
 1. `subprocess.run` patchato con `_fake_subprocess_run` che simula output wpctl/pactl
 2. `importlib.reload(am_main)` per ogni test — bus fresco e stato modulo pulito
 3. `am.cfg = MagicMock()` per isolare ConfigClient da config_manager reale
 4. Handler on_* chiamati direttamente; spy BusClient per verificare topic pubblicati
 5. Test negativi verificano assenza di pubblicazioni con `time.sleep(0.2)` + assert `len == 0`
+
+### Integration Tests — Pattern config_manager (Fase 2 §4)
+1. `_load_cm(broker, config_dir)` — reload `config_manager.main`, patcha bus + BusTracer, sovrascrive `CONFIG_DIR` con `tmp_path`
+2. `tmp_path` (pytest fixture) — ogni test ha directory YAML isolata; nessun side-effect tra test
+3. Handler `on_config_get` / `on_config_set` chiamati direttamente — bus spy riceve i topic pubblicati
+4. Schema registrato tramite `on_config_get` con `schema=` payload, poi verificato nell'echo della response
+5. Validazione schema testata end-to-end: valore invalido → `config.error` pubblicato, YAML non scritto
+6. Campi strutturati (ConfigFieldList, ConfigFieldMessage) testati: nessuna validazione scalare, stored as-is
 
 ### Helper riutilizzabili (unit test)
 ```python
@@ -144,28 +153,27 @@ def _published_payload(mock_bus, topic: str) -> dict:
 | Fase | Stato | Note |
 |---|---|---|
 | **0 — Infrastruttura** | ✅ Completa | |
-| **1 — Unit Test §1.1 Shared** | ✅ Completa | Include test_bus_trace.py (nuovo) |
+| **1 — Unit Test §1.1 Shared** | ✅ Completa | Include test_bus_trace.py |
 | **1 — Unit Test §1.2 Base** | ✅ Completa | |
 | **1 — Unit Test §1.3 Channel Modules** | ✅ Completa | |
-| **1 — Unit Test §1.4 Standalone** | ✅ Completa | Include test_zmq_trace.py (nuovo) |
-| **2 — Integration Tests** | 🟡 In corso | `test_bus_broker.py` ✅ + `test_channel_lifecycle.py` ✅ + `test_audio_manager.py` ✅ |
+| **1 — Unit Test §1.4 Standalone** | ✅ Completa | Include test_zmq_trace.py |
+| **2 — Integration Tests** | 🟡 In corso | broker ✅ + channel_lifecycle ✅ + audio_manager ✅ + config_manager ✅ |
 | **3–5** | ❌ Non iniziata | |
 
 ---
 
 ## Prossimo Passo Immediato
 
-**Fase 2 §4 — `test_config_manager_integration.py`**
+**Fase 2 §5 — `test_video_pipeline.py`**
 
-Scope: `config_manager` con bus ZMQ in-process reale.
+Scope: `video_ui` + `video` channel module con bus ZMQ in-process reale.
 Cosa testare:
-- `config_manager` riceve `config.request` e risponde con `config.response`
-- Persistenza: dopo `config.set`, un secondo `config.request` restituisce il valore aggiornato
-- `config.changed` viene pubblicato al cambio di un valore
-- Schema registrato correttamente (tipo, default, validazione range)
-- Comportamento con payload malformati
+- `video_ui` pubblica correttamente i topic `aa.video.*` in risposta agli handler
+- `video` channel module riceve frame e li instrada correttamente
+- Sequenza start → frame → stop senza blocchi
+- Comportamento su frame malformati
 
-**Prerequisito**: leggere `v2/modules/config_manager/main.py` prima di scrivere.
+**Prerequisito**: leggere `v2/modules/video_ui/main.py` e `v2/modules/channel_modules/video/main.py` prima di scrivere.
 
 ---
 
@@ -185,59 +193,59 @@ Cosa testare:
 | Integration: importlib.reload per ogni test | garantisce bus ZMQ fresco con socket in-process |
 | Integration: Launcher mockato in Fase 2 | nessun subprocess reale — test layer 2 puro |
 | BusTracer mock in TUTTI i test unit | BusTracer lancia thread drain; mock evita thread spurii e socket ZMQ nei test unit |
-| Integration audio_manager: subprocess.run patchato | wpctl/pactl non disponibili in CI; output simulato da _fake_subprocess_run |
-| Integration audio_manager: cfg=MagicMock() | isola ConfigClient; config_manager non avviato in test di integrazione layer 2 |
+| Integration audio_manager: subprocess.run patchato | wpctl/pactl non disponibili in CI |
+| Integration audio_manager: cfg=MagicMock() | isola ConfigClient; config_manager non avviato in layer 2 |
+| Integration config_manager: CONFIG_DIR=tmp_path | ogni test ha filesystem isolato; no side-effect tra test |
+| Integration config_manager: campi strutturati stored as-is | ConfigFieldList/Message saltano validate_value(); testato esplicitamente |
+
+---
+
+## 2026-05-13 — Fase 2 §4: test_config_manager integration
+
+**What changed:**
+`v2/tests/integration/test_config_manager.py` creato con ~50 test in 8 gruppi:
+1. Boot protocol (readytostart → module_ready, system.start priority filter, config dir creation)
+2. config.get — no YAML paths (empty, defaults seeding, schema-first seeding, idempotenza)
+3. config.get — YAML esistente + schema echo + persistenza schema tra get successivi
+4. config.set — happy path (crea YAML, aggiorna chiave, preserva chiavi esistenti, roundtrip set→get)
+5. config.set — validazione schema scalare (int coerce, min/max violation, float, enum valid/invalid, bool coerce, no-schema pass-through)
+6. config.set — campi strutturati (ConfigFieldList e ConfigFieldMessage stored as-is senza config.error)
+7. Requester echo (echoed, default empty string, multi-subscriber)
+8. Malformed payloads (module mancante, key mancante, payload vuoto — nessun crash)
+
+**Why:**
+Fase 2 Integration Test §4. Garantisce che config_manager gestisca correttamente
+persistenza YAML, schema registration, validazione scalare e structured fields
+con bus ZMQ reale in-process e filesystem isolato per test.
+
+**Status:** Completato — commit `9f08aa6`
+
+**Next 1-3 steps:**
+1. `test_video_pipeline.py` — Fase 2 §5
+2. `test_boot_shutdown.py` — sequenza boot completa
+3. Fase 3 — E2E tests
 
 ---
 
 ## 2026-05-13 — Fase 2 §3: test_audio_manager integration
 
 **What changed:**
-`v2/tests/integration/test_audio_manager.py` creato con ~47 test in 6 gruppi:
-1. Boot protocol (readytostart, system.start priority check, system.stop)
-2. Volume handlers (on_audio_volume_set, on_audio_channel_volume_set)
-3. Config callbacks (_on_config_loaded, _on_config_changed)
-4. Device refresh (_refresh_devices, fallback su default sink/source)
-5. Schema builder (_build_schema, chiavi attese, default)
-6. Robustezza (wpctl failure, sequenze multiple, valori strutturali)
-
-**Why:**
-Fase 2 Integration Test richiede test su `audio_manager` con bus ZMQ reale in-process.
-Garantisce che i topic bus siano pubblicati correttamente nelle condizioni operative reali.
+`v2/tests/integration/test_audio_manager.py` creato con ~47 test in 6 gruppi.
 
 **Status:** Completato — commit `7e1d9be`
-
-**Next 1-3 steps:**
-1. `test_config_manager_integration.py` — Fase 2 §4
-2. `test_video_pipeline.py` — video_ui + video channel
-3. `test_boot_shutdown.py` — sequenza boot completa
 
 ---
 
 ## 2026-05-13 — Fix test_bus_client + Nuovi test trace
 
 **What changed:**
-1. `test_bus_client.py` aggiornato: fix `test_publish_sends_topic_and_payload` (wire ora ha `_trace`),
-   `_FakeSocket` aggiunge `getsockopt()`, `_make_unit_client` mocka `BusTracer`,
-   nuovi test per `_trace` wire injection, blacklist, seq tracking, `_handle_received_message` diretti.
-2. `test_bus_trace.py` creato: 72 test per `shared/bus_trace.BusTracer`.
-3. `test_zmq_trace.py` creato: 68 test per `modules/zmq_trace/main.py`.
-
-**Why:**
-I 3 commit di produzione (ddd7142, 1b70b0a, 859d70e) hanno introdotto BusClient refactor,
-BusTracer e zmq_trace senza test. I test esistenti sarebbero falliti a causa del `_trace`
-iniettato nel payload wire.
+`test_bus_client.py` aggiornato, `test_bus_trace.py` e `test_zmq_trace.py` creati.
 
 **Status:** Completato — commit `cdc9e6f`
 
-**Next 1-3 steps:**
-1. `test_audio_manager.py` (integration) — Fase 2 §3 ✅ (completato)
-2. `test_config_manager_integration.py` — Fase 2 §4
-3. `test_video_pipeline.py` — video_ui + video channel
-
 ---
 
-*Handoff Version: 4.3*  
+*Handoff Version: 4.4*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `7e1d9be`*  
-*Test totali scritti: ~2260*
+*Commit head: `9f08aa6`*  
+*Test totali scritti: ~2310*
