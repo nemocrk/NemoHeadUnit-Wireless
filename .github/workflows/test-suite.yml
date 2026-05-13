@@ -1,0 +1,327 @@
+# ---------------------------------------------------------------------------
+# NemoHeadUnit-Wireless — CI Test Suite
+# Rif: docs/TEST_SUITE_ARCHITECTURE.md, docs/roadmap-current.md v3.5
+#
+# Job:
+#   1. unit-integration  — marker unit|integration + coverage ≥ 80%  [blocca merge]
+#   2. e2e-smoke         — marker e2e_smoke                           [blocca merge]
+#   3. fuzz              — marker fuzz (Hypothesis)                   [informativo]
+#   4. performance       — marker performance                         [informativo]
+# ---------------------------------------------------------------------------
+
+name: Test Suite
+
+on:
+  push:
+    branches: ["main", "dev", "feature/**"]
+  pull_request:
+    branches: ["main", "dev"]
+  workflow_dispatch:
+    inputs:
+      run_e2e_full:
+        description: "Esegui anche e2e_full (sessione AA completa)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  PIP_CACHE_DIR: ~/.cache/pip
+
+# ===========================================================================
+jobs:
+# ===========================================================================
+
+  # -------------------------------------------------------------------------
+  # JOB 1 — Unit + Integration  (blocca merge)
+  # -------------------------------------------------------------------------
+  unit-integration:
+    name: "Unit & Integration (≥ 80% coverage)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libzmq3-dev \
+            dbus \
+            libdbus-1-dev \
+            libglib2.0-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r v2/tests/requirements-test.txt
+          # Installa il pacchetto v2 in modalità editable (se setup.py/pyproject.toml esiste)
+          if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
+            pip install -e v2/
+          fi
+
+      - name: Start D-Bus session (per test bluetooth)
+        run: |
+          eval $(dbus-launch --sh-syntax)
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> $GITHUB_ENV
+
+      - name: Run unit + integration tests
+        run: |
+          pytest \
+            -m "unit or integration" \
+            --cov=v2 \
+            --cov-report=xml:coverage.xml \
+            --cov-report=html:coverage-html \
+            --cov-report=term-missing \
+            --cov-fail-under=80 \
+            --timeout=30 \
+            -v \
+            --tb=short \
+            -p no:warnings
+        env:
+          QT_QPA_PLATFORM: offscreen
+          HYPOTHESIS_SEED: 0
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            coverage-html/
+          retention-days: 14
+
+      - name: Coverage summary (PR comment-ready)
+        if: always()
+        run: |
+          python -c "
+          import xml.etree.ElementTree as ET, sys
+          tree = ET.parse('coverage.xml')
+          root = tree.getroot()
+          pct = float(root.attrib.get('line-rate', 0)) * 100
+          print(f'Coverage: {pct:.1f}%')
+          sys.exit(0 if pct >= 80 else 1)
+          "
+
+  # -------------------------------------------------------------------------
+  # JOB 2 — E2E Smoke  (blocca merge)
+  # -------------------------------------------------------------------------
+  e2e-smoke:
+    name: "E2E Smoke"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: unit-integration
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libzmq3-dev \
+            bluez \
+            bluetooth
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r v2/tests/requirements-test.txt
+          if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
+            pip install -e v2/
+          fi
+
+      - name: Run E2E smoke tests
+        run: |
+          pytest \
+            -m e2e_smoke \
+            --timeout=60 \
+            -v \
+            --tb=short
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+  # -------------------------------------------------------------------------
+  # JOB 3 — Fuzz  (informativo, non blocca merge)
+  # -------------------------------------------------------------------------
+  fuzz:
+    name: "Fuzz (Hypothesis)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: unit-integration
+    # Non blocca il merge
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r v2/tests/requirements-test.txt
+          if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
+            pip install -e v2/
+          fi
+
+      - name: Restore Hypothesis database
+        uses: actions/cache@v4
+        with:
+          path: .hypothesis
+          key: hypothesis-db-${{ github.ref_name }}
+          restore-keys: hypothesis-db-main
+
+      - name: Run fuzz tests
+        run: |
+          pytest \
+            -m fuzz \
+            --timeout=60 \
+            -v \
+            --tb=short \
+            -p no:warnings
+        env:
+          HYPOTHESIS_SEED: ${{ github.run_number }}
+
+      - name: Save Hypothesis database
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .hypothesis
+          key: hypothesis-db-${{ github.ref_name }}
+
+      - name: Upload fuzz artifacts (failing examples)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypothesis-failures
+          path: .hypothesis/
+          retention-days: 30
+
+  # -------------------------------------------------------------------------
+  # JOB 4 — Performance  (informativo, non blocca merge)
+  # -------------------------------------------------------------------------
+  performance:
+    name: "Performance Benchmarks"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: unit-integration
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libzmq3-dev
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r v2/tests/requirements-test.txt
+          pip install pytest-json-report
+          if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
+            pip install -e v2/
+          fi
+
+      - name: Run performance benchmarks
+        run: |
+          pytest \
+            -m performance \
+            --timeout=120 \
+            -v \
+            --tb=short \
+            --json-report \
+            --json-report-file=perf-results.json
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Upload performance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results
+          path: perf-results.json
+          retention-days: 30
+
+  # -------------------------------------------------------------------------
+  # JOB 5 — E2E Full (nightly / manuale, non blocca merge)
+  # -------------------------------------------------------------------------
+  e2e-full:
+    name: "E2E Full Session (nightly)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Gira solo di notte o se esplicitamente richiesto via workflow_dispatch
+    if: |
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.run_e2e_full == 'true')
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libzmq3-dev bluez bluetooth
+          python -m pip install --upgrade pip
+          pip install -r v2/tests/requirements-test.txt
+          if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
+            pip install -e v2/
+          fi
+
+      - name: Run E2E full session tests
+        run: |
+          pytest \
+            -m e2e_full \
+            --timeout=120 \
+            -v \
+            --tb=long
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+# Schedule nightly per e2e_full
+on:
+  schedule:
+    - cron: "0 2 * * *"  # ogni notte alle 02:00 UTC
