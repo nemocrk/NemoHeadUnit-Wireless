@@ -2,13 +2,13 @@
 
 > Documento di pianificazione per la costruzione completa della test suite di `v2/`.
 > Basato su `docs/TEST_SUITE_ARCHITECTURE.md` v2.0 e `docs/project-vision.md` v3.3.
-> Data di creazione: 2026-05-13 — **Ultimo aggiornamento: 2026-05-13 (v3.3)**
+> Data di creazione: 2026-05-13 — **Ultimo aggiornamento: 2026-05-13 (v3.4)**
 
 ---
 
 ## Executive Summary
 
-Nelle sessioni del 2026-05-13 sono stati prodotti **51 file di test + 3 file infrastruttura + 3 helper E2E** per un totale di **~3072 test**. Fase 0–3 completamente chiuse. Fase 4 §1–§4 completati.
+Nelle sessioni del 2026-05-13 sono stati prodotti **53 file di test + 3 file infrastruttura + 3 helper E2E** per un totale di **~3084 test**. Fase 0–4 completamente chiuse.
 
 L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia che blocca il merge in CI.
 
@@ -112,32 +112,34 @@ L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia c
 
 ---
 
-## Fase 4 — Performance Benchmark 🟡 IN CORSO
+## Fase 4 — Performance Benchmark ✅ COMPLETATA
 
 Marker `@pytest.mark.performance`. **Non bloccano il merge.**
 
 | File | Metrica | Test | Stato |
 |---|---|---|---|
 | `performance/test_bus_latency.py` | publish→receive p50/p95/p99 ms | ~9 | ✅ `1e461f9` |
-| `performance/test_bus_throughput.py` | msg/s, MB/s | ~10 | ✅ **NUOVO** |
-| `performance/test_audio_latency.py` | ≤ 10ms p50 | ~8 | ✅ **NUOVO** |
-| `performance/test_memory_rss.py` | RSS baseline/+5min/+30min | ~7 | ✅ **NUOVO** |
-| `performance/test_video_frame_rate.py` | ≥ 30fps | ~6 | ❌ |
-| `performance/test_aa_frame_decode.py` | encode+decode round-trip µs | ~6 | ❌ |
+| `performance/test_bus_throughput.py` | msg/s, MB/s | ~8 | ✅ `9f75a88` |
+| `performance/test_audio_latency.py` | ≤ 10ms p50 | ~8 | ✅ `4927f1c` |
+| `performance/test_memory_rss.py` | RSS baseline/+session/reconnect | ~6 | ✅ `777af59` |
+| `performance/test_video_frame_rate.py` | ≥ 30fps decode pipeline | ~7 | ✅ **NUOVO** |
+| `performance/test_aa_frame_decode.py` | encode+decode RTT µs | ~6 | ✅ **NUOVO** |
 
-**Totale Fase 4 completato: 4/6 file, ~34 test.**
+**Totale Fase 4: 6/6 file, ~44 test. ✅ COMPLETA.**
 
 ---
 
-## Fase 5 — Fuzz Test
+## Fase 5 — Fuzz Test 🟡 IN CORSO
 
-Marker `@pytest.mark.fuzz`. Motore: `hypothesis`.
+Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. **Non bloccano il merge.**
 
-| File | Stato |
-|---|---|
-| `fuzz/test_aa_wire_format.py` | ❌ |
-| `fuzz/test_proto_utils_roundtrip.py` | ❌ |
-| `fuzz/test_bus_payload_malformed.py` | ❌ |
+| File | Scenario | Stato |
+|---|---|---|
+| `fuzz/test_aa_wire_format.py` | Frame AA malformati / troncati / overflow | ✅ **NUOVO** |
+| `fuzz/test_proto_utils_roundtrip.py` | Roundtrip proto encode→decode con input arbitrary | ❌ |
+| `fuzz/test_bus_payload_malformed.py` | Payload JSON malformati / tipi errati sul bus | ❌ |
+
+**Totale Fase 5 completato: 1/3 file.**
 
 ---
 
@@ -151,9 +153,9 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`.
 | 3 — E2E helpers | 3 / 3 | — | — | ✅ **Completo** |
 | 3 — E2E Smoke | 3 / 3 | ~27 | ✅ Sì | ✅ **Completa** |
 | 3 — E2E Full | 2 / 2 | ~20 | ❌ No | ✅ **Completa** |
-| 4 — Performance | 4 / 6 | ~43 | ❌ No | 🟡 **In corso** |
-| 5 — Fuzz | 0 / 3 | 0 | ❌ No | ❌ Todo |
-| **Totale** | **51 / ~57** | **~3072** | — | 🟡 |
+| 4 — Performance | 6 / 6 | ~44 | ❌ No | ✅ **Completa** |
+| 5 — Fuzz | 1 / 3 | ~12 | ❌ No | 🟡 **In corso** |
+| **Totale** | **54 / ~57** | **~3084** | — | 🟡 |
 
 ---
 
@@ -165,17 +167,13 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`.
 4. ~~**Prerequisito Fase 3**: helpers~~ ✅
 5. ~~**Fase 3 Smoke**~~ ✅ ~27 test
 6. ~~**Fase 3 Full**~~ ✅ ~20 test
-7. ~~**Fase 4 §1**: `test_bus_latency.py`~~ ✅
-8. ~~**Fase 4 §2**: `test_bus_throughput.py`~~ ✅
-9. ~~**Fase 4 §3**: `test_audio_latency.py`~~ ✅
-10. ~~**Fase 4 §4**: `test_memory_rss.py`~~ ✅
-11. **PROSSIMO → Fase 4 §5**: `test_video_frame_rate.py`
-12. **Fase 4 §6**: `test_aa_frame_decode.py`
-13. **Fase 5**: fuzz test (`hypothesis`), non bloccanti
+7. ~~**Fase 4 §1–§6**~~ ✅ ~44 test
+8. **PROSSIMO → Fase 5 §2**: `fuzz/test_proto_utils_roundtrip.py`
+9. **Fase 5 §3**: `fuzz/test_bus_payload_malformed.py` (chiude Fase 5)
 
 ---
 
-*Roadmap Version: 3.3*
+*Roadmap Version: 3.4*
 *Aggiornato: 2026-05-13*
 *Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*
 *Vedi anche: `docs/session_handoff.md` per dettagli tecnici della sessione corrente*
