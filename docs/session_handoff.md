@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `0328b84`
+> **Aggiornato**: 2026-05-13 — commit `bd326e5`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**26 file di test, 1823 test** su `main`. Nessun test è ancora stato eseguito sull’hardware reale.
+**27 file di test, 1907 test** su `main`. Fase 1 Unit Test completata. Fase 2 Integration Test avviata con `test_bus_broker.py`.
 
 ---
 
@@ -45,8 +45,9 @@
 | `v2/tests/unit/modules/bluetooth/test_pairing.py` | `d4973f8` | 84 | |
 | `v2/tests/unit/modules/bluetooth/test_paired_devices.py` | `6a83677` | 68 | |
 | `v2/tests/unit/modules/config_manager/test_config_manager.py` | `e1c0847` | 96 | |
+| `v2/tests/integration/test_bus_broker.py` | `bd326e5` | 84 | **NUOVO** — Fase 2 §1 |
 
-**Totale: 1823 test in 26 file di test + 3 file infrastruttura.**
+**Totale: 1907 test in 27 file di test + 3 file infrastruttura.**
 
 ---
 
@@ -65,10 +66,17 @@ Patern stabilito:
 3. `_start_stream` / `_stop_stream` patchati con `patch.object` nei test che non li testano direttamente
 4. `_send_queue` (SimpleQueue) manipolato direttamente nelle fixture per i test di `_drain_send_queue`
 
+### Integration Tests — Pattern BusClient in-process
+1. `_make_client(in_process_broker, name)` — helper locale che monkey-patcha BROKER_PUB_ADDR/BROKER_SUB_ADDR
+2. `_start_client(client)` — avvia receive loop non-blocking + sleep 0.05s
+3. `_wait_received(list, count, timeout)` — polling con deadline per asserzioni asincrone
+4. Tutti i client devono chiamare `.stop()` nel teardown del test
+5. `time.sleep(0.1-0.2)` dopo subscribe per attendere propagazione subscription ZMQ
+
 ### Logger
 Vedi handoff v3.1.
 
-### Helper riutilizzabili
+### Helper riutilizzabili (unit test)
 ```python
 def _published_topics(mock_bus) -> list[str]:
     return [c.args[0] for c in mock_bus.publish.call_args_list]
@@ -89,22 +97,23 @@ def _published_payload(mock_bus, topic: str) -> dict:
 | **0 — Infrastruttura** | ✅ Completa | |
 | **1 — Unit Test §1.1 Shared** | ✅ Completa | proto_utils, bus_client, config_client, logger ✅ |
 | **1 — Unit Test §1.2 Base** | ✅ Completa | base_channel_module ✅ |
-| **1 — Unit Test §1.3 Channel Modules** | ✅ **Completa** | audio, video, base, input, sensor, bluetooth, wifi, av_input ✅ |
+| **1 — Unit Test §1.3 Channel Modules** | ✅ Completa | audio, video, base, input, sensor, bluetooth, wifi, av_input ✅ |
 | **1 — Unit Test §1.4 Standalone** | ✅ Completa | oaa_cc, tcp, audio_mgr, video_ui, bluetooth, config_manager ✅ |
-| **2 — Integration Tests** | ❌ Non iniziata | ← PROSSIMO |
+| **2 — Integration Tests** | 🟡 In corso | `test_bus_broker.py` ✅ (84 test) |
 | **3–5** | ❌ Non iniziata | |
 
 ---
 
 ## Prossimo Passo Immediato
 
-**Fase 2 — Integration Tests**
+**Fase 2 — `test_channel_lifecycle.py`**
 
-Leggere `docs/roadmap-current.md` e `docs/project-vision.md` per capire quali scenari di integrazione sono prioritari.
-Candidati naturali:
-- `channel_manager` ↔ `tcp_server` ↔ channel modules: flusso completo frame
-- `oaa_control_channel` ↔ `channel_manager`: handshake + ServiceDiscovery end-to-end
-- `audio_manager` ↔ `av_input` channel: source selection e cattura
+Scope: `channel_manager` + `channel_modules` avviati come thread reali con bus ZMQ in-process condiviso.
+Cosa testare:
+- `channel_manager` riceve `module_ready_to_start` e avvia i canali nell'ordine corretto
+- Canali pubblicano `channel.ready` dopo setup
+- `channel_manager` gestisce `channel.error` e risponde con shutdown
+- Sequenza `system.start` → canali `READY` entro 5s
 
 ---
 
@@ -112,16 +121,36 @@ Candidati naturali:
 
 | Decisione | Rationale |
 |---|---|
-| Stub loguru+zmq pre-import | side-effect all’import: non si può importare senza mock |
+| Stub loguru+zmq pre-import | side-effect all'import: non si può importare senza mock |
 | `patch("atexit.register")` durante reload | evita doppio registrazione handler |
 | decode_aa_frame patchato in NON-AV dispatch | NON-AV usa raw bytes + decode, non message_id già estratto |
 | subprocess.Popen patchato in _start_stream | evita spawn reale di pacat nei test |
 | threading.Thread patchato in _start_stream | evita thread reali nei test unit |
 | _send_queue manipolato direttamente | SimpleQueue è accessibile senza mock |
+| Integration: BusClient monkey-patch indirizzi | no modifica al codice sorgente — test isola tramite fixture |
+| Integration: sleep(0.1) dopo subscribe | ZMQ subscription propagation non è sincrona |
+| Integration: tolleranza 45/50 su burst test | CI lenta può droppar pochi msg senza che sia un errore |
 
 ---
 
-*Handoff Version: 3.2*  
+## 2026-05-13 — Fase 2 §1: test_bus_broker.py
+
+**What changed:**
+Creato `v2/tests/integration/test_bus_broker.py` — primo file della Fase 2 Integration Tests.
+
+**Why:**
+Il broker ZMQ è il prerequisito di tutti gli altri test di integrazione. Va testato per primo e in isolamento prima di coinvolgere i moduli applicativi.
+
+**Status:** Completato — commit `bd326e5`
+
+**Next 1-3 steps:**
+1. `test_channel_lifecycle.py` — channel_manager + channel_modules con bus reale
+2. `test_audio_pipeline.py` — audio_manager + av_input
+3. `test_boot_shutdown.py` — sequenza boot completa
+
+---
+
+*Handoff Version: 4.0*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `0328b84`*  
-*Test totali scritti: 1823*
+*Commit head: `bd326e5`*  
+*Test totali scritti: 1907*
