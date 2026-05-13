@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `dbbc2b4`
+> **Aggiornato**: 2026-05-13 — commit `2fe07ef`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**36 file di test, ~2430 test** su `main`. Fase 1 Unit Test completata. Fase 2 Integration Test: 6 file completati su 7.
+**37 file di test, ~2495 test** su `main`. Fase 0, 1 e **2 completamente chiuse**. Prossimo: Fase 3 E2E Smoke.
 
 ---
 
@@ -52,9 +52,10 @@
 | `v2/tests/integration/test_audio_manager.py` | `7e1d9be` | ~47 | Fase 2 §3 |
 | `v2/tests/integration/test_config_manager.py` | `9f08aa6` | ~50 | Fase 2 §4 |
 | `v2/tests/integration/test_video_pipeline.py` | `2d8d861` | ~60 | Fase 2 §5 |
-| `v2/tests/integration/test_bluetooth_flow.py` | `dbbc2b4` | ~60 | **NUOVO** — Fase 2 §6 |
+| `v2/tests/integration/test_bluetooth_flow.py` | `dbbc2b4` | ~60 | Fase 2 §6 |
+| `v2/tests/integration/test_boot_shutdown.py` | `2fe07ef` | ~65 | **NUOVO** — Fase 2 §7 |
 
-**Totale: ~2430 test in 36 file di test + 3 file infrastruttura.**
+**Totale: ~2495 test in 37 file di test + 3 file infrastruttura.**
 
 ---
 
@@ -154,6 +155,15 @@ def _load_module():
 6. Autoconnect testato: `_autoconnect_stop` verificato direttamente, loop inline con `_autoconnect_stop.set()`
 7. Config callbacks (`_on_config_loaded` / `_on_config_changed`) chiamati direttamente con `_apply_config` patchato
 
+### Integration Tests — Pattern boot_shutdown (Fase 2 §7)
+1. `FakeModule(broker, name, priority)` — mini-classe che implementa il boot protocol sul bus ZMQ reale
+2. `BootOrchestrator(broker)` — raccoglie `system.module_ready`, invia `system.start`, raccoglie `system.ready`
+3. Handler `_on_readytostart` / `_on_system_start` / `_on_system_stop` implementati in FakeModule
+4. `_load_cm(broker)` — reload channel_manager.main con indirizzi in-process per test E2E con modulo reale
+5. Test di timing: late subscriber non riceve readytostart (ZMQ no replay)
+6. Moduli con stessa priority rispondono entrambi a `system.start {priority}`
+7. Boot sequenziale verificato: start p1 → wait ready p1 → start p2 → wait ready p2 (in ordine)
+
 ### Helper riutilizzabili (unit test)
 ```python
 def _published_topics(mock_bus) -> list[str]:
@@ -177,23 +187,28 @@ def _published_payload(mock_bus, topic: str) -> dict:
 | **1 — Unit Test §1.2 Base** | ✅ Completa | |
 | **1 — Unit Test §1.3 Channel Modules** | ✅ Completa | |
 | **1 — Unit Test §1.4 Standalone** | ✅ Completa | Include test_zmq_trace.py |
-| **2 — Integration Tests** | 🟡 In corso (6/7) | broker ✅ + channel_lifecycle ✅ + audio_manager ✅ + config_manager ✅ + video_pipeline ✅ + bluetooth_flow ✅ |
-| **3–5** | ❌ Non iniziata | |
+| **2 — Integration Tests** | ✅ **COMPLETATA** (7/7) | broker ✅ + lifecycle ✅ + audio ✅ + config ✅ + video ✅ + bluetooth ✅ + boot_shutdown ✅ |
+| **3 — E2E Smoke** | ❌ **PROSSIMO** | `test_bt_connect_to_handshake.py` |
+| **4–5** | ❌ Non iniziata | |
 
 ---
 
 ## Prossimo Passo Immediato
 
-**Fase 2 §7 — `test_boot_shutdown.py`**
+**Fase 3 — E2E Smoke: `test_bt_connect_to_handshake.py`**
 
-Scope: sequenza boot completa dell'intero sistema simulato su bus in-process.
+Scope: test E2E smoke che simula il flow completo BT connect → RFCOMM handshake → AA session su bus in-process.
+Marker `@pytest.mark.e2e_smoke`, target < 30s.
+
 Cosa testare:
-- Orchestrazione `system.readytostart` → tutti i moduli pubblicano `system.module_ready`
-- Sequenza start per priority (priority 1 → 2 → ...) con `system.start`
-- Shutdown ordinato: `system.stop` → tutti i moduli ACKano
-- Timeout handling durante boot
+- BT device connesso → `bt.device_connected` pubblicato
+- rfcomm_handshake riceve evento e avvia handshake RFCOMM
+- Handshake OK → `rfcomm.handshake_complete` → oaa_control_channel si avvia
+- AA session attiva → `aa.session.active` pubblicato
 
-**File da leggere prima**: `v2/modules/system_controller/main.py`
+**File da leggere prima**: `v2/modules/rfcomm_handshake/main.py`, `v2/modules/oaa_control_channel/main.py`
+
+**Prerequisito**: helper `e2e/helpers/` (phone_mock, frame_sequences, stack_launcher) da creare prima.
 
 ---
 
@@ -224,33 +239,43 @@ Cosa testare:
 | Integration bluetooth_flow: bt._adapter pre-iniettato | evita "Adapter not ready" nei test handler layer 2 |
 | Integration bluetooth_flow: autoconnect loop inline con stop event set | testa logica loop senza thread reali |
 | Integration bluetooth_flow: callback _on_* chiamati direttamente | verifica pubblicazione topic senza GLib event loop |
+| Integration boot_shutdown: FakeModule + BootOrchestrator come actor sul bus reale | nessun mock del bus — verifica comportamento wire reale |
+| Integration boot_shutdown: test late subscriber | verifica che ZMQ non faccia replay dei messaggi |
+| Integration boot_shutdown: stessa priority = entrambi rispondono | comportamento atteso da moduli UI paralleli |
+
+---
+
+## 2026-05-13 — Fase 2 §7: test_boot_shutdown integration
+
+**What changed:**
+`v2/tests/integration/test_boot_shutdown.py` creato con ~65 test in 6 gruppi:
+1. Single module boot protocol (readytostart, system.start correct/wrong priority, system.stop, no early module_ready)
+2. Multi-module boot sequential priorities (all respond to readytostart, sequential start per priority, all receive stop, 5 modules, same-priority both respond)
+3. channel_manager boot reale (announce priority 2, system.ready on start, ignore wrong priority, stop cleans session, stop no session no crash)
+4. Full boot sequence (2 moduli sequential, boot+stop, ordered by priority, readytostart before modules=no reply, late subscriber misses)
+5. Shutdown protocol (stop before start, stop after partial boot, double stop no crash, stop without readytostart, stopped flag)
+6. Boot E2E con channel_manager reale + FakeModules (cm partecipa al boot, stop cleanup session, priority 2 announce, full e2e boot+stop)
+
+**Why:**
+Fase 2 Integration Test §7 — ultimo file integration. Verifica il boot protocol dell'intero sistema:
+orchestrazione multi-modulo, sequenza per priority level, shutdown ordinato, edge cases timing ZMQ,
+con bus ZMQ reale in-process e channel_manager reale come actor principale.
+
+**Status:** Completato — commit `2fe07ef` — **FASE 2 COMPLETATA** ✅
+
+**Next 1-3 steps:**
+1. Creare `e2e/helpers/` (phone_mock, frame_sequences, stack_launcher)
+2. `test_bt_connect_to_handshake.py` — Fase 3 E2E Smoke §1
+3. Coverage report — verificare soglia 80% su tutti i moduli prima di Fase 3
 
 ---
 
 ## 2026-05-13 — Fase 2 §6: test_bluetooth_flow integration
 
 **What changed:**
-`v2/tests/integration/test_bluetooth_flow.py` creato con ~60 test in 8 gruppi:
-1. Boot protocol (readytostart, system.start priority filter/wrong priority/adapter init failure, system.stop)
-2. Discovery flow (on_discover adapter ready/not-ready, duplicate session, _on_device_found, _on_discovery_done)
-3. Pairing flow (on_pair, confirm, reject, pin/completed/failed callbacks via bus)
-4. Paired-device operations (list/empty/no-adapter, remove success/failure/missing-addr, connect on_connected/on_failed, disconnect on_disconnected/on_failed)
-5. Autoconnect state machine (_stop_autoconnect, _start_autoconnect disabled/already-active, on_rfcomm_connected, on_try_autoconnect, loop skips connected device, loop exits immediately when stopped)
-6. Config callbacks (_on_config_loaded merge/empty/system.ready/pairing_agent, _on_config_changed update/unknown/structural/apply_config)
-7. Error paths (connect/disconnect/remove/confirm no-adapter or missing fields, reject missing address)
-8. E2E bus flow (full discovery with 2 devices, pairing pin+completed, pairing pin+failed, rfcomm stops autoconnect, remove+list reflects change, 5 devices burst)
-
-**Why:**
-Fase 2 Integration Test §6. Verifica il modulo bluetooth nella sua interezza: tutti i handler bus,
-la state machine autoconnect, i callback D-Bus simulati, la gestione config e gli error path,
-con bus ZMQ reale in-process e senza dipendenze hardware (D-Bus/BlueZ/GLib stubbed).
+`v2/tests/integration/test_bluetooth_flow.py` creato con ~60 test in 8 gruppi.
 
 **Status:** Completato — commit `dbbc2b4`
-
-**Next 1-3 steps:**
-1. `test_boot_shutdown.py` — sequenza boot completa del sistema (Fase 2 §7, ultimo file integration)
-2. Fase 3 — E2E tests (TCP server + AA handshake end-to-end)
-3. Coverage report — verificare soglia 80% su tutti i moduli
 
 ---
 
@@ -290,7 +315,7 @@ con bus ZMQ reale in-process e senza dipendenze hardware (D-Bus/BlueZ/GLib stubb
 
 ---
 
-*Handoff Version: 4.6*  
+*Handoff Version: 4.7*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `dbbc2b4`*  
-*Test totali scritti: ~2430*
+*Commit head: `2fe07ef`*  
+*Test totali scritti: ~2495*

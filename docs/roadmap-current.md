@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-Nelle sessioni del 2026-05-13 sono stati prodotti **36 file di test + 3 file infrastruttura** per un totale di **~2430 test**. La Fase 0 e la Fase 1 sono completamente chiuse. La Fase 2 conta **6 file completati su 7** — manca solo `test_boot_shutdown.py`.
+Nelle sessioni del 2026-05-13 sono stati prodotti **37 file di test + 3 file infrastruttura** per un totale di **~2495 test**. La Fase 0, 1 e **2 sono completamente chiuse**. La Fase 3 E2E Smoke è il prossimo obiettivo.
 
 L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia che blocca il merge in CI — seguendo l'architettura stratificata definita in `TEST_SUITE_ARCHITECTURE.md`.
 
@@ -96,12 +96,9 @@ Target: **< 1s per test**, coverage ≥ 80%, marker `@pytest.mark.unit`.
 
 ---
 
-## Fase 2 — Integration Test 🟡 IN CORSO (6/7)
+## Fase 2 — Integration Test ✅ COMPLETATA
 
 Target: **< 10s per test**, marker `@pytest.mark.integration`. Bus ZMQ reale in-process condiviso tra moduli avviati come thread.
-
-> **Nota**: tutti i `_make_integration_client()` nei test di Fase 2 devono mockare `BusTracer`
-> per evitare thread drain spurii e socket ZMQ extra. Pattern: `patch("shared.bus_client.BusTracer", return_value=MagicMock())`
 
 | File target | Test | Commit | Stato |
 |---|---|---|---|
@@ -111,31 +108,39 @@ Target: **< 10s per test**, marker `@pytest.mark.integration`. Bus ZMQ reale in-
 | `integration/test_config_manager.py` | ~50 | `9f08aa6` | ✅ |
 | `integration/test_video_pipeline.py` | ~60 | `2d8d861` | ✅ |
 | `integration/test_bluetooth_flow.py` | ~60 | `dbbc2b4` | ✅ |
-| `integration/test_boot_shutdown.py` | — | — | ❌ **PROSSIMO** |
+| `integration/test_boot_shutdown.py` | ~65 | `2fe07ef` | ✅ |
 
-**Totale Fase 2 finora: ~389 test in 6 file.**
+**Totale Fase 2: ~454 test in 7 file.**
 
 ### Pattern integration (recap)
 
 - `_load_*` / `_make_*` per reload modulo + patch indirizzi + BusTracer mock
 - `_make_client` + `_start_client` + `_wait` — helper condivisi
-- Handler `on_*` / `_handle_*` / callback `_on_*` chiamati direttamente; spy BusClient riceve topic pubblicati
+- `FakeModule` + `BootOrchestrator` come actor attivi sul bus reale (boot_shutdown)
 - `importlib.reload()` per ogni test — bus ZMQ fresco e stato modulo pulito
-- D-Bus/BlueZ/GLib/gi + PyQt6/GStreamer stubbed in `sys.modules` per test senza hardware
+- Hardware stub: D-Bus/BlueZ/GLib/gi + PyQt6/GStreamer in `sys.modules`
 
 ---
 
-## Fase 3 — E2E Test
+## Fase 3 — E2E Test 🟡 PROSSIMA
+
+### Prerequisito: `e2e/helpers/`
+
+Prima di scrivere i test smoke, creare i helper condivisi:
+
+| Helper | Scopo |
+|---|---|
+| `e2e/helpers/phone_mock.py` | Simula un telefono Android: connessione BT, RFCOMM, AA frame exchange |
+| `e2e/helpers/frame_sequences.py` | Sequenze AA predefinite (handshake, audio, video, stop) |
+| `e2e/helpers/stack_launcher.py` | Avvia l'intero stack NemoHeadUnit in-process con tutti i moduli |
 
 ### Smoke (`@pytest.mark.e2e_smoke`) — run in CI, < 30s
 
 | File target | Stato |
 |---|---|
-| `e2e/smoke/test_bt_connect_to_handshake.py` | ❌ da fare |
+| `e2e/smoke/test_bt_connect_to_handshake.py` | ❌ **PROSSIMO** |
 | `e2e/smoke/test_channel_manager_boot.py` | ❌ da fare |
 | `e2e/smoke/test_audio_path_smoke.py` | ❌ da fare |
-
-Helper richiesti in `e2e/helpers/`: `phone_mock.py`, `frame_sequences.py`, `stack_launcher.py`.
 
 ### Full Session (`@pytest.mark.e2e_full`) — nightly/on-demand
 
@@ -179,32 +184,30 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 |---|---|---|---|---|
 | 0 — Infrastruttura | 3 / 3 | — | ✅ Sì | ✅ Completa |
 | 1 — Unit Test | 28 / 28 | 2213 | ✅ Sì (≥80%) | ✅ **Completa** |
-| 2 — Integration | 6 / 7 | ~389 | ✅ Sì | 🟡 In corso |
-| 3 — E2E Smoke | 0 / 3 | 0 | ✅ Sì | ❌ Todo |
+| 2 — Integration | 7 / 7 | ~454 | ✅ Sì | ✅ **Completa** |
+| 3 — E2E Smoke | 0 / 3 | 0 | ✅ Sì | 🟡 **Prossima** |
 | 3 — E2E Full | 0 / 2 | 0 | ❌ No | ❌ Todo |
 | 4 — Performance | 0 / 6 | 0 | ❌ No | ❌ Todo |
 | 5 — Fuzz | 0 / 3 | 0 | ❌ No | ❌ Todo |
-| **Totale** | **37 / ~54** | **~2602** | — | 🟡 |
+| **Totale** | **38 / ~54** | **~2667** | — | 🟡 |
 
 ---
 
 ## Ordine di Esecuzione Raccomandato (aggiornato)
 
-1. ⁠~~**Fase 0**~~ ✅ Completata
-2. ⁠~~**Fase 1 §1.1–1.4 completo**~~ ✅ 2213 test
-3. ⁠~~**Fase 2 §1**: `test_bus_broker.py`~~ ✅
-4. ⁠~~**Fase 2 §2**: `test_channel_lifecycle.py`~~ ✅
-5. ⁠~~**Fase 2 §3**: `test_audio_manager.py`~~ ✅
-6. ⁠~~**Fase 2 §4**: `test_config_manager.py`~~ ✅
-7. ⁠~~**Fase 2 §5**: `test_video_pipeline.py`~~ ✅
-8. ⁠~~**Fase 2 §6**: `test_bluetooth_flow.py`~~ ✅
-9. **PROSSIMO → Fase 2 §7**: `test_boot_shutdown.py` — sequenza boot completa del sistema (`system_controller`)
-10. **Fase 3 Smoke** — E2E smoke dopo il completamento integration
-11. **Fase 4 + 5** — Performance e fuzz in parallelo, non bloccanti
+1. ~~**Fase 0**~~ ✅
+2. ~~**Fase 1 §1.1–1.4**~~ ✅ 2213 test
+3. ~~**Fase 2 §1–§7**~~ ✅ 454 test — **FASE 2 COMPLETATA**
+4. **PROSSIMO → Prerequisito Fase 3**: creare `e2e/helpers/` (phone_mock, frame_sequences, stack_launcher)
+5. **Fase 3 Smoke §1**: `test_bt_connect_to_handshake.py`
+6. **Fase 3 Smoke §2**: `test_channel_manager_boot.py`
+7. **Fase 3 Smoke §3**: `test_audio_path_smoke.py`
+8. **Fase 3 Full**: `test_full_aa_session.py` + `test_session_recovery.py` (nightly)
+9. **Fase 4 + 5** — Performance e fuzz in parallelo, non bloccanti
 
 ---
 
-*Roadmap Version: 2.7*  
+*Roadmap Version: 2.8*  
 *Aggiornato: 2026-05-13*  
 *Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*  
 *Vedi anche: `docs/session_handoff.md` per dettagli tecnici della sessione corrente*
