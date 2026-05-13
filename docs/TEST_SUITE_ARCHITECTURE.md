@@ -28,7 +28,9 @@ v2/
     │   ├── shared/
     │   │   ├── test_proto_utils.py
     │   │   ├── test_logger.py
-    │   │   └── test_bus_client.py
+    │   │   ├── test_bus_client.py
+    │   │   ├── test_bus_trace.py
+    │   │   └── test_config_client.py
     │   └── modules/
     │       ├── channel_modules/
     │       │   ├── test_base_channel_module.py
@@ -36,38 +38,58 @@ v2/
     │       │   │   └── test_audio.py
     │       │   ├── av_input/
     │       │   │   └── test_av_input.py
-    │       │   └── video/
-    │       │       └── test_video.py
+    │       │   ├── bluetooth/
+    │       │   │   └── test_bluetooth_channel.py
+    │       │   ├── input/
+    │       │   │   └── test_input.py
+    │       │   ├── sensor/
+    │       │   │   └── test_sensor.py
+    │       │   ├── video/
+    │       │   │   └── test_video.py
+    │       │   └── wifi/
+    │       │       └── test_wifi.py
     │       ├── oaa_control_channel/
-    │       │   └── test_handshake.py
+    │       │   ├── test_oaa_control_channel_main.py
+    │       │   ├── test_handshake.py
+    │       │   ├── test_serializer.py
+    │       │   └── test_service_discovery.py
     │       ├── channel_manager/
     │       │   └── test_channel_manager.py
-    │       ├── bluetooth/
-    │       │   ├── test_paired_devices.py
-    │       │   ├── test_pairing.py
-    │       │   └── test_autoconnect.py
+    │       ├── tcp_server/
+    │       │   └── test_tcp_server.py
     │       ├── audio_manager/
     │       │   └── test_audio_manager.py
     │       ├── video_ui/
     │       │   └── test_video_ui.py          ← QApplication offscreen
-    │       └── bluetooth_ui/
-    │           └── test_bluetooth_ui.py      ← QApplication offscreen
+    │       ├── bluetooth/
+    │       │   ├── test_bluetooth_main.py
+    │       │   ├── test_bluez_adapter.py
+    │       │   ├── test_discovery.py
+    │       │   ├── test_pairing.py
+    │       │   └── test_paired_devices.py
+    │       ├── config_manager/
+    │       │   └── test_config_manager.py
+    │       └── zmq_trace/
+    │           └── test_zmq_trace.py
     │
     ├── integration/                          ← @pytest.mark.integration
     │   ├── test_bus_broker.py               ← broker ZMQ + multi-client
     │   ├── test_channel_lifecycle.py        ← channel_manager + channel_modules
-    │   ├── test_audio_pipeline.py           ← audio_manager + audio + av_input
+    │   ├── test_audio_manager.py            ← audio_manager + wpctl/pactl mock
+    │   ├── test_config_manager.py           ← config_manager + YAML tmp_path
     │   ├── test_video_pipeline.py           ← video + video_ui
     │   ├── test_bluetooth_flow.py           ← bluetooth + bluetooth_ui
     │   └── test_boot_shutdown.py            ← main.py boot/shutdown completo
     │
     ├── e2e/                                 ← @pytest.mark.e2e
-    │   ├── helpers/
-    │   │   ├── phone_mock.py                ← simulatore telefono AA wire protocol
-    │   │   ├── frame_sequences.py           ← sequenze frame predefinite
-    │   │   └── stack_launcher.py            ← avvia/stoppa stack v2 come subprocess
+    │   ├── helpers/                         ← ✅ PRESENTI (commit 637631d)
+    │   │   ├── phone_mock.py                ← PhoneMock (RFCOMM) + TcpPhoneClient (AA TCP)
+    │   │   ├── frame_sequences.py           ← VersionSeq, AuthSeq, ServiceDiscoverySeq,
+    │   │   │                                    ChannelOpenSeq, MediaSeq, ShutdownSeq,
+    │   │   │                                    FullHandshakeSequence
+    │   │   └── stack_launcher.py            ← StackLauncher, e2e_stack() context manager
     │   ├── smoke/                           ← @pytest.mark.e2e_smoke (veloci, <30s)
-    │   │   ├── test_bt_connect_to_handshake.py
+    │   │   ├── test_bt_connect_to_handshake.py   ← ❌ PROSSIMO
     │   │   ├── test_channel_manager_boot.py
     │   │   └── test_audio_path_smoke.py
     │   └── full_session/                    ← @pytest.mark.e2e_full (lenti, >60s)
@@ -213,9 +235,111 @@ def aa_frame_factory():
     """
 ```
 
-### 4.4 `phone_mock` (E2E)
+### 4.4 E2E Helpers (`e2e/helpers/`) — ✅ Implementati
 
-Simulatore del telefono AA per i test e2e. Implementa il wire protocol AA: handshake SETUP → OPEN → frame media → disconnect. Configurabile per crash, timeout, riconnessione.
+I tre helper sono stati creati nella sessione del 2026-05-13 e sono disponibili su `main`.
+
+#### `phone_mock.py`
+
+Due classi principali:
+
+**`PhoneMock`** — simula il lato telefono del handshake RFCOMM. Opera in un thread daemon.
+
+```python
+class PhoneMock:
+    """RFCOMM handshake responder (4-step protocol).
+
+    Flusso eseguito in background:
+      1. Riceve  WifiStartRequest  (MSG_WIFI_START_REQUEST = 1)
+      2. Invia   WifiStartResponse ack  (opzionale, controllato da send_start_ack)
+      3. Invia   WifiInfoRequest   (MSG_WIFI_INFO_REQUEST = 2)
+      4. Riceve  WifiInfoResponse  (MSG_WIFI_INFO_RESPONSE = 3)
+      5. Invia   WifiConnectionStatus (MSG_WIFI_CONNECT_STATUS = 7)
+
+    Uso:
+        hu_sock, phone_sock = socket.socketpair(AF_UNIX, SOCK_STREAM)
+        mock = PhoneMock(phone_sock).start()
+        # esegui RfcommHandshake su hu_sock in un thread separato
+        assert mock.wait_done(timeout=5.0)
+        assert mock.completed
+        assert mock.ssid_received == "NemoAP"
+    """
+    def __init__(self, sock, send_start_ack=True, wifi_join_delay=0.05, on_error=None): ...
+    def start(self) -> "PhoneMock": ...
+    def wait_done(self, timeout=5.0) -> bool: ...
+    @property
+    def result(self) -> RfcommHandshakeResult: ...
+    @property
+    def completed(self) -> bool: ...
+    @property
+    def phone_ip_received(self) -> str: ...
+    @property
+    def ssid_received(self) -> str: ...
+```
+
+**`TcpPhoneClient`** — simula il client TCP AA (dopo RFCOMM completato).
+
+```python
+class TcpPhoneClient:
+    """AA TCP client per la fase post-RFCOMM.
+
+    Uso:
+        client = TcpPhoneClient.connect(host="127.0.0.1", port=5288)
+        frame  = client.recv_frame(timeout=2.0)  # (ch, flags, msg_id, body)
+        client.send_frame(channel_id=0, msg_id=MSG_VERSION_RESPONSE, body=b"...")
+        client.close()
+    """
+    @classmethod
+    def connect(cls, host="127.0.0.1", port=5288, timeout=5.0) -> "TcpPhoneClient": ...
+    def send_frame(self, channel_id, msg_id, body=b"", flags=0) -> bool: ...
+    def recv_frame(self, timeout=5.0) -> Optional[tuple]: ...
+    def recv_frames_until(self, predicate, timeout=5.0, max_frames=50) -> List[tuple]: ...
+    def close(self) -> None: ...
+```
+
+#### `frame_sequences.py`
+
+Raccolta di classi stateless con metodi `@staticmethod` per costruire frame AA:
+
+| Classe | Metodi chiave |
+|---|---|
+| `VersionSequence` | `request_frame()`, `response_frame()`, `version_mismatch_frame()` |
+| `AuthSequence` | `ssl_handshake_frame(blob)`, `auth_complete_frame()`, `tls_handshake_payload(blob)` |
+| `ServiceDiscoverySeq` | `request_frame()`, `response_frame_minimal()`, `response_frame_with_channels(ids)` |
+| `ChannelOpenSeq` | `request_frame(ch_id)`, `response_frame(ch_id, status)`, `open_all_channels_sequence(ids)` |
+| `PingSequence` | `request_frame(ts_us)`, `response_frame(ts_us)` |
+| `MediaSequence` | `audio_frame(ch, payload)`, `audio_burst(count)`, `video_idr_frame(ch, size)`, `video_p_frame(ch, size)` |
+| `ShutdownSequence` | `request_frame(reason)`, `response_frame(status)` |
+| `FullHandshakeSequence` | `phone_response_sequence(channel_ids)`, `as_bus_payloads(channel_ids)` |
+
+Tutti i builder restituiscono `bytes` pronti per `TcpPhoneClient.send_frame()` o `on_frame_ch0()`.
+
+#### `stack_launcher.py`
+
+Orchestra lo stack in-process per i test E2E.
+
+```python
+class StackLauncher:
+    """Lancia ogni modulo nel proprio thread daemon.
+
+    API:
+        wait_module_ready(name, timeout)  → bool
+        wait_all_ready(timeout)           → bool
+        publish(topic, payload)           → None
+        collect(topic, timeout, count)    → List[dict]
+        received(topic)                   → List[dict]
+        shutdown()                        → None
+    """
+
+# Context manager di alto livello:
+with e2e_stack(in_process_broker, modules=["rfcomm_handshake", "tcp_server"]) as stack:
+    # Tutti i moduli hanno pubblicato system.module_ready
+    stack.publish("system.start", {"priority": 1})
+    msgs = stack.collect("aa.session.active", timeout=5.0)
+    assert msgs
+```
+
+Moduli disponibili nel registro: `config_manager`, `channel_manager`, `rfcomm_handshake`, `tcp_server`, `oaa_control_channel`, `audio_manager`, `bluetooth`, `video_ui`, `zmq_trace`.
 
 ### 4.5 `hardware_available(device)` — Device Detection Matrix
 
@@ -428,6 +552,7 @@ Quando si aggiunge un nuovo modulo v2, prima del merge:
 
 ---
 
-*Document Version: 2.0*  
-*Sostituisce versione 1.0 del 2026-05-13*  
+*Document Version: 2.1*  
+*Aggiornato: 2026-05-13 — §2 directory tree con helpers presenti, §4.4 API completa degli helper E2E*  
+*Sostituisce versione 2.0 del 2026-05-13*  
 *Livelli: unit → integration → e2e → performance*
