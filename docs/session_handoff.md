@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `acb6dce`
+> **Aggiornato**: 2026-05-13 — commit `83973cb`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente completata: **13 file di test, 767 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull'hardware reale.
+Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente completata: **14 file di test, 859 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull'hardware reale.
 
 ---
 
@@ -32,44 +32,51 @@ Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente co
 | `v2/tests/unit/modules/channel_manager/test_channel_manager.py` | `4f90f8a` | 78 | registry resolve×16+module_name×5, ChannelManagerSession start/readiness/shutdown/crash, module-level handlers×14 |
 | `v2/tests/unit/modules/tcp_server/test_tcp_server.py` | `412541a` | 84 | frame_codec helpers×9+encode×13, FrameAssembler×12, boot handlers×4, handshake_completed×3, frame_send×4, TLS handlers×7, _on_raw_frame×6, session restart×6 |
 | `v2/tests/unit/modules/audio_manager/test_audio_manager.py` | `acb6dce` | 88 | enum helpers×16, enumerate fallback×4, _build_schema×5, sink_input_index×3, volume_control×5, _refresh_devices×4, config_loaded×5, config_changed×8, volume_set×6, ch_volume_set×4, boot×6 |
+| `v2/tests/unit/modules/video_ui/test_video_ui.py` | `83973cb` | 92 | _STATE_LABELS×4, _set_conn_state×4, readytostart×1, system_start×4, system_stop×2, video_frame×3, video_state×6, aa_session_active×4, aa_session_shutdown×3+parametrize×4, bt_pairing×3, vaapi_probe×4, VideoWidget.set_streaming×5, push_frame×5, PlaceholderWidget×2 |
 
-**Totale: 767 test in 13 file di test + 3 file infrastruttura.**
+**Totale: 859 test in 14 file di test + 3 file infrastruttura.**
 
 ---
 
 ## Pattern Architetturali Stabiliti (da rispettare)
 
-### Fixture `am` (per audio_manager/main.py — subprocess + bus + cfg mockati)
+### Fixture `vu` (per video_ui/main.py — Qt + GStreamer headless)
 
-`audio_manager/main.py` usa `subprocess.run` per wpctl/pactl. La fixture `am` patcha `subprocess.run` a livello di modulo e resetta esplicitamente lo stato:
+`video_ui/main.py` importa PyQt6 e gi/Gst al top-level. Il modulo NON è importabile senza stub.
+La soluzione è installare stub in `sys.modules` **prima** del primo import, una sola volta a livello di file:
 
 ```python
-@pytest.fixture()
-def am():
-    mock_run = MagicMock(return_value=_make_run_result(""))
-    with patch("shared.bus_client.BusClient", return_value=mock_bus), \
-         patch("subprocess.run", mock_run):
-        import modules.audio_manager.main as mod
-        importlib.reload(mod)
-        mod._sinks = ["default"]; mod._sources = ["default"]
-        mod._config = {...defaults...}
-        yield mod, mock_bus, mock_cfg, mock_run
+def _install_qt_stubs():
+    gi_mod = types.ModuleType("gi")
+    gi_mod.require_version = MagicMock()
+    sys.modules["gi"] = gi_mod
+    # ... Gst, GLib, PyQt6.QtCore/Gui/Widgets/OpenGLWidgets come types.ModuleType
+    # pyqtSlot viene sostituito con identity decorator:
+    qtcore.pyqtSlot = lambda *a, **kw: (lambda f: f)
+    # QMetaObject stub per intercettare invokeMethod:
+    qtcore.QMetaObject = MagicMock()
+
+_install_qt_stubs()   # chiamata a livello di modulo
 ```
 
-**Regola**: i test che verificano un comando specifico (es. wpctl/pactl) usano `patch.object(mod, "enumerate_sinks")` oppure un `patch("subprocess.run")` locale dentro il test, sovrascrivendo il default della fixture.
+**Regola**: `_install_qt_stubs()` viene chiamata PRIMA di qualsiasi import del modulo sotto test. `sys.modules.setdefault()` evita di sovrascrivere stub già installati da altri test dello stesso processo.
 
-**Pattern helper utile**: `_payload(mock_bus, topic)` per leggere il primo payload di una publish.
+**Regola**: la fixture `vu` resetta `mod._conn_state`, `mod._window`, `mod._app` dopo reload.
+
+**Regola**: i test che verificano `QMetaObject.invokeMethod` usano `patch.object(mod, "QMetaObject", create=True)` oppure controllano solo l'effetto collaterale (_conn_state cambiato).
+
+**Regola**: `VideoWidget.set_streaming` e `push_frame` vengono testati bindando il metodo reale su un MagicMock (`method.__get__(widget)`) senza costruire il widget Qt reale.
+
+### Fixture `am` (per audio_manager/main.py)
+`subprocess.run` patchato a stringa vuota di default; test specifici usano `patch("subprocess.run")` locale o `patch.object(mod, "enumerate_sinks")`.
 
 ### Fixture `ts` (per tcp_server/main.py)
-Reset esplicito di 7 singleton + `_shutdown_ack_event.clear()`. `FrameAssembler` reale su `mod._assembler` nei test di `_on_raw_frame`.
+Reset esplicito di 7 singleton + `_shutdown_ack_event.clear()`. `FrameAssembler` reale su `mod._assembler`.
 
 ### Fixture `cm` (per channel_manager/main.py)
 `session._launcher = mock_launcher_instance` inject diretto post-`__init__`.
 
-### Fixture `scope="module"` per moduli stateless
-`frame_codec.py`, `registry.py`, `serializer.py`, `service_discovery.py` — nessun singleton mutabile.
-
-### Helper di asserzione riutilizzabili
+### Helper riutilizzabili (tutti i moduli)
 
 ```python
 def _topics(mock_bus) -> list[str]:
@@ -92,7 +99,7 @@ def _payload(mock_bus, topic: str) -> dict:
 | **1 — Unit Test §1.1 Shared** | 🟡 Parziale | `test_proto_utils.py` ✅, `test_bus_client.py` ✅, `test_config_client.py` ✅, `test_logger.py` ❌ mancante |
 | **1 — Unit Test §1.2 Base** | ✅ Completa | `test_base_channel_module.py` ✅ |
 | **1 — Unit Test §1.3 Channel specifici** | 🟡 Parziale | `test_audio_module.py` ✅, `test_video_module.py` ✅, `av_input/bluetooth/input/sensor/wifi` ❌ mancanti |
-| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | `oaa_cc_main` ✅, `handshake` ✅, `serializer` ✅, `service_discovery` ✅, `channel_manager` ✅, `tcp_server` ✅, `audio_manager` ✅, `video_ui` ❌ **PROSSIMO**, `bluetooth/*` ❌, `config_manager` ❌, altri ❌ |
+| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | `oaa_cc_main` ✅, `handshake` ✅, `serializer` ✅, `service_discovery` ✅, `channel_manager` ✅, `tcp_server` ✅, `audio_manager` ✅, `video_ui` ✅, `bluetooth/*` ❌ **PROSSIMO**, `config_manager` ❌, altri ❌ |
 | **2 — Integration** | ❌ Non iniziata | — |
 | **3 — E2E** | ❌ Non iniziata | — |
 | **4 — Performance** | ❌ Non iniziata | — |
@@ -102,17 +109,16 @@ def _payload(mock_bus, topic: str) -> dict:
 
 ## Prossimo Passo Immediato
 
-**`test_video_ui.py`** — `v2/modules/video_ui/main.py`.
-Gestisce la visualizzazione del video AA su un'interfaccia Qt/GStreamer.
+**`test_bluetooth_*.py`** — moduli bluetooth. Prima di scrivere i test, leggere i file in `v2/modules/bluetooth/` per capire l'architettura (probabile split in più file: rfcomm, a2dp, manager...).
 
 Ordine suggerito per completare §1.4:
 1. ~~`test_serializer.py`~~ ✅
 2. ~~`test_service_discovery.py`~~ ✅
 3. ~~`test_channel_manager.py`~~ ✅
 4. ~~`test_tcp_server.py`~~ ✅
-5. ~~`test_audio_manager.py`~~ ✅ (enum×20 + schema×5 + config×13 + handlers×16 + boot×6 = 88 test)
-6. `test_video_ui.py` ← **PROSSIMO**
-7. `test_bluetooth_*.py` (×3)
+5. ~~`test_audio_manager.py`~~ ✅
+6. ~~`test_video_ui.py`~~ ✅ (state machine×14 + handlers×20 + pipeline×4 + widget×12 + placeholder×2 = 92 test)
+7. `test_bluetooth_*.py` (×3) ← **PROSSIMO** — leggere prima i sorgenti
 8. `test_config_manager.py`
 9. Moduli secondari: `rfcomm_handshake`, `hostapd_helper`, `config_ui`, `log_viewer`
 
@@ -122,15 +128,13 @@ Ordine suggerito per completare §1.4:
 
 | Decisione | Rationale |
 |---|---|
+| `sys.modules` injection Qt+GStreamer a livello di file | `pyqtSlot` e altri decorator PyQt6 vengono applicati al momento dell’import — devono essere stub già al primo import |
+| `sys.modules.setdefault()` per gi stub | Evita conflitti se altri test nel processo hanno già installato stub |
+| `pyqtSlot = lambda *a,**kw: (lambda f: f)` | Fa passare il decorator senza registrazione Qt reale |
+| `VideoWidget.method.__get__(mock)` per test metodi | Evita di costruire widget Qt reale; testa la logica pura bindando il metodo su MagicMock |
 | `importlib.reload()` per ogni test di `main.py` | I singleton globali devono essere resettati per l'isolamento |
-| `subprocess.run` patchato a livello di fixture + override locale | Default sicuro (restituisce stringa vuota); test specifici iniettano stdout controllato |
-| `patch.object(mod, "enumerate_sinks")` nei test di `_refresh_devices` | Più pulito che patchare subprocess indirettamente per funzioni di alto livello |
-| `patch.object(mod, "_set_global_volume")` nei test di config | Evita dependency su wpctl nei test di logica pure (config merge, publish) |
-| `_make_run_result(stdout)` helper | Crea MagicMock con `.stdout` e `.returncode` in una riga |
-| `autouse=True` su `_patch_module` in altri moduli | Garantisce isolamento automatico |
-| `scope="module"` per moduli stateless | `frame_codec.py`, `registry.py`, `serializer.py`, `service_discovery.py` |
-| `session._launcher = mock` inject diretto | Più affidabile di `patch()` su `__init__` dopo `importlib.reload()` |
-| Reset esplicito singleton in `ts` e `am` | Moduli con molti singleton — più sicuro del solo reload |
+| Reset esplicito `_conn_state`, `_window`, `_app` nella fixture | I singleton di video_ui sono globali — il reload da solo non basta se il modulo è già cached |
+| `subprocess.run` patchato in fixture `am` | Default sicuro; test specifici sovrascrivono localmente |
 
 ---
 
@@ -147,7 +151,7 @@ Ordine suggerito per completare §1.4:
 
 ---
 
-*Handoff Version: 2.5*  
+*Handoff Version: 2.6*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `acb6dce`*  
-*Test totali scritti: 767*
+*Commit head: `83973cb`*  
+*Test totali scritti: 859*
