@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `b024893`
+> **Aggiornato**: 2026-05-13 — commit `17c7c4d`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente completata: **15 file di test, 955 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull’hardware reale.
+**16 file di test, 1043 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull’hardware reale.
 
 ---
 
@@ -33,55 +33,51 @@ Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente co
 | `v2/tests/unit/modules/tcp_server/test_tcp_server.py` | `412541a` | 84 | frame_codec, TLS, session |
 | `v2/tests/unit/modules/audio_manager/test_audio_manager.py` | `acb6dce` | 88 | enum, sink, volume, config |
 | `v2/tests/unit/modules/video_ui/test_video_ui.py` | `83973cb` | 92 | state machine, handlers, GL widget |
-| `v2/tests/unit/modules/bluetooth/test_bluetooth_main.py` | `b024893` | 96 | boot×8, config×5, discover×5, pair×3, confirm/reject×5, rfcomm×1, autoconnect×5, paired CRUD×12, internal callbacks×5, autoconnect loop×5 |
+| `v2/tests/unit/modules/bluetooth/test_bluetooth_main.py` | `b024893` | 96 | boot, config, discovery, pairing, paired CRUD, autoconnect |
+| `v2/tests/unit/modules/bluetooth/test_bluez_adapter.py` | `17c7c4d` | 88 | __init__×5, init()×7, _find_adapter_path×4, register_profiles×6, set_discoverable×5, set_name×4, get_adapter_address×3, is_discovering×4, reset×5, shutdown×4, bus property×3, constants×3 |
 
-**Totale: 955 test in 15 file di test + 3 file infrastruttura.**
+**Totale: 1043 test in 16 file di test + 3 file infrastruttura.**
 
 ---
 
 ## Pattern Architetturali Stabiliti
 
-### Fixture `bt` (per bluetooth/main.py — dbus + gi headless)
+### Fixture `ba` / `ba_init` (per BluezAdapter — dbus lazy-import)
 
-`bluetooth/main.py` importa `dbus`, `dbus.mainloop.glib` e `gi.repository.GLib` all’import-time via `bluez_adapter.py` (`_setup_glib_mainloop()` è chiamata al modulo-level). Gli stub devono essere in `sys.modules` **prima** del primo import del modulo.
+`BluezAdapter` importa `dbus` *dentro* i metodi (lazy import). Il modulo viene importato una volta sola a livello di file con `patch("shared.logger.get_logger")`. I singoli test usano `patch.dict(sys.modules, {"dbus": mock_dbus})` per controllare la versione di dbus vista dal metodo al momento dell’esecuzione.
 
 ```python
-def _install_dbus_stubs():
-    dbus_mod = types.ModuleType("dbus")
-    dbus_mod.SystemBus  = MagicMock
-    dbus_mod.Interface  = MagicMock
-    dbus_mod.Boolean    = lambda v: v
-    sys.modules.setdefault("dbus", dbus_mod)
-    sys.modules.setdefault("dbus.mainloop", types.ModuleType("dbus.mainloop"))
-    dbus_ml_glib = types.ModuleType("dbus.mainloop.glib")
-    dbus_ml_glib.DBusGMainLoop = MagicMock()
-    sys.modules.setdefault("dbus.mainloop.glib", dbus_ml_glib)
-    # gi.repository.GLib
-    sys.modules.setdefault("gi", ...)
-    sys.modules.setdefault("gi.repository.GLib", MagicMock())
+# Import del modulo una volta a livello di file (non in fixture)
+with patch("shared.logger.get_logger", return_value=MagicMock()):
+    import modules.bluetooth.bluez_adapter as _ba_mod
+    importlib.reload(_ba_mod)
 
-_install_dbus_stubs()   # livello di file
+BluezAdapter = _ba_mod.BluezAdapter
+
+# Fixture ba: istanza fresca per ogni test
+@pytest.fixture()
+def ba():
+    return BluezAdapter()
+
+# Fixture ba_init: adapter già inizializzato
+@pytest.fixture()
+def ba_init():
+    adapter = BluezAdapter()
+    mock_dbus = _make_dbus_mocks()[0]
+    with patch.dict(sys.modules, {"dbus": mock_dbus}):
+        adapter.init()
+    return adapter, mock_dbus, mock_props_iface, mock_adapter_iface
 ```
 
-**Regola**: BluezAdapter, DiscoverySession, PairingAgent, paired_devices vengono patchati con `patch("bluetooth.X")` nella fixture `bt`, prima del reload.
+**Helper `_make_dbus_mocks()`**: costruisce un mock_dbus coerente con `Interface.side_effect` che ritorna mock diversi per ogni nome di interfaccia D-Bus (ObjectManager, Adapter1, ProfileManager1, Properties). Evita il problema di un unico MagicMock restituito per tutte le chiamate a `dbus.Interface()`.
 
-**Regola**: `mod._config` viene resettato manualmente ai default dopo reload (i field_bool/int/string sono MagicMock con `.default` fissato).
+**Pattern retry**: `set_discoverable`, `set_name`, `reset` hanno 3 tentativi con `time.sleep`. I test usano `patch("time.sleep")` per evitare wait reali e verificano `mock_props.Set.call_count == 3` per il caso di fallimento definitivo.
 
-**Regola**: `_start_glib_mainloop` e `_stop_glib_mainloop` vengono patchati con `patch.object(mod, ...)` nei test di boot per evitare avvio thread GLib reali.
+### Fixture `bt` (per bluetooth/main.py)
+Vedi handoff v2.7.
 
-**Regola**: i test su `_start_autoconnect` usano `patch("threading.Thread")` per verificare che il thread venga o non venga lanciato, senza eseguire `_autoconnect_loop`.
-
-### Fixture `vu` (per video_ui/main.py — PyQt6 + GStreamer headless)
+### Fixture `vu` (per video_ui/main.py)
 Vedi handoff v2.6.
-
-### Fixture `am` (per audio_manager/main.py)
-`subprocess.run` patchato a stringa vuota di default.
-
-### Fixture `ts` (per tcp_server/main.py)
-Reset esplicito di 7 singleton + `_shutdown_ack_event.clear()`.
-
-### Fixture `cm` (per channel_manager/main.py)
-`session._launcher = mock_launcher_instance` inject diretto.
 
 ### Helper riutilizzabili
 
@@ -105,22 +101,21 @@ def _payload(mock_bus, topic: str) -> dict:
 | **0 — Infrastruttura** | ✅ Completa | |
 | **1 — Unit Test §1.1 Shared** | 🟡 Parziale | `test_logger.py` ❌ mancante |
 | **1 — Unit Test §1.2 Base** | ✅ Completa | |
-| **1 — Unit Test §1.3 Channel specifici** | 🟡 Parziale | audio, video ✅; altri ❌ |
-| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | oaa_cc, tcp_server, audio_manager, video_ui, bluetooth/main ✅; **`test_bluez_adapter.py`** ← **PROSSIMO**, config_manager ❌, altri ❌ |
+| **1 — Unit Test §1.3 Channel** | 🟡 Parziale | audio, video ✅ |
+| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | oaa_cc, tcp_server, audio_manager, video_ui, bluetooth/main ✅, BluezAdapter ✅; **`test_discovery.py`** ← **PROSSIMO** |
 | **2–5** | ❌ Non iniziata | |
 
 ---
 
 ## Prossimo Passo Immediato
 
-**`test_bluez_adapter.py`** — `BluezAdapter` class in `v2/modules/bluetooth/bluez_adapter.py`.
+**`test_discovery.py`** — `DiscoverySession` in `v2/modules/bluetooth/discovery.py`.
 
-Ordine suggerito per completare bluetooth:
-1. ~~`test_bluetooth_main.py`~~ ✅ (96 test)
-2. `test_bluez_adapter.py` ← **PROSSIMO** — init, _find_adapter_path, register_profiles, set_discoverable, set_name, get_adapter_address, is_discovering, reset, shutdown
-3. `test_discovery.py` — DiscoverySession
-4. `test_pairing.py` — PairingAgent state machine
-5. `test_paired_devices.py` — list_paired, connect, disconnect, remove
+Ordine rimanente per completare bluetooth:
+1. ~~`test_bluez_adapter.py`~~ ✅ (88 test)
+2. `test_discovery.py` ← **PROSSIMO**
+3. `test_pairing.py` — PairingAgent state machine
+4. `test_paired_devices.py` — list_paired, connect, disconnect, remove
 
 ---
 
@@ -128,15 +123,15 @@ Ordine suggerito per completare bluetooth:
 
 | Decisione | Rationale |
 |---|---|
-| `sys.modules` injection dbus+gi a livello di file | `_setup_glib_mainloop()` è chiamata all’import-time di bluez_adapter.py |
-| `sys.modules.setdefault()` | Evita conflitti tra test files |
-| `patch("bluetooth.X")` invece di `patch.object` | Le classi vengono risolte alla riga `from bluetooth.X import X` nel reload |
-| `patch.object(mod, "_start_glib_mainloop")` | Evita thread GLib reali nei test |
-| `patch("threading.Thread")` in test autoconnect | Verifica lancio thread senza eseguire `_autoconnect_loop` |
+| `patch.dict(sys.modules, {"dbus": mock_dbus})` per ogni metodo | dbus è importato *lazy* inside i metodi; patch a livello di test è più preciso di patch globale |
+| `_make_dbus_mocks()` helper con `Interface.side_effect` | Evita ambiguità: ogni interfaccia D-Bus diversa ritorna mock distinto |
+| Import del modulo una volta sola a livello di file test | BluezAdapter non ha singleton globale; non serve reload per ogni test |
+| `patch("time.sleep")` nei test retry | Evita attese reali (0.5s × 3 = 1.5s per test) |
+| `patch.object(adapter, "register_profiles")` nel test reset | Isola il test reset dal comportamento di register_profiles |
 
 ---
 
-*Handoff Version: 2.7*  
+*Handoff Version: 2.8*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `b024893`*  
-*Test totali scritti: 955*
+*Commit head: `17c7c4d`*  
+*Test totali scritti: 1043*
