@@ -1,14 +1,13 @@
 # Session Handoff — NemoHeadUnit-Wireless v2 Test Suite
 
 > **Scopo**: documento di continuità per sessioni AI successive.
-> Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.
-> **Aggiornato**: 2026-05-13 — Fase 4 completa (6/6), Fase 5 §1 completato (`test_aa_wire_format.py`)
+> **Aggiornato**: 2026-05-13 — **TEST SUITE COMPLETA** (Fase 0–5 chiuse, 57 file, ~3120 test)
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**54 file di test, ~3084 test + 3 helper E2E** su `main`. Fase 0–4 chiuse. Fase 5: 1/3 completati. **Prossimo: Fase 5 §2 — `fuzz/test_proto_utils_roundtrip.py`**.
+**57 file di test, ~3120 test + 3 helper E2E** su `main`. Tutte le fasi completate. **Prossimo: coverage report + top-up moduli sotto 80%.**
 
 ---
 
@@ -58,20 +57,22 @@
 | `e2e/helpers/frame_sequences.py` | `bab116c` | — | |
 | `e2e/helpers/stack_launcher.py` | `637631d` | — | |
 | `test_rfcomm_and_channel_manager.py` | `9ab6c2e` | ~51 | |
-| `e2e/smoke/test_bt_connect_to_handshake.py` | — | 10 | Fase 3 Smoke §1 |
-| `e2e/smoke/test_channel_manager_boot.py` | `f45cf77` | 9 | Fase 3 Smoke §2 |
-| `e2e/smoke/test_audio_path_smoke.py` | `e734333` | 8 | Fase 3 Smoke §3 |
-| `e2e/full_session/test_full_aa_session.py` | `1cfa379` | ~12 | Fase 3 Full §1 |
-| `e2e/full_session/test_session_recovery.py` | `aa2c995` | ~8 | Fase 3 Full §2 |
-| `performance/test_bus_latency.py` | `1e461f9` | ~9 | Fase 4 §1 |
-| `performance/test_bus_throughput.py` | `9f75a88` | ~8 | Fase 4 §2 |
-| `performance/test_audio_latency.py` | `4927f1c` | ~8 | Fase 4 §3 |
-| `performance/test_memory_rss.py` | `777af59` | ~6 | Fase 4 §4 |
-| `performance/test_video_frame_rate.py` | — | ~7 | **Fase 4 §5** |
-| `performance/test_aa_frame_decode.py` | — | ~6 | **Fase 4 §6** |
-| `fuzz/test_aa_wire_format.py` | — | ~12 | **Fase 5 §1** |
+| `e2e/smoke/test_bt_connect_to_handshake.py` | — | 10 | |
+| `e2e/smoke/test_channel_manager_boot.py` | `f45cf77` | 9 | |
+| `e2e/smoke/test_audio_path_smoke.py` | `e734333` | 8 | |
+| `e2e/full_session/test_full_aa_session.py` | `1cfa379` | ~12 | |
+| `e2e/full_session/test_session_recovery.py` | `aa2c995` | ~8 | |
+| `performance/test_bus_latency.py` | `1e461f9` | ~9 | |
+| `performance/test_bus_throughput.py` | `9f75a88` | ~8 | |
+| `performance/test_audio_latency.py` | `4927f1c` | ~8 | |
+| `performance/test_memory_rss.py` | `777af59` | ~6 | |
+| `performance/test_video_frame_rate.py` | `14df4e6` | ~7 | |
+| `performance/test_aa_frame_decode.py` | `1b22850` | ~6 | |
+| `fuzz/test_aa_wire_format.py` | — | ~12 | Fase 5 §1 |
+| `fuzz/test_proto_utils_roundtrip.py` | — | ~10 | **Fase 5 §2** |
+| `fuzz/test_bus_payload_malformed.py` | — | ~10 | **Fase 5 §3** |
 
-**Totale: ~3084 test in 54 file + 3 helper + 3 infra.**
+**Totale: ~3120 test in 57 file + 3 helper + 3 infra.**
 
 ---
 
@@ -98,55 +99,56 @@ class TestXxxFuzz:
     # Motore: hypothesis
     # @given(st.binary() | st.text() | st.integers() | ...)
     # @settings(max_examples=500, suppress_health_check=[HealthCheck.too_slow])
-    # Mai assert su valori specifici: assert su proprietà (no crash, no hang, no exception non-gestita)
+    # Mai assert su valori specifici: assert su proprietà (no crash, no hang)
     # Ogni test deve completare in < 30s
+
+    # Proto roundtrip property:
+    # @given(st.binary())
+    # def test_roundtrip(raw): decoded = decode(raw); assert encode(decoded) == raw  # o None-safe
+
+    # Bus payload property:
+    # @given(st.one_of(st.text(), st.integers(), st.binary(), st.floats(allow_nan=False)))
+    # def test_publish_no_crash(val): bus.publish(topic, {"v": val})  # no exception
 ```
 
 ---
 
-## 2026-05-13 — Fase 4 §5/§6 + Fase 5 §1
+## 2026-05-13 — Fase 5 §2/§3 (chiude test suite)
 
 **Cosa cambiato:**
 
-- **`test_video_frame_rate.py`** (~7 test `@pytest.mark.performance`)
-  - `test_video_decode_fps_30` — decoder pipeline ≥ 30fps
-  - `test_video_decode_fps_60` — decoder pipeline ≥ 60fps (H.264)
-  - `test_video_frame_latency_p95` — p95 < 33ms (1 frame @30fps)
-  - `test_video_keyframe_decode_time` — keyframe < 50ms
-  - `test_video_fps_under_audio_load` — fps stabile con audio attivo
-  - `test_video_fps_sustained_60s` — degradazione < 10% su finestra 10s
-  - `test_video_fps_regression` — vs baseline JSON
+- **`fuzz/test_proto_utils_roundtrip.py`** (~10 test `@pytest.mark.fuzz`)
+  - `test_fuzz_encode_decode_roundtrip` — `@given(st.binary())`: encode→decode→encode idempotente
+  - `test_fuzz_decode_arbitrary_bytes` — nessun crash su bytes arbitrari
+  - `test_fuzz_decode_valid_proto_structure` — struttura protobuf valida sempre decodificabile
+  - `test_fuzz_field_overflow` — field ID > INT32_MAX
+  - `test_fuzz_repeated_field_huge` — campo repeated con 10k elementi
+  - `test_fuzz_nested_message_deep` — messaggi annidati fino a depth 100
+  - `test_fuzz_unicode_string_field` — stringhe Unicode arbitrarie
+  - `test_fuzz_integer_extremes` — int64 min/max, 0, negativi
+  - `test_fuzz_float_specials` — inf, -inf, nan (gestiti gracefully)
+  - `test_fuzz_proto_no_hang` — decode non blocca > 50ms
 
-- **`test_aa_frame_decode.py`** (~6 test `@pytest.mark.performance`)
-  - `test_frame_encode_rtt_us` — encode RTT µs con payload tipico AA
-  - `test_frame_decode_rtt_us` — decode RTT µs
-  - `test_roundtrip_rtt_us` — encode+decode roundtrip
-  - `test_large_frame_decode` — payload 64KB
-  - `test_malformed_frame_no_crash` — frame troncato non crasha il decoder
-  - `test_decode_regression` — vs baseline JSON
+- **`fuzz/test_bus_payload_malformed.py`** (~10 test `@pytest.mark.fuzz`)
+  - `test_fuzz_publish_any_value` — `@given(st.one_of(...))`: publish non crasha
+  - `test_fuzz_publish_nested_dict` — dict arbitrariamente annidato
+  - `test_fuzz_publish_list_payload` — lista come payload value
+  - `test_fuzz_publish_none_value` — None come value di campo
+  - `test_fuzz_publish_wrong_types` — tipi errati (bytes, set, object)
+  - `test_fuzz_subscribe_topic_arbitrary` — topic string arbitraria → no crash
+  - `test_fuzz_malformed_json_string` — stringa JSON-like malformata
+  - `test_fuzz_large_payload` — payload 1MB+ non blocca il bus
+  - `test_fuzz_concurrent_malformed` — N thread pubblicano payload errati in parallelo
+  - `test_fuzz_handler_receives_original` — handler sempre riceve il payload originale invariato
 
-- **`fuzz/test_aa_wire_format.py`** (~12 test `@pytest.mark.fuzz`)
-  - `test_fuzz_random_bytes_no_crash` — bytes arbitrari → no exception non-gestita
-  - `test_fuzz_truncated_frame` — frame troncato a N byte
-  - `test_fuzz_overflow_length_field` — length field > payload reale
-  - `test_fuzz_zero_length_frame` — length = 0
-  - `test_fuzz_negative_length_varint` — varint negativo
-  - `test_fuzz_unknown_msg_id` — msg_id fuori range
-  - `test_fuzz_repeated_header` — doppio header
-  - `test_fuzz_max_frame_size` — frame al limite massimo
-  - `test_fuzz_mixed_valid_invalid` — sequenza mista valid/invalid
-  - `test_fuzz_concurrent_send_random` — N thread inviano frame casuali
-  - `test_fuzz_encoding_roundtrip` — `@given`: encode(decode(x)) == x
-  - `test_fuzz_decode_never_hangs` — decode non blocca > 100ms
+**Perché:** Completare la Fase 5 e chiudere la test suite.
 
-**Perché:** Completare Fase 4 e avviare Fase 5 fuzz test.
-
-**Status:** Completato ✅
+**Status:** Completato ✅ — **TEST SUITE COMPLETA**
 
 **Prossimi 3 passi:**
-1. **IMMEDIATO** — `v2/tests/fuzz/test_proto_utils_roundtrip.py` (Fase 5 §2)
-2. `v2/tests/fuzz/test_bus_payload_malformed.py` (Fase 5 §3 — chiude Fase 5)
-3. Review coverage report + eventuale top-up sui moduli sotto soglia 80%
+1. **IMMEDIATO** — Eseguire `pytest --cov=v2 --cov-report=html` e identificare moduli sotto 80%
+2. Top-up test unit mirati sui moduli sotto soglia
+3. Verifica CI: `pytest -m "unit or integration" --cov-fail-under=80` in green
 
 ---
 
@@ -154,8 +156,9 @@ class TestXxxFuzz:
 
 | Data | Cosa | Status |
 |---|---|---|
-| 2026-05-13 | Fase 4 §2/§3/§4 (`throughput`, `audio_latency`, `memory_rss`) | ✅ |
-| 2026-05-13 | Fase 3 Full + Fase 4 §1 (`bus_latency`) | ✅ |
+| 2026-05-13 | Fase 4 §5/§6 + Fase 5 §1 | ✅ |
+| 2026-05-13 | Fase 4 §2/§3/§4 | ✅ |
+| 2026-05-13 | Fase 3 Full + Fase 4 §1 | ✅ |
 | 2026-05-13 | Fase 3 Smoke §2/§3 | ✅ |
 | 2026-05-13 | Unit rfcomm_handshake + channel_manager | ✅ |
 | 2026-05-13 | E2E Helpers | ✅ |
@@ -165,14 +168,14 @@ class TestXxxFuzz:
 ## Comandi Utili
 
 ```bash
+# Coverage report
+pytest --cov=v2 --cov-report=html --cov-report=term-missing
+
 # Fuzz (tutti)
 pytest -m fuzz -v
 
-# Fuzz singolo file
-pytest v2/tests/fuzz/test_aa_wire_format.py -v
-
 # Performance
-pytest -m performance -v --json-report
+pytest -m performance -v
 
 # Smoke CI
 pytest -m e2e_smoke -v
