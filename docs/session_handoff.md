@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `17c7c4d`
+> **Aggiornato**: 2026-05-13 — commit `6a83677`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**16 file di test, 1043 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull’hardware reale.
+**Bluetooth completamente coperto (5 file, ~368 test).** Totale: **19 file di test, 1267 test** su `main`. Nessun test è ancora stato eseguito sull’hardware reale.
 
 ---
 
@@ -33,33 +33,30 @@
 | `v2/tests/unit/modules/tcp_server/test_tcp_server.py` | `412541a` | 84 | frame_codec, TLS, session |
 | `v2/tests/unit/modules/audio_manager/test_audio_manager.py` | `acb6dce` | 88 | enum, sink, volume, config |
 | `v2/tests/unit/modules/video_ui/test_video_ui.py` | `83973cb` | 92 | state machine, handlers, GL widget |
-| `v2/tests/unit/modules/bluetooth/test_bluetooth_main.py` | `b024893` | 96 | boot, config, discovery, pairing, paired CRUD, autoconnect |
-| `v2/tests/unit/modules/bluetooth/test_bluez_adapter.py` | `17c7c4d` | 88 | __init__×5, init()×7, _find_adapter_path×4, register_profiles×6, set_discoverable×5, set_name×4, get_adapter_address×3, is_discovering×4, reset×5, shutdown×4, bus property×3, constants×3 |
+| `v2/tests/unit/modules/bluetooth/test_bluetooth_main.py` | `b024893` | 96 | boot, config, discover, pair, paired CRUD, autoconnect |
+| `v2/tests/unit/modules/bluetooth/test_bluez_adapter.py` | `17c7c4d` | 88 | __init__, init(), find_adapter, profiles, controls, reset, shutdown |
+| `v2/tests/unit/modules/bluetooth/test_discovery.py` | `a1b5156` | 72 | init, is_running, start, stop, _start_discovery, _stop_discovery, _poll_devices, _run |
+| `v2/tests/unit/modules/bluetooth/test_pairing.py` | `d4973f8` | 84 | __init__, register, unregister, pair, reply/error handlers, confirm, reject, pin_code, confirm_request, confirm_worker, cancel, helpers |
+| `v2/tests/unit/modules/bluetooth/test_paired_devices.py` | `6a83677` | 68 | _device_to_dict, _get_managed_objects, _resolve_*path, list_paired, get_info, remove, connect, disconnect |
 
-**Totale: 1043 test in 16 file di test + 3 file infrastruttura.**
+**Totale: 1267 test in 19 file di test + 3 file infrastruttura.**
 
 ---
 
 ## Pattern Architetturali Stabiliti
 
-### Fixture `ba` / `ba_init` (per BluezAdapter — dbus lazy-import)
+### Bluetooth: pattern comune per tutti i file
 
-`BluezAdapter` importa `dbus` *dentro* i metodi (lazy import). Il modulo viene importato una volta sola a livello di file con `patch("shared.logger.get_logger")`. I singoli test usano `patch.dict(sys.modules, {"dbus": mock_dbus})` per controllare la versione di dbus vista dal metodo al momento dell’esecuzione.
+- **Import una volta sola** a livello di file del modulo con `patch("shared.logger.get_logger")` + `importlib.reload()`
+- **`patch.dict(sys.modules, {"dbus": mock_dbus})`** per ogni test che esegue metodi con lazy dbus import
+- **`_make_dbus_mocks()`** / **`_make_bus()`** helper che costruiscono mock coerenti con `Interface.side_effect` per distinguere interfacce D-Bus
+- **`iface_factory`** pattern locale nei test complessi: `dbus.Interface.side_effect = lambda obj, iface: {iface_name: mock}[iface]`
+- **`patch.object(agent/session, "method")`** per isolare unit senza eseguire side-effect reali (thread, D-Bus)
+- **`patch("threading.Thread")`** per verificare launch senza eseguire il loop
+
+### Fixture `ba_init` (ba + già inizializzato)
 
 ```python
-# Import del modulo una volta a livello di file (non in fixture)
-with patch("shared.logger.get_logger", return_value=MagicMock()):
-    import modules.bluetooth.bluez_adapter as _ba_mod
-    importlib.reload(_ba_mod)
-
-BluezAdapter = _ba_mod.BluezAdapter
-
-# Fixture ba: istanza fresca per ogni test
-@pytest.fixture()
-def ba():
-    return BluezAdapter()
-
-# Fixture ba_init: adapter già inizializzato
 @pytest.fixture()
 def ba_init():
     adapter = BluezAdapter()
@@ -69,17 +66,19 @@ def ba_init():
     return adapter, mock_dbus, mock_props_iface, mock_adapter_iface
 ```
 
-**Helper `_make_dbus_mocks()`**: costruisce un mock_dbus coerente con `Interface.side_effect` che ritorna mock diversi per ogni nome di interfaccia D-Bus (ObjectManager, Adapter1, ProfileManager1, Properties). Evita il problema di un unico MagicMock restituito per tutte le chiamate a `dbus.Interface()`.
+### Helper `_make_objects()` (paired_devices / discovery)
 
-**Pattern retry**: `set_discoverable`, `set_name`, `reset` hanno 3 tentativi con `time.sleep`. I test usano `patch("time.sleep")` per evitare wait reali e verificano `mock_props.Set.call_count == 3` per il caso di fallimento definitivo.
+```python
+def _make_objects(devices=None, adapters=None):
+    objects = {}
+    for path, props in (devices or []):
+        objects[path] = {"org.bluez.Device1": props}
+    for path in (adapters or []):
+        objects[path] = {"org.bluez.Adapter1": {}}
+    return objects
+```
 
-### Fixture `bt` (per bluetooth/main.py)
-Vedi handoff v2.7.
-
-### Fixture `vu` (per video_ui/main.py)
-Vedi handoff v2.6.
-
-### Helper riutilizzabili
+### Helper riutilizzabili (bus-based modules)
 
 ```python
 def _topics(mock_bus) -> list[str]:
@@ -101,21 +100,21 @@ def _payload(mock_bus, topic: str) -> dict:
 | **0 — Infrastruttura** | ✅ Completa | |
 | **1 — Unit Test §1.1 Shared** | 🟡 Parziale | `test_logger.py` ❌ mancante |
 | **1 — Unit Test §1.2 Base** | ✅ Completa | |
-| **1 — Unit Test §1.3 Channel** | 🟡 Parziale | audio, video ✅ |
-| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | oaa_cc, tcp_server, audio_manager, video_ui, bluetooth/main ✅, BluezAdapter ✅; **`test_discovery.py`** ← **PROSSIMO** |
+| **1 — Unit Test §1.3 Channel** | 🟡 Parziale | audio, video ✅; altri ❌ |
+| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | oaa_cc, tcp_server, audio_manager, video_ui, bluetooth ✅✅; **`config_manager`** ← PROSSIMO |
 | **2–5** | ❌ Non iniziata | |
 
 ---
 
 ## Prossimo Passo Immediato
 
-**`test_discovery.py`** — `DiscoverySession` in `v2/modules/bluetooth/discovery.py`.
+**`test_config_manager.py`** — `ConfigManager` in `v2/modules/config_manager/` (o `v2/shared/`).
 
-Ordine rimanente per completare bluetooth:
-1. ~~`test_bluez_adapter.py`~~ ✅ (88 test)
-2. `test_discovery.py` ← **PROSSIMO**
-3. `test_pairing.py` — PairingAgent state machine
-4. `test_paired_devices.py` — list_paired, connect, disconnect, remove
+Ordine suggerito post-bluetooth:
+1. ~~bluetooth (5 file)~~ ✅
+2. `test_config_manager.py` ← **PROSSIMO**
+3. `test_logger.py` (shared)
+4. Channel modules mancanti (input, sensor, navigation, …)
 
 ---
 
@@ -123,15 +122,16 @@ Ordine rimanente per completare bluetooth:
 
 | Decisione | Rationale |
 |---|---|
-| `patch.dict(sys.modules, {"dbus": mock_dbus})` per ogni metodo | dbus è importato *lazy* inside i metodi; patch a livello di test è più preciso di patch globale |
-| `_make_dbus_mocks()` helper con `Interface.side_effect` | Evita ambiguità: ogni interfaccia D-Bus diversa ritorna mock distinto |
-| Import del modulo una volta sola a livello di file test | BluezAdapter non ha singleton globale; non serve reload per ogni test |
-| `patch("time.sleep")` nei test retry | Evita attese reali (0.5s × 3 = 1.5s per test) |
-| `patch.object(adapter, "register_profiles")` nel test reset | Isola il test reset dal comportamento di register_profiles |
+| `patch.dict(sys.modules, {"dbus": mock_dbus})` per ogni metodo | dbus è importato lazy inside i metodi |
+| `_make_dbus_mocks()` / `_make_bus()` con `Interface.side_effect` | Evita ambiguità: ogni interfaccia D-Bus diversa ritorna mock distinto |
+| Import modulo una volta sola a livello di file | Nessun singleton globale nei moduli bluetooth |
+| `patch("time.sleep")` nei test retry | Evita attese reali |
+| `patch.object(adapter, "register_profiles")` nel test reset | Isola il test reset |
+| `connect()` usa `_replied` Event come flag idempotente | Evita double-call tra watchdog e D-Bus reply |
 
 ---
 
-*Handoff Version: 2.8*  
+*Handoff Version: 2.9*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `17c7c4d`*  
-*Test totali scritti: 1043*
+*Commit head: `6a83677`*  
+*Test totali scritti: 1267*
