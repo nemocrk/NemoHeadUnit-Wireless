@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-Nelle sessioni del 2026-05-13 sono stati prodotti **33 file di test + 3 file infrastruttura** per un totale di **~2310 test**. La Fase 0 e la Fase 1 sono completamente chiuse. La Fase 2 conta 4 file completati su 6.
+Nelle sessioni del 2026-05-13 sono stati prodotti **35 file di test + 3 file infrastruttura** per un totale di **~2370 test**. La Fase 0 e la Fase 1 sono completamente chiuse. La Fase 2 conta 5 file completati su 7.
 
 L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia che blocca il merge in CI — seguendo l'architettura stratificata definita in `TEST_SUITE_ARCHITECTURE.md`.
 
@@ -109,18 +109,19 @@ Target: **< 10s per test**, marker `@pytest.mark.integration`. Bus ZMQ reale in-
 | `integration/test_channel_lifecycle.py` | 88 | `1734764` | ✅ |
 | `integration/test_audio_manager.py` | ~47 | `7e1d9be` | ✅ |
 | `integration/test_config_manager.py` | ~50 | `9f08aa6` | ✅ |
-| `integration/test_video_pipeline.py` | — | — | ❌ **PROSSIMO** |
-| `integration/test_bluetooth_flow.py` | — | — | ❌ da fare |
+| `integration/test_video_pipeline.py` | ~60 | `2d8d861` | ✅ **COMPLETATO** |
+| `integration/test_bluetooth_flow.py` | — | — | ❌ **PROSSIMO** |
 | `integration/test_boot_shutdown.py` | — | — | ❌ da fare |
 
-**Totale Fase 2 finora: ~269 test in 4 file.**
+**Totale Fase 2 finora: ~329 test in 5 file.**
 
 ### Pattern integration (recap)
 
-- `_load_cm` / `_load_am` per reload modulo + patch indirizzi + `CONFIG_DIR = tmp_path`
-- `_make_client` + `_start_client` + `_wait_received` — helper condivisi
-- Handler `on_*` chiamati direttamente; spy BusClient riceve topic pubblicati
+- `_load_cm` / `_load_am` / `_load_video_ui` / `_make_video_module` per reload modulo + patch indirizzi
+- `_make_client` + `_start_client` + `_wait` — helper condivisi
+- Handler `on_*` / `_handle_*` chiamati direttamente; spy BusClient riceve topic pubblicati
 - `importlib.reload()` per ogni test — bus ZMQ fresco e stato modulo pulito
+- PyQt6/GStreamer/gi stubbed in `sys.modules` per video_ui senza display
 
 ---
 
@@ -178,12 +179,12 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 |---|---|---|---|---|
 | 0 — Infrastruttura | 3 / 3 | — | ✅ Sì | ✅ Completa |
 | 1 — Unit Test | 28 / 28 | 2213 | ✅ Sì (≥80%) | ✅ **Completa** |
-| 2 — Integration | 4 / 7 | ~269 | ✅ Sì | 🟡 In corso |
+| 2 — Integration | 5 / 7 | ~329 | ✅ Sì | 🟡 In corso |
 | 3 — E2E Smoke | 0 / 3 | 0 | ✅ Sì | ❌ Todo |
 | 3 — E2E Full | 0 / 2 | 0 | ❌ No | ❌ Todo |
 | 4 — Performance | 0 / 6 | 0 | ❌ No | ❌ Todo |
 | 5 — Fuzz | 0 / 3 | 0 | ❌ No | ❌ Todo |
-| **Totale** | **35 / ~54** | **~2482** | — | 🟡 |
+| **Totale** | **36 / ~54** | **~2542** | — | 🟡 |
 
 ---
 
@@ -195,15 +196,15 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 4. ⁠~~**Fase 2 §2**: `test_channel_lifecycle.py`~~ ✅
 5. ⁠~~**Fase 2 §3**: `test_audio_manager.py`~~ ✅
 6. ⁠~~**Fase 2 §4**: `test_config_manager.py`~~ ✅
-7. **PROSSIMO → Fase 2 §5**: `test_video_pipeline.py` — video_ui + video channel module
-8. Fase 2 §6: `test_bluetooth_flow.py`
-9. Fase 2 §7: `test_boot_shutdown.py`
+7. ⁠~~**Fase 2 §5**: `test_video_pipeline.py`~~ ✅
+8. **PROSSIMO → Fase 2 §6**: `test_bluetooth_flow.py` — bluetooth pairing + A2DP flow
+9. Fase 2 §7: `test_boot_shutdown.py` — full system boot sequence
 10. **Fase 3 Smoke** — E2E smoke dopo integration
 11. **Fase 4 + 5** — Performance e fuzz in parallelo, non bloccanti
 
 ---
 
-*Roadmap Version: 2.5*  
+*Roadmap Version: 2.6*  
 *Aggiornato: 2026-05-13*  
 *Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*  
 *Vedi anche: `docs/session_handoff.md` per dettagli tecnici della sessione corrente*
