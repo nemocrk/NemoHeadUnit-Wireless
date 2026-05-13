@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-La test suite di `v2/` era quasi assente al kick-off. Nelle sessioni del 2026-05-13 sono stati prodotti **9 file di test + 3 file infrastruttura** per un totale di **445 test** coperti da marker `@pytest.mark.unit`. La Fase 0 è completamente chiusa. La Fase 1 è in corso.
+La test suite di `v2/` era quasi assente al kick-off. Nelle sessioni del 2026-05-13 sono stati prodotti **10 file di test + 3 file infrastruttura** per un totale di **517 test** coperti da marker `@pytest.mark.unit`. La Fase 0 è completamente chiusa. La Fase 1 è in corso.
 
 L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia che blocca il merge in CI — seguendo l'architettura stratificata definita in `TEST_SUITE_ARCHITECTURE.md`.
 
@@ -76,8 +76,8 @@ Target: **< 1s per test**, coverage ≥ 80%, marker `@pytest.mark.unit`.
 | `unit/oaa_control_channel/test_oaa_control_channel_main.py` | 54 | ✅ |
 | `unit/oaa_control_channel/test_handshake.py` | 62 | ✅ |
 | `unit/oaa_control_channel/test_serializer.py` | 68 | ✅ commit `ffe6314` |
-| `unit/oaa_control_channel/test_service_discovery.py` | — | ❌ **PROSSIMO** |
-| `unit/modules/channel_manager/test_channel_manager.py` | — | ❌ da fare |
+| `unit/oaa_control_channel/test_service_discovery.py` | 72 | ✅ commit `4e7a28d` |
+| `unit/modules/channel_manager/test_channel_manager.py` | — | ❌ **PROSSIMO** |
 | `unit/modules/audio_manager/test_audio_manager.py` | — | ❌ da fare |
 | `unit/modules/video_ui/test_video_ui.py` | — | ❌ da fare |
 | `unit/modules/bluetooth/test_paired_devices.py` | — | ❌ da fare |
@@ -91,7 +91,7 @@ Target: **< 1s per test**, coverage ≥ 80%, marker `@pytest.mark.unit`.
 | `unit/modules/config_ui/test_config_ui.py` | — | ❌ da fare |
 | `unit/modules/log_viewer/test_log_viewer.py` | — | ❌ da fare |
 
-**Totale Fase 1 prodotto finora: 445 test in 9 file.**
+**Totale Fase 1 prodotto finora: 517 test in 10 file.**
 
 ---
 
@@ -163,13 +163,13 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 | Fase | File prodotti / totali | Test scritti | Blocca CI | Stato |
 |---|---|---|---|---|
 | 0 — Infrastruttura | 3 / 3 | — | ✅ Sì | ✅ Completa |
-| 1 — Unit Test | 9 / ~25 | 445 | ✅ Sì (≥80%) | 🟡 In corso |
+| 1 — Unit Test | 10 / ~25 | 517 | ✅ Sì (≥80%) | 🟡 In corso |
 | 2 — Integration | 0 / 6 | 0 | ✅ Sì | ❌ Todo |
 | 3 — E2E Smoke | 0 / 6 | 0 | ✅ Sì | ❌ Todo |
 | 3 — E2E Full | 0 / 2 | 0 | ❌ No | ❌ Todo |
 | 4 — Performance | 0 / 6 | 0 | ❌ No | ❌ Todo |
 | 5 — Fuzz | 0 / 3 | 0 | ❌ No | ❌ Todo |
-| **Totale** | **12 / ~51** | **445** | — | 🟡 |
+| **Totale** | **13 / ~51** | **517** | — | 🟡 |
 
 ## Ordine di Esecuzione Raccomandato (aggiornato)
 
@@ -178,9 +178,9 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 3. ~~**Fase 1 §1.1 parziale**~~ ✅ `proto_utils`, `bus_client`, `config_client`
 4. ~~**Fase 1 §1.3 parziale**~~ ✅ `audio`, `video`
 5. ~~**Fase 1 §1.4 parziale**~~ ✅ `oaa_control_channel_main`, `handshake`
-6. ~~**Fase 1 §1.4**~~ ✅ `test_serializer.py` — 68 test, commit `ffe6314`
-7. **PROSSIMO → Fase 1 §1.4**: `test_service_discovery.py` (`oaa_control_channel/service_discovery.py`, 16 KB)
-8. Fase 1 §1.4: `test_channel_manager.py`
+6. ~~**Fase 1 §1.4**~~ ✅ `test_serializer.py` — 68 test
+7. ~~**Fase 1 §1.4**~~ ✅ `test_service_discovery.py` — 72 test
+8. **PROSSIMO → Fase 1 §1.4**: `test_channel_manager.py`
 9. Fase 1 §1.3 resto: `av_input`, `bluetooth`, `input`, `sensor`, `wifi`
 10. Fase 1 §1.4 secondario: `tcp_server`, `audio_manager`, `video_ui`, `bluetooth/*`, `config_manager`, altri
 11. Fase 1 §1.1: `test_logger.py`
@@ -190,7 +190,7 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 
 ---
 
-*Roadmap Version: 2.1*  
+*Roadmap Version: 2.2*  
 *Aggiornato: 2026-05-13*  
 *Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*  
 *Vedi anche: `docs/session_handoff.md` per dettagli tecnici della sessione corrente*
