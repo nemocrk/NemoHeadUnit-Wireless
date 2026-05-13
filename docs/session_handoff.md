@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `6c99b41`
+> **Aggiornato**: 2026-05-13 — commit `ffe6314`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente completata: **8 file di test, 377 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull'hardware reale.
+Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente completata: **9 file di test, 445 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull'hardware reale.
 
 ---
 
@@ -27,8 +27,9 @@ Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente co
 | `v2/tests/unit/shared/test_config_client.py` | precedente | 38 | config load, merge, changed callback, unknown key |
 | `v2/tests/unit/oaa_control_channel/test_oaa_control_channel_main.py` | `c3d7a4a` | 54 | boot protocol, config flow, session lifecycle, frame dispatch, TLS delegation, channel_manager integration |
 | `v2/tests/unit/oaa_control_channel/test_handshake.py` | `6c99b41` | 62 | state machine completa: VERSION→TLS→AUTH→SDR→CHANNELS→ACTIVE→SHUTDOWN |
+| `v2/tests/unit/oaa_control_channel/test_serializer.py` | `ffe6314` | 68 | FrameHeader serialize/parse/roundtrip, FrameSerializer BULK/multi-frame/raw, Messenger msg_type/enc_type/serialize_and_log |
 
-**Totale: 377 test in 8 file di test + 3 file infrastruttura.**
+**Totale: 445 test in 9 file di test + 3 file infrastruttura.**
 
 ---
 
@@ -74,6 +75,22 @@ def hs_factory():
 
 **Regola**: tutti i protobuf sono sostituiti con `types.SimpleNamespace` o `MagicMock`. La state machine è testata in isolamento completo.
 
+### Fixture `ser_mod` (per moduli senza singleton — import diretto)
+
+Per moduli puri come `serializer.py` (nessun singleton globale, nessun bus), si usa import diretto con scope `module`:
+
+```python
+@pytest.fixture(scope="module")
+def ser_mod():
+    if _MODULE_PATH in sys.modules:
+        del sys.modules[_MODULE_PATH]
+    import oaa_control_channel.serializer as mod
+    importlib.reload(mod)
+    return mod
+```
+
+**Regola**: usare `scope="module"` quando il modulo è stateless (nessun singleton che cambia tra test).
+
 ### Helper di asserzione riutilizzabili
 
 ```python
@@ -97,7 +114,7 @@ def _published_topics(publish_fn) -> list[str]:
 | **1 — Unit Test §1.1 Shared** | 🟡 Parziale | `test_proto_utils.py` ✅, `test_bus_client.py` ✅, `test_config_client.py` ✅, `test_logger.py` ❌ mancante |
 | **1 — Unit Test §1.2 Base** | ✅ Completa | `test_base_channel_module.py` ✅ |
 | **1 — Unit Test §1.3 Channel specifici** | 🟡 Parziale | `test_audio_module.py` ✅, `test_video_module.py` ✅, `av_input/bluetooth/input/sensor/wifi` ❌ mancanti |
-| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | `test_oaa_control_channel_main.py` ✅, `test_handshake.py` ✅, `test_serializer.py` ❌, `test_service_discovery.py` ❌, `channel_manager` ❌, `audio_manager` ❌, `video_ui` ❌, `bluetooth/*` ❌, `tcp_server` ❌, `config_manager` ❌, altri ❌ |
+| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | `test_oaa_control_channel_main.py` ✅, `test_handshake.py` ✅, `test_serializer.py` ✅, `test_service_discovery.py` ❌ **PROSSIMO**, `channel_manager` ❌, `audio_manager` ❌, `video_ui` ❌, `bluetooth/*` ❌, `tcp_server` ❌, `config_manager` ❌, altri ❌ |
 | **2 — Integration** | ❌ Non iniziata | — |
 | **3 — E2E** | ❌ Non iniziata | — |
 | **4 — Performance** | ❌ Non iniziata | — |
@@ -107,14 +124,11 @@ def _published_topics(publish_fn) -> list[str]:
 
 ## Prossimo Passo Immediato
 
-**Opzione A (consigliata)**: `test_serializer.py` — parser dei frame AA wire-format in `oaa_control_channel/serializer.py` (14 KB). Alta priorità perché il serializer è usato dal `tcp_server` e da tutti i frame in ingresso/uscita.
-
-**Opzione B**: `test_service_discovery.py` — builder del Service Discovery Response in `oaa_control_channel/service_discovery.py` (16 KB). Logica critica per il negoziazione dei canali.
-
-**Opzione C**: Girare i test esistenti per verificare quanti passano prima di continuare a scriverne altri.
+**`test_service_discovery.py`** — builder del Service Discovery Response in `oaa_control_channel/service_discovery.py` (16 KB).  
+Logica critica per la negoziazione dei canali; usata da `handshake.py` in stato `SDR`.
 
 Ordine suggerito per completare §1.4:
-1. `test_serializer.py`
+1. ~~`test_serializer.py`~~ ✅
 2. `test_service_discovery.py`
 3. `test_channel_manager.py`
 4. `test_tcp_server.py`
@@ -135,6 +149,8 @@ Ordine suggerito per completare §1.4:
 | `_FakeEnum` con `__eq__` custom | I valori proto enum non sono istanze standard di Python `Enum` |
 | Inject diretto su `mod.decode_proto` etc. | Più affidabile di `patch()` dopo `importlib.reload()` su moduli con import at module level |
 | `autouse=True` su `_patch_module` | Garantisce isolamento automatico senza dimenticare la fixture |
+| `scope="module"` per `ser_mod` in `test_serializer.py` | `serializer.py` è stateless — nessun singleton, riuso sicuro tra test nella stessa sessione |
+| Helper `_parse_bulk_frame` / `_parse_first_frame` | Evita parsing duplicato in ogni test — rende le asserzioni leggibili |
 
 ---
 
@@ -151,7 +167,7 @@ Ordine suggerito per completare §1.4:
 
 ---
 
-*Handoff Version: 2.0*  
+*Handoff Version: 2.1*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `6c99b41`*  
-*Test totali scritti: 377*
+*Commit head: `ffe6314`*  
+*Test totali scritti: 445*
