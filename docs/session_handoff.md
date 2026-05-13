@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `4e7a28d`
+> **Aggiornato**: 2026-05-13 — commit `4f90f8a`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente completata: **10 file di test, 517 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull'hardware reale.
+Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente completata: **11 file di test, 595 test** scritti e pushati su `main`. Nessun test è ancora stato eseguito sull'hardware reale.
 
 ---
 
@@ -29,8 +29,9 @@ Fase 0 completata (infrastruttura), Fase 1 §1.1 + §1.2 + §1.4 parzialmente co
 | `v2/tests/unit/oaa_control_channel/test_handshake.py` | `6c99b41` | 62 | state machine completa: VERSION→TLS→AUTH→SDR→CHANNELS→ACTIVE→SHUTDOWN |
 | `v2/tests/unit/oaa_control_channel/test_serializer.py` | `ffe6314` | 68 | FrameHeader serialize/parse/roundtrip, FrameSerializer BULK/multi-frame/raw, Messenger msg_type/enc_type/serialize_and_log |
 | `v2/tests/unit/oaa_control_channel/test_service_discovery.py` | `4e7a28d` | 72 | SEMANTIC_DEFAULTS struct, _apply_defaults_to_schema, build_from_schema_cfg BT/WiFi inject, channels_from_sdr_bytes round-trip/av_type/audio_type, message_from_sdr_bytes |
+| `v2/tests/unit/modules/channel_manager/test_channel_manager.py` | `4f90f8a` | 78 | registry resolve×16+module_name×5, ChannelManagerSession start/readiness/shutdown/crash, module-level handlers×14 |
 
-**Totale: 517 test in 10 file di test + 3 file infrastruttura.**
+**Totale: 595 test in 11 file di test + 3 file infrastruttura.**
 
 ---
 
@@ -56,6 +57,33 @@ def _patch_module(monkeypatch):
 ```
 
 **Regola**: ogni test riceve un modulo fresco via `importlib.reload()` + `autouse=True`. I singleton vengono iniettati direttamente nel namespace del modulo ricaricato.
+
+### Fixture `cm` (per channel_manager/main.py — OOP + Launcher mock)
+
+`channel_manager/main.py` è strutturato OOP (`ChannelManagerSession`), non usa `autouse=True`. La fixture `cm` è per-test (scope default) e restituisce `(mod, mock_bus, mock_launcher_cls, mock_launcher_instance)`:
+
+```python
+@pytest.fixture()
+def cm():
+    mock_launcher_cls = MagicMock()
+    mock_launcher_instance = MagicMock()
+    mock_launcher_cls.return_value = mock_launcher_instance
+    mock_launcher_instance.start_all.return_value = set()
+    with patch("shared.bus_client.BusClient", return_value=mock_bus_instance), \
+         patch("modules.channel_manager.launcher.Launcher", mock_launcher_cls):
+        import modules.channel_manager.main as mod
+        importlib.reload(mod)
+        mod.bus = mock_bus_instance
+        mod._session = None
+        yield mod, mock_bus_instance, mock_launcher_cls, mock_launcher_instance
+
+def _make_session(mod, mock_launcher_instance):
+    session = mod.ChannelManagerSession()
+    session._launcher = mock_launcher_instance  # inject diretto
+    return session
+```
+
+**Regola**: `ChannelManagerSession` viene testata con Launcher injettato direttamente (`session._launcher = mock`), non tramite `patch()`. Questo è più affidabile dopo `importlib.reload()`.
 
 ### Fixture `hs_factory` (per state machine pura con proto stubbati)
 
@@ -90,37 +118,15 @@ def sd():
     return mod
 ```
 
-**Regola**: usare `scope="module"` + import reale quando:
+**Regola**: usare `scope="module"` quando:
 - I proto `_pb2.py` sono disponibili nel repo (non servono stub)
 - Il modulo non ha singleton globali mutabili tra test
-- Le asserzioni beneficiano di valori proto reali (enum, ParseFromString, etc.)
-
-**Decisione per `test_service_discovery.py`**: i proto sono in `v2/protos/oaa/` → import reale. Round-trip `build_from_schema_cfg` → `channels_from_sdr_bytes` testato con `ParseFromString` reale. Nessuno stub necessario.
-
-### Fixture `ser_mod` (per moduli senza singleton — import diretto)
-
-Per moduli puri come `serializer.py` (nessun singleton globale, nessun bus), si usa import diretto con scope `module`:
-
-```python
-@pytest.fixture(scope="module")
-def ser_mod():
-    if _MODULE_PATH in sys.modules:
-        del sys.modules[_MODULE_PATH]
-    import oaa_control_channel.serializer as mod
-    importlib.reload(mod)
-    return mod
-```
-
-**Regola**: usare `scope="module"` quando il modulo è stateless (nessun singleton che cambia tra test).
 
 ### Helper di asserzione riutilizzabili
 
 ```python
 def _published(bus, topic) -> list[dict]:
     return [c.args[1] for c in bus.publish.call_args_list if c.args[0] == topic]
-
-def _sent_msg_ids(send_fn) -> list[int]:
-    return [c.args[0] for c in send_fn.call_args_list]
 
 def _published_topics(publish_fn) -> list[str]:
     return [c.args[0] for c in publish_fn.call_args_list]
@@ -136,7 +142,7 @@ def _published_topics(publish_fn) -> list[str]:
 | **1 — Unit Test §1.1 Shared** | 🟡 Parziale | `test_proto_utils.py` ✅, `test_bus_client.py` ✅, `test_config_client.py` ✅, `test_logger.py` ❌ mancante |
 | **1 — Unit Test §1.2 Base** | ✅ Completa | `test_base_channel_module.py` ✅ |
 | **1 — Unit Test §1.3 Channel specifici** | 🟡 Parziale | `test_audio_module.py` ✅, `test_video_module.py` ✅, `av_input/bluetooth/input/sensor/wifi` ❌ mancanti |
-| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | `test_oaa_control_channel_main.py` ✅, `test_handshake.py` ✅, `test_serializer.py` ✅, `test_service_discovery.py` ✅, `channel_manager` ❌ **PROSSIMO**, `audio_manager` ❌, `video_ui` ❌, `bluetooth/*` ❌, `tcp_server` ❌, `config_manager` ❌, altri ❌ |
+| **1 — Unit Test §1.4 Standalone** | 🟡 Parziale | `oaa_cc_main` ✅, `handshake` ✅, `serializer` ✅, `service_discovery` ✅, `channel_manager` ✅, `tcp_server` ❌ **PROSSIMO**, `audio_manager` ❌, altri ❌ |
 | **2 — Integration** | ❌ Non iniziata | — |
 | **3 — E2E** | ❌ Non iniziata | — |
 | **4 — Performance** | ❌ Non iniziata | — |
@@ -146,14 +152,14 @@ def _published_topics(publish_fn) -> list[str]:
 
 ## Prossimo Passo Immediato
 
-**`test_channel_manager.py`** — `v2/modules/channel_manager/channel_manager.py`.
-Orchestra tutti i `ChannelModule`; riceve SDR bytes da `oaa_control_channel`, risolve il tipo di modulo tramite `registry.resolve_module_type()`, avvia/ferma i thread per canale.
+**`test_tcp_server.py`** — `v2/modules/tcp_server/main.py` (o `tcp_server.py`).  
+Gestisce la connessione TCP dall'app Android; espone socket, legge/scrive frame AA raw.
 
 Ordine suggerito per completare §1.4:
 1. ~~`test_serializer.py`~~ ✅
 2. ~~`test_service_discovery.py`~~ ✅
-3. `test_channel_manager.py` ← **PROSSIMO**
-4. `test_tcp_server.py`
+3. ~~`test_channel_manager.py`~~ ✅ (registry×16 + session×35 + handlers×14 = 78 test)
+4. `test_tcp_server.py` ← **PROSSIMO**
 5. `test_audio_manager.py`
 6. `test_video_ui.py`
 7. `test_bluetooth_*.py` (×3)
@@ -174,6 +180,8 @@ Ordine suggerito per completare §1.4:
 | `autouse=True` su `_patch_module` | Garantisce isolamento automatico senza dimenticare la fixture |
 | `scope="module"` per moduli stateless | Sia `serializer.py` che `service_discovery.py` — nessun singleton mutabile tra test |
 | Helper `_minimal_cfg` in `test_service_discovery.py` | `copy.deepcopy(SEMANTIC_DEFAULTS)` per isolare ogni test dalle modifiche agli altri |
+| `session._launcher = mock_launcher_instance` inject diretto | `ChannelManagerSession.__init__` crea `Launcher()` — sostituirlo post-init è più semplice e leggibile che patchare il costruttore |
+| Fixture `cm` scope per-test (non `module`) | `channel_manager/main.py` ha `_session` globale mutabile — ogni test parte da stato pulito |
 
 ---
 
@@ -190,7 +198,7 @@ Ordine suggerito per completare §1.4:
 
 ---
 
-*Handoff Version: 2.2*  
+*Handoff Version: 2.3*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `4e7a28d`*  
-*Test totali scritti: 517*
+*Commit head: `4f90f8a`*  
+*Test totali scritti: 595*
