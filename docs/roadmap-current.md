@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-Nelle sessioni del 2026-05-13 sono stati prodotti **37 file di test + 3 file infrastruttura + 3 helper E2E** per un totale di **~2495 test**. La Fase 0, 1 e **2 sono completamente chiuse**. Il prerequisito della Fase 3 (helper `e2e/helpers/`) è completato. **Il prossimo obiettivo è il primo smoke test E2E.**
+Nelle sessioni del 2026-05-13 sono stati prodotti **38 file di test + 3 file infrastruttura + 3 helper E2E** per un totale di **~2546 test**. La Fase 0, 1 e **2 sono completamente chiuse**. Il prerequisito della Fase 3 (helper `e2e/helpers/`) è completato. Unit test aggiuntivi per `rfcomm_handshake` e `channel_manager` aggiunti (commit `9ab6c2e`). **Il prossimo obiettivo è il primo smoke test E2E.**
 
 L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia che blocca il merge in CI — seguendo l'architettura stratificata definita in `TEST_SUITE_ARCHITECTURE.md`.
 
@@ -91,8 +91,9 @@ Target: **< 1s per test**, coverage ≥ 80%, marker `@pytest.mark.unit`.
 | `unit/modules/bluetooth/test_paired_devices.py` | 68 | ✅ `6a83677` |
 | `unit/modules/config_manager/test_config_manager.py` | 96 | ✅ `e1c0847` |
 | `unit/modules/zmq_trace/test_zmq_trace.py` | 68 | ✅ `cdc9e6f` |
+| `test_rfcomm_and_channel_manager.py` | ~51 | ✅ `9ab6c2e` — **NUOVO** |
 
-**Totale Fase 1: 2213 test in 28 file unit.**
+**Totale Fase 1: ~2264 test in 29 file unit.**
 
 ---
 
@@ -181,21 +182,21 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 | Fase | File prodotti / totali | Test scritti | Blocca CI | Stato |
 |---|---|---|---|---|
 | 0 — Infrastruttura | 3 / 3 | — | ✅ Sì | ✅ Completa |
-| 1 — Unit Test | 28 / 28 | 2213 | ✅ Sì (≥80%) | ✅ **Completa** |
+| 1 — Unit Test | 29 / 29 | ~2264 | ✅ Sì (≥80%) | ✅ **Completa** |
 | 2 — Integration | 7 / 7 | ~454 | ✅ Sì | ✅ **Completa** |
 | 3 — E2E helpers | 3 / 3 | — | — | ✅ **Completo** |
 | 3 — E2E Smoke | 0 / 3 | 0 | ✅ Sì | 🟡 **Prossima** |
 | 3 — E2E Full | 0 / 2 | 0 | ❌ No | ❌ Todo |
 | 4 — Performance | 0 / 6 | 0 | ❌ No | ❌ Todo |
 | 5 — Fuzz | 0 / 3 | 0 | ❌ No | ❌ Todo |
-| **Totale** | **41 / ~54** | **~2667** | — | 🟡 |
+| **Totale** | **42 / ~54** | **~2718** | — | 🟡 |
 
 ---
 
 ## Ordine di Esecuzione Raccomandato (aggiornato)
 
 1. ~~**Fase 0**~~ ✅
-2. ~~**Fase 1 §1.1–1.4**~~ ✅ 2213 test
+2. ~~**Fase 1 §1.1–1.4**~~ ✅ ~2264 test (include test_rfcomm_and_channel_manager.py)
 3. ~~**Fase 2 §1–§7**~~ ✅ 454 test — **FASE 2 COMPLETATA**
 4. ~~**Prerequisito Fase 3**: `e2e/helpers/`~~ ✅ phone_mock + frame_sequences + stack_launcher
 5. **PROSSIMO → Fase 3 Smoke §1**: `test_bt_connect_to_handshake.py`
@@ -206,7 +207,7 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 
 ---
 
-*Roadmap Version: 2.9*  
+*Roadmap Version: 3.0*  
 *Aggiornato: 2026-05-13*  
 *Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*  
 *Vedi anche: `docs/session_handoff.md` per dettagli tecnici della sessione corrente*
