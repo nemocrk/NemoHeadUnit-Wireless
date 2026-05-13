@@ -2,13 +2,13 @@
 
 > Documento di pianificazione per la costruzione completa della test suite di `v2/`.
 > Basato su `docs/TEST_SUITE_ARCHITECTURE.md` v2.0 e `docs/project-vision.md` v3.3.
-> Data di creazione: 2026-05-13 — **Ultimo aggiornamento: 2026-05-13**
+> Data di creazione: 2026-05-13 — **Ultimo aggiornamento: 2026-05-13 (v3.3)**
 
 ---
 
 ## Executive Summary
 
-Nelle sessioni del 2026-05-13 sono stati prodotti **48 file di test + 3 file infrastruttura + 3 helper E2E** per un totale di **~2918 test**. Fase 0, 1, 2 e 3 Smoke **completamente chiuse**. Fase 3 Full e Fase 4 §1 **in corso**.
+Nelle sessioni del 2026-05-13 sono stati prodotti **51 file di test + 3 file infrastruttura + 3 helper E2E** per un totale di **~3072 test**. Fase 0–3 completamente chiuse. Fase 4 §1–§4 completati.
 
 L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia che blocca il merge in CI.
 
@@ -86,7 +86,7 @@ L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia c
 
 ---
 
-## Fase 3 — E2E Test 🟡 IN CORSO
+## Fase 3 — E2E Test ✅ COMPLETATA
 
 ### Prerequisito: `e2e/helpers/` ✅
 | Helper | Commit | Stato |
@@ -95,18 +95,18 @@ L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia c
 | `e2e/helpers/frame_sequences.py` | `bab116c` | ✅ |
 | `e2e/helpers/stack_launcher.py` | `637631d` | ✅ |
 
-### Smoke (`@pytest.mark.e2e_smoke`) ✅ COMPLETATA
+### Smoke (`@pytest.mark.e2e_smoke`) ✅
 | File | Test | Stato |
 |---|---|---|
 | `e2e/smoke/test_bt_connect_to_handshake.py` | 10 | ✅ |
 | `e2e/smoke/test_channel_manager_boot.py` | 9 | ✅ `f45cf77` |
 | `e2e/smoke/test_audio_path_smoke.py` | 8 | ✅ `e734333` |
 
-### Full Session (`@pytest.mark.e2e_full`) 🟡 IN CORSO
+### Full Session (`@pytest.mark.e2e_full`) ✅
 | File | Test | Stato |
 |---|---|---|
-| `e2e/full_session/test_full_aa_session.py` | ~12 | ✅ **NUOVO** |
-| `e2e/full_session/test_session_recovery.py` | ~8 | ✅ **NUOVO** |
+| `e2e/full_session/test_full_aa_session.py` | ~12 | ✅ `1cfa379` |
+| `e2e/full_session/test_session_recovery.py` | ~8 | ✅ `aa2c995` |
 
 **Totale Fase 3: ~47 test in 5 file + 3 helper.**
 
@@ -116,14 +116,16 @@ L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia c
 
 Marker `@pytest.mark.performance`. **Non bloccano il merge.**
 
-| File | Metrica | Stato |
-|---|---|---|
-| `performance/test_bus_latency.py` | publish→receive p50/p95/p99 ms | ✅ **NUOVO** |
-| `performance/test_bus_throughput.py` | msg/s, MB/s | ❌ |
-| `performance/test_audio_latency.py` | ≤ 10ms p50 | ❌ |
-| `performance/test_video_frame_rate.py` | ≥ 30fps | ❌ |
-| `performance/test_memory_rss.py` | RSS baseline/+5min/+30min | ❌ |
-| `performance/test_aa_frame_decode.py` | encode+decode round-trip µs | ❌ |
+| File | Metrica | Test | Stato |
+|---|---|---|---|
+| `performance/test_bus_latency.py` | publish→receive p50/p95/p99 ms | ~9 | ✅ `1e461f9` |
+| `performance/test_bus_throughput.py` | msg/s, MB/s | ~10 | ✅ **NUOVO** |
+| `performance/test_audio_latency.py` | ≤ 10ms p50 | ~8 | ✅ **NUOVO** |
+| `performance/test_memory_rss.py` | RSS baseline/+5min/+30min | ~7 | ✅ **NUOVO** |
+| `performance/test_video_frame_rate.py` | ≥ 30fps | ~6 | ❌ |
+| `performance/test_aa_frame_decode.py` | encode+decode round-trip µs | ~6 | ❌ |
+
+**Totale Fase 4 completato: 4/6 file, ~34 test.**
 
 ---
 
@@ -149,9 +151,9 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`.
 | 3 — E2E helpers | 3 / 3 | — | — | ✅ **Completo** |
 | 3 — E2E Smoke | 3 / 3 | ~27 | ✅ Sì | ✅ **Completa** |
 | 3 — E2E Full | 2 / 2 | ~20 | ❌ No | ✅ **Completa** |
-| 4 — Performance | 1 / 6 | ~18 | ❌ No | 🟡 **In corso** |
+| 4 — Performance | 4 / 6 | ~43 | ❌ No | 🟡 **In corso** |
 | 5 — Fuzz | 0 / 3 | 0 | ❌ No | ❌ Todo |
-| **Totale** | **48 / ~54** | **~2918** | — | 🟡 |
+| **Totale** | **51 / ~57** | **~3072** | — | 🟡 |
 
 ---
 
@@ -163,13 +165,17 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`.
 4. ~~**Prerequisito Fase 3**: helpers~~ ✅
 5. ~~**Fase 3 Smoke**~~ ✅ ~27 test
 6. ~~**Fase 3 Full**~~ ✅ ~20 test
-7. **PROSSIMO → Fase 4 §2**: `test_bus_throughput.py`
-8. **Fase 4 §3–6**: latency audio, frame rate, memory RSS, aa_frame_decode
-9. **Fase 5**: fuzz test in parallelo, non bloccanti
+7. ~~**Fase 4 §1**: `test_bus_latency.py`~~ ✅
+8. ~~**Fase 4 §2**: `test_bus_throughput.py`~~ ✅
+9. ~~**Fase 4 §3**: `test_audio_latency.py`~~ ✅
+10. ~~**Fase 4 §4**: `test_memory_rss.py`~~ ✅
+11. **PROSSIMO → Fase 4 §5**: `test_video_frame_rate.py`
+12. **Fase 4 §6**: `test_aa_frame_decode.py`
+13. **Fase 5**: fuzz test (`hypothesis`), non bloccanti
 
 ---
 
-*Roadmap Version: 3.2*
+*Roadmap Version: 3.3*
 *Aggiornato: 2026-05-13*
 *Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*
 *Vedi anche: `docs/session_handoff.md` per dettagli tecnici della sessione corrente*
