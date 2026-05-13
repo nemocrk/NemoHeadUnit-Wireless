@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `637631d` (helpers E2E)
+> **Aggiornato**: 2026-05-13 — commit `9ab6c2e` (unit tests rfcomm_handshake + channel_manager)
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**37 file di test, ~2495 test + 3 helper E2E** su `main`. Fase 0, 1 e **2 completamente chiuse**. Prerequisito Fase 3 (helpers) ✅. **Prossimo: primo smoke test E2E** — `test_bt_connect_to_handshake.py`.
+**38 file di test, ~2546 test + 3 helper E2E** su `main`. Fase 0, 1 e **2 completamente chiuse**. Prerequisito Fase 3 (helpers) ✅. Test unitari aggiuntivi per `rfcomm_handshake` e `channel_manager` aggiunti a `v2/tests/`. **Prossimo: primo smoke test E2E** — `test_bt_connect_to_handshake.py`.
 
 ---
 
@@ -53,12 +53,13 @@
 | `v2/tests/integration/test_config_manager.py` | `9f08aa6` | ~50 | Fase 2 §4 |
 | `v2/tests/integration/test_video_pipeline.py` | `2d8d861` | ~60 | Fase 2 §5 |
 | `v2/tests/integration/test_bluetooth_flow.py` | `dbbc2b4` | ~60 | Fase 2 §6 |
-| `v2/tests/integration/test_boot_shutdown.py` | `2fe07ef` | ~65 | **NUOVO** — Fase 2 §7 |
-| `v2/tests/e2e/helpers/phone_mock.py` | `5c74859` | — | **NUOVO** — PhoneMock + TcpPhoneClient |
-| `v2/tests/e2e/helpers/frame_sequences.py` | `bab116c` | — | **NUOVO** — 8 classi frame builder |
-| `v2/tests/e2e/helpers/stack_launcher.py` | `637631d` | — | **NUOVO** — StackLauncher + e2e_stack() |
+| `v2/tests/integration/test_boot_shutdown.py` | `2fe07ef` | ~65 | Fase 2 §7 |
+| `v2/tests/e2e/helpers/phone_mock.py` | `5c74859` | — | PhoneMock + TcpPhoneClient |
+| `v2/tests/e2e/helpers/frame_sequences.py` | `bab116c` | — | 8 classi frame builder |
+| `v2/tests/e2e/helpers/stack_launcher.py` | `637631d` | — | StackLauncher + e2e_stack() |
+| `v2/tests/test_rfcomm_and_channel_manager.py` | `9ab6c2e` | ~51 | **NUOVO** — unit rfcomm_handshake + channel_manager |
 
-**Totale: ~2495 test in 37 file di test + 3 helper E2E + 3 file infrastruttura.**
+**Totale: ~2546 test in 38 file di test + 3 helper E2E + 3 file infrastruttura.**
 
 ---
 
@@ -133,6 +134,38 @@ class FakeModule:
     def on_stop(self): self.bus.publish("system.module_stopped", {"module": self.name})
 ```
 
+### rfcomm_handshake / channel_manager — pattern unit test (commit 9ab6c2e)
+- **`importlib.reload(mod)`** all'inizio di ogni metodo di test per stato globale pulito
+- **`mod.bus = MagicMock()`** sostituisce il BusClient modulo-level senza ZMQ
+- **Socket mock**: `MagicMock(spec=socket.socket)` con `recv.side_effect` che simula un byte-stream pre-caricato
+- **`_make_socket_with_responses(*packets_raw)`** helper locale: flattens raw packets in un stream, serve via `recv(n)`
+- **`patch("rfcomm_handshake.main.DbusRfcommListener")`** per isolare D-Bus
+- **`patch("rfcomm_handshake.main._start_glib_mainloop")`** per evitare GLib reale
+- `RfcommHandshakeEventLoop` skippato automaticamente se `google.protobuf` non è installato
+
+---
+
+## 2026-05-13 — Unit Tests rfcomm_handshake + channel_manager
+
+**Cosa cambiato:**
+Creato `v2/tests/test_rfcomm_and_channel_manager.py` con 4 sezioni:
+- **Section 1** — `packet.py`: encode/decode roundtrip, truncated buffer, repr
+- **Section 2** — `handshake.py / RfcommHandshake`: 6 test dell'event loop (happy path, ack opzionale, socket chiuso, sendall fallisce, msg_id sconosciuti, loop esaurito)
+- **Section 3** — `rfcomm_handshake/main.py`: 7 test bus-level (boot, priority guard, handshake trigger, duplicate reject, credentials store, stop)
+- **Section 4** — `channel_manager/main.py`: 13 test (ChannelManagerSession lifecycle + boot handlers)
+
+**Perché:**
+Aggiunto per raggiungere coverage ≥80% sui due moduli prima del primo smoke test E2E, che li usa entrambi nel path critico RFCOMM→AA.
+
+**Status:** Completato ✅
+
+**Prossimi 3 passi:**
+1. **IMMEDIATO** — Creare `v2/tests/e2e/smoke/test_bt_connect_to_handshake.py` usando `PhoneMock` + `e2e_stack()`
+2. Creare `v2/tests/e2e/smoke/test_channel_manager_boot.py`
+3. Creare `v2/tests/e2e/smoke/test_audio_path_smoke.py`
+
+| Verificare vision alignment | `grep -A 100 "# Project Vision: NemoHeadUnit-Wireless" docs/project-vision.md` |
+
 ---
 
 ## 2026-05-13 — E2E Helpers Completati
@@ -144,16 +177,9 @@ Creati i tre helper E2E in `v2/tests/e2e/helpers/`:
 - `stack_launcher.py` — `StackLauncher` (orchestratore in-process con stub hardware) + `e2e_stack()` context manager
 
 **Perché:**
-Prerequisito architetturale della Fase 3 E2E. Senza questi helper ogni test E2E richiederebbe hardware fisico e socket reali; con questi, i test E2E smoke girano in CI in < 30s.
+Prerequisito architetturale della Fase 3 E2E.
 
 **Status:** Completato ✅
-
-**Prossimi 3 passi:**
-1. Creare `v2/tests/e2e/smoke/test_bt_connect_to_handshake.py` usando `PhoneMock` + `e2e_stack()` — **IMMEDIATO**
-2. Creare `v2/tests/e2e/smoke/test_channel_manager_boot.py`
-3. Creare `v2/tests/e2e/smoke/test_audio_path_smoke.py`
-
-| Verificare vision alignment | `grep -A 100 "# Project Vision: NemoHeadUnit-Wireless" docs/project-vision.md` |
 
 ---
 
