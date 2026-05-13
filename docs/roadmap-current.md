@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-Nelle sessioni del 2026-05-13 sono stati prodotti **37 file di test + 3 file infrastruttura** per un totale di **~2495 test**. La Fase 0, 1 e **2 sono completamente chiuse**. La Fase 3 E2E Smoke è il prossimo obiettivo.
+Nelle sessioni del 2026-05-13 sono stati prodotti **37 file di test + 3 file infrastruttura + 3 helper E2E** per un totale di **~2495 test**. La Fase 0, 1 e **2 sono completamente chiuse**. Il prerequisito della Fase 3 (helper `e2e/helpers/`) è completato. **Il prossimo obiettivo è il primo smoke test E2E.**
 
 L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia che blocca il merge in CI — seguendo l'architettura stratificata definita in `TEST_SUITE_ARCHITECTURE.md`.
 
@@ -122,17 +122,15 @@ Target: **< 10s per test**, marker `@pytest.mark.integration`. Bus ZMQ reale in-
 
 ---
 
-## Fase 3 — E2E Test 🟡 PROSSIMA
+## Fase 3 — E2E Test 🟡 IN CORSO
 
-### Prerequisito: `e2e/helpers/`
+### Prerequisito: `e2e/helpers/` ✅ COMPLETATO
 
-Prima di scrivere i test smoke, creare i helper condivisi:
-
-| Helper | Scopo |
-|---|---|
-| `e2e/helpers/phone_mock.py` | Simula un telefono Android: connessione BT, RFCOMM, AA frame exchange |
-| `e2e/helpers/frame_sequences.py` | Sequenze AA predefinite (handshake, audio, video, stop) |
-| `e2e/helpers/stack_launcher.py` | Avvia l'intero stack NemoHeadUnit in-process con tutti i moduli |
+| Helper | Scopo | Commit | Stato |
+|---|---|---|---|
+| `e2e/helpers/phone_mock.py` | `PhoneMock` (RFCOMM responder) + `TcpPhoneClient` (AA TCP client) | `5c74859` | ✅ |
+| `e2e/helpers/frame_sequences.py` | `VersionSequence`, `AuthSequence`, `ServiceDiscoverySeq`, `ChannelOpenSeq`, `PingSequence`, `MediaSequence`, `ShutdownSequence`, `FullHandshakeSequence` | `bab116c` | ✅ |
+| `e2e/helpers/stack_launcher.py` | `StackLauncher`, `_ModuleThread`, context manager `e2e_stack()` | `637631d` | ✅ |
 
 ### Smoke (`@pytest.mark.e2e_smoke`) — run in CI, < 30s
 
@@ -185,11 +183,12 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 | 0 — Infrastruttura | 3 / 3 | — | ✅ Sì | ✅ Completa |
 | 1 — Unit Test | 28 / 28 | 2213 | ✅ Sì (≥80%) | ✅ **Completa** |
 | 2 — Integration | 7 / 7 | ~454 | ✅ Sì | ✅ **Completa** |
+| 3 — E2E helpers | 3 / 3 | — | — | ✅ **Completo** |
 | 3 — E2E Smoke | 0 / 3 | 0 | ✅ Sì | 🟡 **Prossima** |
 | 3 — E2E Full | 0 / 2 | 0 | ❌ No | ❌ Todo |
 | 4 — Performance | 0 / 6 | 0 | ❌ No | ❌ Todo |
 | 5 — Fuzz | 0 / 3 | 0 | ❌ No | ❌ Todo |
-| **Totale** | **38 / ~54** | **~2667** | — | 🟡 |
+| **Totale** | **41 / ~54** | **~2667** | — | 🟡 |
 
 ---
 
@@ -198,8 +197,8 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 1. ~~**Fase 0**~~ ✅
 2. ~~**Fase 1 §1.1–1.4**~~ ✅ 2213 test
 3. ~~**Fase 2 §1–§7**~~ ✅ 454 test — **FASE 2 COMPLETATA**
-4. **PROSSIMO → Prerequisito Fase 3**: creare `e2e/helpers/` (phone_mock, frame_sequences, stack_launcher)
-5. **Fase 3 Smoke §1**: `test_bt_connect_to_handshake.py`
+4. ~~**Prerequisito Fase 3**: `e2e/helpers/`~~ ✅ phone_mock + frame_sequences + stack_launcher
+5. **PROSSIMO → Fase 3 Smoke §1**: `test_bt_connect_to_handshake.py`
 6. **Fase 3 Smoke §2**: `test_channel_manager_boot.py`
 7. **Fase 3 Smoke §3**: `test_audio_path_smoke.py`
 8. **Fase 3 Full**: `test_full_aa_session.py` + `test_session_recovery.py` (nightly)
@@ -207,7 +206,7 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 
 ---
 
-*Roadmap Version: 2.8*  
+*Roadmap Version: 2.9*  
 *Aggiornato: 2026-05-13*  
 *Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*  
 *Vedi anche: `docs/session_handoff.md` per dettagli tecnici della sessione corrente*
