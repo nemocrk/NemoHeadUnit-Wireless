@@ -2,13 +2,13 @@
 
 > Documento di pianificazione per la costruzione completa della test suite di `v2/`.
 > Basato su `docs/TEST_SUITE_ARCHITECTURE.md` v2.0 e `docs/project-vision.md` v3.3.
-> Data di creazione: 2026-05-13 — **Ultimo aggiornamento: 2026-05-13 (v3.4)**
+> Data di creazione: 2026-05-13 — **Ultimo aggiornamento: 2026-05-13 (v3.5)**
 
 ---
 
 ## Executive Summary
 
-Nelle sessioni del 2026-05-13 sono stati prodotti **53 file di test + 3 file infrastruttura + 3 helper E2E** per un totale di **~3084 test**. Fase 0–4 completamente chiuse.
+Nelle sessioni del 2026-05-13 sono stati prodotti **57 file di test + 3 infrastruttura + 3 helper E2E** per un totale di **~3120 test**. Fase 0–5 completamente chiuse. **Test suite completa.**
 
 L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia che blocca il merge in CI.
 
@@ -88,92 +88,75 @@ L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia c
 
 ## Fase 3 — E2E Test ✅ COMPLETATA
 
-### Prerequisito: `e2e/helpers/` ✅
+### Helper E2E ✅
 | Helper | Commit | Stato |
 |---|---|---|
 | `e2e/helpers/phone_mock.py` | `5c74859` | ✅ |
 | `e2e/helpers/frame_sequences.py` | `bab116c` | ✅ |
 | `e2e/helpers/stack_launcher.py` | `637631d` | ✅ |
 
-### Smoke (`@pytest.mark.e2e_smoke`) ✅
+### Smoke + Full Session ✅
 | File | Test | Stato |
 |---|---|---|
 | `e2e/smoke/test_bt_connect_to_handshake.py` | 10 | ✅ |
-| `e2e/smoke/test_channel_manager_boot.py` | 9 | ✅ `f45cf77` |
-| `e2e/smoke/test_audio_path_smoke.py` | 8 | ✅ `e734333` |
-
-### Full Session (`@pytest.mark.e2e_full`) ✅
-| File | Test | Stato |
-|---|---|---|
-| `e2e/full_session/test_full_aa_session.py` | ~12 | ✅ `1cfa379` |
-| `e2e/full_session/test_session_recovery.py` | ~8 | ✅ `aa2c995` |
-
-**Totale Fase 3: ~47 test in 5 file + 3 helper.**
+| `e2e/smoke/test_channel_manager_boot.py` | 9 | ✅ |
+| `e2e/smoke/test_audio_path_smoke.py` | 8 | ✅ |
+| `e2e/full_session/test_full_aa_session.py` | ~12 | ✅ |
+| `e2e/full_session/test_session_recovery.py` | ~8 | ✅ |
 
 ---
 
-## Fase 4 — Performance Benchmark ✅ COMPLETATA
-
-Marker `@pytest.mark.performance`. **Non bloccano il merge.**
+## Fase 4 — Performance Benchmark ✅ COMPLETATA (~44 test)
 
 | File | Metrica | Test | Stato |
 |---|---|---|---|
-| `performance/test_bus_latency.py` | publish→receive p50/p95/p99 ms | ~9 | ✅ `1e461f9` |
-| `performance/test_bus_throughput.py` | msg/s, MB/s | ~8 | ✅ `9f75a88` |
-| `performance/test_audio_latency.py` | ≤ 10ms p50 | ~8 | ✅ `4927f1c` |
-| `performance/test_memory_rss.py` | RSS baseline/+session/reconnect | ~6 | ✅ `777af59` |
-| `performance/test_video_frame_rate.py` | ≥ 30fps decode pipeline | ~7 | ✅ **NUOVO** |
-| `performance/test_aa_frame_decode.py` | encode+decode RTT µs | ~6 | ✅ **NUOVO** |
-
-**Totale Fase 4: 6/6 file, ~44 test. ✅ COMPLETA.**
+| `performance/test_bus_latency.py` | p50/p95/p99 ms | ~9 | ✅ |
+| `performance/test_bus_throughput.py` | msg/s, MB/s | ~8 | ✅ |
+| `performance/test_audio_latency.py` | ≤ 10ms p50 | ~8 | ✅ |
+| `performance/test_memory_rss.py` | RSS baseline/session | ~6 | ✅ |
+| `performance/test_video_frame_rate.py` | ≥ 30fps | ~7 | ✅ |
+| `performance/test_aa_frame_decode.py` | encode+decode RTT µs | ~6 | ✅ |
 
 ---
 
-## Fase 5 — Fuzz Test 🟡 IN CORSO
+## Fase 5 — Fuzz Test ✅ COMPLETATA
 
 Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. **Non bloccano il merge.**
 
-| File | Scenario | Stato |
-|---|---|---|
-| `fuzz/test_aa_wire_format.py` | Frame AA malformati / troncati / overflow | ✅ **NUOVO** |
-| `fuzz/test_proto_utils_roundtrip.py` | Roundtrip proto encode→decode con input arbitrary | ❌ |
-| `fuzz/test_bus_payload_malformed.py` | Payload JSON malformati / tipi errati sul bus | ❌ |
+| File | Scenario | Test | Stato |
+|---|---|---|---|
+| `fuzz/test_aa_wire_format.py` | Frame AA malformati / troncati / overflow | ~12 | ✅ |
+| `fuzz/test_proto_utils_roundtrip.py` | Roundtrip proto encode→decode input arbitrary | ~10 | ✅ **NUOVO** |
+| `fuzz/test_bus_payload_malformed.py` | Payload JSON malformati / tipi errati sul bus | ~10 | ✅ **NUOVO** |
 
-**Totale Fase 5 completato: 1/3 file.**
+**Totale Fase 5: 3/3 file, ~32 test. ✅ COMPLETA.**
 
 ---
 
-## Riepilogo Generale
+## Riepilogo Generale ✅ TEST SUITE COMPLETA
 
-| Fase | File prodotti / totali | Test scritti | Blocca CI | Stato |
+| Fase | File | Test | Blocca CI | Stato |
 |---|---|---|---|---|
-| 0 — Infrastruttura | 3 / 3 | — | ✅ Sì | ✅ Completa |
-| 1 — Unit Test | 29 / 29 | ~2264 | ✅ Sì (≥80%) | ✅ **Completa** |
-| 2 — Integration | 7 / 7 | ~454 | ✅ Sì | ✅ **Completa** |
-| 3 — E2E helpers | 3 / 3 | — | — | ✅ **Completo** |
-| 3 — E2E Smoke | 3 / 3 | ~27 | ✅ Sì | ✅ **Completa** |
-| 3 — E2E Full | 2 / 2 | ~20 | ❌ No | ✅ **Completa** |
-| 4 — Performance | 6 / 6 | ~44 | ❌ No | ✅ **Completa** |
-| 5 — Fuzz | 1 / 3 | ~12 | ❌ No | 🟡 **In corso** |
-| **Totale** | **54 / ~57** | **~3084** | — | 🟡 |
+| 0 — Infrastruttura | 3 | — | ✅ Sì | ✅ |
+| 1 — Unit Test | 29 | ~2264 | ✅ Sì (≥80%) | ✅ |
+| 2 — Integration | 7 | ~454 | ✅ Sì | ✅ |
+| 3 — E2E (helpers + smoke + full) | 8 | ~47 | ✅ smoke | ✅ |
+| 4 — Performance | 6 | ~44 | ❌ No | ✅ |
+| 5 — Fuzz | 3 | ~32 | ❌ No | ✅ |
+| **Totale** | **57** | **~3120** | — | ✅ **COMPLETA** |
 
 ---
 
-## Ordine di Esecuzione Raccomandato (aggiornato)
+## Prossimi Passi (post-suite)
 
-1. ~~**Fase 0**~~ ✅
-2. ~~**Fase 1**~~ ✅ ~2264 test
-3. ~~**Fase 2**~~ ✅ ~454 test
-4. ~~**Prerequisito Fase 3**: helpers~~ ✅
-5. ~~**Fase 3 Smoke**~~ ✅ ~27 test
-6. ~~**Fase 3 Full**~~ ✅ ~20 test
-7. ~~**Fase 4 §1–§6**~~ ✅ ~44 test
-8. **PROSSIMO → Fase 5 §2**: `fuzz/test_proto_utils_roundtrip.py`
-9. **Fase 5 §3**: `fuzz/test_bus_payload_malformed.py` (chiude Fase 5)
+1. **Esegui coverage report**: `pytest --cov=v2 --cov-report=html` e identifica moduli sotto 80%
+2. **Top-up** sui moduli sotto soglia con test unit mirati
+3. **CI pipeline**: verifica che `pytest -m "unit or integration" --cov-fail-under=80` passi in green
+4. **Hypothesis database**: arricchire il database degli esempi con `hypothesis` in modalità CI
 
 ---
 
-*Roadmap Version: 3.4*
+*Roadmap Version: 3.5*
 *Aggiornato: 2026-05-13*
 *Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*
 *Vedi anche: `docs/session_handoff.md` per dettagli tecnici della sessione corrente*
