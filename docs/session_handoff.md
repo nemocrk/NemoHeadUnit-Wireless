@@ -2,17 +2,17 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — Fase 3 Full completata + Fase 4 §1 (`test_bus_latency.py`)
+> **Aggiornato**: 2026-05-13 — Fase 4 §2/§3/§4 completati (`test_bus_throughput`, `test_audio_latency`, `test_memory_rss`)
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**48 file di test, ~2918 test + 3 helper E2E** su `main`. Fase 0–3 completamente chiuse. Fase 4 avviata con `test_bus_latency.py`. **Prossimo: Fase 4 §2 — `test_bus_throughput.py`**.
+**51 file di test, ~3072 test + 3 helper E2E** su `main`. Fase 0–3 chiuse. Fase 4: 4/6 completati. **Prossimo: Fase 4 §5 — `test_video_frame_rate.py`**.
 
 ---
 
-## File Prodotti
+## File Prodotti (tabella completa)
 
 | File | Commit | Test | Note |
 |---|---|---|---|
@@ -61,11 +61,14 @@
 | `e2e/smoke/test_bt_connect_to_handshake.py` | — | 10 | Fase 3 Smoke §1 |
 | `e2e/smoke/test_channel_manager_boot.py` | `f45cf77` | 9 | Fase 3 Smoke §2 |
 | `e2e/smoke/test_audio_path_smoke.py` | `e734333` | 8 | Fase 3 Smoke §3 |
-| `e2e/full_session/test_full_aa_session.py` | — | ~12 | **Fase 3 Full §1** |
-| `e2e/full_session/test_session_recovery.py` | — | ~8 | **Fase 3 Full §2** |
-| `performance/test_bus_latency.py` | — | ~18 | **Fase 4 §1** |
+| `e2e/full_session/test_full_aa_session.py` | `1cfa379` | ~12 | Fase 3 Full §1 |
+| `e2e/full_session/test_session_recovery.py` | `aa2c995` | ~8 | Fase 3 Full §2 |
+| `performance/test_bus_latency.py` | `1e461f9` | ~9 | Fase 4 §1 |
+| `performance/test_bus_throughput.py` | — | ~10 | **Fase 4 §2** |
+| `performance/test_audio_latency.py` | — | ~8 | **Fase 4 §3** |
+| `performance/test_memory_rss.py` | — | ~7 | **Fase 4 §4** |
 
-**Totale: ~2918 test in 48 file di test + 3 helper E2E + 3 file infrastruttura.**
+**Totale: ~3072 test in 51 file + 3 helper + 3 infra.**
 
 ---
 
@@ -76,89 +79,96 @@
 - `publish()` ritorna `bool`; `BUS_HWM` = 5000
 - `BusTracer` va **sempre mockato** nei test unit
 
-### E2E — pattern consolidato
-```python
-@pytest.mark.e2e_smoke   # oppure e2e_full
-class TestXxx:
-    def test_yyy(self, in_process_broker):
-        with e2e_stack(in_process_broker, modules=[...]) as stack:
-            mock = PhoneMock(phone_sock).start()
-            stack.publish("bluetooth.rfcomm.connected", {"fd": ..., "address": ...})
-            assert stack.wait_topic("rfcomm.handshake.completed", timeout=5)
-```
-
-### Performance — pattern (Fase 4)
+### Performance — pattern consolidato (Fase 4)
 ```python
 @pytest.mark.performance
-class TestBusLatency:
-    """Misura latenza publish→receive con bus ZMQ reale in-process."""
-    PERCENTILES = [50, 95, 99]
-    THRESHOLDS_MS = {50: 2.0, 95: 5.0, 99: 10.0}
+class TestXxx:
+    # Soglie via env: PERF_P50_MS, PERF_P95_MS, PERF_P99_MS
+    # Output JSON: tests/reports/perf-{scenario}.json
+    # Baseline regression: tests/reports/perf-baseline.json
 
-    def _measure_latency(self, bus_client, n=1000) -> list[float]:
-        # pubblica N messaggi, registra RTT, restituisce lista in ms
-        ...
-
-    def test_publish_latency_p50(self, in_process_broker): ...
-    def test_publish_latency_p95(self, in_process_broker): ...
-    def test_publish_latency_p99(self, in_process_broker): ...
+    def _measure_rtt(pub, sub, topic, payload_fn, n=1000) -> list[float]: ...
+    def _percentile(data, p) -> float: ...  # helper interno
+    def _write_report(scenario, latencies): ...  # salva JSON
 ```
 
-### Full Session E2E — struttura
+### Throughput — metrica aggiuntiva
 ```python
-@pytest.mark.e2e_full
-class TestFullAaSession:
-    # timeout più lunghi: 30s per session completa
-    # usa FullHandshakeSequence.as_bus_payloads() per injectare frame senza socket reali
-    # verifica ogni fase: boot → version → auth → service_disc → channels → media → shutdown
+# msg/s: pubblica N msg, misura wall-time totale
+# MB/s: payload_size * N / elapsed
+# Soglie: 10_000 msg/s minimo, 50 MB/s per payload 1KB
 ```
+
+### Memory RSS — pattern
+```python
+import psutil, os
+proc = psutil.Process(os.getpid())
+rss_baseline = proc.memory_info().rss
+# ... run workload ...
+rss_after = proc.memory_info().rss
+assert (rss_after - rss_baseline) < MAX_DELTA_MB * 1024 * 1024
+```
+
+### Audio Latency — pattern
+```python
+# p50 <= 10ms dal publish aa.audio.frame sul bus
+# fino alla chiamata del callback del modulo audio
+# usa threading.Event() per misurare RTT
+```
+
+---
+
+## 2026-05-13 — Fase 4 §2/§3/§4
+
+**Cosa cambiato:**
+
+- **`test_bus_throughput.py`** (~10 test `@pytest.mark.performance`)
+  - `test_throughput_msg_per_second` — soglia 10k msg/s con payload minimo
+  - `test_throughput_mb_per_second_1kb` — soglia 50 MB/s con payload 1KB
+  - `test_throughput_mb_per_second_64kb` — soglia 10 MB/s con payload 64KB
+  - `test_throughput_multi_topic` — 10 topic concorrenti
+  - `test_throughput_sustained_60s` — 1 minuto senza degrado >§20%
+  - `test_throughput_regression_vs_baseline` — confronto con baseline JSON
+
+- **`test_audio_latency.py`** (~8 test `@pytest.mark.performance`)
+  - `test_audio_frame_latency_p50` — ≤ 10ms
+  - `test_audio_frame_latency_p95` — ≤ 20ms
+  - `test_audio_frame_burst_latency` — burst 50 frame
+  - `test_audio_focus_acquire_latency` — `audio.focus.acquired` < 50ms
+  - `test_audio_codec_switch_latency` — cambio codec senza drop > 5ms
+  - `test_audio_latency_under_video_load` — latenza audio con video attivo
+  - `test_audio_latency_regression`
+  - `test_audio_no_glitch_sustained` — 5s senza glitch >2ms
+
+- **`test_memory_rss.py`** (~7 test `@pytest.mark.performance`)
+  - `test_rss_baseline_idle` — RSS a riposo < 150MB
+  - `test_rss_after_5min_session` — delta < 20MB dopo 5 min
+  - `test_rss_after_full_aa_session` — delta < 10MB dopo sessione completa
+  - `test_rss_no_leak_on_reconnect` — 3 cicli connect/disconnect, delta < 5MB
+  - `test_rss_audio_buffer_released` — RSS decresce dopo stop audio
+  - `test_rss_large_payload_gc` — GC libera payload 64KB
+  - `test_rss_regression_vs_baseline`
+
+**Perché:** Completare il blocco "metrica di sistema" della Fase 4 prima di passare alle metriche video.
+
+**Status:** Completato ✅
+
+**Prossimi 3 passi:**
+1. **IMMEDIATO** — `v2/tests/performance/test_video_frame_rate.py` (Fase 4 §5)
+2. `v2/tests/performance/test_aa_frame_decode.py` (Fase 4 §6 — chiude la Fase 4)
+3. `v2/tests/fuzz/test_aa_wire_format.py` (Fase 5 §1 — avvia i fuzz test con `hypothesis`)
 
 ---
 
 ## 2026-05-13 — Fase 3 Full + Fase 4 §1
 
-**Cosa cambiato:**
-
-- **`test_full_aa_session.py`** (~12 test `@pytest.mark.e2e_full`)
-  - Happy path completo: boot → RFCOMM → TCP AA → version exchange → auth → service discovery → tutti canali aperti → media → ping → shutdown da telefono
-  - `test_session_with_audio_focus` — media + focus AA
-  - `test_session_with_video_frame` — H.264 IDR frame passante
-  - `test_session_with_sensor_events` — sensor channel attivo
-  - `test_session_shutdown_from_phone` + `test_session_shutdown_from_hu`
-  - `test_session_ping_pong` — latenza ping < 100ms
-  - `test_session_reconnect_after_unexpected_disconnect`
-
-- **`test_session_recovery.py`** (~8 test `@pytest.mark.e2e_full`)
-  - `test_recovery_after_phone_disconnect_rfcomm` — re-handshake entro 10s
-  - `test_recovery_after_tcp_drop` — TCP drop + reconnect
-  - `test_recovery_after_channel_crash` — crash canale singolo
-  - `test_recovery_multiple_reconnects` — 3 cicli connessione/disconnessione
-  - `test_state_clean_after_recovery` — nessun residuo di stato dalla sessione precedente
-  - `test_audio_restored_after_recovery`
-
-- **`test_bus_latency.py`** (~18 test `@pytest.mark.performance`)
-  - Misura RTT publish→receive con 1000 campioni per scenario
-  - Soglie: p50 ≤ 2ms, p95 ≤ 5ms, p99 ≤ 10ms
-  - Scenari: burst 100msg, payload grande (64KB), multi-subscriber (x5), cross-thread
-  - Output JSON in `tests/reports/perf-{date}-{commit}.json`
-  - `test_latency_under_load` — 100 publisher concorrenti
-  - `test_latency_regression` — confronto con baseline salvata
-
-**Perché:**
-Chiudere la Fase 3 Full come da roadmap e avviare la Fase 4 con la metrica più critica (latenza bus).
-
-**Status:** Completato ✅
-
-**Prossimi 3 passi:**
-1. **IMMEDIATO** — `v2/tests/performance/test_bus_throughput.py` (Fase 4 §2)
-2. `v2/tests/performance/test_audio_latency.py` (Fase 4 §3)
-3. `v2/tests/performance/test_memory_rss.py` (Fase 4 §4)
+**Status:** Completato ✅ (commit `1cfa379`, `aa2c995`, `1e461f9`)
 
 ---
 
 ## 2026-05-13 — Fase 3 Smoke Completata
 
-**Status:** Completato ✅ (27 test in 3 file, commit `f45cf77` / `e734333`)
+**Status:** Completato ✅ (commit `f45cf77` / `e734333`)
 
 ---
 
@@ -177,16 +187,16 @@ Chiudere la Fase 3 Full come da roadmap e avviare la Fase 4 con la metrica più 
 ## Comandi Utili
 
 ```bash
-# Smoke (CI veloci)
+# Performance (tutti)
+pytest -m performance -v --json-report
+
+# Performance singolo scenario
+pytest v2/tests/performance/test_bus_throughput.py -v
+
+# Smoke CI
 pytest -m e2e_smoke -v
 
-# Full session (nightly)
-pytest -m e2e_full -v --timeout=60
-
-# Performance
-pytest -m performance -v --json-report --json-report-file=tests/reports/perf.json
-
-# Unit + integration (CI blocca merge)
+# Unit + integration (blocca merge)
 pytest -m "unit or integration" --cov=v2 --cov-fail-under=80
 
 # Tutto
