@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-Nelle sessioni del 2026-05-13 sono stati prodotti **31 file di test + 3 file infrastruttura** per un totale di **2213 test** coperti da marker `@pytest.mark.unit`. La Fase 0 e la Fase 1 sono completamente chiuse. La Fase 2 è in corso.
+Nelle sessioni del 2026-05-13 sono stati prodotti **33 file di test + 3 file infrastruttura** per un totale di **~2310 test**. La Fase 0 e la Fase 1 sono completamente chiuse. La Fase 2 conta 4 file completati su 6.
 
 L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia che blocca il merge in CI — seguendo l'architettura stratificata definita in `TEST_SUITE_ARCHITECTURE.md`.
 
@@ -52,7 +52,7 @@ Target: **< 1s per test**, coverage ≥ 80%, marker `@pytest.mark.unit`.
 | `unit/shared/test_bus_client.py` | ~75 | ✅ aggiornato `db85dc8` |
 | `unit/shared/test_config_client.py` | 38 | ✅ |
 | `unit/shared/test_logger.py` | 88 | ✅ `38a2885` |
-| `unit/shared/test_bus_trace.py` | 72 | ✅ **NUOVO** `be3068e` |
+| `unit/shared/test_bus_trace.py` | 72 | ✅ `be3068e` |
 
 ### 1.2 Channel Modules — Base
 
@@ -90,27 +90,37 @@ Target: **< 1s per test**, coverage ≥ 80%, marker `@pytest.mark.unit`.
 | `unit/modules/bluetooth/test_pairing.py` | 84 | ✅ `d4973f8` |
 | `unit/modules/bluetooth/test_paired_devices.py` | 68 | ✅ `6a83677` |
 | `unit/modules/config_manager/test_config_manager.py` | 96 | ✅ `e1c0847` |
-| `unit/modules/zmq_trace/test_zmq_trace.py` | 68 | ✅ **NUOVO** `cdc9e6f` |
+| `unit/modules/zmq_trace/test_zmq_trace.py` | 68 | ✅ `cdc9e6f` |
 
 **Totale Fase 1: 2213 test in 28 file unit.**
 
 ---
 
-## Fase 2 — Integration Test
+## Fase 2 — Integration Test 🟡 IN CORSO
 
 Target: **< 10s per test**, marker `@pytest.mark.integration`. Bus ZMQ reale in-process condiviso tra moduli avviati come thread.
 
 > **Nota**: tutti i `_make_integration_client()` nei test di Fase 2 devono mockare `BusTracer`
 > per evitare thread drain spurii e socket ZMQ extra. Pattern: `patch("shared.bus_client.BusTracer", return_value=MagicMock())`
 
-| File target | Test | Stato |
-|---|---|
-| `integration/test_bus_broker.py` | 84 | ✅ `bd326e5` |
-| `integration/test_channel_lifecycle.py` | 88 | ✅ `1734764` |
-| `integration/test_audio_pipeline.py` | — | ❌ **PROSSIMO** |
-| `integration/test_video_pipeline.py` | — | ❌ da fare |
-| `integration/test_bluetooth_flow.py` | — | ❌ da fare |
-| `integration/test_boot_shutdown.py` | — | ❌ da fare |
+| File target | Test | Commit | Stato |
+|---|---|---|---|
+| `integration/test_bus_broker.py` | 84 | `bd326e5` | ✅ |
+| `integration/test_channel_lifecycle.py` | 88 | `1734764` | ✅ |
+| `integration/test_audio_manager.py` | ~47 | `7e1d9be` | ✅ |
+| `integration/test_config_manager.py` | ~50 | `9f08aa6` | ✅ |
+| `integration/test_video_pipeline.py` | — | — | ❌ **PROSSIMO** |
+| `integration/test_bluetooth_flow.py` | — | — | ❌ da fare |
+| `integration/test_boot_shutdown.py` | — | — | ❌ da fare |
+
+**Totale Fase 2 finora: ~269 test in 4 file.**
+
+### Pattern integration (recap)
+
+- `_load_cm` / `_load_am` per reload modulo + patch indirizzi + `CONFIG_DIR = tmp_path`
+- `_make_client` + `_start_client` + `_wait_received` — helper condivisi
+- Handler `on_*` chiamati direttamente; spy BusClient riceve topic pubblicati
+- `importlib.reload()` per ogni test — bus ZMQ fresco e stato modulo pulito
 
 ---
 
@@ -168,27 +178,32 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 |---|---|---|---|---|
 | 0 — Infrastruttura | 3 / 3 | — | ✅ Sì | ✅ Completa |
 | 1 — Unit Test | 28 / 28 | 2213 | ✅ Sì (≥80%) | ✅ **Completa** |
-| 2 — Integration | 2 / 6 | 172 | ✅ Sì | 🟡 In corso |
-| 3 — E2E Smoke | 0 / 6 | 0 | ✅ Sì | ❌ Todo |
+| 2 — Integration | 4 / 7 | ~269 | ✅ Sì | 🟡 In corso |
+| 3 — E2E Smoke | 0 / 3 | 0 | ✅ Sì | ❌ Todo |
 | 3 — E2E Full | 0 / 2 | 0 | ❌ No | ❌ Todo |
 | 4 — Performance | 0 / 6 | 0 | ❌ No | ❌ Todo |
 | 5 — Fuzz | 0 / 3 | 0 | ❌ No | ❌ Todo |
-| **Totale** | **33 / ~54** | **2385** | — | 🟡 |
+| **Totale** | **35 / ~54** | **~2482** | — | 🟡 |
+
+---
 
 ## Ordine di Esecuzione Raccomandato (aggiornato)
 
 1. ⁠~~**Fase 0**~~ ✅ Completata
-2. ⁠~~**Fase 1 §1.1–1.4 completo**~~ ✅ 2213 test — inclusi `bus_trace`, `zmq_trace`, `bus_client` update
-3. **PROSSIMO → Fase 2 §3**: `test_audio_pipeline.py` — audio_manager + av_input con bus reale
-4. Fase 2 §4: `test_video_pipeline.py`
-5. Fase 2 §5: `test_bluetooth_flow.py`
-6. Fase 2 §6: `test_boot_shutdown.py`
-7. **Fase 3 Smoke** — E2E smoke dopo integration
-8. **Fase 4 + 5** — Performance e fuzz in parallelo, non bloccanti
+2. ⁠~~**Fase 1 §1.1–1.4 completo**~~ ✅ 2213 test
+3. ⁠~~**Fase 2 §1**: `test_bus_broker.py`~~ ✅
+4. ⁠~~**Fase 2 §2**: `test_channel_lifecycle.py`~~ ✅
+5. ⁠~~**Fase 2 §3**: `test_audio_manager.py`~~ ✅
+6. ⁠~~**Fase 2 §4**: `test_config_manager.py`~~ ✅
+7. **PROSSIMO → Fase 2 §5**: `test_video_pipeline.py` — video_ui + video channel module
+8. Fase 2 §6: `test_bluetooth_flow.py`
+9. Fase 2 §7: `test_boot_shutdown.py`
+10. **Fase 3 Smoke** — E2E smoke dopo integration
+11. **Fase 4 + 5** — Performance e fuzz in parallelo, non bloccanti
 
 ---
 
-*Roadmap Version: 2.4*  
+*Roadmap Version: 2.5*  
 *Aggiornato: 2026-05-13*  
 *Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*  
 *Vedi anche: `docs/session_handoff.md` per dettagli tecnici della sessione corrente*
