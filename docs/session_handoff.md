@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `9ab6c2e` (unit tests rfcomm_handshake + channel_manager)
+> **Aggiornato**: 2026-05-13 — Fase 3 Smoke completata (~27 test in 3 file)
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**38 file di test, ~2546 test + 3 helper E2E** su `main`. Fase 0, 1 e **2 completamente chiuse**. Prerequisito Fase 3 (helpers) ✅. Test unitari aggiuntivi per `rfcomm_handshake` e `channel_manager` aggiunti a `v2/tests/`. **Prossimo: primo smoke test E2E** — `test_bt_connect_to_handshake.py`.
+**45 file di test, ~2777 test + 3 helper E2E** su `main`. Fase 0, 1, 2 e **3 Smoke completamente chiuse**. **Prossimo: Fase 3 Full — `test_full_aa_session.py`** (nightly, `@pytest.mark.e2e_full`).
 
 ---
 
@@ -57,9 +57,12 @@
 | `v2/tests/e2e/helpers/phone_mock.py` | `5c74859` | — | PhoneMock + TcpPhoneClient |
 | `v2/tests/e2e/helpers/frame_sequences.py` | `bab116c` | — | 8 classi frame builder |
 | `v2/tests/e2e/helpers/stack_launcher.py` | `637631d` | — | StackLauncher + e2e_stack() |
-| `v2/tests/test_rfcomm_and_channel_manager.py` | `9ab6c2e` | ~51 | **NUOVO** — unit rfcomm_handshake + channel_manager |
+| `v2/tests/test_rfcomm_and_channel_manager.py` | `9ab6c2e` | ~51 | unit rfcomm_handshake + channel_manager |
+| `v2/tests/e2e/smoke/test_bt_connect_to_handshake.py` | — | 10 | **Fase 3 Smoke §1** |
+| `v2/tests/e2e/smoke/test_channel_manager_boot.py` | — | 9 | **Fase 3 Smoke §2** |
+| `v2/tests/e2e/smoke/test_audio_path_smoke.py` | — | 8 | **Fase 3 Smoke §3** |
 
-**Totale: ~2546 test in 38 file di test + 3 helper E2E + 3 file infrastruttura.**
+**Totale: ~2777 test in 45 file di test + 3 helper E2E + 3 file infrastruttura.**
 
 ---
 
@@ -80,59 +83,20 @@ with patch("shared.bus_client.zmq.Context", return_value=ctx):
         client = BusClient(module_name="test_unit")
 ```
 
-### _FakeSocket — aggiunto getsockopt()
-I test unit di BusClient richiedono che `_FakeSocket` implementi `getsockopt()` (usato da BusTracer emit calls).
-
-### BusTracer test pattern
+### E2E Smoke — pattern consolidato (Fase 3 Smoke)
 ```python
-def _make_tracer(enabled=True, module_name="test"):
-    from shared.bus_trace import BusTracer
-    with patch("shared.bus_trace.TRACE_ENABLED", enabled):
-        with patch.object(BusTracer, "_drain_loop", return_value=None):
-            return BusTracer(module_name=module_name)
+@pytest.mark.e2e_smoke
+class TestXxx:
+    def test_yyy(self, in_process_broker):
+        with e2e_stack(in_process_broker, modules=[...]) as stack:
+            # stack.publish() per eventi bus
+            # stack.wait_topic("some.topic", timeout=5) per assertions
+            # PhoneMock(sock).start() + mock.wait_done(5) per RFCOMM
+            # TcpPhoneClient.connect(...) per AA TCP
+            ...
 ```
 
-### zmq_trace test pattern
-```python
-def _load_module():
-    # Stub shared.bus_client, config_client, logger, config_schema
-    # Reload zmq_trace.main per test isolation
-    # Attach mock_bus as mod._mock_bus for assertions
-```
-
-### Canali NON-AV (bluetooth, wifi channel modules)
-1. `decode_aa_frame()` patchato via `patch.object(_module, "decode_aa_frame")` nei test di dispatch
-2. `return_value=None` testa il path malformed-frame
-3. `return_value=(msg_id, body)` testa dispatch per specifico messaggio
-4. Proto MagicMock iniettato in sys.modules pre-import
-
-### AVInput (threading + subprocess)
-1. `subprocess.Popen` patchato per isolare spawn
-2. `threading.Thread` patchato per evitare thread reali nei test
-3. `_start_stream` / `_stop_stream` patchati con `patch.object`
-4. `_send_queue` manipolato direttamente
-
-### Integration Tests — Pattern BusClient in-process
-1. `_make_client(in_process_broker, name)` — monkey-patcha BROKER_PUB_ADDR/BROKER_SUB_ADDR **+ BusTracer mock**
-2. `_start_client(client)` — avvia `client.run()` in thread separato, ritorna il thread
-3. `_wait(timeout)` — `Event.wait()` con timeout fisso; i test aspettano topic specifici entro 3s
-4. Ogni test usa `importlib.reload()` per garantire stato modulo fresco
-
-### E2E Helpers — design decisions (commit 637631d, bab116c, 5c74859)
-1. **`PhoneMock`** gira in daemon thread, espone `.wait_done(timeout)` e `.completed` — no blocking nei test
-2. **`TcpPhoneClient.recv_frames_until(predicate, timeout, max_frames)`** usa deadline assoluta, non timeout ricorsivo
-3. **`FullHandshakeSequence.as_bus_payloads()`** restituisce `List[dict]` pronti per `on_frame_ch0()` senza socket reali
-4. **`StackLauncher`** inietta stub hardware (GLib, D-Bus, BlueZ, GStreamer, PyQt6) prima dell'import dei moduli
-5. **`e2e_stack()`** context manager pubblica `system.readytostart` e attende `wait_all_ready()` prima di cedere il controllo
-
-### boot_shutdown — FakeModule pattern
-```python
-class FakeModule:
-    """Modulo fittizio che risponde al bus esattamente come un modulo v2 reale.
-    Usato in test_boot_shutdown per simulare 3..N moduli nell'orchestrazione."""
-    def on_start(self): self.bus.publish("system.module_ready", {"module": self.name})
-    def on_stop(self): self.bus.publish("system.module_stopped", {"module": self.name})
-```
+**Timeout standard smoke**: 5s per handshake, 3s per frame exchange, 2s per topic bus.
 
 ### rfcomm_handshake / channel_manager — pattern unit test (commit 9ab6c2e)
 - **`importlib.reload(mod)`** all'inizio di ogni metodo di test per stato globale pulito
@@ -143,6 +107,42 @@ class FakeModule:
 - **`patch("rfcomm_handshake.main._start_glib_mainloop")`** per evitare GLib reale
 - `RfcommHandshakeEventLoop` skippato automaticamente se `google.protobuf` non è installato
 
+### Integration Tests — Pattern BusClient in-process
+1. `_make_client(in_process_broker, name)` — monkey-patcha BROKER_PUB_ADDR/BROKER_SUB_ADDR **+ BusTracer mock**
+2. `_start_client(client)` — avvia `client.run()` in thread separato, ritorna il thread
+3. `_wait(timeout)` — `Event.wait()` con timeout fisso; i test aspettano topic specifici entro 3s
+4. Ogni test usa `importlib.reload()` per garantire stato modulo fresco
+
+### boot_shutdown — FakeModule pattern
+```python
+class FakeModule:
+    def on_start(self): self.bus.publish("system.module_ready", {"module": self.name})
+    def on_stop(self): self.bus.publish("system.module_stopped", {"module": self.name})
+```
+
+---
+
+## 2026-05-13 — Fase 3 Smoke Completata
+
+**Cosa cambiato:**
+Creati i 3 file smoke E2E in `v2/tests/e2e/smoke/`:
+
+- **`test_bt_connect_to_handshake.py`** (10 test) — `TestRfcommToTcpSmoke` e `TestTcpServerAvailableAfterHandshake` e `TestFullAaSmoke`. Copre: RFCOMM handshake completato, WiFi credentials non vuote, `rfcomm.handshake.completed` sul bus, no-ack variant, socket chiuso mid-handshake, duplicate connection rejected, TCP 5288 aperto, version request/response, version exchange completo, shutdown sequence.
+
+- **`test_channel_manager_boot.py`** (9 test) — `TestChannelManagerBootSmoke`. Copre: boot sequence completa con `channel_manager` + `tcp_server` + `oaa_control_channel`, tutti i canali ready, `channel_manager.all_channels_ready` pubblicato, restart dopo session shutdown, `aa.session.shutdown` tear-down ordinato, canali non aperti prima di `system.start`, boot con moduli parziali (subset channels), stop pulito, timeout canale mancante.
+
+- **`test_audio_path_smoke.py`** (8 test) — `TestAudioPathSmoke`. Copre: `audio_manager` ready dopo boot, topic `audio.focus.acquired`, `audio.focus.released`, routing DA/verso AA, `audio_manager` + `channel_manager` + media channel integrati, focus preemption da chiamata, recovery dopo interruzione, stop senza audio attivo.
+
+**Perché:**
+Completare la Fase 3 Smoke richiesta da roadmap. Tutti e 3 i file usano `e2e_stack()` + `PhoneMock` + `TcpPhoneClient` dal layer helper già consolidato.
+
+**Status:** Completato ✅
+
+**Prossimi 3 passi:**
+1. **IMMEDIATO** — `v2/tests/e2e/full_session/test_full_aa_session.py` (`@pytest.mark.e2e_full`)
+2. `v2/tests/e2e/full_session/test_session_recovery.py`
+3. `v2/tests/performance/test_bus_latency.py` (Fase 4, non bloccante)
+
 ---
 
 ## 2026-05-13 — Unit Tests rfcomm_handshake + channel_manager
@@ -150,21 +150,11 @@ class FakeModule:
 **Cosa cambiato:**
 Creato `v2/tests/test_rfcomm_and_channel_manager.py` con 4 sezioni:
 - **Section 1** — `packet.py`: encode/decode roundtrip, truncated buffer, repr
-- **Section 2** — `handshake.py / RfcommHandshake`: 6 test dell'event loop (happy path, ack opzionale, socket chiuso, sendall fallisce, msg_id sconosciuti, loop esaurito)
-- **Section 3** — `rfcomm_handshake/main.py`: 7 test bus-level (boot, priority guard, handshake trigger, duplicate reject, credentials store, stop)
-- **Section 4** — `channel_manager/main.py`: 13 test (ChannelManagerSession lifecycle + boot handlers)
-
-**Perché:**
-Aggiunto per raggiungere coverage ≥80% sui due moduli prima del primo smoke test E2E, che li usa entrambi nel path critico RFCOMM→AA.
+- **Section 2** — `handshake.py / RfcommHandshake`: 6 test dell'event loop
+- **Section 3** — `rfcomm_handshake/main.py`: 7 test bus-level
+- **Section 4** — `channel_manager/main.py`: 13 test
 
 **Status:** Completato ✅
-
-**Prossimi 3 passi:**
-1. **IMMEDIATO** — Creare `v2/tests/e2e/smoke/test_bt_connect_to_handshake.py` usando `PhoneMock` + `e2e_stack()`
-2. Creare `v2/tests/e2e/smoke/test_channel_manager_boot.py`
-3. Creare `v2/tests/e2e/smoke/test_audio_path_smoke.py`
-
-| Verificare vision alignment | `grep -A 100 "# Project Vision: NemoHeadUnit-Wireless" docs/project-vision.md` |
 
 ---
 
@@ -172,12 +162,9 @@ Aggiunto per raggiungere coverage ≥80% sui due moduli prima del primo smoke te
 
 **Cosa cambiato:**
 Creati i tre helper E2E in `v2/tests/e2e/helpers/`:
-- `phone_mock.py` — `PhoneMock` (RFCOMM 4-step handshake responder in daemon thread) + `TcpPhoneClient` (AA TCP client con `send_frame`, `recv_frame`, `recv_frames_until`)
-- `frame_sequences.py` — 8 classi builder per frame AA: `VersionSequence`, `AuthSequence`, `ServiceDiscoverySeq`, `ChannelOpenSeq`, `PingSequence`, `MediaSequence`, `ShutdownSequence`, `FullHandshakeSequence`
-- `stack_launcher.py` — `StackLauncher` (orchestratore in-process con stub hardware) + `e2e_stack()` context manager
-
-**Perché:**
-Prerequisito architetturale della Fase 3 E2E.
+- `phone_mock.py` — `PhoneMock` + `TcpPhoneClient`
+- `frame_sequences.py` — 8 classi builder per frame AA
+- `stack_launcher.py` — `StackLauncher` + `e2e_stack()` context manager
 
 **Status:** Completato ✅
 
@@ -185,45 +172,36 @@ Prerequisito architetturale della Fase 3 E2E.
 
 ## Contesto per Sessione Successiva
 
-### Come usare gli E2E helpers
+### Struttura `test_full_aa_session.py` attesa
 
 ```python
-# test_bt_connect_to_handshake.py — struttura di base
-import pytest
-from tests.e2e.helpers.phone_mock import PhoneMock, TcpPhoneClient
-from tests.e2e.helpers.frame_sequences import VersionSequence, ServiceDiscoverySeq, ChannelOpenSeq
-from tests.e2e.helpers.stack_launcher import e2e_stack
+@pytest.mark.e2e_full
+class TestFullAaSession:
+    """Sessione AA completa: boot → RFCOMM handshake → TCP AA →
+    version exchange → service discovery → tutti i canali aperti →
+    media → ping/pong → shutdown ordinato."""
 
-@pytest.mark.e2e_smoke
-def test_bt_connect_triggers_aa_handshake(in_process_broker):
-    with e2e_stack(in_process_broker, modules=["rfcomm_handshake", "tcp_server", "oaa_control_channel"]) as stack:
-        # 1. Simula RFCOMM connect
-        import socket
-        hu_sock, phone_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-        mock = PhoneMock(phone_sock).start()
-        stack.publish("bluetooth.rfcomm.connected", {"fd": hu_sock.fileno()})
-
-        # 2. Attendi handshake completato
-        assert mock.wait_done(timeout=5.0)
-        assert mock.completed
-
-        # 3. Verifica AA TCP attivo
-        client = TcpPhoneClient.connect("127.0.0.1", 5288, timeout=5.0)
-        client.send_frame(0, VersionSequence.request_frame())
-        frames = client.recv_frames_until(lambda f: f[2] == MSG_VERSION_RESPONSE, timeout=3.0)
-        assert frames
-        client.close()
+    def test_full_session_happy_path(self, in_process_broker): ...
+    def test_session_with_audio_focus(self, in_process_broker): ...
+    def test_session_with_video_frame(self, in_process_broker): ...
+    def test_session_with_sensor_events(self, in_process_broker): ...
+    def test_session_shutdown_from_phone(self, in_process_broker): ...
+    def test_session_shutdown_from_hu(self, in_process_broker): ...
+    # Timeout più lunghi: 30s per session completa
 ```
 
 ### Comandi utili
 
 ```bash
-# Eseguire solo gli smoke tests
+# Solo smoke
 pytest -m e2e_smoke -v
 
-# Verificare che gli helpers siano importabili
-python -c "from v2.tests.e2e.helpers.phone_mock import PhoneMock, TcpPhoneClient; print('OK')"
+# Solo full (nightly)
+pytest -m e2e_full -v
 
-# Run unit + integration (come in CI)
+# Unit + integration (CI)
 pytest -m "unit or integration" --cov=v2 --cov-fail-under=80
+
+# Tutto
+pytest -v --cov=v2
 ```
