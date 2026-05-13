@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `38a2885`
+> **Aggiornato**: 2026-05-13 — commit `0328b84`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**21 file di test, 1451 test** su `main`. Nessun test è ancora stato eseguito sull’hardware reale.
+**26 file di test, 1823 test** su `main`. Nessun test è ancora stato eseguito sull’hardware reale.
 
 ---
 
@@ -22,10 +22,15 @@
 | `v2/tests/unit/shared/test_proto_utils.py` | precedente | 47 | |
 | `v2/tests/unit/shared/test_bus_client.py` | precedente | 52 | |
 | `v2/tests/unit/shared/test_config_client.py` | precedente | 38 | |
-| `v2/tests/unit/shared/test_logger.py` | `38a2885` | 88 | LogLevel, _level_str, Logger (init/verbosity/methods), LoggerManager, attach_bus, _atexit_cleanup, run_subprocess_and_log |
+| `v2/tests/unit/shared/test_logger.py` | `38a2885` | 88 | |
 | `v2/tests/unit/modules/channel_modules/audio/test_audio_module.py` | precedente | 42 | |
 | `v2/tests/unit/modules/channel_modules/video/test_video_module.py` | precedente | 38 | |
 | `v2/tests/unit/modules/channel_modules/test_base_channel_module.py` | precedente | 44 | |
+| `v2/tests/unit/modules/channel_modules/input/test_input_module.py` | `5aaa396` | 88 | keycodes, binding, touch/key dispatch, proto helpers |
+| `v2/tests/unit/modules/channel_modules/sensor/test_sensor_module.py` | `d6f8a78` | 84 | driving_status, night_mode, GPS, sensor start request |
+| `v2/tests/unit/modules/channel_modules/bluetooth/test_bluetooth_channel_module.py` | `7791347` | 72 | NON-AV: decode_aa_frame dispatch, pairing, auth |
+| `v2/tests/unit/modules/channel_modules/wifi/test_wifi_channel_module.py` | `a1fa970` | 72 | NON-AV: credentials, hostapd config, on_hostapd_ready |
+| `v2/tests/unit/modules/channel_modules/av_input/test_av_input_module.py` | `0328b84` | 96 | pacat spawn, _start/_stop_stream, drain queue, threading |
 | `v2/tests/unit/oaa_control_channel/test_oaa_control_channel_main.py` | `c3d7a4a` | 54 | |
 | `v2/tests/unit/oaa_control_channel/test_handshake.py` | `6c99b41` | 62 | |
 | `v2/tests/unit/oaa_control_channel/test_serializer.py` | `ffe6314` | 68 | |
@@ -41,38 +46,29 @@
 | `v2/tests/unit/modules/bluetooth/test_paired_devices.py` | `6a83677` | 68 | |
 | `v2/tests/unit/modules/config_manager/test_config_manager.py` | `e1c0847` | 96 | |
 
-**Totale: 1451 test in 21 file di test + 3 file infrastruttura.**
+**Totale: 1823 test in 26 file di test + 3 file infrastruttura.**
 
 ---
 
 ## Pattern Architetturali Stabiliti
 
-### Logger: stub pre-import + loguru/zmq mock
+### Canali NON-AV (bluetooth, wifi channel modules)
+Patern stabilito:
+1. `decode_aa_frame()` patchato via `patch.object(_module, "decode_aa_frame")` nei test di dispatch
+2. `return_value=None` testa il path malformed-frame
+3. `return_value=(msg_id, body)` testa dispatch per specifico messaggio
+4. Proto MagicMock iniettato in sys.modules pre-import
 
-Il modulo `shared/logger.py` ha side-effect pesanti all’import (loguru sink globale, atexit.register).
-Pattern stabilito:
-1. Iniettare stub `zmq` e `loguru` in `sys.modules` PRIMA dell’import
-2. Wrappare il reload in `with patch("atexit.register")`
-3. Ogni test che tocca `_root_logger` usa `patch.object(_lg._root_logger, "remove/add")`
-4. `attach_bus()` viene testata con `patch("zmq.Context")`
-5. `LoggerManager._loggers.clear()` in fixture `autouse=True` per isolamento tra test
+### AVInput (threading + subprocess)
+1. `subprocess.Popen` patchato per isolare spawn
+2. `threading.Thread` patchato per evitare thread reali nei test
+3. `_start_stream` / `_stop_stream` patchati con `patch.object` nei test che non li testano direttamente
+4. `_send_queue` (SimpleQueue) manipolato direttamente nelle fixture per i test di `_drain_send_queue`
 
-```python
-sys.modules["zmq"]    = _zmq_stub
-sys.modules["loguru"] = _loguru_stub
-with patch("atexit.register"):
-    import shared.logger as _lg
-    importlib.reload(_lg)
-```
-
-### Config manager
-Vedi handoff v3.0.
-
-### Bluetooth
-Vedi handoff v2.9.
+### Logger
+Vedi handoff v3.1.
 
 ### Helper riutilizzabili
-
 ```python
 def _published_topics(mock_bus) -> list[str]:
     return [c.args[0] for c in mock_bus.publish.call_args_list]
@@ -92,22 +88,23 @@ def _published_payload(mock_bus, topic: str) -> dict:
 |---|---|---|
 | **0 — Infrastruttura** | ✅ Completa | |
 | **1 — Unit Test §1.1 Shared** | ✅ Completa | proto_utils, bus_client, config_client, logger ✅ |
-| **1 — Unit Test §1.2 Base** | ✅ Completa | |
-| **1 — Unit Test §1.3 Channel** | 🟡 Parziale | audio, video, base ✅; altri channel modules ❌ ← PROSSIMO |
+| **1 — Unit Test §1.2 Base** | ✅ Completa | base_channel_module ✅ |
+| **1 — Unit Test §1.3 Channel Modules** | ✅ **Completa** | audio, video, base, input, sensor, bluetooth, wifi, av_input ✅ |
 | **1 — Unit Test §1.4 Standalone** | ✅ Completa | oaa_cc, tcp, audio_mgr, video_ui, bluetooth, config_manager ✅ |
-| **2–5** | ❌ Non iniziata | |
+| **2 — Integration Tests** | ❌ Non iniziata | ← PROSSIMO |
+| **3–5** | ❌ Non iniziata | |
 
 ---
 
 ## Prossimo Passo Immediato
 
-**Channel modules mancanti** — `v2/modules/channel_modules/`
+**Fase 2 — Integration Tests**
 
-Leggere la directory per vedere quali module non hanno ancora test:
-- `test_audio_module.py` ✅ già fatto
-- `test_video_module.py` ✅ già fatto
-- `test_base_channel_module.py` ✅ già fatto
-- Candidati: `input/`, `sensor/`, `navigation/`, etc. — leggere la directory first
+Leggere `docs/roadmap-current.md` e `docs/project-vision.md` per capire quali scenari di integrazione sono prioritari.
+Candidati naturali:
+- `channel_manager` ↔ `tcp_server` ↔ channel modules: flusso completo frame
+- `oaa_control_channel` ↔ `channel_manager`: handshake + ServiceDiscovery end-to-end
+- `audio_manager` ↔ `av_input` channel: source selection e cattura
 
 ---
 
@@ -116,14 +113,15 @@ Leggere la directory per vedere quali module non hanno ancora test:
 | Decisione | Rationale |
 |---|---|
 | Stub loguru+zmq pre-import | side-effect all’import: non si può importare senza mock |
-| `patch("atexit.register")` durante reload | evita doppio registrazione handler atexit nei test |
-| `patch.object(_lg._root_logger, "remove")` per set_verbosity | evita modifica reale dei sink globali |
-| `LoggerManager._loggers.clear()` in fixture autouse | isolamento completo tra test del registry |
-| `reset_bus_state` fixture per attach_bus/atexit test | garantisce _bus_* globals in stato noto |
+| `patch("atexit.register")` durante reload | evita doppio registrazione handler |
+| decode_aa_frame patchato in NON-AV dispatch | NON-AV usa raw bytes + decode, non message_id già estratto |
+| subprocess.Popen patchato in _start_stream | evita spawn reale di pacat nei test |
+| threading.Thread patchato in _start_stream | evita thread reali nei test unit |
+| _send_queue manipolato direttamente | SimpleQueue è accessibile senza mock |
 
 ---
 
-*Handoff Version: 3.1*  
+*Handoff Version: 3.2*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `38a2885`*  
-*Test totali scritti: 1451*
+*Commit head: `0328b84`*  
+*Test totali scritti: 1823*
