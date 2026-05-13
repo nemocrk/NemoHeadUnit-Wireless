@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `2d8d861`
+> **Aggiornato**: 2026-05-13 — commit `dbbc2b4`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**35 file di test, ~2370 test** su `main`. Fase 1 Unit Test completata. Fase 2 Integration Test: 5 file completati.
+**36 file di test, ~2430 test** su `main`. Fase 1 Unit Test completata. Fase 2 Integration Test: 6 file completati su 7.
 
 ---
 
@@ -51,9 +51,10 @@
 | `v2/tests/integration/test_channel_lifecycle.py` | `1734764` | 88 | Fase 2 §2 |
 | `v2/tests/integration/test_audio_manager.py` | `7e1d9be` | ~47 | Fase 2 §3 |
 | `v2/tests/integration/test_config_manager.py` | `9f08aa6` | ~50 | Fase 2 §4 |
-| `v2/tests/integration/test_video_pipeline.py` | `2d8d861` | ~60 | **NUOVO** — Fase 2 §5 |
+| `v2/tests/integration/test_video_pipeline.py` | `2d8d861` | ~60 | Fase 2 §5 |
+| `v2/tests/integration/test_bluetooth_flow.py` | `dbbc2b4` | ~60 | **NUOVO** — Fase 2 §6 |
 
-**Totale: ~2370 test in 35 file di test + 3 file infrastruttura.**
+**Totale: ~2430 test in 36 file di test + 3 file infrastruttura.**
 
 ---
 
@@ -109,7 +110,7 @@ def _load_module():
 ### Integration Tests — Pattern BusClient in-process
 1. `_make_client(in_process_broker, name)` — monkey-patcha BROKER_PUB_ADDR/BROKER_SUB_ADDR **+ BusTracer mock**
 2. `_start_client(client)` — avvia receive loop non-blocking + sleep 0.05s
-3. `_wait_received(list, count, timeout)` — polling con deadline
+3. `_wait(list, count, timeout)` — polling con deadline
 4. Tutti i client chiamano `.stop()` nel teardown
 5. `time.sleep(0.1-0.2)` dopo subscribe per propagazione ZMQ
 
@@ -144,6 +145,15 @@ def _load_module():
 6. `publish_frames=False` testato esplicitamente per verificare soppressione video.frame
 7. Wire format `_media_with_ts_bytes()` helper per costruire payload MediaWithTimestamp senza dipendenze proto
 
+### Integration Tests — Pattern bluetooth_flow (Fase 2 §6)
+1. D-Bus / BlueZ / GLib / `gi` stubbed in `sys.modules` **pre-import** — nessun hardware BT in CI
+2. `_load_bt(broker)` — reload `modules/bluetooth/main.py` + patch `sys.modules` per submoduli BT
+3. `BluezAdapter`, `DiscoverySession`, `PairingAgent`, `paired_devices` — tutti MagicMock istanziati in `_load_bt`
+4. `bt._adapter` pre-iniettato con mock_adapter per evitare "Adapter not ready" nei test di layer 2
+5. Callback interni (`_on_device_found`, `_on_pairing_completed`, etc.) chiamati direttamente — spy verifica topic bus
+6. Autoconnect testato: `_autoconnect_stop` verificato direttamente, loop inline con `_autoconnect_stop.set()`
+7. Config callbacks (`_on_config_loaded` / `_on_config_changed`) chiamati direttamente con `_apply_config` patchato
+
 ### Helper riutilizzabili (unit test)
 ```python
 def _published_topics(mock_bus) -> list[str]:
@@ -167,14 +177,14 @@ def _published_payload(mock_bus, topic: str) -> dict:
 | **1 — Unit Test §1.2 Base** | ✅ Completa | |
 | **1 — Unit Test §1.3 Channel Modules** | ✅ Completa | |
 | **1 — Unit Test §1.4 Standalone** | ✅ Completa | Include test_zmq_trace.py |
-| **2 — Integration Tests** | 🟡 In corso | broker ✅ + channel_lifecycle ✅ + audio_manager ✅ + config_manager ✅ + video_pipeline ✅ |
+| **2 — Integration Tests** | 🟡 In corso (6/7) | broker ✅ + channel_lifecycle ✅ + audio_manager ✅ + config_manager ✅ + video_pipeline ✅ + bluetooth_flow ✅ |
 | **3–5** | ❌ Non iniziata | |
 
 ---
 
 ## Prossimo Passo Immediato
 
-**Fase 2 §6 — `test_boot_shutdown.py`**
+**Fase 2 §7 — `test_boot_shutdown.py`**
 
 Scope: sequenza boot completa dell'intero sistema simulato su bus in-process.
 Cosa testare:
@@ -210,35 +220,46 @@ Cosa testare:
 | Integration video_pipeline: PyQt6/GStreamer/gi stubbed in sys.modules | nessun display/hardware in CI |
 | Integration video_pipeline: _conn_state testato come state machine | verifica coerenza transizioni senza finestra Qt |
 | Integration video_pipeline: _media_with_ts_bytes() helper | costruisce wire format senza importare protobuf reale |
+| Integration bluetooth_flow: D-Bus/BlueZ/GLib/gi stubbed in sys.modules | nessun hardware BT in CI |
+| Integration bluetooth_flow: bt._adapter pre-iniettato | evita "Adapter not ready" nei test handler layer 2 |
+| Integration bluetooth_flow: autoconnect loop inline con stop event set | testa logica loop senza thread reali |
+| Integration bluetooth_flow: callback _on_* chiamati direttamente | verifica pubblicazione topic senza GLib event loop |
+
+---
+
+## 2026-05-13 — Fase 2 §6: test_bluetooth_flow integration
+
+**What changed:**
+`v2/tests/integration/test_bluetooth_flow.py` creato con ~60 test in 8 gruppi:
+1. Boot protocol (readytostart, system.start priority filter/wrong priority/adapter init failure, system.stop)
+2. Discovery flow (on_discover adapter ready/not-ready, duplicate session, _on_device_found, _on_discovery_done)
+3. Pairing flow (on_pair, confirm, reject, pin/completed/failed callbacks via bus)
+4. Paired-device operations (list/empty/no-adapter, remove success/failure/missing-addr, connect on_connected/on_failed, disconnect on_disconnected/on_failed)
+5. Autoconnect state machine (_stop_autoconnect, _start_autoconnect disabled/already-active, on_rfcomm_connected, on_try_autoconnect, loop skips connected device, loop exits immediately when stopped)
+6. Config callbacks (_on_config_loaded merge/empty/system.ready/pairing_agent, _on_config_changed update/unknown/structural/apply_config)
+7. Error paths (connect/disconnect/remove/confirm no-adapter or missing fields, reject missing address)
+8. E2E bus flow (full discovery with 2 devices, pairing pin+completed, pairing pin+failed, rfcomm stops autoconnect, remove+list reflects change, 5 devices burst)
+
+**Why:**
+Fase 2 Integration Test §6. Verifica il modulo bluetooth nella sua interezza: tutti i handler bus,
+la state machine autoconnect, i callback D-Bus simulati, la gestione config e gli error path,
+con bus ZMQ reale in-process e senza dipendenze hardware (D-Bus/BlueZ/GLib stubbed).
+
+**Status:** Completato — commit `dbbc2b4`
+
+**Next 1-3 steps:**
+1. `test_boot_shutdown.py` — sequenza boot completa del sistema (Fase 2 §7, ultimo file integration)
+2. Fase 3 — E2E tests (TCP server + AA handshake end-to-end)
+3. Coverage report — verificare soglia 80% su tutti i moduli
 
 ---
 
 ## 2026-05-13 — Fase 2 §5: test_video_pipeline integration
 
 **What changed:**
-`v2/tests/integration/test_video_pipeline.py` creato con ~60 test in 10 gruppi:
-1. video_ui — Boot protocol (readytostart, system.start priority filter, system.stop no crash)
-2. video_ui — Connection state machine (WAITING_BT→HANDSHAKE→STREAMING→INTERRUPTED, session shutdown reset)
-3. video_ui — video.state handler (PLAYING/IDLE/STOPPED/unknown/missing key)
-4. video_ui — video.frame handler (no window no crash, empty payload no crash)
-5. VideoModule — Boot/channel lifecycle (readytostart, module_start priority, module_stop, channel open/close)
-6. VideoModule — AA message dispatch (setup_request, open_request, stop_indication, focus_request, malformed/unknown msg)
-7. VideoModule — Media frame publish (handle_media SPS→is_config=True, MediaAck, media_with_timestamp, multi-frame, data_b64 decode)
-8. VideoModule — Session lifecycle (aa.session.active no state change, session.shutdown→IDLE, start_indication→PLAYING)
-9. VideoModule — Robustness (missing payload_hex, same-state no publish, _send_media_ack session_id, init codec, cleanup)
-10. Pipeline E2E (full setup→open→start→frame→stop sequence, config+IDR order, session shutdown after playing, video_ui receives PLAYING via bus)
-
-**Why:**
-Fase 2 Integration Test §5. Garantisce che il pipeline video (VideoModule + video_ui) gestisca
-correttamente l'intero lifecycle AA: handshake, frame dispatch, state machine, session reset,
-con bus ZMQ reale in-process e senza dipendenze hardware (PyQt6/GStreamer stubbed).
+`v2/tests/integration/test_video_pipeline.py` creato con ~60 test in 10 gruppi.
 
 **Status:** Completato — commit `2d8d861`
-
-**Next 1-3 steps:**
-1. `test_boot_shutdown.py` — sequenza boot completa del sistema
-2. Fase 3 — E2E tests (TCP server + AA handshake end-to-end)
-3. Coverage report — verificare soglia 80% su tutti i moduli
 
 ---
 
@@ -269,7 +290,7 @@ con bus ZMQ reale in-process e senza dipendenze hardware (PyQt6/GStreamer stubbe
 
 ---
 
-*Handoff Version: 4.5*  
+*Handoff Version: 4.6*  
 *Aggiornato: 2026-05-13*  
-*Commit head: `2d8d861`*  
-*Test totali scritti: ~2370*
+*Commit head: `dbbc2b4`*  
+*Test totali scritti: ~2430*
