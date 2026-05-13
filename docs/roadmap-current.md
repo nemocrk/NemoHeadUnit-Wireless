@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-Nelle sessioni del 2026-05-13 sono stati prodotti **38 file di test + 3 file infrastruttura + 3 helper E2E** per un totale di **~2546 test**. La Fase 0, 1 e **2 sono completamente chiuse**. Il prerequisito della Fase 3 (helper `e2e/helpers/`) è completato. Unit test aggiuntivi per `rfcomm_handshake` e `channel_manager` aggiunti (commit `9ab6c2e`). **Il prossimo obiettivo è il primo smoke test E2E.**
+Nelle sessioni del 2026-05-13 sono stati prodotti **41 file di test + 3 file infrastruttura + 3 helper E2E** per un totale di **~2777 test**. La Fase 0, 1, 2 e **3 Smoke sono completamente chiuse**. **Il prossimo obiettivo è la Fase 3 Full Session.**
 
 L'obiettivo è raggiungere **≥ 80% di coverage globale** su `v2/` — soglia che blocca il merge in CI — seguendo l'architettura stratificata definita in `TEST_SUITE_ARCHITECTURE.md`.
 
@@ -91,7 +91,7 @@ Target: **< 1s per test**, coverage ≥ 80%, marker `@pytest.mark.unit`.
 | `unit/modules/bluetooth/test_paired_devices.py` | 68 | ✅ `6a83677` |
 | `unit/modules/config_manager/test_config_manager.py` | 96 | ✅ `e1c0847` |
 | `unit/modules/zmq_trace/test_zmq_trace.py` | 68 | ✅ `cdc9e6f` |
-| `test_rfcomm_and_channel_manager.py` | ~51 | ✅ `9ab6c2e` — **NUOVO** |
+| `test_rfcomm_and_channel_manager.py` | ~51 | ✅ `9ab6c2e` |
 
 **Totale Fase 1: ~2264 test in 29 file unit.**
 
@@ -123,7 +123,7 @@ Target: **< 10s per test**, marker `@pytest.mark.integration`. Bus ZMQ reale in-
 
 ---
 
-## Fase 3 — E2E Test 🟡 IN CORSO
+## Fase 3 — E2E Test ✅ SMOKE COMPLETATA
 
 ### Prerequisito: `e2e/helpers/` ✅ COMPLETATO
 
@@ -133,19 +133,21 @@ Target: **< 10s per test**, marker `@pytest.mark.integration`. Bus ZMQ reale in-
 | `e2e/helpers/frame_sequences.py` | `VersionSequence`, `AuthSequence`, `ServiceDiscoverySeq`, `ChannelOpenSeq`, `PingSequence`, `MediaSequence`, `ShutdownSequence`, `FullHandshakeSequence` | `bab116c` | ✅ |
 | `e2e/helpers/stack_launcher.py` | `StackLauncher`, `_ModuleThread`, context manager `e2e_stack()` | `637631d` | ✅ |
 
-### Smoke (`@pytest.mark.e2e_smoke`) — run in CI, < 30s
+### Smoke (`@pytest.mark.e2e_smoke`) — run in CI, < 30s ✅ COMPLETATA
 
-| File target | Stato |
-|---|---|
-| `e2e/smoke/test_bt_connect_to_handshake.py` | ❌ **PROSSIMO** |
-| `e2e/smoke/test_channel_manager_boot.py` | ❌ da fare |
-| `e2e/smoke/test_audio_path_smoke.py` | ❌ da fare |
+| File target | Test | Stato |
+|---|---|---|
+| `e2e/smoke/test_bt_connect_to_handshake.py` | 10 | ✅ |
+| `e2e/smoke/test_channel_manager_boot.py` | 9 | ✅ |
+| `e2e/smoke/test_audio_path_smoke.py` | 8 | ✅ |
+
+**Totale Fase 3 Smoke: ~27 test in 3 file.**
 
 ### Full Session (`@pytest.mark.e2e_full`) — nightly/on-demand
 
 | File target | Stato |
 |---|---|
-| `e2e/full_session/test_full_aa_session.py` | ❌ da fare |
+| `e2e/full_session/test_full_aa_session.py` | ❌ **PROSSIMO** |
 | `e2e/full_session/test_session_recovery.py` | ❌ da fare |
 
 ---
@@ -185,29 +187,28 @@ Marker `@pytest.mark.fuzz`. Motore: `hypothesis`. Profili: `ci` (100), `local` (
 | 1 — Unit Test | 29 / 29 | ~2264 | ✅ Sì (≥80%) | ✅ **Completa** |
 | 2 — Integration | 7 / 7 | ~454 | ✅ Sì | ✅ **Completa** |
 | 3 — E2E helpers | 3 / 3 | — | — | ✅ **Completo** |
-| 3 — E2E Smoke | 0 / 3 | 0 | ✅ Sì | 🟡 **Prossima** |
-| 3 — E2E Full | 0 / 2 | 0 | ❌ No | ❌ Todo |
+| 3 — E2E Smoke | 3 / 3 | ~27 | ✅ Sì | ✅ **Completa** |
+| 3 — E2E Full | 0 / 2 | 0 | ❌ No | ❌ **PROSSIMA** |
 | 4 — Performance | 0 / 6 | 0 | ❌ No | ❌ Todo |
 | 5 — Fuzz | 0 / 3 | 0 | ❌ No | ❌ Todo |
-| **Totale** | **42 / ~54** | **~2718** | — | 🟡 |
+| **Totale** | **45 / ~57** | **~2777** | — | 🟡 |
 
 ---
 
 ## Ordine di Esecuzione Raccomandato (aggiornato)
 
 1. ~~**Fase 0**~~ ✅
-2. ~~**Fase 1 §1.1–1.4**~~ ✅ ~2264 test (include test_rfcomm_and_channel_manager.py)
-3. ~~**Fase 2 §1–§7**~~ ✅ 454 test — **FASE 2 COMPLETATA**
-4. ~~**Prerequisito Fase 3**: `e2e/helpers/`~~ ✅ phone_mock + frame_sequences + stack_launcher
-5. **PROSSIMO → Fase 3 Smoke §1**: `test_bt_connect_to_handshake.py`
-6. **Fase 3 Smoke §2**: `test_channel_manager_boot.py`
-7. **Fase 3 Smoke §3**: `test_audio_path_smoke.py`
-8. **Fase 3 Full**: `test_full_aa_session.py` + `test_session_recovery.py` (nightly)
-9. **Fase 4 + 5** — Performance e fuzz in parallelo, non bloccanti
+2. ~~**Fase 1 §1.1–1.4**~~ ✅ ~2264 test
+3. ~~**Fase 2 §1–§7**~~ ✅ 454 test
+4. ~~**Prerequisito Fase 3**: `e2e/helpers/`~~ ✅
+5. ~~**Fase 3 Smoke §1–§3**~~ ✅ ~27 test
+6. **PROSSIMO → Fase 3 Full §1**: `test_full_aa_session.py`
+7. **Fase 3 Full §2**: `test_session_recovery.py`
+8. **Fase 4 + 5** — Performance e fuzz in parallelo, non bloccanti
 
 ---
 
-*Roadmap Version: 3.0*  
-*Aggiornato: 2026-05-13*  
-*Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*  
+*Roadmap Version: 3.1*
+*Aggiornato: 2026-05-13*
+*Basata su: `docs/TEST_SUITE_ARCHITECTURE.md` v2.0, `docs/project-vision.md` v3.3*
 *Vedi anche: `docs/session_handoff.md` per dettagli tecnici della sessione corrente*
