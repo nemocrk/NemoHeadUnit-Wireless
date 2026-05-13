@@ -179,7 +179,7 @@ Audio/video frames carry raw AAC or H.264 bytes in Frame 2 for zero-copy deliver
 ## 7. Success Metrics
 
 ### 7.1 Quality Metrics
-- **Test Coverage**: Comprehensive test coverage as primary success indicator
+- **Test Coverage**: Comprehensive test coverage as primary success indicator — see [`docs/TEST_SUITE_ARCHITECTURE.md`](TEST_SUITE_ARCHITECTURE.md) for the full architecture of the test suite (unit → integration → e2e → performance).
 - **Ease of Use**: User-friendly interface and deployment
 - **Reliability**: High uptime and connection stability
 
@@ -438,6 +438,6 @@ NemoHeadUnit-Wireless represents a significant advancement in Android Auto emula
 
 ---
 
-*Document Version: 3.2*
-*Last Updated: 2026-04-21*
+*Document Version: 3.3*
+*Last Updated: 2026-05-13*
 *Author: Nemo Development Team*
