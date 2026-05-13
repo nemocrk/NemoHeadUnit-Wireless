@@ -2,13 +2,13 @@
 
 > **Scopo**: documento di continuità per sessioni AI successive.  
 > Contiene lo stato esatto della test suite, i file prodotti, le decisioni prese e il prossimo passo immediato.  
-> **Aggiornato**: 2026-05-13 — commit `2fe07ef`
+> **Aggiornato**: 2026-05-13 — commit `637631d` (helpers E2E)
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**37 file di test, ~2495 test** su `main`. Fase 0, 1 e **2 completamente chiuse**. Prossimo: Fase 3 E2E Smoke.
+**37 file di test, ~2495 test + 3 helper E2E** su `main`. Fase 0, 1 e **2 completamente chiuse**. Prerequisito Fase 3 (helpers) ✅. **Prossimo: primo smoke test E2E** — `test_bt_connect_to_handshake.py`.
 
 ---
 
@@ -54,8 +54,11 @@
 | `v2/tests/integration/test_video_pipeline.py` | `2d8d861` | ~60 | Fase 2 §5 |
 | `v2/tests/integration/test_bluetooth_flow.py` | `dbbc2b4` | ~60 | Fase 2 §6 |
 | `v2/tests/integration/test_boot_shutdown.py` | `2fe07ef` | ~65 | **NUOVO** — Fase 2 §7 |
+| `v2/tests/e2e/helpers/phone_mock.py` | `5c74859` | — | **NUOVO** — PhoneMock + TcpPhoneClient |
+| `v2/tests/e2e/helpers/frame_sequences.py` | `bab116c` | — | **NUOVO** — 8 classi frame builder |
+| `v2/tests/e2e/helpers/stack_launcher.py` | `637631d` | — | **NUOVO** — StackLauncher + e2e_stack() |
 
-**Totale: ~2495 test in 37 file di test + 3 file infrastruttura.**
+**Totale: ~2495 test in 37 file di test + 3 helper E2E + 3 file infrastruttura.**
 
 ---
 
@@ -110,212 +113,91 @@ def _load_module():
 
 ### Integration Tests — Pattern BusClient in-process
 1. `_make_client(in_process_broker, name)` — monkey-patcha BROKER_PUB_ADDR/BROKER_SUB_ADDR **+ BusTracer mock**
-2. `_start_client(client)` — avvia receive loop non-blocking + sleep 0.05s
-3. `_wait(list, count, timeout)` — polling con deadline
-4. Tutti i client chiamano `.stop()` nel teardown
-5. `time.sleep(0.1-0.2)` dopo subscribe per propagazione ZMQ
+2. `_start_client(client)` — avvia `client.run()` in thread separato, ritorna il thread
+3. `_wait(timeout)` — `Event.wait()` con timeout fisso; i test aspettano topic specifici entro 3s
+4. Ogni test usa `importlib.reload()` per garantire stato modulo fresco
 
-### Integration Tests — Pattern ChannelManagerSession
-1. `importlib.reload(cm_main)` ad ogni test per garantire bus fresco con indirizzi in-process
-2. Launcher sempre MagicMock — nessun subprocess reale nei test di integrazione (layer 2)
-3. `_make_session()` incapsula reload + ChannelManagerSession()
-4. Handler on_* testati via chiamata diretta + spy sul bus per verificare i topic pubblicati
-5. `cm_main.CHILDREN_READY_TIMEOUT` patchato a 0.3s per test di timeout
+### E2E Helpers — design decisions (commit 637631d, bab116c, 5c74859)
+1. **`PhoneMock`** gira in daemon thread, espone `.wait_done(timeout)` e `.completed` — no blocking nei test
+2. **`TcpPhoneClient.recv_frames_until(predicate, timeout, max_frames)`** usa deadline assoluta, non timeout ricorsivo
+3. **`FullHandshakeSequence.as_bus_payloads()`** restituisce `List[dict]` pronti per `on_frame_ch0()` senza socket reali
+4. **`StackLauncher`** inietta stub hardware (GLib, D-Bus, BlueZ, GStreamer, PyQt6) prima dell'import dei moduli
+5. **`e2e_stack()`** context manager pubblica `system.readytostart` e attende `wait_all_ready()` prima di cedere il controllo
 
-### Integration Tests — Pattern audio_manager (Fase 2 §3)
-1. `subprocess.run` patchato con `_fake_subprocess_run` che simula output wpctl/pactl
-2. `importlib.reload(am_main)` per ogni test — bus fresco e stato modulo pulito
-3. `am.cfg = MagicMock()` per isolare ConfigClient da config_manager reale
-4. Handler on_* chiamati direttamente; spy BusClient per verificare topic pubblicati
-5. Test negativi verificano assenza di pubblicazioni con `time.sleep(0.2)` + assert `len == 0`
-
-### Integration Tests — Pattern config_manager (Fase 2 §4)
-1. `_load_cm(broker, config_dir)` — reload `config_manager.main`, patcha bus + BusTracer, sovrascrive `CONFIG_DIR` con `tmp_path`
-2. `tmp_path` (pytest fixture) — ogni test ha directory YAML isolata; nessun side-effect tra test
-3. Handler `on_config_get` / `on_config_set` chiamati direttamente — bus spy riceve i topic pubblicati
-4. Schema registrato tramite `on_config_get` con `schema=` payload, poi verificato nell'echo della response
-5. Validazione schema testata end-to-end: valore invalido → `config.error` pubblicato, YAML non scritto
-6. Campi strutturati (ConfigFieldList, ConfigFieldMessage) testati: nessuna validazione scalare, stored as-is
-
-### Integration Tests — Pattern video_pipeline (Fase 2 §5)
-1. PyQt6 / GStreamer / gi stubbed in `sys.modules` **pre-import** con MagicMock — nessuna finestra Qt in CI
-2. `_load_video_ui(broker)` — reload `video_ui.main` + BusTracer mock + `_window=None`
-3. `_make_video_module(broker)` — reload `channel_modules/video/main.py` + `VideoModule()` istanziata
-4. `_handle_*` chiamati direttamente su VideoModule; spy BusClient verifica topic pubblicati
-5. `_conn_state` di video_ui testato come state machine (WAITING_BT → HANDSHAKE → STREAMING → INTERRUPTED)
-6. `publish_frames=False` testato esplicitamente per verificare soppressione video.frame
-7. Wire format `_media_with_ts_bytes()` helper per costruire payload MediaWithTimestamp senza dipendenze proto
-
-### Integration Tests — Pattern bluetooth_flow (Fase 2 §6)
-1. D-Bus / BlueZ / GLib / `gi` stubbed in `sys.modules` **pre-import** — nessun hardware BT in CI
-2. `_load_bt(broker)` — reload `modules/bluetooth/main.py` + patch `sys.modules` per submoduli BT
-3. `BluezAdapter`, `DiscoverySession`, `PairingAgent`, `paired_devices` — tutti MagicMock istanziati in `_load_bt`
-4. `bt._adapter` pre-iniettato con mock_adapter per evitare "Adapter not ready" nei test di layer 2
-5. Callback interni (`_on_device_found`, `_on_pairing_completed`, etc.) chiamati direttamente — spy verifica topic bus
-6. Autoconnect testato: `_autoconnect_stop` verificato direttamente, loop inline con `_autoconnect_stop.set()`
-7. Config callbacks (`_on_config_loaded` / `_on_config_changed`) chiamati direttamente con `_apply_config` patchato
-
-### Integration Tests — Pattern boot_shutdown (Fase 2 §7)
-1. `FakeModule(broker, name, priority)` — mini-classe che implementa il boot protocol sul bus ZMQ reale
-2. `BootOrchestrator(broker)` — raccoglie `system.module_ready`, invia `system.start`, raccoglie `system.ready`
-3. Handler `_on_readytostart` / `_on_system_start` / `_on_system_stop` implementati in FakeModule
-4. `_load_cm(broker)` — reload channel_manager.main con indirizzi in-process per test E2E con modulo reale
-5. Test di timing: late subscriber non riceve readytostart (ZMQ no replay)
-6. Moduli con stessa priority rispondono entrambi a `system.start {priority}`
-7. Boot sequenziale verificato: start p1 → wait ready p1 → start p2 → wait ready p2 (in ordine)
-
-### Helper riutilizzabili (unit test)
+### boot_shutdown — FakeModule pattern
 ```python
-def _published_topics(mock_bus) -> list[str]:
-    return [c.args[0] for c in mock_bus.publish.call_args_list]
-
-def _published_payload(mock_bus, topic: str) -> dict:
-    for c in mock_bus.publish.call_args_list:
-        if c.args[0] == topic:
-            return c.args[1]
-    return {}
+class FakeModule:
+    """Modulo fittizio che risponde al bus esattamente come un modulo v2 reale.
+    Usato in test_boot_shutdown per simulare 3..N moduli nell'orchestrazione."""
+    def on_start(self): self.bus.publish("system.module_ready", {"module": self.name})
+    def on_stop(self): self.bus.publish("system.module_stopped", {"module": self.name})
 ```
 
 ---
 
-## Stato Roadmap per Fase
+## 2026-05-13 — E2E Helpers Completati
 
-| Fase | Stato | Note |
-|---|---|---|
-| **0 — Infrastruttura** | ✅ Completa | |
-| **1 — Unit Test §1.1 Shared** | ✅ Completa | Include test_bus_trace.py |
-| **1 — Unit Test §1.2 Base** | ✅ Completa | |
-| **1 — Unit Test §1.3 Channel Modules** | ✅ Completa | |
-| **1 — Unit Test §1.4 Standalone** | ✅ Completa | Include test_zmq_trace.py |
-| **2 — Integration Tests** | ✅ **COMPLETATA** (7/7) | broker ✅ + lifecycle ✅ + audio ✅ + config ✅ + video ✅ + bluetooth ✅ + boot_shutdown ✅ |
-| **3 — E2E Smoke** | ❌ **PROSSIMO** | `test_bt_connect_to_handshake.py` |
-| **4–5** | ❌ Non iniziata | |
+**Cosa cambiato:**
+Creati i tre helper E2E in `v2/tests/e2e/helpers/`:
+- `phone_mock.py` — `PhoneMock` (RFCOMM 4-step handshake responder in daemon thread) + `TcpPhoneClient` (AA TCP client con `send_frame`, `recv_frame`, `recv_frames_until`)
+- `frame_sequences.py` — 8 classi builder per frame AA: `VersionSequence`, `AuthSequence`, `ServiceDiscoverySeq`, `ChannelOpenSeq`, `PingSequence`, `MediaSequence`, `ShutdownSequence`, `FullHandshakeSequence`
+- `stack_launcher.py` — `StackLauncher` (orchestratore in-process con stub hardware) + `e2e_stack()` context manager
 
----
+**Perché:**
+Prerequisito architetturale della Fase 3 E2E. Senza questi helper ogni test E2E richiederebbe hardware fisico e socket reali; con questi, i test E2E smoke girano in CI in < 30s.
 
-## Prossimo Passo Immediato
+**Status:** Completato ✅
 
-**Fase 3 — E2E Smoke: `test_bt_connect_to_handshake.py`**
+**Prossimi 3 passi:**
+1. Creare `v2/tests/e2e/smoke/test_bt_connect_to_handshake.py` usando `PhoneMock` + `e2e_stack()` — **IMMEDIATO**
+2. Creare `v2/tests/e2e/smoke/test_channel_manager_boot.py`
+3. Creare `v2/tests/e2e/smoke/test_audio_path_smoke.py`
 
-Scope: test E2E smoke che simula il flow completo BT connect → RFCOMM handshake → AA session su bus in-process.
-Marker `@pytest.mark.e2e_smoke`, target < 30s.
-
-Cosa testare:
-- BT device connesso → `bt.device_connected` pubblicato
-- rfcomm_handshake riceve evento e avvia handshake RFCOMM
-- Handshake OK → `rfcomm.handshake_complete` → oaa_control_channel si avvia
-- AA session attiva → `aa.session.active` pubblicato
-
-**File da leggere prima**: `v2/modules/rfcomm_handshake/main.py`, `v2/modules/oaa_control_channel/main.py`
-
-**Prerequisito**: helper `e2e/helpers/` (phone_mock, frame_sequences, stack_launcher) da creare prima.
+| Verificare vision alignment | `grep -A 100 "# Project Vision: NemoHeadUnit-Wireless" docs/project-vision.md` |
 
 ---
 
-## Decisioni Tecniche Prese
+## Contesto per Sessione Successiva
 
-| Decisione | Rationale |
-|---|---|
-| Stub loguru+zmq pre-import | side-effect all'import |
-| `patch("atexit.register")` durante reload | evita doppio registrazione handler |
-| decode_aa_frame patchato in NON-AV dispatch | NON-AV usa raw bytes + decode |
-| subprocess.Popen patchato in _start_stream | evita spawn reale di pacat |
-| threading.Thread patchato in _start_stream | evita thread reali nei test unit |
-| _send_queue manipolato direttamente | SimpleQueue accessibile senza mock |
-| Integration: BusClient monkey-patch indirizzi + BusTracer mock | no modifica al codice sorgente, no thread trace spurii |
-| Integration: sleep(0.1) dopo subscribe | ZMQ subscription propagation non sincrona |
-| Integration: tolleranza 45/50 su burst test | CI lenta può droppar pochi msg |
-| Integration: importlib.reload per ogni test | garantisce bus ZMQ fresco con socket in-process |
-| Integration: Launcher mockato in Fase 2 | nessun subprocess reale — test layer 2 puro |
-| BusTracer mock in TUTTI i test unit | BusTracer lancia thread drain; mock evita thread spurii e socket ZMQ nei test unit |
-| Integration audio_manager: subprocess.run patchato | wpctl/pactl non disponibili in CI |
-| Integration audio_manager: cfg=MagicMock() | isola ConfigClient; config_manager non avviato in layer 2 |
-| Integration config_manager: CONFIG_DIR=tmp_path | ogni test ha filesystem isolato; no side-effect tra test |
-| Integration config_manager: campi strutturati stored as-is | ConfigFieldList/Message saltano validate_value(); testato esplicitamente |
-| Integration video_pipeline: PyQt6/GStreamer/gi stubbed in sys.modules | nessun display/hardware in CI |
-| Integration video_pipeline: _conn_state testato come state machine | verifica coerenza transizioni senza finestra Qt |
-| Integration video_pipeline: _media_with_ts_bytes() helper | costruisce wire format senza importare protobuf reale |
-| Integration bluetooth_flow: D-Bus/BlueZ/GLib/gi stubbed in sys.modules | nessun hardware BT in CI |
-| Integration bluetooth_flow: bt._adapter pre-iniettato | evita "Adapter not ready" nei test handler layer 2 |
-| Integration bluetooth_flow: autoconnect loop inline con stop event set | testa logica loop senza thread reali |
-| Integration bluetooth_flow: callback _on_* chiamati direttamente | verifica pubblicazione topic senza GLib event loop |
-| Integration boot_shutdown: FakeModule + BootOrchestrator come actor sul bus reale | nessun mock del bus — verifica comportamento wire reale |
-| Integration boot_shutdown: test late subscriber | verifica che ZMQ non faccia replay dei messaggi |
-| Integration boot_shutdown: stessa priority = entrambi rispondono | comportamento atteso da moduli UI paralleli |
+### Come usare gli E2E helpers
 
----
+```python
+# test_bt_connect_to_handshake.py — struttura di base
+import pytest
+from tests.e2e.helpers.phone_mock import PhoneMock, TcpPhoneClient
+from tests.e2e.helpers.frame_sequences import VersionSequence, ServiceDiscoverySeq, ChannelOpenSeq
+from tests.e2e.helpers.stack_launcher import e2e_stack
 
-## 2026-05-13 — Fase 2 §7: test_boot_shutdown integration
+@pytest.mark.e2e_smoke
+def test_bt_connect_triggers_aa_handshake(in_process_broker):
+    with e2e_stack(in_process_broker, modules=["rfcomm_handshake", "tcp_server", "oaa_control_channel"]) as stack:
+        # 1. Simula RFCOMM connect
+        import socket
+        hu_sock, phone_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        mock = PhoneMock(phone_sock).start()
+        stack.publish("bluetooth.rfcomm.connected", {"fd": hu_sock.fileno()})
 
-**What changed:**
-`v2/tests/integration/test_boot_shutdown.py` creato con ~65 test in 6 gruppi:
-1. Single module boot protocol (readytostart, system.start correct/wrong priority, system.stop, no early module_ready)
-2. Multi-module boot sequential priorities (all respond to readytostart, sequential start per priority, all receive stop, 5 modules, same-priority both respond)
-3. channel_manager boot reale (announce priority 2, system.ready on start, ignore wrong priority, stop cleans session, stop no session no crash)
-4. Full boot sequence (2 moduli sequential, boot+stop, ordered by priority, readytostart before modules=no reply, late subscriber misses)
-5. Shutdown protocol (stop before start, stop after partial boot, double stop no crash, stop without readytostart, stopped flag)
-6. Boot E2E con channel_manager reale + FakeModules (cm partecipa al boot, stop cleanup session, priority 2 announce, full e2e boot+stop)
+        # 2. Attendi handshake completato
+        assert mock.wait_done(timeout=5.0)
+        assert mock.completed
 
-**Why:**
-Fase 2 Integration Test §7 — ultimo file integration. Verifica il boot protocol dell'intero sistema:
-orchestrazione multi-modulo, sequenza per priority level, shutdown ordinato, edge cases timing ZMQ,
-con bus ZMQ reale in-process e channel_manager reale come actor principale.
+        # 3. Verifica AA TCP attivo
+        client = TcpPhoneClient.connect("127.0.0.1", 5288, timeout=5.0)
+        client.send_frame(0, VersionSequence.request_frame())
+        frames = client.recv_frames_until(lambda f: f[2] == MSG_VERSION_RESPONSE, timeout=3.0)
+        assert frames
+        client.close()
+```
 
-**Status:** Completato — commit `2fe07ef` — **FASE 2 COMPLETATA** ✅
+### Comandi utili
 
-**Next 1-3 steps:**
-1. Creare `e2e/helpers/` (phone_mock, frame_sequences, stack_launcher)
-2. `test_bt_connect_to_handshake.py` — Fase 3 E2E Smoke §1
-3. Coverage report — verificare soglia 80% su tutti i moduli prima di Fase 3
+```bash
+# Eseguire solo gli smoke tests
+pytest -m e2e_smoke -v
 
----
+# Verificare che gli helpers siano importabili
+python -c "from v2.tests.e2e.helpers.phone_mock import PhoneMock, TcpPhoneClient; print('OK')"
 
-## 2026-05-13 — Fase 2 §6: test_bluetooth_flow integration
-
-**What changed:**
-`v2/tests/integration/test_bluetooth_flow.py` creato con ~60 test in 8 gruppi.
-
-**Status:** Completato — commit `dbbc2b4`
-
----
-
-## 2026-05-13 — Fase 2 §5: test_video_pipeline integration
-
-**What changed:**
-`v2/tests/integration/test_video_pipeline.py` creato con ~60 test in 10 gruppi.
-
-**Status:** Completato — commit `2d8d861`
-
----
-
-## 2026-05-13 — Fase 2 §4: test_config_manager integration
-
-**What changed:**
-`v2/tests/integration/test_config_manager.py` creato con ~50 test in 8 gruppi.
-
-**Status:** Completato — commit `9f08aa6`
-
----
-
-## 2026-05-13 — Fase 2 §3: test_audio_manager integration
-
-**What changed:**
-`v2/tests/integration/test_audio_manager.py` creato con ~47 test in 6 gruppi.
-
-**Status:** Completato — commit `7e1d9be`
-
----
-
-## 2026-05-13 — Fix test_bus_client + Nuovi test trace
-
-**What changed:**
-`test_bus_client.py` aggiornato, `test_bus_trace.py` e `test_zmq_trace.py` creati.
-
-**Status:** Completato — commit `cdc9e6f`
-
----
-
-*Handoff Version: 4.7*  
-*Aggiornato: 2026-05-13*  
-*Commit head: `2fe07ef`*  
-*Test totali scritti: ~2495*
+# Run unit + integration (come in CI)
+pytest -m "unit or integration" --cov=v2 --cov-fail-under=80
+```
