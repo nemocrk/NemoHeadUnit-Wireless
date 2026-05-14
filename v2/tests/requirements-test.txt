@@ -13,6 +13,9 @@
 # Test runner
 pytest>=8.0
 
+# Test timeout
+pytest-timeout>=2.4.0
+
 # Coverage
 pytest-cov>=5.0
 

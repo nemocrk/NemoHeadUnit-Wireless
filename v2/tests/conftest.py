@@ -40,7 +40,7 @@ import zmq
 _HERE = Path(__file__).parent          # v2/tests/
 _V2   = _HERE.parent                   # v2/
 
-for _p in (_V2, _V2 / "modules"):
+for _p in (_V2 / "modules", _V2 / "protos", _V2 / "shared", _V2 / "modules" / "channel_modules", _V2 / "tests"):
     _s = str(_p)
     if _s not in sys.path:
         sys.path.insert(0, _s)
