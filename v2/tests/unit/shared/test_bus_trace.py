@@ -51,23 +51,11 @@ from __future__ import annotations
 
 import json
 import queue
-import sys
 import threading
 import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# sys.path bootstrap
-# ---------------------------------------------------------------------------
-_V2 = Path(__file__).parents[3]
-_SHARED = _V2 / "shared"
-for _p in (_V2, _SHARED):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
 
 # ---------------------------------------------------------------------------
 # Helpers

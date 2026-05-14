@@ -50,20 +50,9 @@ Coverage targets:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# sys.path bootstrap
-# ---------------------------------------------------------------------------
-_V2    = Path(__file__).parents[3]
-_SHARED = _V2 / "shared"
-for _p in (_V2, _SHARED):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from shared.config_client import ConfigClient          # noqa: E402
 from shared.config_schema import field_int, field_enum  # noqa: E402
@@ -181,7 +170,7 @@ class TestGet:
 
     def test_schema_with_enum_field(self):
         client, bus = _make_client()
-        schema = {"mode": field_enum(default="A", options=["A", "B", "C"])}
+        schema = {"mode": field_enum(default="A", choices=["A", "B", "C"])}
         client.get(schema=schema)
         payloads = _published(bus, "config.get")
         assert "mode" in payloads[0]["schema"]

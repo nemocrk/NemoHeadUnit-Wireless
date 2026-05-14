@@ -41,24 +41,13 @@ Coverage targets:
 from __future__ import annotations
 
 import json
-import sys
 import threading
 import time
 import uuid
-from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 import zmq
-
-# ---------------------------------------------------------------------------
-# sys.path bootstrap
-# ---------------------------------------------------------------------------
-_V2    = Path(__file__).parents[3]
-_SHARED = _V2 / "shared"
-for _p in (_V2, _SHARED):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from shared.bus_client import BusClient, BROKER_PUB_ADDR, BROKER_SUB_ADDR  # noqa: E402
 

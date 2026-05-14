@@ -32,19 +32,8 @@ Test strategy:
 from __future__ import annotations
 
 import struct
-import sys
-from pathlib import Path
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# sys.path bootstrap
-# ---------------------------------------------------------------------------
-_V2     = Path(__file__).parents[3]
-_PROTOS = _V2 / "protos"
-for _p in (_V2, _PROTOS):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 # ---------------------------------------------------------------------------
 # Module under test
@@ -86,11 +75,9 @@ def _make_sdr_hex(channel_id: int = 4) -> str:
     and return its hex string, suitable for channels_from_sdr_bytes().
     """
     from oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
-    from oaa.control.ServiceDiscoveryResponseMessage_pb2 import ChannelDescriptor
-    from oaa.av.AVChannelDescriptorMessage_pb2 import AVChannelDescriptor
+    from oaa.control.ChannelDescriptorData_pb2 import ChannelDescriptor
     from oaa.av.AVStreamTypeEnum_pb2 import AVStreamType
     from oaa.audio.AudioTypeEnum_pb2 import AudioType
-    from oaa.av.AudioConfigMessage_pb2 import AudioConfig
     from oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType
 
     sdr = ServiceDiscoveryResponse()
@@ -386,7 +373,7 @@ class TestSchemaFromProtoMessage:
     def test_int_field_present(self):
         schema = schema_from_proto_message(AVMediaAckIndication.DESCRIPTOR)
         assert "session_id" in schema
-        assert "ack_count"  in schema
+        assert "ack_count" in schema
 
     @pytest.mark.unit
     def test_setup_response_max_unacked_is_int(self):
