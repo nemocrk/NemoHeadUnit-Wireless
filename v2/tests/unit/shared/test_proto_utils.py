@@ -76,24 +76,22 @@ def _make_sdr_hex(channel_id: int = 4) -> str:
     """
     from oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
     from oaa.control.ChannelDescriptorData_pb2 import ChannelDescriptor
-    from oaa.av.AVStreamTypeEnum_pb2 import AVStreamType
     from oaa.audio.AudioTypeEnum_pb2 import AudioType
     from oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType
 
     sdr = ServiceDiscoveryResponse()
-    sdr.make_id = "NemoTest"
-    sdr.model   = "TestModel"
+    sdr.headunit_manufacturer = "NemoTest"
+    sdr.headunit_model   = "TestModel"
 
     ch = sdr.channels.add()
     ch.channel_id = channel_id
     av = ch.av_channel
-    av.stream_type = AVStreamType.AUDIO
+    av.codec = MediaCodecType.MEDIA_CODEC_AUDIO_PCM
     av.audio_type  = AudioType.MEDIA
     ac = av.audio_configs.add()
     ac.sample_rate   = 48000
     ac.bit_depth     = 16
     ac.channel_count = 2
-    ac.codec         = MediaCodecType.MEDIA_CODEC_AUDIO_PCM
 
     return sdr.SerializeToString().hex()
 

@@ -259,10 +259,14 @@ class TestPair:
         objects = _objects_with_device(address)
         agent, mock_adapter, mock_dbus = _fresh_agent(objects=objects)
         mock_device_iface = MagicMock()
-        mock_dbus.Interface.return_value = mock_device_iface
+        mock_manager_iface = MagicMock()
+        mock_manager_iface.GetManagedObjects.return_value = objects
+        mock_dbus.Interface.side_effect = [mock_manager_iface, mock_device_iface]
         with patch.dict(sys.modules, {"dbus": mock_dbus}):
             agent.pair(address)
         mock_device_iface.Pair.assert_called_once()
+        assert "reply_handler" in mock_device_iface.Pair.call_args.kwargs
+        assert "error_handler" in mock_device_iface.Pair.call_args.kwargs
 
     @pytest.mark.unit
     def test_pair_sets_pending_address(self):

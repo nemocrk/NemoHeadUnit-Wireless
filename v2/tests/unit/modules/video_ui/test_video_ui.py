@@ -53,10 +53,10 @@ def _install_qt_stubs():
     # --- gi / GStreamer ---
     gi_mod = types.ModuleType("gi")
     gi_mod.require_version = MagicMock()
-    sys.modules.setdefault("gi", gi_mod)
+    sys.modules["gi"] = gi_mod
 
     gi_repo = types.ModuleType("gi.repository")
-    sys.modules.setdefault("gi.repository", gi_repo)
+    sys.modules["gi.repository"] = gi_repo
 
     mock_gst = MagicMock()
     mock_gst.init = MagicMock()
@@ -71,8 +71,8 @@ def _install_qt_stubs():
     mock_gst.MapFlags.READ = 1
     gi_repo.Gst  = mock_gst
     gi_repo.GLib = MagicMock()
-    sys.modules.setdefault("gi.repository.Gst",  mock_gst)
-    sys.modules.setdefault("gi.repository.GLib", MagicMock())
+    sys.modules["gi.repository.Gst"] = mock_gst
+    sys.modules["gi.repository.GLib"] = MagicMock()
 
     # --- PyQt6.QtCore ---
     qtcore = types.ModuleType("PyQt6.QtCore")
@@ -125,6 +125,7 @@ def vu():
     Reload video_ui/main.py with bus/log mocked.
     Returns (mod, mock_bus).
     """
+    _install_qt_stubs()
     mock_bus = MagicMock()
     mock_log = MagicMock()
 

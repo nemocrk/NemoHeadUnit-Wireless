@@ -366,7 +366,7 @@ class TestBootHandlers:
         mock_bus.publish.reset_mock()
         mod.on_system_readytostart()
         payload = _payload(mock_bus, "system.module_ready")
-        assert payload == {"name": "bluetooth", "priority": 1}
+        assert payload == {"name": "bluetooth_manager", "priority": 1}
 
     @pytest.mark.unit
     def test_system_start_wrong_priority_ignored(self, bt):

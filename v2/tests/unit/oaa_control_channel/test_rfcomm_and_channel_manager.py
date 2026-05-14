@@ -397,8 +397,8 @@ class TestChannelManagerSession:
         session = mod.ChannelManagerSession()
 
         with patch.object(session._launcher, "start_all", return_value={"video_ch1"}) as mock_start:
-            with patch("modules.channel_manager.main.resolve_module_type", return_value="video"), \
-                 patch("modules.channel_manager.main.module_name",          return_value="video_ch1"):
+            with patch("channel_manager.main.resolve_module_type", return_value="video"), \
+                 patch("channel_manager.main.module_name",          return_value="video_ch1"):
                 session.start("aabbcc", channels)
 
         # start_all must be called with only channel_id=1 (0 was dropped)
@@ -413,16 +413,14 @@ class TestChannelManagerSession:
 
         # Seed expected set directly
         session._expected = {"video_ch1", "audio_ch4"}
-
-        session.on_module_ready("video_ch1")
-        assert "video_ch1" in session._ready
-        assert not session._all_ready.is_set()
-
-        # Seed all_started_channels so the next on_module_ready can resolve
         session._all_started_channels = [
             {"module_name": "video_ch1", "module_type": "video", "channel_id": 1},
             {"module_name": "audio_ch4", "module_type": "audio", "channel_id": 4},
         ]
+
+        session.on_module_ready("video_ch1")
+        assert "video_ch1" in session._ready
+        assert not session._all_ready.is_set()
         session.on_module_ready("audio_ch4")
         assert session._all_ready.is_set()
 

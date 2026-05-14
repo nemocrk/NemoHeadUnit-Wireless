@@ -215,7 +215,6 @@ class TestInitMethod:
 
     @pytest.mark.unit
     def test_returns_true_on_success(self, ba):
-        mock_dbus, *_ = _make_dbus_mocks()[:1] + list(_make_dbus_mocks()[1:])
         mock_dbus = _make_dbus_mocks()[0]
         with patch.dict(sys.modules, {"dbus": mock_dbus}):
             result = ba.init()
@@ -350,8 +349,8 @@ class TestRegisterProfiles:
         adapter._profile_mgr = MagicMock()
         adapter._profile_mgr.RegisterProfile.side_effect = Exception("unexpected error")
         with patch.dict(sys.modules, {"dbus": mock_dbus}):
-            with pytest.raises(Exception, match="unexpected error"):
-                adapter.register_profiles()
+            result = adapter.register_profiles()
+        assert result is False
 
 
 # ===========================================================================

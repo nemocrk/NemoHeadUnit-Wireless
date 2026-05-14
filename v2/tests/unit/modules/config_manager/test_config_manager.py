@@ -85,6 +85,9 @@ def cm():
       - _schemas is empty
       - bus mock call history cleared
     """
+    with patch("shared.bus_client.BusClient", _mock_bus_class), \
+         patch("shared.logger.get_logger", return_value=MagicMock()):
+        importlib.reload(_cm_mod)
     _cm_mod._schemas.clear()
     _mock_bus_instance.reset_mock()
     yield _cm_mod, _mock_bus_instance
@@ -106,19 +109,17 @@ def _published_payload(mock_bus, topic: str) -> dict:
 
 
 def _make_scalar_field(type_: str = "string", default=None):
-    """Return a ConfigFieldSchema-like mock with .type and .default."""
+    """Return a real ConfigFieldSchema so isinstance checks exercise production code."""
     from shared.config_schema import ConfigFieldSchema
-    f = MagicMock(spec=ConfigFieldSchema)
-    f.type    = type_
-    f.default = default
-    return f
+    return ConfigFieldSchema(type=type_, default=default)
 
 
 def _make_list_field(default=None):
-    from shared.config_schema import ConfigFieldList
-    f = MagicMock(spec=ConfigFieldList)
-    f.default = default or []
-    return f
+    from shared.config_schema import ConfigFieldList, ConfigFieldSchema
+    return ConfigFieldList(
+        item_schema=ConfigFieldSchema(type="string", default=""),
+        default=default or [],
+    )
 
 
 # ===========================================================================
@@ -137,7 +138,7 @@ class TestConfigPath:
     def test_ends_with_module_yaml(self, cm):
         mod, _ = cm
         result = mod._config_path("bluetooth")
-        assert result.name == "bluetooth_manager.yaml"
+        assert result.name == "bluetooth.yaml"
 
     @pytest.mark.unit
     def test_parent_is_config_dir(self, cm):
@@ -155,8 +156,7 @@ class TestLoadConfig:
     @pytest.mark.unit
     def test_returns_empty_when_file_missing(self, cm):
         mod, _ = cm
-        with patch.object(mod.CONFIG_DIR / "nomodule.yaml", "exists", return_value=False, create=True), \
-             patch("pathlib.Path.exists", return_value=False):
+        with patch("pathlib.Path.exists", return_value=False):
             result = mod._load_config("nomodule")
         assert result == {}
 
@@ -207,7 +207,7 @@ class TestSaveConfig:
     def test_returns_true_on_success(self, cm):
         mod, _ = cm
         with patch("pathlib.Path.mkdir"), \
-             patch("builtins.open", mock_open()), \
+             patch("pathlib.Path.open", mock_open()), \
              patch("yaml.safe_dump"):
             result = mod._save_config("bluetooth", {"pin": "1234"})
         assert result is True
@@ -216,7 +216,7 @@ class TestSaveConfig:
     def test_creates_config_dir(self, cm):
         mod, _ = cm
         with patch("pathlib.Path.mkdir") as mock_mkdir, \
-             patch("builtins.open", mock_open()), \
+             patch("pathlib.Path.open", mock_open()), \
              patch("yaml.safe_dump"):
             mod._save_config("bluetooth", {})
         mock_mkdir.assert_called()
@@ -226,7 +226,7 @@ class TestSaveConfig:
         mod, _ = cm
         data = {"pin": "1234"}
         with patch("pathlib.Path.mkdir"), \
-             patch("builtins.open", mock_open()), \
+             patch("pathlib.Path.open", mock_open()), \
              patch("yaml.safe_dump") as mock_dump:
             mod._save_config("bluetooth", data)
         assert mock_dump.called
@@ -235,7 +235,7 @@ class TestSaveConfig:
     def test_returns_false_on_exception(self, cm):
         mod, _ = cm
         with patch("pathlib.Path.mkdir"), \
-             patch("builtins.open", side_effect=OSError("disk full")):
+             patch("pathlib.Path.open", side_effect=OSError("disk full")):
             result = mod._save_config("bluetooth", {})
         assert result is False
 
@@ -446,7 +446,7 @@ class TestOnConfigGet:
         mod, mock_bus = cm
         raw_schema = {"pin": {"type": "string", "default": "0000"}}
         with patch.object(mod, "_load_config", return_value={"pin": "1234"}), \
-             patch("config_manager.main.schema_from_dict", return_value={"pin": MagicMock()}):
+             patch("config_manager.main.schema_from_dict", return_value={"pin": _make_scalar_field(default="0000")}):
             mod.on_config_get("config.get", {"module": "bt", "schema": raw_schema})
         assert "bt" in mod._schemas
 
@@ -536,7 +536,7 @@ class TestOnConfigSet:
     def test_valid_value_coerced_by_schema(self, cm):
         mod, mock_bus = cm
         from shared.config_schema import ConfigFieldSchema
-        field = MagicMock(spec=ConfigFieldSchema)
+        field = ConfigFieldSchema(type="int", default=0, min=0, max=100)
         mod._schemas["bt"] = {"volume": field}
         with patch("config_manager.main.validate_value", return_value=80) as mock_validate, \
              patch.object(mod, "_load_config", return_value={}), \
@@ -550,7 +550,7 @@ class TestOnConfigSet:
     def test_invalid_value_publishes_config_error(self, cm):
         mod, mock_bus = cm
         from shared.config_schema import ConfigFieldSchema
-        field = MagicMock(spec=ConfigFieldSchema)
+        field = ConfigFieldSchema(type="int", default=0, min=0, max=100)
         mod._schemas["bt"] = {"volume": field}
         with patch("config_manager.main.validate_value", side_effect=ValueError("out of range")), \
              patch.object(mod, "_load_config", return_value={}), \
@@ -564,7 +564,7 @@ class TestOnConfigSet:
     def test_config_error_payload_has_reason(self, cm):
         mod, mock_bus = cm
         from shared.config_schema import ConfigFieldSchema
-        field = MagicMock(spec=ConfigFieldSchema)
+        field = ConfigFieldSchema(type="int", default=0, min=0, max=100)
         mod._schemas["bt"] = {"volume": field}
         with patch("config_manager.main.validate_value", side_effect=ValueError("out of range")), \
              patch.object(mod, "_load_config", return_value={}):
@@ -577,8 +577,8 @@ class TestOnConfigSet:
     def test_structured_field_saved_without_validation(self, cm):
         mod, mock_bus = cm
         # A non-ConfigFieldSchema field (e.g. ConfigFieldList)
-        from shared.config_schema import ConfigFieldList
-        field = MagicMock(spec=ConfigFieldList)
+        from shared.config_schema import ConfigFieldList, ConfigFieldSchema
+        field = ConfigFieldList(item_schema=ConfigFieldSchema(type="int", default=0))
         mod._schemas["svc"] = {"channels": field}
         with patch("config_manager.main.validate_value") as mock_validate, \
              patch.object(mod, "_load_config", return_value={}), \

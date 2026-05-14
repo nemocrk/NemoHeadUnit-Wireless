@@ -29,6 +29,11 @@ import struct
 import pytest
 from unittest.mock import MagicMock, patch, call
 
+
+class _BulkAssembler:
+    def feed(self, channel_id, flags, payload, total_size=0):
+        return channel_id, flags, payload, total_size
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -442,7 +447,7 @@ class TestFrameSend:
     def test_frame_send_calls_relay_send_raw(self, ts):
         mod, mock_bus, _, _, _, mock_relay_inst, *_ = ts
         mod._relay = mock_relay_inst
-        with patch("tcp_server.frame_codec.encode", return_value=[b"FRAME"]) as mock_encode:
+        with patch.object(mod, "encode", return_value=[b"FRAME"]) as mock_encode:
             mod.on_frame_send("aa.frame.send", {
                 "channel_id": 0, "message_id": 0x0001,
                 "payload_hex": "", "encrypted": False
@@ -543,9 +548,7 @@ class TestOnRawFrame:
     @pytest.mark.unit
     def test_bulk_frame_published_on_channel_topic(self, ts):
         mod, mock_bus, *_ = ts
-        from tcp_server.frame_codec import FrameAssembler
-        a = FrameAssembler()
-        mod._assembler = a
+        mod._assembler = _BulkAssembler()
         payload = self._msg_payload(0x0001, b"body")
         mock_bus.publish.reset_mock()
         mod._on_raw_frame(0, 0x03, payload, 0)  # BULK, no enc
@@ -555,9 +558,7 @@ class TestOnRawFrame:
     @pytest.mark.unit
     def test_frame_strips_message_id(self, ts):
         mod, mock_bus, *_ = ts
-        from tcp_server.frame_codec import FrameAssembler
-        a = FrameAssembler()
-        mod._assembler = a
+        mod._assembler = _BulkAssembler()
         payload = self._msg_payload(0xABCD, b"proto_body")
         mock_bus.publish.reset_mock()
         mod._on_raw_frame(0, 0x03, payload, 0)
@@ -570,9 +571,7 @@ class TestOnRawFrame:
     @pytest.mark.unit
     def test_too_short_payload_dropped(self, ts):
         mod, mock_bus, *_ = ts
-        from tcp_server.frame_codec import FrameAssembler
-        a = FrameAssembler()
-        mod._assembler = a
+        mod._assembler = _BulkAssembler()
         mock_bus.publish.reset_mock()
         mod._on_raw_frame(0, 0x03, b"\x00", 0)  # only 1 byte
         topics = [c.args[0] for c in mock_bus.publish.call_args_list]
@@ -581,9 +580,7 @@ class TestOnRawFrame:
     @pytest.mark.unit
     def test_encrypted_frame_decrypted_when_cryptor_active(self, ts):
         mod, mock_bus, _, _, _, _, _, mock_cryptor_inst, *_ = ts
-        from tcp_server.frame_codec import FrameAssembler
-        a = FrameAssembler()
-        mod._assembler = a
+        mod._assembler = _BulkAssembler()
         mock_cryptor_inst.is_active.return_value = True
         plain_payload = self._msg_payload(0x0007, b"decrypted")
         mock_cryptor_inst.decrypt.return_value = plain_payload
@@ -595,9 +592,7 @@ class TestOnRawFrame:
     @pytest.mark.unit
     def test_unencrypted_frame_no_decrypt_call(self, ts):
         mod, mock_bus, _, _, _, _, _, mock_cryptor_inst, *_ = ts
-        from tcp_server.frame_codec import FrameAssembler
-        a = FrameAssembler()
-        mod._assembler = a
+        mod._assembler = _BulkAssembler()
         mod._cryptor = mock_cryptor_inst
         payload = self._msg_payload(0x0001, b"hello")
         mod._on_raw_frame(0, 0x03, payload, 0)  # no enc bit
@@ -606,9 +601,7 @@ class TestOnRawFrame:
     @pytest.mark.unit
     def test_aa_frame_received_always_published(self, ts):
         mod, mock_bus, *_ = ts
-        from tcp_server.frame_codec import FrameAssembler
-        a = FrameAssembler()
-        mod._assembler = a
+        mod._assembler = _BulkAssembler()
         payload = self._msg_payload(0x0002, b"diag")
         mock_bus.publish.reset_mock()
         mod._on_raw_frame(0, 0x03, payload, 0)
@@ -635,7 +628,7 @@ class TestSessionRestart:
     def test_restart_sends_shutdown_request_via_relay(self, ts):
         mod, mock_bus, _, _, _, mock_relay_inst, *_ = ts
         mod._relay = mock_relay_inst
-        with patch("tcp_server.frame_codec.encode", return_value=[b"SHUTDOWN_REQ"]) as mock_enc:
+        with patch.object(mod, "encode", return_value=[b"SHUTDOWN_REQ"]) as mock_enc:
             # Make shutdown ack arrive quickly
             mod._shutdown_ack_event.set()
             mod.on_aa_session_restart("t", {})
@@ -646,7 +639,7 @@ class TestSessionRestart:
         mod, mock_bus, _, _, _, mock_relay_inst, *_ = ts
         mod._relay = mock_relay_inst
         mod._SHUTDOWN_ACK_TIMEOUT = 0.05
-        with patch("tcp_server.frame_codec.encode", return_value=[b"S"]):
+        with patch.object(mod, "encode", return_value=[b"S"]):
             mock_bus.publish.reset_mock()
             mod.on_aa_session_restart("t", {})
         topics = [c.args[0] for c in mock_bus.publish.call_args_list]

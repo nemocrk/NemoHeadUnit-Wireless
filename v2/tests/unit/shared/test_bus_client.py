@@ -390,9 +390,11 @@ class TestHandleReceivedMessage:
 
     def test_callback_exception_does_not_propagate(self):
         client, _, _ = _make_unit_client()
+        client.log.exception = MagicMock()
         client.subscribe("t", lambda t, p: 1 / 0)
         frames = self._wire_frame("t", {})
         client._handle_received_message(frames)  # must not raise
+        client.log.exception.assert_called_once()
 
     def test_seq_gap_detected(self):
         """If sender jumps from seq=1 to seq=5, seq_gap is tracked."""
@@ -633,10 +635,17 @@ class TestBusClientIntegration:
         N = 30
         errors = []
 
+        senders = {
+            0: _make_integration_client(pub_addr, sub_addr, "conc_sender_0"),
+            N // 2: _make_integration_client(pub_addr, sub_addr, "conc_sender_15"),
+        }
+        time.sleep(0.25)
+
         def _publish_batch(start):
+            local_sender = senders[start]
             try:
                 for i in range(start, start + N // 2):
-                    sender.publish("concurrent", {"i": i})
+                    local_sender.publish("concurrent", {"i": i})
             except Exception as e:
                 errors.append(e)
 
@@ -650,6 +659,8 @@ class TestBusClientIntegration:
 
         receiver.stop()
         t.join(timeout=3)
+        for local_sender in senders.values():
+            local_sender.stop()
         sender.stop()
 
     def test_topic_prefix_filter(self, _broker):
