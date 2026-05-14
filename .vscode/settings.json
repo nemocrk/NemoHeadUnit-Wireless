@@ -2,13 +2,14 @@
     "python-envs.defaultEnvManager": "ms-python.python:conda",
     "python-envs.defaultPackageManager": "ms-python.python:conda",
     "python.testing.pytestArgs": [
-        "tests"
+        "v2/tests"
     ],
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true,
     "git.autoStash": true,
     "git.postCommitCommand": "sync",
     "python.analysis.extraPaths": [
-        "./v2/protos"
+        "./v2/protos",
+        "./v2/modules"
     ]
 }

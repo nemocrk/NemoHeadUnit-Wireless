@@ -1,5 +1,6 @@
 {
     "configurations": [
+
         {
             "name": "Standard Version",
             "type": "debugpy",
@@ -19,6 +20,16 @@
             "program": "${workspaceFolder}/v2/shared/proto_explorer.py",
             "args": [
                 "${input:pythonClass}"
+            ]
+        },
+        {
+            "name": "Collect Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "${workspaceFolder}/v2/tests/",
+                "--collect-only"
             ]
         }
     ],
