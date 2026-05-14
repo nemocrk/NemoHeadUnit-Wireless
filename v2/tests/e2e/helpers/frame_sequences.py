@@ -163,6 +163,10 @@ class AuthSequence:
         return _encode(CH_CONTROL, MSG_AUTH_COMPLETE, b"")
 
     @staticmethod
+    def response_frame() -> FrameBytes:
+        return AuthSequence.auth_complete_frame()
+
+    @staticmethod
     def tls_handshake_payload(blob: bytes = b"\x16\x03\x01" + b"\x00" * 40) -> dict:
         """
         Bus payload for tcp.server.tls_handshake topic
@@ -227,6 +231,10 @@ class ServiceDiscoverySeq:
         return _encode(CH_CONTROL, MSG_SERVICE_DISCOVERY_RESP, ServiceDiscoverySeq.response_body_minimal())
 
     @staticmethod
+    def response_frame() -> FrameBytes:
+        return ServiceDiscoverySeq.response_frame_minimal()
+
+    @staticmethod
     def response_frame_with_channels(channel_ids: List[int]) -> FrameBytes:
         return _encode(
             CH_CONTROL,
@@ -256,7 +264,7 @@ class ChannelOpenSeq:
         return bytes([0x08, channel_id, 0x10, status])
 
     @staticmethod
-    def request_frame(channel_id: int) -> FrameBytes:
+    def request_frame(channel_id: int, channel_type: str | None = None) -> FrameBytes:
         return _encode(CH_CONTROL, MSG_CHANNEL_OPEN_REQ, ChannelOpenSeq.request_body(channel_id))
 
     @staticmethod
@@ -289,6 +297,10 @@ class PingSequence:
     @staticmethod
     def request_frame(timestamp_us: int = 0) -> FrameBytes:
         return _encode(CH_CONTROL, MSG_PING_REQUEST, PingSequence.request_body(timestamp_us))
+
+    @staticmethod
+    def ping_frame(timestamp_us: int = 0) -> FrameBytes:
+        return PingSequence.request_frame(timestamp_us)
 
     @staticmethod
     def response_frame(timestamp_us: int = 0) -> FrameBytes:
@@ -328,6 +340,10 @@ class MediaSequence:
         nal_header = b"\x00\x00\x00\x01\x65"
         payload    = nal_header + b"\xFF" * (size - len(nal_header))
         return _encode(channel_id, 0x0001, payload)
+
+    @staticmethod
+    def idr_frame(channel_id: int = CH_VIDEO, size: int = 512) -> FrameBytes:
+        return MediaSequence.video_idr_frame(channel_id=channel_id, size=size)
 
     @staticmethod
     def video_p_frame(channel_id: int = CH_VIDEO, size: int = 256) -> FrameBytes:

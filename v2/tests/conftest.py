@@ -1,6 +1,6 @@
 """
 NemoHeadUnit-Wireless v2 — Global Test Fixtures
-================================================
+===============================================
 Fase 0: infrastruttura condivisa per tutta la test suite.
 
 Fixture disponibili:
@@ -18,6 +18,7 @@ Rif: docs/TEST_SUITE_ARCHITECTURE.md §4
 from __future__ import annotations
 
 import json
+import importlib
 import os
 import struct
 import subprocess
@@ -44,6 +45,117 @@ for _p in (_V2 / "modules", _V2 / "protos", _V2 / "shared", _V2 / "modules" / "c
     _s = str(_p)
     if _s not in sys.path:
         sys.path.insert(0, _s)
+
+
+# ===========================================================================
+# Proto Import Hook — Pre-loads all proto modules to avoid descriptor pool errors
+# ===========================================================================
+
+def _preload_all_protos():
+    """Pre-carica tutti i moduli proto per popolare il descriptor pool.
+    Deve essere invocato prima che i moduli di test effettuino i propri import."""
+    _proto_root = _V2 / "protos"
+    if not _proto_root.exists():
+        return
+
+    for _proto_file in _proto_root.rglob("*_pb2.py"):
+        # Converte il path in nome modulo (es. oaa/av/AVChannelData_pb2.py -> oaa.av.AVChannelData_pb2)
+        rel_path = _proto_file.relative_to(_proto_root)
+        module_name = str(rel_path.with_suffix('')).replace(os.sep, '.')
+        try:
+            if module_name not in sys.modules:
+                __import__(module_name)
+        except Exception:
+            pass
+
+# Esecuzione immediata al caricamento di conftest.py
+_preload_all_protos()
+
+
+try:
+    # In the test process many BusClient/ZMQ objects are intentionally mocked or
+    # abandoned by crash-path tests.  pyzmq's Context.__del__ can block forever
+    # waiting for sockets owned by background threads, so tests rely on explicit
+    # close/term paths and keep GC non-blocking.
+    zmq.Context.__del__ = lambda self: None
+except Exception:
+    pass
+
+
+def _restore_real_module(module_name: str) -> None:
+    """Re-import a real module after collection-time tests installed stubs."""
+    sys.modules.pop(module_name, None)
+    module = importlib.import_module(module_name)
+    if module_name == "zmq":
+        try:
+            module.Context.__del__ = lambda self: None
+        except Exception:
+            pass
+
+
+def pytest_collection_finish(session):
+    """Undo collection-time sys.modules stubs that would leak into later tests.
+
+    Some unit files import their module under test with fake shared/logging/ZMQ
+    dependencies at module import time.  Pytest imports every test file before
+    running tests, so those fakes can otherwise affect unrelated tests whose
+    modules are imported lazily during the test body.
+    """
+    for module_name in (
+        "zmq",
+        "loguru",
+        "shared.config_schema",
+        "shared.proto_utils",
+        "shared.config_client",
+        "shared.logger",
+        "dbus",
+        "dbus.service",
+        "dbus.mainloop",
+        "dbus.mainloop.glib",
+    ):
+        try:
+            _restore_real_module(module_name)
+        except Exception:
+            pass
+
+
+@pytest.fixture(autouse=True)
+def _stable_test_environment(monkeypatch):
+    """Keep ambient shell/debug state from changing deterministic unit tests."""
+    monkeypatch.delenv("DEBUG", raising=False)
+
+
+def pytest_runtest_setup(item):
+    """Repair globals in test modules that may have imported collection stubs."""
+    module = getattr(item, "module", None)
+    if module is None:
+        return
+
+    if module.__name__.endswith("test_proto_utils"):
+        real = importlib.import_module("shared.proto_utils")
+        for name in (
+            "decode_proto",
+            "encode_proto",
+            "encode_aa_frame",
+            "decode_aa_frame",
+            "parse_media_with_timestamp",
+            "build_media_with_timestamp",
+            "proto_to_dict",
+            "dict_to_proto",
+            "schema_from_proto_message",
+            "channels_from_sdr_bytes",
+            "channel_config_from_sdr",
+            "_read_varint",
+            "_skip_field",
+        ):
+            setattr(module, name, getattr(real, name))
+
+    if module.__name__.endswith("test_config_client"):
+        real_client = importlib.reload(importlib.import_module("shared.config_client"))
+        real_schema = importlib.import_module("shared.config_schema")
+        module.ConfigClient = real_client.ConfigClient
+        module.field_int = real_schema.field_int
+        module.field_enum = real_schema.field_enum
 
 
 # ===========================================================================
@@ -159,7 +271,7 @@ class _BrokerThread(threading.Thread):
                 pass
 
     def stop(self, timeout: float = 2.0) -> None:
-        """Ferma il proxy tramite TERMINATE poison pill."""
+        """Ferma il broker tramite TERMINATE poison pill."""
         try:
             ctrl_push = self._ctx.socket(zmq.PUSH)
             ctrl_push.connect(self._ctrl_addr)
@@ -189,9 +301,8 @@ def in_process_broker():
     broker = _BrokerThread(pub_addr=pub_addr, sub_addr=sub_addr)
     broker.start()
     broker.ready.wait(timeout=3.0)
-    # Piccola pausa per permettere al proxy di mettersi in ascolto
+    # Piccola pausa per permettere al broker di mettersi in ascolto
     time.sleep(0.05)
-
     yield {"pub_addr": pub_addr, "sub_addr": sub_addr, "_broker": broker}
 
     broker.stop()

@@ -289,9 +289,12 @@ class TcpPhoneClient:
         sock.settimeout(None)   # switch to blocking after connect
         return cls(sock)
 
-    def send_frame(self, channel_id: int, msg_id: int, body: bytes = b"", flags: int = 0) -> bool:
-        """Encode and send one AA frame. Returns True on success."""
-        frame = aa_frame_encode(channel_id, msg_id, body, flags)
+    def send_frame(self, channel_id: int | bytes, msg_id: int | None = None, body: bytes = b"", flags: int = 0) -> bool:
+        """Encode and send one AA frame. Raw pre-encoded frame bytes are also accepted."""
+        if isinstance(channel_id, (bytes, bytearray)) and msg_id is None:
+            frame = bytes(channel_id)
+        else:
+            frame = aa_frame_encode(channel_id, msg_id, body, flags)
         with self._lock:
             try:
                 self._sock.sendall(frame)
@@ -334,7 +337,12 @@ class TcpPhoneClient:
             if frame is None:
                 break
             frames.append(frame)
-            if predicate(*frame):
+            decoded = _aa_frame_to_event(frame)
+            try:
+                matched = predicate(decoded)
+            except TypeError:
+                matched = predicate(*frame)
+            if matched:
                 break
         return frames
 
@@ -365,6 +373,32 @@ def _parse_wifi_start_request_ip(payload: bytes) -> str:
         return msg.ip_address or ""
     except Exception:
         return ""
+
+
+def _aa_frame_to_event(frame: tuple) -> dict:
+    channel_id, flags, msg_id, body = frame
+    names = {
+        0x0001: "version_request",
+        0x0002: "version_response",
+        0x0003: "auth_request",
+        0x0004: "auth_complete",
+        0x0005: "service_discovery_request",
+        0x0006: "service_discovery_response",
+        0x0007: "channel_open_request",
+        0x0008: "channel_open_response",
+        0x000B: "ping",
+        0x000C: "pong",
+        0x0100: "shutdown_request",
+        0x0101: "shutdown_response",
+    }
+    return {
+        "channel_id": channel_id,
+        "flags": flags,
+        "message_id": msg_id,
+        "msg_id": msg_id,
+        "msg_type": names.get(msg_id, f"unknown_{msg_id:04x}"),
+        "body": body,
+    }
 
 
 def _parse_wifi_info_response(payload: bytes) -> tuple:
