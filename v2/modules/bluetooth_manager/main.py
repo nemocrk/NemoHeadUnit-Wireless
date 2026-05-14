@@ -78,7 +78,7 @@ import bluetooth_manager.paired_devices as paired_devices    # noqa: E402
 # Module identity
 # ---------------------------------------------------------------------------
 
-MODULE_NAME = "bluetooth"
+MODULE_NAME = "bluetooth_manager"
 PRIORITY    = 1  # service level
 
 bus = BusClient(module_name=MODULE_NAME)

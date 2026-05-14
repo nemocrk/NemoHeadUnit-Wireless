@@ -371,7 +371,8 @@ class BusClient:
                 error=repr(e),
                 callback=callback_name,
             )
-            self.log.exception(f"Error in callback for topic '{topic}'")
+            self.log.error(f"Error in callback for topic '{topic}'")
+            self.log.exception(exc_info=e)
 
     def _receive_loop(self):
         self.log.info("Bus receive loop started.")

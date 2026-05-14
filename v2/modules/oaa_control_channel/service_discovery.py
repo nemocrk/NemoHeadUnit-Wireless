@@ -192,7 +192,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
         {
             "channel_id": 3,
             "av_channel": {
-                "stream_type": "VIDEO",
+                "codec":            "MEDIA_CODEC_VIDEO_H264_BP",
                 "video_configs": [
                     {
                         "video_resolution": "VIDEO_1280x720",
@@ -200,7 +200,6 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
                         "margin_width":     0,
                         "margin_height":    0,
                         "dpi":              140,
-                        "codec":            "MEDIA_CODEC_VIDEO_H264_BP",
                     },
                 ],
             },
@@ -209,10 +208,10 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
         {
             "channel_id": 4,
             "av_channel": {
-                "stream_type": "AUDIO",
+                "codec": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS",
                 "audio_type":  "MEDIA",
                 "audio_configs": [
-                    {"sample_rate": 48000, "bit_depth": 16, "channel_count": 2, "codec": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS"},
+                    {"sample_rate": 48000, "bit_depth": 16, "channel_count": 2},
                 ],
             },
         },
@@ -421,8 +420,8 @@ def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
                     # Expose stream_type (VIDEO vs AUDIO) and, for AUDIO
                     # channels, also audio_type (MEDIA / SPEECH / SYSTEM)
                     # so registry.resolve_module_type() can route correctly.
-                    av_dict: dict = {"av_type": sub.stream_type}
-                    if sub.stream_type == AVStreamType.AUDIO:
+                    av_dict: dict = {"av_type": sub.codec}
+                    if sub.codec == MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC_ADTS or sub.codec == MediaCodecType.MEDIA_CODEC_AUDIO_PCM or sub.codec == MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC:
                         av_dict["audio_type"] = sub.audio_type
                     entry["av_channel"] = av_dict
                 else:

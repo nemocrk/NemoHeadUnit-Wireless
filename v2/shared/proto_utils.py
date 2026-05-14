@@ -94,7 +94,7 @@ channels_from_sdr_bytes
 Parse a hex-encoded ServiceDiscoveryResponse and return the channel list
 as plain dicts.  Each dict contains at minimum:
     {"channel_id": <int>, "<oneof_field>": {}}
-For av_channel the dict exposes "av_type" (AVStreamType int) and, for
+For av_channel the dict exposes "codec" (MediaCodecType int) and, for
 AUDIO channels, "audio_type" (AudioType int) so that consumers can
 distinguish VIDEO from the three audio stream types without importing
 proto enums.
@@ -527,8 +527,8 @@ def channels_from_sdr_bytes(sdr_bytes_hex: str) -> list[dict]:
         {"channel_id": <int>, "<oneof_field>": {}}
 
     For av_channel the dict exposes:
-        "av_type"    — AVStreamType int  (VIDEO vs AUDIO)
-        "audio_type" — AudioType int     (MEDIA / SPEECH / SYSTEM, only when av_type == AUDIO)
+        "codec"    — MediaCodecType int  (MEDIA_CODEC_AUDIO_PCM, MEDIA_CODEC_AUDIO_AAC_LC, MEDIA_CODEC_AUDIO_AAC_LC_ADTS, MEDIA_CODEC_VIDEO_H264_BP, etc)
+        "audio_type" — AudioType int     (MEDIA / SPEECH / SYSTEM, only when codec == MEDIA_CODEC_AUDIO_PCM or MEDIA_CODEC_AUDIO_AAC_LC or MEDIA_CODEC_AUDIO_AAC_LC_ADTS)
         "audio_configs" — list of dicts with keys:
                          sample_rate, bit_depth, channel_count, codec (enum name string)
 
@@ -550,7 +550,7 @@ def channels_from_sdr_bytes(sdr_bytes_hex: str) -> list[dict]:
         from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (  # noqa: PLC0415
             ServiceDiscoveryResponse,
         )
-        from v2.protos.oaa.av.AVStreamTypeEnum_pb2 import AVStreamType  # noqa: PLC0415
+        from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType  # noqa: PLC0415
     except ImportError as exc:
         log.error("channels_from_sdr_bytes: proto import failed — %s", exc)
         return []
@@ -571,8 +571,8 @@ def channels_from_sdr_bytes(sdr_bytes_hex: str) -> list[dict]:
             if ch.HasField(field_name):
                 sub = getattr(ch, field_name)
                 if field_name == "av_channel":
-                    av_dict: dict = {"av_type": sub.stream_type}
-                    if sub.stream_type == AVStreamType.AUDIO:
+                    av_dict: dict = {"av_type": sub.codec}
+                    if sub.codec == MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC_ADTS or sub.codec == MediaCodecType.MEDIA_CODEC_AUDIO_PCM or sub.codec == MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC:
                         av_dict["audio_type"] = sub.audio_type
                         av_dict["audio_configs"] = [
                             {
