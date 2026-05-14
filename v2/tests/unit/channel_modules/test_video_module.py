@@ -116,19 +116,23 @@ def _build_video_module(
 def _setup_request_body() -> bytes:
     from oaa.av.AVChannelSetupRequestMessage_pb2 import AVChannelSetupRequest
     req = AVChannelSetupRequest()
-    req.config_index = 0
+    req.media_codec_type = 0  # MEDIA_CODEC_VIDEO_H264_BP (default for tests)
     return req.SerializeToString()
 
 
 def _open_request_body() -> bytes:
     from oaa.control.ChannelOpenRequestMessage_pb2 import ChannelOpenRequest
-    return ChannelOpenRequest().SerializeToString()
+    req = ChannelOpenRequest()
+    req.channel_id = 1
+    req.priority = 0
+    return req.SerializeToString()
 
 
 def _start_indication_body(session: int = 1) -> bytes:
     from oaa.av.AVChannelStartIndicationMessage_pb2 import AVChannelStartIndication
     msg = AVChannelStartIndication()
     msg.session = session
+    msg.config = 0  # dummy config bytes
     return msg.SerializeToString()
 
 
