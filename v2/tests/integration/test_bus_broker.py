@@ -43,12 +43,6 @@ import zmq
 
 def _make_client(in_process_broker, name: str = None):
     """Crea un _TestBusClient connesso al broker in-process."""
-    import sys
-    from pathlib import Path
-    _v2 = Path(__file__).parent.parent.parent
-    if str(_v2) not in sys.path:
-        sys.path.insert(0, str(_v2))
-
     import shared.bus_client as _bc_mod
     _bc_mod.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
     _bc_mod.BROKER_SUB_ADDR = in_process_broker["sub_addr"]

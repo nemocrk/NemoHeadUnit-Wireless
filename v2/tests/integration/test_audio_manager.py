@@ -27,23 +27,11 @@ Rif: docs/TEST_SUITE_ARCHITECTURE.md §3.2
 from __future__ import annotations
 
 import importlib
-import sys
 import time
 import uuid
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# sys.path
-# ---------------------------------------------------------------------------
-
-_V2 = Path(__file__).parent.parent.parent
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
-if str(_V2 / "modules") not in sys.path:
-    sys.path.insert(0, str(_V2 / "modules"))
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +62,7 @@ def _load_module(in_process_broker):
     _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
     _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
 
-    import modules.audio_manager.main as am
+    import audio_manager.main as am
     importlib.reload(am)
     return am
 

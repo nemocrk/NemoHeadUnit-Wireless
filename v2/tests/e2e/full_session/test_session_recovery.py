@@ -48,7 +48,7 @@ def _rfcomm_connect(stack) -> tuple[PhoneMock, socket.socket]:
     hu_sock, phone_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     mock = PhoneMock(phone_sock).start()
     stack.publish(
-        "bluetooth.rfcomm.connected",
+        "bluetooth_manager.rfcomm.connected",
         {"fd": hu_sock.fileno(), "address": "AA:BB:CC:DD:EE:FF"},
     )
     return mock, hu_sock
@@ -81,7 +81,7 @@ class TestSessionRecovery:
             # Chiudi subito il lato telefono per simulare EOF
             phone_sock1.close()
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock1.fileno(), "address": "AA:BB:CC:DD:EE:FF"},
             )
             failed = stack.wait_topic("rfcomm.handshake.failed", timeout=_T_RECOVERY)
@@ -172,7 +172,7 @@ class TestSessionRecovery:
                     pass  # TCP potrebbe non essere ancora pronto
 
                 # Pubblica disconnect per resettare lo stato
-                stack.publish("bluetooth.rfcomm.disconnected", {"address": "AA:BB:CC:DD:EE:FF"})
+                stack.publish("bluetooth_manager.rfcomm.disconnected", {"address": "AA:BB:CC:DD:EE:FF"})
                 time.sleep(0.5)  # reset
 
     def test_state_clean_after_recovery(self, in_process_broker):
@@ -243,7 +243,7 @@ class TestSessionRecovery:
             hu_sock1, phone_sock1 = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
             # NON avviare il mock: il telefono non risponde mai
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock1.fileno(), "address": "AA:BB:CC:DD:EE:FF"},
             )
 

@@ -40,20 +40,9 @@ import sys
 import time
 import types
 import uuid
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# sys.path
-# ---------------------------------------------------------------------------
-
-_V2 = Path(__file__).parent.parent.parent
-for _p in (_V2, _V2 / "modules", _V2 / "modules" / "channel_modules"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
 
 # ---------------------------------------------------------------------------
 # Stub Qt / GStreamer / gi BEFORE any module import
@@ -133,7 +122,7 @@ def _load_video_ui(in_process_broker):
 
     mock_tracer = MagicMock()
     with patch("shared.bus_client.BusTracer", return_value=mock_tracer):
-        import modules.video_ui.main as vui
+        import video_ui.main as vui
         importlib.reload(vui)
     # Ensure _window is None (no Qt window in CI)
     vui._window = None
@@ -154,7 +143,7 @@ def _make_video_module(in_process_broker):
 
     mock_tracer = MagicMock()
     with patch("shared.bus_client.BusTracer", return_value=mock_tracer):
-        import modules.channel_modules.video.main as vm_mod
+        import channel_modules.video.main as vm_mod
         importlib.reload(vm_mod)
         mod = vm_mod.VideoModule()
 
@@ -295,18 +284,18 @@ class TestVideoUiConnState:
 
     @pytest.mark.integration
     def test_bt_pairing_completed_transitions_to_handshake(self, in_process_broker):
-        """bluetooth.pairing.completed da WAITING_BT → HANDSHAKE."""
+        """bluetooth_manager.pairing.completed da WAITING_BT → HANDSHAKE."""
         vui = _load_video_ui(in_process_broker)
         vui._conn_state = vui._STATE_WAITING_BT
-        vui.on_bluetooth_pairing_completed("bluetooth.pairing.completed", {"device_address": "AA:BB"})
+        vui.on_bluetooth_pairing_completed("bluetooth_manager.pairing.completed", {"device_address": "AA:BB"})
         assert vui._conn_state == vui._STATE_HANDSHAKE
 
     @pytest.mark.integration
     def test_bt_pairing_in_handshake_state_no_change(self, in_process_broker):
-        """bluetooth.pairing.completed da HANDSHAKE rimane HANDSHAKE."""
+        """bluetooth_manager.pairing.completed da HANDSHAKE rimane HANDSHAKE."""
         vui = _load_video_ui(in_process_broker)
         vui._conn_state = vui._STATE_HANDSHAKE
-        vui.on_bluetooth_pairing_completed("bluetooth.pairing.completed", {"device_address": "AA:BB"})
+        vui.on_bluetooth_pairing_completed("bluetooth_manager.pairing.completed", {"device_address": "AA:BB"})
         assert vui._conn_state == vui._STATE_HANDSHAKE
 
     @pytest.mark.integration

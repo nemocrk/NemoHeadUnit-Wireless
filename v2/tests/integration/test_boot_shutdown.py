@@ -360,7 +360,7 @@ class TestChannelManagerBoot:
 
     def _load_cm(self, broker):
         pub_addr, sub_addr = broker
-        import modules.channel_manager.main as cm_main
+        import channel_manager.main as cm_main
         import importlib
         with patch("shared.bus_client.BusTracer", return_value=MagicMock()):
             import shared.bus_client as _bc
@@ -631,7 +631,7 @@ class TestBootE2E:
 
     def _load_cm(self, broker):
         pub_addr, sub_addr = broker
-        import modules.channel_manager.main as cm_main
+        import channel_manager.main as cm_main
         with patch("shared.bus_client.BusTracer", return_value=MagicMock()):
             import shared.bus_client as _bc
             _bc.BROKER_PUB_ADDR = sub_addr

@@ -24,25 +24,12 @@ Rif: docs/TEST_SUITE_ARCHITECTURE.md §3.2
 """
 from __future__ import annotations
 
-import sys
 import threading
 import time
 import uuid
-from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# sys.path
-# ---------------------------------------------------------------------------
-
-_V2 = Path(__file__).parent.parent.parent
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
-if str(_V2 / "modules") not in sys.path:
-    sys.path.insert(0, str(_V2 / "modules"))
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -75,7 +62,7 @@ def _make_session(in_process_broker) -> "ChannelManagerSession":
 
     # Importa il modulo con il bus già patchato
     import importlib
-    import modules.channel_manager.main as cm_main
+    import channel_manager.main as cm_main
     importlib.reload(cm_main)  # garantisce il bus fresco con i nuovi indirizzi
 
     from modules.channel_manager.main import ChannelManagerSession
@@ -336,7 +323,7 @@ class TestWaitAllReady:
     @pytest.mark.integration
     def test_wait_all_ready_returns_false_on_timeout(self, in_process_broker):
         """wait_all_ready() ritorna False se i moduli non diventano ready entro il timeout."""
-        import modules.channel_manager.main as cm_main
+        import channel_manager.main as cm_main
         original_timeout = cm_main.CHILDREN_READY_TIMEOUT
         cm_main.CHILDREN_READY_TIMEOUT = 0.3  # timeout brevissimo per il test
 
@@ -626,7 +613,7 @@ class TestBusEventHandlers:
         _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
         _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
         import importlib
-        import modules.channel_manager.main as cm
+        import channel_manager.main as cm
         importlib.reload(cm)
 
         spy = _make_bus_client(in_process_broker, "spy")
@@ -651,7 +638,7 @@ class TestBusEventHandlers:
         _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
         _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
         import importlib
-        import modules.channel_manager.main as cm
+        import channel_manager.main as cm
         importlib.reload(cm)
 
         spy = _make_bus_client(in_process_broker, "spy")
@@ -674,7 +661,7 @@ class TestBusEventHandlers:
         _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
         _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
         import importlib
-        import modules.channel_manager.main as cm
+        import channel_manager.main as cm
         importlib.reload(cm)
 
         spy = _make_bus_client(in_process_broker, "spy")
@@ -699,7 +686,7 @@ class TestBusEventHandlers:
         _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
         _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
         import importlib
-        import modules.channel_manager.main as cm
+        import channel_manager.main as cm
         importlib.reload(cm)
         cm._session = None
 
@@ -722,7 +709,7 @@ class TestBusEventHandlers:
         _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
         _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
         import importlib
-        import modules.channel_manager.main as cm
+        import channel_manager.main as cm
         importlib.reload(cm)
 
         mock_session = MagicMock()
@@ -740,7 +727,7 @@ class TestBusEventHandlers:
         _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
         _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
         import importlib
-        import modules.channel_manager.main as cm
+        import channel_manager.main as cm
         importlib.reload(cm)
         cm._session = None
 
@@ -756,7 +743,7 @@ class TestBusEventHandlers:
         _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
         _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
         import importlib
-        import modules.channel_manager.main as cm
+        import channel_manager.main as cm
         importlib.reload(cm)
 
         mock_session = MagicMock()
@@ -774,7 +761,7 @@ class TestBusEventHandlers:
         _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
         _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
         import importlib
-        import modules.channel_manager.main as cm
+        import channel_manager.main as cm
         importlib.reload(cm)
 
         mock_session = MagicMock()
@@ -794,7 +781,7 @@ class TestBusEventHandlers:
         _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
         _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
         import importlib
-        import modules.channel_manager.main as cm
+        import channel_manager.main as cm
         importlib.reload(cm)
 
         mock_session = MagicMock()
@@ -814,7 +801,7 @@ class TestBusEventHandlers:
         _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
         _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
         import importlib
-        import modules.channel_manager.main as cm
+        import channel_manager.main as cm
         importlib.reload(cm)
 
         mock_session = MagicMock()
@@ -938,7 +925,7 @@ class TestFullLifecycle:
         _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
         _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
         import importlib
-        import modules.channel_manager.main as cm
+        import channel_manager.main as cm
         importlib.reload(cm)
         cm._session = None
 

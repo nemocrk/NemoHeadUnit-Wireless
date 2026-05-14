@@ -44,7 +44,7 @@ def _rfcomm_connect(stack) -> PhoneMock:
     hu_sock, phone_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     mock = PhoneMock(phone_sock).start()
     stack.publish(
-        "bluetooth.rfcomm.connected",
+        "bluetooth_manager.rfcomm.connected",
         {"fd": hu_sock.fileno(), "address": "AA:BB:CC:DD:EE:FF"},
     )
     return mock
@@ -141,7 +141,7 @@ class TestAudioPathSmoke:
 
             # Simula chiamata bluetooth in arrivo — focus preemption
             stack.publish(
-                "bluetooth.call.incoming",
+                "bluetooth_manager.call.incoming",
                 {"address": "AA:BB:CC:DD:EE:FF", "caller_id": "+39123456789"},
             )
 

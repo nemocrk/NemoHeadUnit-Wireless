@@ -39,20 +39,9 @@ import sys
 import time
 import types
 import uuid
-from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# sys.path
-# ---------------------------------------------------------------------------
-
-_V2 = Path(__file__).parent.parent.parent
-for _p in (_V2, _V2 / "modules"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
 
 # ---------------------------------------------------------------------------
 # Stub D-Bus / BlueZ / GLib / gi BEFORE any module import
@@ -112,7 +101,7 @@ _MOCK_PAIRED_DEVICES = MagicMock()
 
 
 def _load_bt(in_process_broker):
-    """Reload bluetooth.main with in-process broker and all hardware deps mocked."""
+    """Reload bluetooth_manager.main with in-process broker and all hardware deps mocked."""
     import shared.bus_client as _bc
     _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
     _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
@@ -133,12 +122,12 @@ def _load_bt(in_process_broker):
 
     with patch("shared.bus_client.BusTracer", return_value=MagicMock()), \
          patch.dict(sys.modules, {
-             "bluetooth.bluez_adapter": types.SimpleNamespace(BluezAdapter=mock_adapter_cls),
-             "bluetooth.discovery":     types.SimpleNamespace(DiscoverySession=mock_discovery_cls),
-             "bluetooth.pairing":       types.SimpleNamespace(PairingAgent=mock_pairing_cls),
-             "bluetooth.paired_devices": mock_paired_mod,
+             "bluetooth_manager.bluez_adapter": types.SimpleNamespace(BluezAdapter=mock_adapter_cls),
+             "bluetooth_manager.discovery":     types.SimpleNamespace(DiscoverySession=mock_discovery_cls),
+             "bluetooth_manager.pairing":       types.SimpleNamespace(PairingAgent=mock_pairing_cls),
+             "bluetooth_manager.paired_devices": mock_paired_mod,
          }):
-        import modules.bluetooth.main as bt
+        import bluetooth_manager.main as bt
         importlib.reload(bt)
 
     # Attach mocks for assertion access
@@ -190,8 +179,8 @@ class TestBootProtocol:
         bt = _load_bt(in_process_broker)
         bt._adapter = None  # reset so system_start re-creates it
 
-        with patch("modules.bluetooth.main._start_glib_mainloop"), \
-             patch("modules.bluetooth.main.cfg") as mock_cfg:
+        with patch("bluetooth_manager.main._start_glib_mainloop"), \
+             patch("bluetooth_manager.main.cfg") as mock_cfg:
             bt.on_system_start("system.start", {"priority": bt.PRIORITY})
 
         bt._mock_adapter_cls.assert_called_once()
@@ -209,32 +198,32 @@ class TestBootProtocol:
 
     @pytest.mark.integration
     def test_system_start_adapter_init_failed_publishes_error(self, in_process_broker):
-        """on_system_start() con adapter.init()=False pubblica bluetooth.error."""
+        """on_system_start() con adapter.init()=False pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._adapter = None
         bt._mock_adapter_cls.return_value.init.return_value = False
 
-        with patch("modules.bluetooth.main._start_glib_mainloop"), \
-             patch("modules.bluetooth.main.cfg"):
+        with patch("bluetooth_manager.main._start_glib_mainloop"), \
+             patch("bluetooth_manager.main.cfg"):
             bt.on_system_start("system.start", {"priority": bt.PRIORITY})
 
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.error non ricevuto dopo init failure"
+        assert ok, "bluetooth_manager.error non ricevuto dopo init failure"
         assert "error" in received[0]
 
     @pytest.mark.integration
     def test_system_stop_calls_stop_autoconnect(self, in_process_broker):
         """on_system_stop() chiama _stop_autoconnect."""
         bt = _load_bt(in_process_broker)
-        with patch("modules.bluetooth.main._stop_autoconnect") as mock_stop, \
-             patch("modules.bluetooth.main._stop_glib_mainloop"):
+        with patch("bluetooth_manager.main._stop_autoconnect") as mock_stop, \
+             patch("bluetooth_manager.main._stop_glib_mainloop"):
             bt.on_system_stop("system.stop", {})
         mock_stop.assert_called_once()
 
@@ -243,8 +232,8 @@ class TestBootProtocol:
         """on_system_stop() senza adapter non solleva."""
         bt = _load_bt(in_process_broker)
         bt._adapter = None
-        with patch("modules.bluetooth.main._stop_autoconnect"), \
-             patch("modules.bluetooth.main._stop_glib_mainloop"):
+        with patch("bluetooth_manager.main._stop_autoconnect"), \
+             patch("bluetooth_manager.main._stop_glib_mainloop"):
             try:
                 bt.on_system_stop("system.stop", {})
             except Exception as exc:
@@ -263,7 +252,7 @@ class TestDiscoveryFlow:
         bt = _load_bt(in_process_broker)
         bt._discovery = None
 
-        bt.on_discover("bluetooth.discover", {"duration_sec": 5})
+        bt.on_discover("bluetooth_manager.discover", {"duration_sec": 5})
 
         bt._mock_discovery_cls.assert_called_once()
         bt._mock_discovery_cls.return_value.start.assert_called_once_with(duration_sec=5)
@@ -275,27 +264,27 @@ class TestDiscoveryFlow:
         bt._discovery = None
         bt._config["discovery_duration_sec"] = 15
 
-        bt.on_discover("bluetooth.discover", {})
+        bt.on_discover("bluetooth_manager.discover", {})
 
         bt._mock_discovery_cls.return_value.start.assert_called_once_with(duration_sec=15)
 
     @pytest.mark.integration
     def test_discover_no_adapter_publishes_error(self, in_process_broker):
-        """on_discover() con _adapter=None pubblica bluetooth.error."""
+        """on_discover() con _adapter=None pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._adapter = None
 
-        bt.on_discover("bluetooth.discover", {"duration_sec": 5})
+        bt.on_discover("bluetooth_manager.discover", {"duration_sec": 5})
 
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.error non ricevuto"
+        assert ok, "bluetooth_manager.error non ricevuto"
         assert "error" in received[0]
 
     @pytest.mark.integration
@@ -306,17 +295,17 @@ class TestDiscoveryFlow:
         mock_session.is_running = True
         bt._discovery = mock_session
 
-        bt.on_discover("bluetooth.discover", {"duration_sec": 5})
+        bt.on_discover("bluetooth_manager.discover", {"duration_sec": 5})
 
         # DiscoverySession non deve essere ri-istanziata
         assert bt._discovery is mock_session
 
     @pytest.mark.integration
     def test_on_device_found_publishes_device_found(self, in_process_broker):
-        """_on_device_found() pubblica bluetooth.device.found sul bus."""
+        """_on_device_found() pubblica bluetooth_manager.device.found sul bus."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.device.found", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.device.found", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -325,17 +314,17 @@ class TestDiscoveryFlow:
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.device.found non ricevuto"
+        assert ok, "bluetooth_manager.device.found non ricevuto"
         assert received[0]["address"] == "AA:BB:CC:DD:EE:FF"
         assert received[0]["name"] == "TestPhone"
         assert received[0]["rssi"] == -65
 
     @pytest.mark.integration
     def test_on_discovery_done_publishes_discovery_completed(self, in_process_broker):
-        """_on_discovery_done() pubblica bluetooth.discovery.completed sul bus."""
+        """_on_discovery_done() pubblica bluetooth_manager.discovery.completed sul bus."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.discovery.completed", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.discovery.completed", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -345,7 +334,7 @@ class TestDiscoveryFlow:
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.discovery.completed non ricevuto"
+        assert ok, "bluetooth_manager.discovery.completed non ricevuto"
         assert received[0]["devices"] == devices
 
     @pytest.mark.integration
@@ -353,7 +342,7 @@ class TestDiscoveryFlow:
         """_on_discovery_done([]) pubblica devices=[] sul bus."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.discovery.completed", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.discovery.completed", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -379,45 +368,45 @@ class TestPairingFlow:
         mock_pairing = MagicMock()
         bt._pairing = mock_pairing
 
-        bt.on_pair("bluetooth.pair", {"device_address": "AA:BB:CC:DD:EE:FF"})
+        bt.on_pair("bluetooth_manager.pair", {"device_address": "AA:BB:CC:DD:EE:FF"})
 
         mock_pairing.pair.assert_called_once_with("AA:BB:CC:DD:EE:FF")
 
     @pytest.mark.integration
     def test_on_pair_no_agent_publishes_error(self, in_process_broker):
-        """on_pair() senza pairing agent pubblica bluetooth.error."""
+        """on_pair() senza pairing agent pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._pairing = None
 
-        bt.on_pair("bluetooth.pair", {"device_address": "AA:BB"})
+        bt.on_pair("bluetooth_manager.pair", {"device_address": "AA:BB"})
 
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.error non ricevuto"
+        assert ok, "bluetooth_manager.error non ricevuto"
 
     @pytest.mark.integration
     def test_on_pair_missing_address_publishes_error(self, in_process_broker):
-        """on_pair() con device_address mancante pubblica bluetooth.error."""
+        """on_pair() con device_address mancante pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._pairing = MagicMock()
 
-        bt.on_pair("bluetooth.pair", {})
+        bt.on_pair("bluetooth_manager.pair", {})
 
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.error non ricevuto"
+        assert ok, "bluetooth_manager.error non ricevuto"
 
     @pytest.mark.integration
     def test_on_confirm_pairing_calls_confirm(self, in_process_broker):
@@ -426,7 +415,7 @@ class TestPairingFlow:
         mock_pairing = MagicMock()
         bt._pairing = mock_pairing
 
-        bt.on_confirm_pairing("bluetooth.confirm_pairing", {
+        bt.on_confirm_pairing("bluetooth_manager.confirm_pairing", {
             "device_address": "AA:BB",
             "pin": "123456",
         })
@@ -435,16 +424,16 @@ class TestPairingFlow:
 
     @pytest.mark.integration
     def test_on_confirm_pairing_missing_fields_publishes_error(self, in_process_broker):
-        """on_confirm_pairing() con fields mancanti pubblica bluetooth.error."""
+        """on_confirm_pairing() con fields mancanti pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._pairing = MagicMock()
 
-        bt.on_confirm_pairing("bluetooth.confirm_pairing", {"device_address": "AA:BB"})
+        bt.on_confirm_pairing("bluetooth_manager.confirm_pairing", {"device_address": "AA:BB"})
 
         ok = _wait(received, 1)
         spy.stop()
@@ -457,7 +446,7 @@ class TestPairingFlow:
         mock_pairing = MagicMock()
         bt._pairing = mock_pairing
 
-        bt.on_reject_pairing("bluetooth.reject_pairing", {"device_address": "AA:BB"})
+        bt.on_reject_pairing("bluetooth_manager.reject_pairing", {"device_address": "AA:BB"})
 
         mock_pairing.reject.assert_called_once_with("AA:BB")
 
@@ -467,16 +456,16 @@ class TestPairingFlow:
         bt = _load_bt(in_process_broker)
         bt._pairing = None
         try:
-            bt.on_reject_pairing("bluetooth.reject_pairing", {"device_address": "AA:BB"})
+            bt.on_reject_pairing("bluetooth_manager.reject_pairing", {"device_address": "AA:BB"})
         except Exception as exc:
             pytest.fail(f"on_reject_pairing ha sollevato: {exc}")
 
     @pytest.mark.integration
     def test_on_pin_requested_publishes_pairing_pin(self, in_process_broker):
-        """_on_pin_requested() pubblica bluetooth.pairing.pin sul bus."""
+        """_on_pin_requested() pubblica bluetooth_manager.pairing.pin sul bus."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.pairing.pin", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.pairing.pin", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -485,16 +474,16 @@ class TestPairingFlow:
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.pairing.pin non ricevuto"
+        assert ok, "bluetooth_manager.pairing.pin non ricevuto"
         assert received[0]["device_address"] == "AA:BB:CC"
         assert received[0]["pin"] == "654321"
 
     @pytest.mark.integration
     def test_on_pairing_completed_publishes_pairing_completed(self, in_process_broker):
-        """_on_pairing_completed() pubblica bluetooth.pairing.completed sul bus."""
+        """_on_pairing_completed() pubblica bluetooth_manager.pairing.completed sul bus."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.pairing.completed", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.pairing.completed", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -503,15 +492,15 @@ class TestPairingFlow:
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.pairing.completed non ricevuto"
+        assert ok, "bluetooth_manager.pairing.completed non ricevuto"
         assert received[0]["device_address"] == "AA:BB:CC:DD:EE:FF"
 
     @pytest.mark.integration
     def test_on_pairing_failed_publishes_pairing_failed(self, in_process_broker):
-        """_on_pairing_failed() pubblica bluetooth.pairing.failed sul bus."""
+        """_on_pairing_failed() pubblica bluetooth_manager.pairing.failed sul bus."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.pairing.failed", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.pairing.failed", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -520,7 +509,7 @@ class TestPairingFlow:
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.pairing.failed non ricevuto"
+        assert ok, "bluetooth_manager.pairing.failed non ricevuto"
         assert received[0]["device_address"] == "AA:BB"
         assert received[0]["error"] == "Authentication failed"
 
@@ -533,10 +522,10 @@ class TestPairedDeviceOps:
 
     @pytest.mark.integration
     def test_on_paired_list_publishes_devices(self, in_process_broker):
-        """on_paired_list() pubblica bluetooth.paired.devices con la lista."""
+        """on_paired_list() pubblica bluetooth_manager.paired.devices con la lista."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.paired.devices", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.paired.devices", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -544,12 +533,12 @@ class TestPairedDeviceOps:
             {"address": "AA:BB", "name": "Phone1", "connected": True, "trusted": True}
         ]
 
-        bt.on_paired_list("bluetooth.paired.list", {})
+        bt.on_paired_list("bluetooth_manager.paired.list", {})
 
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.paired.devices non ricevuto"
+        assert ok, "bluetooth_manager.paired.devices non ricevuto"
         assert len(received[0]["devices"]) == 1
         assert received[0]["devices"][0]["address"] == "AA:BB"
 
@@ -558,13 +547,13 @@ class TestPairedDeviceOps:
         """on_paired_list() con lista vuota pubblica devices=[]."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.paired.devices", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.paired.devices", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._mock_paired_mod.list_paired.return_value = []
 
-        bt.on_paired_list("bluetooth.paired.list", {})
+        bt.on_paired_list("bluetooth_manager.paired.list", {})
 
         ok = _wait(received, 1)
         spy.stop()
@@ -574,16 +563,16 @@ class TestPairedDeviceOps:
 
     @pytest.mark.integration
     def test_on_paired_list_no_adapter_publishes_error(self, in_process_broker):
-        """on_paired_list() con _adapter=None pubblica bluetooth.error."""
+        """on_paired_list() con _adapter=None pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._adapter = None
 
-        bt.on_paired_list("bluetooth.paired.list", {})
+        bt.on_paired_list("bluetooth_manager.paired.list", {})
 
         ok = _wait(received, 1)
         spy.stop()
@@ -591,52 +580,52 @@ class TestPairedDeviceOps:
 
     @pytest.mark.integration
     def test_on_paired_remove_success_publishes_removed(self, in_process_broker):
-        """on_paired_remove() con remove=True pubblica bluetooth.paired.removed."""
+        """on_paired_remove() con remove=True pubblica bluetooth_manager.paired.removed."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.paired.removed", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.paired.removed", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._mock_paired_mod.remove.return_value = True
 
-        bt.on_paired_remove("bluetooth.paired.remove", {"device_address": "AA:BB"})
+        bt.on_paired_remove("bluetooth_manager.paired.remove", {"device_address": "AA:BB"})
 
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.paired.removed non ricevuto"
+        assert ok, "bluetooth_manager.paired.removed non ricevuto"
         assert received[0]["device_address"] == "AA:BB"
 
     @pytest.mark.integration
     def test_on_paired_remove_failure_publishes_failed(self, in_process_broker):
-        """on_paired_remove() con remove=False pubblica bluetooth.paired.failed."""
+        """on_paired_remove() con remove=False pubblica bluetooth_manager.paired.failed."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.paired.failed", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.paired.failed", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._mock_paired_mod.remove.return_value = False
 
-        bt.on_paired_remove("bluetooth.paired.remove", {"device_address": "AA:BB"})
+        bt.on_paired_remove("bluetooth_manager.paired.remove", {"device_address": "AA:BB"})
 
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.paired.failed non ricevuto"
+        assert ok, "bluetooth_manager.paired.failed non ricevuto"
         assert received[0]["device_address"] == "AA:BB"
 
     @pytest.mark.integration
     def test_on_paired_remove_missing_address_publishes_error(self, in_process_broker):
-        """on_paired_remove() senza device_address pubblica bluetooth.error."""
+        """on_paired_remove() senza device_address pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
-        bt.on_paired_remove("bluetooth.paired.remove", {})
+        bt.on_paired_remove("bluetooth_manager.paired.remove", {})
 
         ok = _wait(received, 1)
         spy.stop()
@@ -648,7 +637,7 @@ class TestPairedDeviceOps:
         bt = _load_bt(in_process_broker)
         bt._config["autoconnect_connect_timeout_s"] = 8
 
-        bt.on_paired_connect("bluetooth.paired.connect", {"device_address": "AA:BB"})
+        bt.on_paired_connect("bluetooth_manager.paired.connect", {"device_address": "AA:BB"})
 
         bt._mock_paired_mod.connect.assert_called_once()
         call_kwargs = bt._mock_paired_mod.connect.call_args
@@ -657,10 +646,10 @@ class TestPairedDeviceOps:
 
     @pytest.mark.integration
     def test_on_paired_connect_on_connected_publishes_connected(self, in_process_broker):
-        """on_paired_connect() — on_connected callback pubblica bluetooth.paired.connected."""
+        """on_paired_connect() — on_connected callback pubblica bluetooth_manager.paired.connected."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.paired.connected", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.paired.connected", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -670,20 +659,20 @@ class TestPairedDeviceOps:
             on_connected(address)
 
         bt._mock_paired_mod.connect.side_effect = _capture_connect
-        bt.on_paired_connect("bluetooth.paired.connect", {"device_address": "CC:DD"})
+        bt.on_paired_connect("bluetooth_manager.paired.connect", {"device_address": "CC:DD"})
 
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.paired.connected non ricevuto"
+        assert ok, "bluetooth_manager.paired.connected non ricevuto"
         assert received[0]["device_address"] == "CC:DD"
 
     @pytest.mark.integration
     def test_on_paired_connect_on_failed_publishes_failed(self, in_process_broker):
-        """on_paired_connect() — on_failed callback pubblica bluetooth.paired.failed."""
+        """on_paired_connect() — on_failed callback pubblica bluetooth_manager.paired.failed."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.paired.failed", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.paired.failed", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -692,20 +681,20 @@ class TestPairedDeviceOps:
             on_failed(address, "Connection refused")
 
         bt._mock_paired_mod.connect.side_effect = _capture_fail
-        bt.on_paired_connect("bluetooth.paired.connect", {"device_address": "CC:DD"})
+        bt.on_paired_connect("bluetooth_manager.paired.connect", {"device_address": "CC:DD"})
 
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.paired.failed non ricevuto"
+        assert ok, "bluetooth_manager.paired.failed non ricevuto"
         assert received[0]["error"] == "Connection refused"
 
     @pytest.mark.integration
     def test_on_paired_disconnect_on_disconnected_publishes_disconnected(self, in_process_broker):
-        """on_paired_disconnect() — on_disconnected callback pubblica bluetooth.paired.disconnected."""
+        """on_paired_disconnect() — on_disconnected callback pubblica bluetooth_manager.paired.disconnected."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.paired.disconnected", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.paired.disconnected", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -714,20 +703,20 @@ class TestPairedDeviceOps:
             on_disconnected(address)
 
         bt._mock_paired_mod.disconnect.side_effect = _capture_disconnect
-        bt.on_paired_disconnect("bluetooth.paired.disconnect", {"device_address": "EE:FF"})
+        bt.on_paired_disconnect("bluetooth_manager.paired.disconnect", {"device_address": "EE:FF"})
 
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.paired.disconnected non ricevuto"
+        assert ok, "bluetooth_manager.paired.disconnected non ricevuto"
         assert received[0]["device_address"] == "EE:FF"
 
     @pytest.mark.integration
     def test_on_paired_disconnect_on_failed_publishes_failed(self, in_process_broker):
-        """on_paired_disconnect() — on_failed callback pubblica bluetooth.paired.failed."""
+        """on_paired_disconnect() — on_failed callback pubblica bluetooth_manager.paired.failed."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.paired.failed", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.paired.failed", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -736,12 +725,12 @@ class TestPairedDeviceOps:
             on_failed(address, "Remote disconnection")
 
         bt._mock_paired_mod.disconnect.side_effect = _capture_fail
-        bt.on_paired_disconnect("bluetooth.paired.disconnect", {"device_address": "EE:FF"})
+        bt.on_paired_disconnect("bluetooth_manager.paired.disconnect", {"device_address": "EE:FF"})
 
         ok = _wait(received, 1)
         spy.stop()
 
-        assert ok, "bluetooth.paired.failed non ricevuto"
+        assert ok, "bluetooth_manager.paired.failed non ricevuto"
         assert received[0]["error"] == "Remote disconnection"
 
 
@@ -787,7 +776,7 @@ class TestAutoconnectStateMachine:
         bt = _load_bt(in_process_broker)
         bt._autoconnect_stop.clear()
 
-        bt.on_rfcomm_connected("bluetooth.rfcomm.connected", {"device_address": "AA:BB"})
+        bt.on_rfcomm_connected("bluetooth_manager.rfcomm.connected", {"device_address": "AA:BB"})
 
         assert bt._autoconnect_stop.is_set()
 
@@ -797,8 +786,8 @@ class TestAutoconnectStateMachine:
         bt = _load_bt(in_process_broker)
         with patch.object(bt, "_start_autoconnect", wraps=bt._start_autoconnect) as spy_ac:
             # Need to monkey-patch the module-level function since it's called directly
-            with patch("modules.bluetooth.main._start_autoconnect") as mock_start:
-                bt.on_try_autoconnect("bluetooth.try_autoconnect", {})
+            with patch("bluetooth_manager.main._start_autoconnect") as mock_start:
+                bt.on_try_autoconnect("bluetooth_manager.try_autoconnect", {})
         mock_start.assert_called_once()
 
     @pytest.mark.integration
@@ -859,8 +848,8 @@ class TestConfigCallbacks:
     def test_on_config_loaded_merges_values(self, in_process_broker):
         """_on_config_loaded() applica i valori persistiti su _config."""
         bt = _load_bt(in_process_broker)
-        with patch("modules.bluetooth.main._apply_config"), \
-             patch("modules.bluetooth.main._start_autoconnect"):
+        with patch("bluetooth_manager.main._apply_config"), \
+             patch("bluetooth_manager.main._start_autoconnect"):
             bt._on_config_loaded({"adapter_name": "MyUnit", "discovery_duration_sec": 20})
 
         assert bt._config["adapter_name"] == "MyUnit"
@@ -870,8 +859,8 @@ class TestConfigCallbacks:
     def test_on_config_loaded_empty_uses_defaults(self, in_process_broker):
         """_on_config_loaded({}) lascia i default inalterati."""
         bt = _load_bt(in_process_broker)
-        with patch("modules.bluetooth.main._apply_config"), \
-             patch("modules.bluetooth.main._start_autoconnect"):
+        with patch("bluetooth_manager.main._apply_config"), \
+             patch("bluetooth_manager.main._start_autoconnect"):
             bt._on_config_loaded({})
 
         assert bt._config["adapter_name"] == "NemoHeadUnit"
@@ -886,8 +875,8 @@ class TestConfigCallbacks:
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
-        with patch("modules.bluetooth.main._apply_config"), \
-             patch("modules.bluetooth.main._start_autoconnect"):
+        with patch("bluetooth_manager.main._apply_config"), \
+             patch("bluetooth_manager.main._start_autoconnect"):
             bt._on_config_loaded({})
 
         ok = _wait(received, 1)
@@ -906,8 +895,8 @@ class TestConfigCallbacks:
         mock_pairing_instance = MagicMock()
         bt._mock_pairing_cls.return_value = mock_pairing_instance
 
-        with patch("modules.bluetooth.main._apply_config"), \
-             patch("modules.bluetooth.main._start_autoconnect"):
+        with patch("bluetooth_manager.main._apply_config"), \
+             patch("bluetooth_manager.main._start_autoconnect"):
             bt._on_config_loaded({})
 
         mock_pairing_instance.register.assert_called_once()
@@ -916,7 +905,7 @@ class TestConfigCallbacks:
     def test_on_config_changed_updates_key(self, in_process_broker):
         """_on_config_changed('adapter_name', 'New') aggiorna _config."""
         bt = _load_bt(in_process_broker)
-        with patch("modules.bluetooth.main._apply_config"):
+        with patch("bluetooth_manager.main._apply_config"):
             bt._on_config_changed("adapter_name", "NewName")
         assert bt._config["adapter_name"] == "NewName"
 
@@ -925,7 +914,7 @@ class TestConfigCallbacks:
         """_on_config_changed('unknown_xyz', 42) non modifica _config."""
         bt = _load_bt(in_process_broker)
         original = dict(bt._config)
-        with patch("modules.bluetooth.main._apply_config"):
+        with patch("bluetooth_manager.main._apply_config"):
             bt._on_config_changed("unknown_xyz", 42)
         # Config unchanged
         for k, v in original.items():
@@ -936,7 +925,7 @@ class TestConfigCallbacks:
         """_on_config_changed() con valore dict non aggiorna _config."""
         bt = _load_bt(in_process_broker)
         original_name = bt._config["adapter_name"]
-        with patch("modules.bluetooth.main._apply_config"):
+        with patch("bluetooth_manager.main._apply_config"):
             bt._on_config_changed("adapter_name", {"nested": "value"})
         assert bt._config["adapter_name"] == original_name
 
@@ -944,7 +933,7 @@ class TestConfigCallbacks:
     def test_on_config_changed_calls_apply_config(self, in_process_broker):
         """_on_config_changed() chiama _apply_config() dopo aggiornamento."""
         bt = _load_bt(in_process_broker)
-        with patch("modules.bluetooth.main._apply_config") as mock_apply:
+        with patch("bluetooth_manager.main._apply_config") as mock_apply:
             bt._on_config_changed("discoverable", False)
         mock_apply.assert_called_once()
 
@@ -957,15 +946,15 @@ class TestErrorPaths:
 
     @pytest.mark.integration
     def test_on_paired_connect_no_adapter_publishes_error(self, in_process_broker):
-        """on_paired_connect() con _adapter=None pubblica bluetooth.error."""
+        """on_paired_connect() con _adapter=None pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._adapter = None
-        bt.on_paired_connect("bluetooth.paired.connect", {"device_address": "AA:BB"})
+        bt.on_paired_connect("bluetooth_manager.paired.connect", {"device_address": "AA:BB"})
 
         ok = _wait(received, 1)
         spy.stop()
@@ -973,14 +962,14 @@ class TestErrorPaths:
 
     @pytest.mark.integration
     def test_on_paired_connect_missing_address_publishes_error(self, in_process_broker):
-        """on_paired_connect() senza device_address pubblica bluetooth.error."""
+        """on_paired_connect() senza device_address pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
-        bt.on_paired_connect("bluetooth.paired.connect", {})
+        bt.on_paired_connect("bluetooth_manager.paired.connect", {})
 
         ok = _wait(received, 1)
         spy.stop()
@@ -988,15 +977,15 @@ class TestErrorPaths:
 
     @pytest.mark.integration
     def test_on_paired_disconnect_no_adapter_publishes_error(self, in_process_broker):
-        """on_paired_disconnect() con _adapter=None pubblica bluetooth.error."""
+        """on_paired_disconnect() con _adapter=None pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._adapter = None
-        bt.on_paired_disconnect("bluetooth.paired.disconnect", {"device_address": "AA:BB"})
+        bt.on_paired_disconnect("bluetooth_manager.paired.disconnect", {"device_address": "AA:BB"})
 
         ok = _wait(received, 1)
         spy.stop()
@@ -1004,14 +993,14 @@ class TestErrorPaths:
 
     @pytest.mark.integration
     def test_on_paired_disconnect_missing_address_publishes_error(self, in_process_broker):
-        """on_paired_disconnect() senza device_address pubblica bluetooth.error."""
+        """on_paired_disconnect() senza device_address pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
-        bt.on_paired_disconnect("bluetooth.paired.disconnect", {})
+        bt.on_paired_disconnect("bluetooth_manager.paired.disconnect", {})
 
         ok = _wait(received, 1)
         spy.stop()
@@ -1019,15 +1008,15 @@ class TestErrorPaths:
 
     @pytest.mark.integration
     def test_on_paired_remove_no_adapter_publishes_error(self, in_process_broker):
-        """on_paired_remove() con _adapter=None pubblica bluetooth.error."""
+        """on_paired_remove() con _adapter=None pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._adapter = None
-        bt.on_paired_remove("bluetooth.paired.remove", {"device_address": "AA:BB"})
+        bt.on_paired_remove("bluetooth_manager.paired.remove", {"device_address": "AA:BB"})
 
         ok = _wait(received, 1)
         spy.stop()
@@ -1035,15 +1024,15 @@ class TestErrorPaths:
 
     @pytest.mark.integration
     def test_on_confirm_pairing_no_agent_publishes_error(self, in_process_broker):
-        """on_confirm_pairing() senza pairing agent pubblica bluetooth.error."""
+        """on_confirm_pairing() senza pairing agent pubblica bluetooth_manager.error."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.error", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.error", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
         bt._pairing = None
-        bt.on_confirm_pairing("bluetooth.confirm_pairing", {
+        bt.on_confirm_pairing("bluetooth_manager.confirm_pairing", {
             "device_address": "AA:BB", "pin": "1234"
         })
 
@@ -1057,7 +1046,7 @@ class TestErrorPaths:
         bt = _load_bt(in_process_broker)
         bt._pairing = MagicMock()
         try:
-            bt.on_reject_pairing("bluetooth.reject_pairing", {})
+            bt.on_reject_pairing("bluetooth_manager.reject_pairing", {})
         except Exception as exc:
             pytest.fail(f"on_reject_pairing ha sollevato: {exc}")
 
@@ -1072,15 +1061,15 @@ class TestEndToEndBusFlow:
     def test_full_discovery_flow_on_bus(self, in_process_broker):
         """
         Sequenza completa discovery via bus:
-          - bluetooth.device.found  pubblicato per ogni device trovato
-          - bluetooth.discovery.completed pubblicato alla fine
+          - bluetooth_manager.device.found  pubblicato per ogni device trovato
+          - bluetooth_manager.discovery.completed pubblicato alla fine
         """
         device_found = []
         discovery_done = []
 
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.device.found",       lambda t, p: device_found.append(p))
-        spy.subscribe("bluetooth.discovery.completed", lambda t, p: discovery_done.append(p))
+        spy.subscribe("bluetooth_manager.device.found",       lambda t, p: device_found.append(p))
+        spy.subscribe("bluetooth_manager.discovery.completed", lambda t, p: discovery_done.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -1109,8 +1098,8 @@ class TestEndToEndBusFlow:
         completed_received = []
 
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.pairing.pin",       lambda t, p: pin_received.append(p))
-        spy.subscribe("bluetooth.pairing.completed", lambda t, p: completed_received.append(p))
+        spy.subscribe("bluetooth_manager.pairing.pin",       lambda t, p: pin_received.append(p))
+        spy.subscribe("bluetooth_manager.pairing.completed", lambda t, p: completed_received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -1121,8 +1110,8 @@ class TestEndToEndBusFlow:
         ok_done = _wait(completed_received, 1)
         spy.stop()
 
-        assert ok_pin,  "bluetooth.pairing.pin non ricevuto"
-        assert ok_done, "bluetooth.pairing.completed non ricevuto"
+        assert ok_pin,  "bluetooth_manager.pairing.pin non ricevuto"
+        assert ok_done, "bluetooth_manager.pairing.completed non ricevuto"
         assert pin_received[0]["pin"] == "111222"
         assert completed_received[0]["device_address"] == "AA:BB"
 
@@ -1135,8 +1124,8 @@ class TestEndToEndBusFlow:
         failed_received = []
 
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.pairing.pin",    lambda t, p: pin_received.append(p))
-        spy.subscribe("bluetooth.pairing.failed", lambda t, p: failed_received.append(p))
+        spy.subscribe("bluetooth_manager.pairing.pin",    lambda t, p: pin_received.append(p))
+        spy.subscribe("bluetooth_manager.pairing.failed", lambda t, p: failed_received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -1147,14 +1136,14 @@ class TestEndToEndBusFlow:
         ok_failed = _wait(failed_received, 1)
         spy.stop()
 
-        assert ok_pin,    "bluetooth.pairing.pin non ricevuto"
-        assert ok_failed, "bluetooth.pairing.failed non ricevuto"
+        assert ok_pin,    "bluetooth_manager.pairing.pin non ricevuto"
+        assert ok_failed, "bluetooth_manager.pairing.failed non ricevuto"
         assert failed_received[0]["error"] == "Auth rejected"
 
     @pytest.mark.integration
     def test_rfcomm_connected_stops_further_autoconnect(self, in_process_broker):
         """
-        bluetooth.rfcomm.connected → _autoconnect_stop settato →
+        bluetooth_manager.rfcomm.connected → _autoconnect_stop settato →
         successivo _start_autoconnect non lancia thread.
         """
         bt = _load_bt(in_process_broker)
@@ -1163,7 +1152,7 @@ class TestEndToEndBusFlow:
         bt._config["autoconnect_enabled"] = True
 
         # Step 1: rfcomm connected → stop event set
-        bt.on_rfcomm_connected("bluetooth.rfcomm.connected", {"device_address": "AA:BB"})
+        bt.on_rfcomm_connected("bluetooth_manager.rfcomm.connected", {"device_address": "AA:BB"})
         assert bt._autoconnect_stop.is_set(), "_autoconnect_stop non settato"
 
     @pytest.mark.integration
@@ -1175,8 +1164,8 @@ class TestEndToEndBusFlow:
         devices_received = []
 
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.paired.removed",  lambda t, p: removed_received.append(p))
-        spy.subscribe("bluetooth.paired.devices",  lambda t, p: devices_received.append(p))
+        spy.subscribe("bluetooth_manager.paired.removed",  lambda t, p: removed_received.append(p))
+        spy.subscribe("bluetooth_manager.paired.devices",  lambda t, p: devices_received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)
@@ -1184,23 +1173,23 @@ class TestEndToEndBusFlow:
         # After removal, list returns empty
         bt._mock_paired_mod.list_paired.return_value = []
 
-        bt.on_paired_remove("bluetooth.paired.remove", {"device_address": "AA:BB"})
-        bt.on_paired_list("bluetooth.paired.list", {})
+        bt.on_paired_remove("bluetooth_manager.paired.remove", {"device_address": "AA:BB"})
+        bt.on_paired_list("bluetooth_manager.paired.list", {})
 
         ok_rem  = _wait(removed_received, 1)
         ok_list = _wait(devices_received, 1)
         spy.stop()
 
-        assert ok_rem,  "bluetooth.paired.removed non ricevuto"
-        assert ok_list, "bluetooth.paired.devices non ricevuto"
+        assert ok_rem,  "bluetooth_manager.paired.removed non ricevuto"
+        assert ok_list, "bluetooth_manager.paired.devices non ricevuto"
         assert devices_received[0]["devices"] == []
 
     @pytest.mark.integration
     def test_multiple_devices_found_all_published(self, in_process_broker):
-        """5 device trovati → 5 bluetooth.device.found pubblicati sul bus."""
+        """5 device trovati → 5 bluetooth_manager.device.found pubblicati sul bus."""
         received = []
         spy = _make_client(in_process_broker, "spy")
-        spy.subscribe("bluetooth.device.found", lambda t, p: received.append(p))
+        spy.subscribe("bluetooth_manager.device.found", lambda t, p: received.append(p))
         _start_client(spy)
 
         bt = _load_bt(in_process_broker)

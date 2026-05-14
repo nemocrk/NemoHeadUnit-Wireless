@@ -359,12 +359,7 @@ def _parse_wifi_start_request_ip(payload: bytes) -> str:
     Falls back to empty string if protobuf is unavailable.
     """
     try:
-        import sys
-        from pathlib import Path
-        _v2 = Path(__file__).parent.parent.parent.parent  # v2/
-        if str(_v2) not in sys.path:
-            sys.path.insert(0, str(_v2))
-        from v2.protos.oaa.wifi.WifiStartRequestMessage_pb2 import WifiStartRequest
+        from oaa.wifi.WifiStartRequestMessage_pb2 import WifiStartRequest
         msg = WifiStartRequest()
         msg.ParseFromString(payload)
         return msg.ip_address or ""
@@ -378,12 +373,7 @@ def _parse_wifi_info_response(payload: bytes) -> tuple:
     Falls back to ("", "", "") if protobuf unavailable.
     """
     try:
-        import sys
-        from pathlib import Path
-        _v2 = Path(__file__).parent.parent.parent.parent
-        if str(_v2) not in sys.path:
-            sys.path.insert(0, str(_v2))
-        from v2.protos.oaa.wifi.WifiSecurityResponseMessage_pb2 import WifiSecurityResponse
+        from oaa.wifi.WifiSecurityResponseMessage_pb2 import WifiSecurityResponse
         msg = WifiSecurityResponse()
         msg.ParseFromString(payload)
         return msg.ssid, msg.key, msg.bssid
@@ -397,12 +387,7 @@ def _build_wifi_start_response(ip_address: str = "") -> bytes:
     Returns empty bytes if proto unavailable (ack is optional in the protocol).
     """
     try:
-        import sys
-        from pathlib import Path
-        _v2 = Path(__file__).parent.parent.parent.parent
-        if str(_v2) not in sys.path:
-            sys.path.insert(0, str(_v2))
-        from v2.protos.oaa.wifi.WifiStartResponseMessage_pb2 import WifiStartResponse
+        from oaa.wifi.WifiStartResponseMessage_pb2 import WifiStartResponse
         msg = WifiStartResponse(ip_address=ip_address, port=0, status=0)
         return msg.SerializeToString()
     except Exception:
@@ -415,12 +400,7 @@ def _build_wifi_connect_status() -> bytes:
     Returns minimal bytes if proto unavailable.
     """
     try:
-        import sys
-        from pathlib import Path
-        _v2 = Path(__file__).parent.parent.parent.parent
-        if str(_v2) not in sys.path:
-            sys.path.insert(0, str(_v2))
-        from v2.protos.oaa.wifi.WifiConnectStatusMessage_pb2 import WifiConnectStatus
+        from oaa.wifi.WifiConnectStatusMessage_pb2 import WifiConnectStatus
         msg = WifiConnectStatus(state=1, status_text="connected")
         return msg.SerializeToString()
     except Exception:

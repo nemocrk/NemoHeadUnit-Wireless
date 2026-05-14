@@ -37,21 +37,6 @@ from typing import Dict, List, Optional
 from unittest.mock import MagicMock
 
 # ---------------------------------------------------------------------------
-# Path bootstrapping (same pattern as all integration tests)
-# ---------------------------------------------------------------------------
-
-_HELPERS = Path(__file__).parent                # e2e/helpers/
-_E2E     = _HELPERS.parent                     # e2e/
-_TESTS   = _E2E.parent                         # tests/
-_V2      = _TESTS.parent                       # v2/
-_MODULES = _V2 / "modules"
-
-for _p in (_V2, _MODULES):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-
-# ---------------------------------------------------------------------------
 # Hardware stubs (injected into sys.modules before any module import)
 # ---------------------------------------------------------------------------
 
@@ -108,7 +93,7 @@ _MODULE_REGISTRY: Dict[str, tuple] = {
     "channel_manager":      ("channel_manager.main",         "run"),
     "audio_manager":        ("audio_manager.main",           "run"),
     "config_manager":       ("config_manager.main",          "run"),
-    "bluetooth":            ("bluetooth.main",               "run"),
+    "bluetooth":            ("bluetooth_manager.main",               "run"),
     "video_ui":             ("video_ui.main",                "run"),
     "zmq_trace":            ("zmq_trace.main",               "run"),
 }
@@ -340,7 +325,7 @@ class StackLauncher:
             "rfcomm.handshake.completed",
             "rfcomm.handshake.failed",
             "rfcomm.handshake.started",
-            "bluetooth.rfcomm.connected",
+            "bluetooth_manager.rfcomm.connected",
             "tcp.session.connected",
             "tcp.session.closed",
             "aa.session.active",

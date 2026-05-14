@@ -33,18 +33,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # ---------------------------------------------------------------------------
-# Path bootstrapping
-# ---------------------------------------------------------------------------
-
-_TESTS   = Path(__file__).parent.parent.parent      # v2/tests/
-_V2      = _TESTS.parent                            # v2/
-_MODULES = _V2 / "modules"
-
-for _p in (_V2, _MODULES, _TESTS):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
-# ---------------------------------------------------------------------------
 # E2E helpers (no source module dependency at import time)
 # ---------------------------------------------------------------------------
 
@@ -108,13 +96,13 @@ class TestRfcommToTcpSmoke:
     ):
         """
         §1 — PhoneMock completa il proprio lato RFCOMM quando lo stack
-        pubblica bluetooth.rfcomm.connected con il fd del socket HU.
+        pubblica bluetooth_manager.rfcomm.connected con il fd del socket HU.
         """
         with e2e_stack(in_process_broker, modules=RFCOMM_MODULES) as stack:
             hu_sock, mock = _make_socketpair()
 
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock.fileno(), "remote_address": "AA:BB:CC:DD:EE:FF"},
             )
 
@@ -132,7 +120,7 @@ class TestRfcommToTcpSmoke:
             hu_sock, mock = _make_socketpair()
 
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock.fileno(), "remote_address": "AA:BB:CC:DD:EE:FF"},
             )
 
@@ -152,7 +140,7 @@ class TestRfcommToTcpSmoke:
             hu_sock, mock = _make_socketpair()
 
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock.fileno(), "remote_address": "AA:BB:CC:DD:EE:FF"},
             )
 
@@ -172,7 +160,7 @@ class TestRfcommToTcpSmoke:
             hu_sock, mock = _make_socketpair(send_start_ack=False)
 
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock.fileno(), "remote_address": "AA:BB:CC:DD:EE:FF"},
             )
 
@@ -200,7 +188,7 @@ class TestRfcommToTcpSmoke:
             threading.Thread(target=_close_after, args=(0.05,), daemon=True).start()
 
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock.fileno(), "remote_address": "AA:BB:CC:DD:EE:FF"},
             )
 
@@ -221,7 +209,7 @@ class TestRfcommToTcpSmoke:
             hu_sock1, mock1 = _make_socketpair(wifi_join_delay=0.3)
 
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock1.fileno(), "remote_address": "AA:BB:CC:DD:EE:FF"},
             )
 
@@ -231,7 +219,7 @@ class TestRfcommToTcpSmoke:
             # Seconda connessione durante handshake attivo
             hu_sock2, mock2 = _make_socketpair()
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock2.fileno(), "remote_address": "11:22:33:44:55:66"},
             )
 
@@ -260,7 +248,7 @@ class TestTcpServerAvailableAfterHandshake:
             hu_sock, mock = _make_socketpair()
 
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock.fileno(), "remote_address": "AA:BB:CC:DD:EE:FF"},
             )
 
@@ -297,7 +285,7 @@ class TestTcpServerAvailableAfterHandshake:
             hu_sock, mock = _make_socketpair()
 
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock.fileno(), "remote_address": "AA:BB:CC:DD:EE:FF"},
             )
 
@@ -335,7 +323,7 @@ class TestTcpServerAvailableAfterHandshake:
 
 class TestFullAaSmoke:
     """
-    §10 — Happy-path end-to-end: da bluetooth.rfcomm.connected fino ad
+    §10 — Happy-path end-to-end: da bluetooth_manager.rfcomm.connected fino ad
     aa.session.active (o almeno fin dopo il VERSION exchange).
     """
 
@@ -354,7 +342,7 @@ class TestFullAaSmoke:
             hu_sock, mock = _make_socketpair()
 
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock.fileno(), "remote_address": "AA:BB:CC:DD:EE:FF"},
             )
 
@@ -420,7 +408,7 @@ class TestFullAaSmoke:
             hu_sock, mock = _make_socketpair()
 
             stack.publish(
-                "bluetooth.rfcomm.connected",
+                "bluetooth_manager.rfcomm.connected",
                 {"fd": hu_sock.fileno(), "remote_address": "AA:BB:CC:DD:EE:FF"},
             )
 
