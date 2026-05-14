@@ -356,6 +356,16 @@ class Logger:
     def critical(self, msg: str, *args, **kwargs) -> None:
         self._proxy.critical(msg % args if args else msg)
 
+    def exception(self, exc_info=None) -> None:
+        """Log an exception with full traceback - same API as stdlib logging."""
+        if exc_info is not None:
+            import traceback
+            import sys
+            if isinstance(exc_info, tuple):
+                traceback.print_exception(*exc_info, file=sys.stderr)
+            else:
+                traceback.print_exception(type(exc_info), exc_info, exc_info.__traceback__, file=sys.stderr)
+        self._proxy.error(f"Exception logged")
 
 # ---------------------------------------------------------------------------
 # LoggerManager — registry of per-module Logger instances

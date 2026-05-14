@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Callable
 
-log = get_logger("bluetooth.discovery")
+log = get_logger("bluetooth_manager.discovery")
 
 
 class DiscoverySession:

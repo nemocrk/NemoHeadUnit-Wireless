@@ -11,7 +11,7 @@ Module contract:
                                  gateway_ip, security_mode, ap_type}
   Publishes   : system.module_ready            {name, priority}
                 system.ready                   {name, priority}
-                bluetooth.rfcomm.connected     {device_address}
+                bluetooth_manager.rfcomm.connected     {device_address}
                 rfcomm.handshake.started       {device_address}
                 rfcomm.handshake.completed     {device_address, phone_ip}
                 rfcomm.handshake.failed        {device_address, error}
@@ -20,7 +20,7 @@ Flow:
   1. Waits for hostapd.ready — stores WiFi credentials
   2. Registers the AA RFCOMM Profile1 service with BlueZ D-Bus
   3. Receives the accepted RFCOMM fd through Profile1.NewConnection
-  4. Publishes bluetooth.rfcomm.connected so hostapd_helper starts the AP
+  4. Publishes bluetooth_manager.rfcomm.connected so hostapd_helper starts the AP
   5. Runs the 5-stage handshake via RfcommHandshake
   6. On success → publishes rfcomm.handshake.completed {phone_ip}
      which triggers tcp_server to start listening
@@ -164,7 +164,7 @@ def _on_rfcomm_connected(sock: socket.socket, device_address: str) -> None:
         _pending_sock = sock
 
     log.info(f"RFCOMM connected from {device_address} — waiting for hostapd.ready")
-    bus.publish("bluetooth.rfcomm.connected", {"device_address": device_address})
+    bus.publish("bluetooth_manager.rfcomm.connected", {"device_address": device_address})
     _try_start_handshake()
 
 

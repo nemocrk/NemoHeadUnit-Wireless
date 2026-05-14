@@ -23,7 +23,7 @@ from typing import Callable
 
 from shared.logger import get_logger
 
-log = get_logger("bluetooth.paired_devices")
+log = get_logger("bluetooth_manager.paired_devices")
 
 _BLUEZ_SERVICE = "org.bluez"
 _IFACE_DEVICE  = "org.bluez.Device1"

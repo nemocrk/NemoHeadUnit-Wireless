@@ -73,30 +73,31 @@ from shared.config_schema import (                                              
     ConfigFieldSchema,
 )
 
-# Control / discovery
-from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (                # noqa: E402
-    ServiceDiscoveryResponse,
-)
-from v2.protos.oaa.control.ChannelDescriptorData_pb2 import ChannelDescriptor          # noqa: E402
-from v2.protos.oaa.common.DriverPositionEnum_pb2 import DriverPosition                 # noqa: E402
-
-# AV / Video / Audio enums
-from v2.protos.oaa.av.AVChannelData_pb2 import AVChannel                               # noqa
-from v2.protos.oaa.av.AVStreamTypeEnum_pb2 import AVStreamType                         # noqa: E402
-from v2.protos.oaa.audio.AudioTypeEnum_pb2 import AudioType                            # noqa: E402
-from v2.protos.oaa.audio.AudioConfigData_pb2 import AudioConfig                        # noqa: E402
-from v2.protos.oaa.video.VideoConfigData_pb2 import VideoConfig                        # noqa: E402
-from v2.protos.oaa.video.VideoResolutionEnum_pb2 import VideoResolution                # noqa: E402
-from v2.protos.oaa.video.VideoFPSEnum_pb2 import VideoFPS                              # noqa: E402
-from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType                     # noqa: E402
+# Import all proto dependencies BEFORE importing ChannelDescriptorData_pb2
+# to ensure the descriptor pool has all required dependencies loaded
+# (ChannelDescriptorData_pb2 depends on these files)
 
 # Sensor
 from v2.protos.oaa.sensor.SensorChannelData_pb2 import SensorChannel                   # noqa: E402
 from v2.protos.oaa.sensor.SensorTypeEnum_pb2 import SensorType                         # noqa: E402
 
+# AV / Video / Audio enums
+from v2.protos.oaa.av.AVChannelData_pb2 import AVChannel                               # noqa
+from v2.protos.oaa.av.AVStreamTypeEnum_pb2 import AVStreamType                         # noqa: E402
+from v2.protos.oaa.av.AVInputChannelData_pb2 import AVInputChannel                     # noqa: E402
+from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType                     # noqa: E402
+from v2.protos.oaa.audio.AudioTypeEnum_pb2 import AudioType                            # noqa: E402
+from v2.protos.oaa.audio.AudioConfigData_pb2 import AudioConfig                        # noqa: E402
+from v2.protos.oaa.video.VideoConfigData_pb2 import VideoConfig                        # noqa: E402
+from v2.protos.oaa.video.VideoResolutionEnum_pb2 import VideoResolution                # noqa: E402
+from v2.protos.oaa.video.VideoFPSEnum_pb2 import VideoFPS                              # noqa: E402
+
 # Bluetooth
 from v2.protos.oaa.bluetooth.BluetoothChannelData_pb2 import BluetoothChannel          # noqa: E402
 from v2.protos.oaa.bluetooth.BluetoothPairingMethodEnum_pb2 import BluetoothPairingMethod  # noqa: E402
+
+# Input
+from v2.protos.oaa.input.InputChannelConfigData_pb2 import InputChannelConfig          # noqa: E402
 
 # WiFi
 from v2.protos.oaa.wifi.WifiChannelData_pb2 import WifiChannel                         # noqa: E402
@@ -109,8 +110,16 @@ from v2.protos.oaa.navigation.NavigationImageOptionsData_pb2 import NavigationIm
 # Media
 from v2.protos.oaa.media.MediaChannelData_pb2 import MediaInfoChannel                  # noqa: E402
 
-# AV Input
-from v2.protos.oaa.av.AVInputChannelData_pb2 import AVInputChannel                     # noqa: E402
+# Radio and Vendor extensions
+from v2.protos.oaa.control.RadioChannelData_pb2 import RadioChannelConfig              # noqa: E402
+from v2.protos.oaa.control.VendorExtensionChannelData_pb2 import VendorExtensionChannel  # noqa: E402
+
+# Car control
+from v2.protos.oaa.carcontrol.CarPropertyData_pb2 import CarPropertyConfig             # noqa: E402
+from v2.protos.oaa.carcontrol.CarControlMessages_pb2 import CarControl                 # noqa: E402
+
+# Notification
+from v2.protos.oaa.notification.NotificationChannelData_pb2 import NotificationChannel  # noqa: E402
 
 # Phone status
 try:
@@ -118,6 +127,13 @@ try:
     _HAS_PHONE_STATUS = True
 except ImportError:
     _HAS_PHONE_STATUS = False
+
+# Control / discovery (NOW import after dependencies)
+from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (                # noqa: E402
+    ServiceDiscoveryResponse,
+)
+from v2.protos.oaa.control.ChannelDescriptorData_pb2 import ChannelDescriptor          # noqa: E402
+from v2.protos.oaa.common.DriverPositionEnum_pb2 import DriverPosition                 # noqa: E402
 
 log = get_logger("oaa_control_channel.service_discovery")
 

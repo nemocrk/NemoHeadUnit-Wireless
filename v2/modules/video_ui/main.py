@@ -14,7 +14,7 @@ Module contract:
                 video.state             {state}  IDLE | SETUP | OPEN | PLAYING | STOPPED
                 aa.session.active       {}
                 aa.session.shutdown     {}
-                bluetooth.pairing.completed  {device_address}
+                bluetooth_manager.pairing.completed  {device_address}
   Publishes   : system.module_ready     {name, priority}
                 system.ready            {name, priority}
                 video.ui.winid          {winid: int}  — for future touch_input module
@@ -47,7 +47,7 @@ Placeholder (no active stream):
     ● red    — Stream interrotto  (after STOPPED/IDLE post-session)
 
 State machine (internal _conn_state):
-  WAITING_BT   → bluetooth.pairing.completed → HANDSHAKE
+  WAITING_BT   → bluetooth_manager.pairing.completed → HANDSHAKE
   HANDSHAKE    → aa.session.active           → HANDSHAKE  (already set)
   HANDSHAKE    → video.state=PLAYING         → STREAMING
   STREAMING    → video.state=IDLE/STOPPED    → INTERRUPTED
@@ -879,7 +879,7 @@ def run() -> None:
     bus.subscribe("video.state",                  on_video_state)
     bus.subscribe("aa.session.active",            on_aa_session_active)
     bus.subscribe("aa.session.shutdown",          on_aa_session_shutdown)
-    bus.subscribe("bluetooth.pairing.completed",  on_bluetooth_pairing_completed)
+    bus.subscribe("bluetooth_manager.pairing.completed",  on_bluetooth_pairing_completed)
 
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)

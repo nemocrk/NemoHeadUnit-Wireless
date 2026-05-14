@@ -7,7 +7,7 @@ Module contract:
   Subscribes  : system.readytostart
                 system.start
                 system.stop
-                bluetooth.rfcomm.connected   {device_address: str}
+                bluetooth_manager.rfcomm.connected   {device_address: str}
                 config.response              (filtered by module=hostapd_helper)
                 config.changed               (filtered by module=hostapd_helper)
   Publishes   : system.module_ready          {name, priority}
@@ -32,7 +32,7 @@ Configuration keys (v2/config/hostapd_helper.yaml):
   monitor_timeout   int    default: 30  (min=5, max=120)
 
 Flow:
-  1. bluetooth.rfcomm.connected  → call Start() on D-Bus ap_manager_service
+  1. bluetooth_manager.rfcomm.connected  → call Start() on D-Bus ap_manager_service
   2. ap_manager_service emits APStarted signal → publish hostapd.ready
   3. rfcomm_handshake module reads hostapd.ready and proceeds
   4. On system.stop (or APFailed signal) → call Stop() on D-Bus ap_manager_service
@@ -348,7 +348,7 @@ def on_system_stop(topic: str, payload: dict) -> None:
     bus.stop()
 
 # ---------------------------------------------------------------------------
-# bluetooth.rfcomm.connected → AP lifecycle
+# bluetooth_manager.rfcomm.connected → AP lifecycle
 # ---------------------------------------------------------------------------
 
 def on_rfcomm_connected(topic: str, payload: dict) -> None:
@@ -433,7 +433,7 @@ def run() -> None:
     bus.subscribe("system.readytostart",        on_system_readytostart)
     bus.subscribe("system.start",               on_system_start)
     bus.subscribe("system.stop",                on_system_stop)
-    bus.subscribe("bluetooth.rfcomm.connected", on_rfcomm_connected)
+    bus.subscribe("bluetooth_manager.rfcomm.connected", on_rfcomm_connected)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)

@@ -42,7 +42,7 @@ if str(_V2) not in sys.path:
 
 from shared.logger import get_logger  # noqa: E402
 
-log = get_logger("bluetooth.pairing")
+log = get_logger("bluetooth_manager.pairing")
 
 AGENT_PATH = "/org/nemo/agent"
 PAIRING_CAPABILITY = "DisplayYesNo"

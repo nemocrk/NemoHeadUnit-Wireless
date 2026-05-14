@@ -18,7 +18,7 @@ import os
 import time
 from shared.logger import get_logger
 
-log = get_logger("bluetooth.bluez_adapter")
+log = get_logger("bluetooth_manager.bluez_adapter")
 
 # Workaround: conda injects DBUS_SYSTEM_BUS_ADDRESS as empty string,
 # causing dbus-python to fall back to a non-existent conda-env socket.

@@ -10,26 +10,26 @@ Module contract:
   Subscribes  : system.readytostart
                 system.start
                 system.stop
-                bluetooth.device.found        {address, name, rssi}
-                bluetooth.discovery.completed {devices: [...]}
-                bluetooth.pairing.pin         {device_address, pin}
-                bluetooth.pairing.completed   {device_address}
-                bluetooth.pairing.failed      {device_address, error}
-                bluetooth.paired.devices      {devices: [{address, name, connected, trusted}]}
-                bluetooth.paired.connected    {device_address}
-                bluetooth.paired.disconnected {device_address}
-                bluetooth.paired.removed      {device_address}
-                bluetooth.paired.failed       {device_address, error}
+                bluetooth_manager.device.found        {address, name, rssi}
+                bluetooth_manager.discovery.completed {devices: [...]}
+                bluetooth_manager.pairing.pin         {device_address, pin}
+                bluetooth_manager.pairing.completed   {device_address}
+                bluetooth_manager.pairing.failed      {device_address, error}
+                bluetooth_manager.paired.devices      {devices: [{address, name, connected, trusted}]}
+                bluetooth_manager.paired.connected    {device_address}
+                bluetooth_manager.paired.disconnected {device_address}
+                bluetooth_manager.paired.removed      {device_address}
+                bluetooth_manager.paired.failed       {device_address, error}
   Publishes   : system.module_ready            {name, priority}
                 system.ready                   {name, priority}
-                bluetooth.discover            {duration_sec: int}
-                bluetooth.pair                {device_address: str}
-                bluetooth.confirm_pairing     {device_address: str, pin: str}
-                bluetooth.paired.list         {}
-                bluetooth.paired.connect      {device_address: str}
-                bluetooth.paired.disconnect   {device_address: str}
-                bluetooth.paired.remove       {device_address: str}
-                bluetooth.try_autoconnect     {}
+                bluetooth_manager.discover            {duration_sec: int}
+                bluetooth_manager.pair                {device_address: str}
+                bluetooth_manager.confirm_pairing     {device_address: str, pin: str}
+                bluetooth_manager.paired.list         {}
+                bluetooth_manager.paired.connect      {device_address: str}
+                bluetooth_manager.paired.disconnect   {device_address: str}
+                bluetooth_manager.paired.remove       {device_address: str}
+                bluetooth_manager.try_autoconnect     {}
 """
 
 import sys
@@ -216,7 +216,7 @@ class BluetoothPairingWindow(QMainWindow):
         self.set_status(f"PIN richiesto per {address}: {pin}")
         dlg = PinDialog(address, pin, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
-            bus.publish("bluetooth.confirm_pairing", {
+            bus.publish("bluetooth_manager.confirm_pairing", {
                 "device_address": address,
                 "pin": pin,
             })
@@ -325,7 +325,7 @@ class BluetoothPairingWindow(QMainWindow):
         self._device_list.clear()
         self._btn_pair.setEnabled(False)
         self.set_status("Ricerca dispositivi in corso…")
-        bus.publish("bluetooth.discover", {"duration_sec": 10})
+        bus.publish("bluetooth_manager.discover", {"duration_sec": 10})
 
     def _on_pair_clicked(self):
         selected = self._device_list.currentItem()
@@ -333,7 +333,7 @@ class BluetoothPairingWindow(QMainWindow):
             return
         address = selected.data(Qt.ItemDataRole.UserRole)
         self.set_status(f"Avvio pairing con {address}…")
-        bus.publish("bluetooth.pair", {"device_address": address})
+        bus.publish("bluetooth_manager.pair", {"device_address": address})
 
     def _on_selection_changed(self):
         self._btn_pair.setEnabled(bool(self._device_list.currentItem()))
@@ -343,25 +343,25 @@ class BluetoothPairingWindow(QMainWindow):
 
     def _on_refresh_paired_clicked(self):
         self.set_status("Aggiornamento lista dispositivi accoppiati…")
-        bus.publish("bluetooth.paired.list", {})
+        bus.publish("bluetooth_manager.paired.list", {})
 
     def _on_autoconnect_clicked(self):
         self.set_status("Riavvio autoconnect richiesto…")
-        bus.publish("bluetooth.try_autoconnect", {})
+        bus.publish("bluetooth_manager.try_autoconnect", {})
 
     def _on_connect_paired_clicked(self):
         address = self._selected_paired_address()
         if not address:
             return
         self.set_status(f"Connessione a {address}…")
-        bus.publish("bluetooth.paired.connect", {"device_address": address})
+        bus.publish("bluetooth_manager.paired.connect", {"device_address": address})
 
     def _on_disconnect_paired_clicked(self):
         address = self._selected_paired_address()
         if not address:
             return
         self.set_status(f"Disconnessione da {address}…")
-        bus.publish("bluetooth.paired.disconnect", {"device_address": address})
+        bus.publish("bluetooth_manager.paired.disconnect", {"device_address": address})
 
     def _on_remove_paired_clicked(self):
         address = self._selected_paired_address()
@@ -375,7 +375,7 @@ class BluetoothPairingWindow(QMainWindow):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.set_status(f"Rimozione {address}…")
-            bus.publish("bluetooth.paired.remove", {"device_address": address})
+            bus.publish("bluetooth_manager.paired.remove", {"device_address": address})
 
 
 _window: BluetoothPairingWindow | None = None
@@ -414,7 +414,7 @@ def on_system_start(topic: str, payload: dict) -> None:
     log.info("system.ready published — bluetooth_ui online")
 
     # Auto-populate paired list on startup
-    bus.publish("bluetooth.paired.list", {})
+    bus.publish("bluetooth_manager.paired.list", {})
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
@@ -502,16 +502,16 @@ def run() -> None:
     bus.subscribe("system.readytostart",           on_system_readytostart)
     bus.subscribe("system.start",                  on_system_start)
     bus.subscribe("system.stop",                   on_system_stop)
-    bus.subscribe("bluetooth.device.found",        on_device_found)
-    bus.subscribe("bluetooth.discovery.completed", on_discovery_completed)
-    bus.subscribe("bluetooth.pairing.pin",         on_pairing_pin)
-    bus.subscribe("bluetooth.pairing.completed",   on_pairing_completed)
-    bus.subscribe("bluetooth.pairing.failed",      on_pairing_failed)
-    bus.subscribe("bluetooth.paired.devices",      on_paired_devices)
-    bus.subscribe("bluetooth.paired.connected",    on_paired_connected)
-    bus.subscribe("bluetooth.paired.disconnected", on_paired_disconnected)
-    bus.subscribe("bluetooth.paired.removed",      on_paired_removed)
-    bus.subscribe("bluetooth.paired.failed",       on_paired_failed)
+    bus.subscribe("bluetooth_manager.device.found",        on_device_found)
+    bus.subscribe("bluetooth_manager.discovery.completed", on_discovery_completed)
+    bus.subscribe("bluetooth_manager.pairing.pin",         on_pairing_pin)
+    bus.subscribe("bluetooth_manager.pairing.completed",   on_pairing_completed)
+    bus.subscribe("bluetooth_manager.pairing.failed",      on_pairing_failed)
+    bus.subscribe("bluetooth_manager.paired.devices",      on_paired_devices)
+    bus.subscribe("bluetooth_manager.paired.connected",    on_paired_connected)
+    bus.subscribe("bluetooth_manager.paired.disconnected", on_paired_disconnected)
+    bus.subscribe("bluetooth_manager.paired.removed",      on_paired_removed)
+    bus.subscribe("bluetooth_manager.paired.failed",       on_paired_failed)
 
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)

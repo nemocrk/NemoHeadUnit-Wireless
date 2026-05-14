@@ -7,33 +7,33 @@ Module contract:
   Subscribes  : system.readytostart
                 system.start
                 system.stop
-                bluetooth.discover              {duration_sec: int}
-                bluetooth.pair                  {device_address: str}
-                bluetooth.confirm_pairing       {device_address: str, pin: str}
-                bluetooth.reject_pairing        {device_address: str}
-                bluetooth.rfcomm.connected      {device_address: str}  → stops autoconnect
-                bluetooth.try_autoconnect       {}                     → (re)starts autoconnect
-                bluetooth.paired.list           {}
-                bluetooth.paired.remove         {device_address: str}
-                bluetooth.paired.connect        {device_address: str}
-                bluetooth.paired.disconnect     {device_address: str}
+                bluetooth_manager.discover              {duration_sec: int}
+                bluetooth_manager.pair                  {device_address: str}
+                bluetooth_manager.confirm_pairing       {device_address: str, pin: str}
+                bluetooth_manager.reject_pairing        {device_address: str}
+                bluetooth_manager.rfcomm.connected      {device_address: str}  → stops autoconnect
+                bluetooth_manager.try_autoconnect       {}                     → (re)starts autoconnect
+                bluetooth_manager.paired.list           {}
+                bluetooth_manager.paired.remove         {device_address: str}
+                bluetooth_manager.paired.connect        {device_address: str}
+                bluetooth_manager.paired.disconnect     {device_address: str}
                 config.response                 (filtered by module=bluetooth)
                 config.changed                  (filtered by module=bluetooth)
   Publishes   : system.module_ready             {name, priority}
                 system.ready                    {name, priority}
-                bluetooth.device.found          {address, name, rssi}
-                bluetooth.discovery.completed   {devices: [...]}
-                bluetooth.pairing.pin           {device_address, pin}
-                bluetooth.pairing.completed     {device_address}
-                bluetooth.pairing.failed        {device_address, error}
-                bluetooth.paired.devices        {devices: [{address, name, connected, trusted}]}
-                bluetooth.paired.removed        {device_address}
-                bluetooth.paired.connected      {device_address}
-                bluetooth.paired.disconnected   {device_address}
-                bluetooth.paired.failed         {device_address, error}
-                bluetooth.error                 {error}
+                bluetooth_manager.device.found          {address, name, rssi}
+                bluetooth_manager.discovery.completed   {devices: [...]}
+                bluetooth_manager.pairing.pin           {device_address, pin}
+                bluetooth_manager.pairing.completed     {device_address}
+                bluetooth_manager.pairing.failed        {device_address, error}
+                bluetooth_manager.paired.devices        {devices: [{address, name, connected, trusted}]}
+                bluetooth_manager.paired.removed        {device_address}
+                bluetooth_manager.paired.connected      {device_address}
+                bluetooth_manager.paired.disconnected   {device_address}
+                bluetooth_manager.paired.failed         {device_address, error}
+                bluetooth_manager.error                 {error}
 
-Configuration keys (v2/config/bluetooth.yaml):
+Configuration keys (v2/config/bluetooth_manager.yaml):
   discoverable                  bool   default: true
   discoverable_timeout          int    default: 0  (seconds, 0 = permanent)
   discovery_duration_sec        int    default: 10
@@ -69,10 +69,10 @@ from shared.logger import get_logger                 # noqa: E402
 from shared.config_client import ConfigClient        # noqa: E402
 from shared.config_schema import field_bool, field_int, field_string  # noqa: E402
 
-from bluetooth.bluez_adapter import BluezAdapter     # noqa: E402
-from bluetooth.discovery import DiscoverySession     # noqa: E402
-from bluetooth.pairing import PairingAgent           # noqa: E402
-import bluetooth.paired_devices as paired_devices    # noqa: E402
+from bluetooth_manager.bluez_adapter import BluezAdapter     # noqa: E402
+from bluetooth_manager.discovery import DiscoverySession     # noqa: E402
+from bluetooth_manager.pairing import PairingAgent           # noqa: E402
+import bluetooth_manager.paired_devices as paired_devices    # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -153,7 +153,7 @@ def _autoconnect_loop() -> None:
     """
     Daemon thread: iterates over all Paired/Trusted devices and attempts
     Device1.Connect() on each. Uses exponential backoff between full rounds.
-    Stops when _autoconnect_stop is set (e.g. bluetooth.rfcomm.connected or
+    Stops when _autoconnect_stop is set (e.g. bluetooth_manager.rfcomm.connected or
     system.stop).
     """
     global _autoconnect_active
@@ -325,13 +325,13 @@ def on_system_start(topic: str, payload: dict) -> None:
     _adapter = BluezAdapter()
     if not _adapter.init():
         log.error("D-Bus init failed — Bluetooth unavailable")
-        bus.publish("bluetooth.error", {"error": "D-Bus init failed"})
+        bus.publish("bluetooth_manager.error", {"error": "D-Bus init failed"})
         bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
         #return
 
     if not _adapter.register_profiles():
         log.error("Profile registration failed")
-        bus.publish("bluetooth.error", {"error": "Profile registration failed"})
+        bus.publish("bluetooth_manager.error", {"error": "Profile registration failed"})
         bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
         #return
 
@@ -351,13 +351,13 @@ def on_system_stop(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# bluetooth.discover
+# bluetooth_manager.discover
 # ---------------------------------------------------------------------------
 
 def on_discover(topic: str, payload: dict) -> None:
     global _discovery
     if _adapter is None:
-        bus.publish("bluetooth.error", {"error": "Adapter not ready"})
+        bus.publish("bluetooth_manager.error", {"error": "Adapter not ready"})
         return
 
     if _discovery is not None and _discovery.is_running:
@@ -375,33 +375,33 @@ def on_discover(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# bluetooth.pair
+# bluetooth_manager.pair
 # ---------------------------------------------------------------------------
 
 def on_pair(topic: str, payload: dict) -> None:
     if _pairing is None:
-        bus.publish("bluetooth.error", {"error": "Pairing agent not ready"})
+        bus.publish("bluetooth_manager.error", {"error": "Pairing agent not ready"})
         return
     address = payload.get("device_address", "")
     if not address:
-        bus.publish("bluetooth.error", {"error": "bluetooth.pair: missing device_address"})
+        bus.publish("bluetooth_manager.error", {"error": "bluetooth_manager.pair: missing device_address"})
         return
     log.info(f"Pairing requested with {address}")
     _pairing.pair(address)
 
 
 # ---------------------------------------------------------------------------
-# bluetooth.confirm_pairing / bluetooth.reject_pairing
+# bluetooth_manager.confirm_pairing / bluetooth_manager.reject_pairing
 # ---------------------------------------------------------------------------
 
 def on_confirm_pairing(topic: str, payload: dict) -> None:
     if _pairing is None:
-        bus.publish("bluetooth.error", {"error": "Pairing agent not ready"})
+        bus.publish("bluetooth_manager.error", {"error": "Pairing agent not ready"})
         return
     address = payload.get("device_address", "")
     pin     = payload.get("pin", "")
     if not address or not pin:
-        bus.publish("bluetooth.error", {"error": "bluetooth.confirm_pairing: missing fields"})
+        bus.publish("bluetooth_manager.error", {"error": "bluetooth_manager.confirm_pairing: missing fields"})
         return
     log.info(f"Confirm pairing for {address} pin={pin}")
     _pairing.confirm(address, pin)
@@ -409,6 +409,7 @@ def on_confirm_pairing(topic: str, payload: dict) -> None:
 
 def on_reject_pairing(topic: str, payload: dict) -> None:
     if _pairing is None:
+        bus.publish("bluetooth_manager.error", {"error": "Pairing agent not ready"})
         return
     address = payload.get("device_address", "")
     if address:
@@ -416,7 +417,7 @@ def on_reject_pairing(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# bluetooth.rfcomm.connected → stop autoconnect
+# bluetooth_manager.rfcomm.connected → stop autoconnect
 # ---------------------------------------------------------------------------
 
 def on_rfcomm_connected(topic: str, payload: dict) -> None:
@@ -426,72 +427,72 @@ def on_rfcomm_connected(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# bluetooth.try_autoconnect
+# bluetooth_manager.try_autoconnect
 # ---------------------------------------------------------------------------
 
 def on_try_autoconnect(topic: str, payload: dict) -> None:
-    log.info("bluetooth.try_autoconnect received")
+    log.info("bluetooth_manager.try_autoconnect received")
     _start_autoconnect()
 
 
 # ---------------------------------------------------------------------------
-# bluetooth.paired.*
+# bluetooth_manager.paired.*
 # ---------------------------------------------------------------------------
 
 def on_paired_list(topic: str, payload: dict) -> None:
     if _adapter is None:
-        bus.publish("bluetooth.error", {"error": "Adapter not ready"})
+        bus.publish("bluetooth_manager.error", {"error": "Adapter not ready"})
         return
     devices = paired_devices.list_paired(_adapter.bus)
-    bus.publish("bluetooth.paired.devices", {"devices": devices})
+    bus.publish("bluetooth_manager.paired.devices", {"devices": devices})
 
 
 def on_paired_remove(topic: str, payload: dict) -> None:
     address = payload.get("device_address", "")
     if not address:
-        bus.publish("bluetooth.error", {"error": "bluetooth.paired.remove: missing device_address"})
+        bus.publish("bluetooth_manager.error", {"error": "bluetooth_manager.paired.remove: missing device_address"})
         return
     if _adapter is None:
-        bus.publish("bluetooth.error", {"error": "Adapter not ready"})
+        bus.publish("bluetooth_manager.error", {"error": "Adapter not ready"})
         return
     ok = paired_devices.remove(_adapter.bus, address)
     if ok:
-        bus.publish("bluetooth.paired.removed", {"device_address": address})
+        bus.publish("bluetooth_manager.paired.removed", {"device_address": address})
     else:
-        bus.publish("bluetooth.paired.failed", {"device_address": address, "error": "Remove failed"})
+        bus.publish("bluetooth_manager.paired.failed", {"device_address": address, "error": "Remove failed"})
 
 
 def on_paired_connect(topic: str, payload: dict) -> None:
     address = payload.get("device_address", "")
     if not address:
-        bus.publish("bluetooth.error", {"error": "bluetooth.paired.connect: missing device_address"})
+        bus.publish("bluetooth_manager.error", {"error": "bluetooth_manager.paired.connect: missing device_address"})
         return
     if _adapter is None:
-        bus.publish("bluetooth.error", {"error": "Adapter not ready"})
+        bus.publish("bluetooth_manager.error", {"error": "Adapter not ready"})
         return
     timeout = int(_config["autoconnect_connect_timeout_s"])
     paired_devices.connect(
         _adapter.bus,
         address,
         timeout_s=timeout,
-        on_connected=lambda addr: bus.publish("bluetooth.paired.connected", {"device_address": addr}),
-        on_failed=lambda addr, err: bus.publish("bluetooth.paired.failed", {"device_address": addr, "error": err}),
+        on_connected=lambda addr: bus.publish("bluetooth_manager.paired.connected", {"device_address": addr}),
+        on_failed=lambda addr, err: bus.publish("bluetooth_manager.paired.failed", {"device_address": addr, "error": err}),
     )
 
 
 def on_paired_disconnect(topic: str, payload: dict) -> None:
     address = payload.get("device_address", "")
     if not address:
-        bus.publish("bluetooth.error", {"error": "bluetooth.paired.disconnect: missing device_address"})
+        bus.publish("bluetooth_manager.error", {"error": "bluetooth_manager.paired.disconnect: missing device_address"})
         return
     if _adapter is None:
-        bus.publish("bluetooth.error", {"error": "Adapter not ready"})
+        bus.publish("bluetooth_manager.error", {"error": "Adapter not ready"})
         return
     paired_devices.disconnect(
         _adapter.bus,
         address,
-        on_disconnected=lambda addr: bus.publish("bluetooth.paired.disconnected", {"device_address": addr}),
-        on_failed=lambda addr, err: bus.publish("bluetooth.paired.failed", {"device_address": addr, "error": err}),
+        on_disconnected=lambda addr: bus.publish("bluetooth_manager.paired.disconnected", {"device_address": addr}),
+        on_failed=lambda addr, err: bus.publish("bluetooth_manager.paired.failed", {"device_address": addr, "error": err}),
     )
 
 
@@ -500,19 +501,19 @@ def on_paired_disconnect(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _on_device_found(address: str, name: str, rssi: int) -> None:
-    bus.publish("bluetooth.device.found", {"address": address, "name": name, "rssi": rssi})
+    bus.publish("bluetooth_manager.device.found", {"address": address, "name": name, "rssi": rssi})
 
 def _on_discovery_done(devices: list) -> None:
-    bus.publish("bluetooth.discovery.completed", {"devices": devices})
+    bus.publish("bluetooth_manager.discovery.completed", {"devices": devices})
 
 def _on_pin_requested(device_address: str, pin: str) -> None:
-    bus.publish("bluetooth.pairing.pin", {"device_address": device_address, "pin": pin})
+    bus.publish("bluetooth_manager.pairing.pin", {"device_address": device_address, "pin": pin})
 
 def _on_pairing_completed(device_address: str) -> None:
-    bus.publish("bluetooth.pairing.completed", {"device_address": device_address})
+    bus.publish("bluetooth_manager.pairing.completed", {"device_address": device_address})
 
 def _on_pairing_failed(device_address: str, error: str) -> None:
-    bus.publish("bluetooth.pairing.failed", {"device_address": device_address, "error": error})
+    bus.publish("bluetooth_manager.pairing.failed", {"device_address": device_address, "error": error})
 
 
 # ---------------------------------------------------------------------------
@@ -527,16 +528,16 @@ def run() -> None:
     bus.subscribe("system.readytostart",        on_system_readytostart)
     bus.subscribe("system.start",               on_system_start)
     bus.subscribe("system.stop",                on_system_stop)
-    bus.subscribe("bluetooth.discover",         on_discover)
-    bus.subscribe("bluetooth.pair",             on_pair)
-    bus.subscribe("bluetooth.confirm_pairing",  on_confirm_pairing)
-    bus.subscribe("bluetooth.reject_pairing",   on_reject_pairing)
-    bus.subscribe("bluetooth.rfcomm.connected", on_rfcomm_connected)
-    bus.subscribe("bluetooth.try_autoconnect",  on_try_autoconnect)
-    bus.subscribe("bluetooth.paired.list",      on_paired_list)
-    bus.subscribe("bluetooth.paired.remove",    on_paired_remove)
-    bus.subscribe("bluetooth.paired.connect",   on_paired_connect)
-    bus.subscribe("bluetooth.paired.disconnect", on_paired_disconnect)
+    bus.subscribe("bluetooth_manager.discover",         on_discover)
+    bus.subscribe("bluetooth_manager.pair",             on_pair)
+    bus.subscribe("bluetooth_manager.confirm_pairing",  on_confirm_pairing)
+    bus.subscribe("bluetooth_manager.reject_pairing",   on_reject_pairing)
+    bus.subscribe("bluetooth_manager.rfcomm.connected", on_rfcomm_connected)
+    bus.subscribe("bluetooth_manager.try_autoconnect",  on_try_autoconnect)
+    bus.subscribe("bluetooth_manager.paired.list",      on_paired_list)
+    bus.subscribe("bluetooth_manager.paired.remove",    on_paired_remove)
+    bus.subscribe("bluetooth_manager.paired.connect",   on_paired_connect)
+    bus.subscribe("bluetooth_manager.paired.disconnect", on_paired_disconnect)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
