@@ -81,3 +81,5 @@ if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ]; then
 else
     echo -e "  ${GREEN}[hw-fix] HP Omni10: nessuna modifica necessaria.${NC}"
 fi
+
+sudo apt update && sudo apt install i965-va-driver vainfo

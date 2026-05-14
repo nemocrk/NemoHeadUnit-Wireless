@@ -146,9 +146,11 @@ class TestXxxFuzz:
 **Status:** Completato ✅ — **TEST SUITE COMPLETA**
 
 **Prossimi 3 passi:**
-1. **IMMEDIATO** — Eseguire `pytest --cov=v2 --cov-report=html` e identificare moduli sotto 80%
-2. Top-up test unit mirati sui moduli sotto soglia
-3. Verifica CI: `pytest -m "unit or integration" --cov-fail-under=80` in green
+
+1. **IMMEDIATO** — Verificare docs/KNOWN_PRODUCTION_BUGS.md
+2. **IMMEDIATO** — Eseguire `pytest --cov=v2 --cov-report=html` e identificare moduli sotto 80%
+3. Top-up test unit mirati sui moduli sotto soglia
+4. Verifica CI: `pytest -m "unit or integration" --cov-fail-under=80` in green
 
 ---
 
