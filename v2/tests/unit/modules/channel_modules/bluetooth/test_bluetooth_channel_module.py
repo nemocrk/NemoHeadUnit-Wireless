@@ -15,10 +15,10 @@ Covers:
                AUTH_DATA, AUTH_RESULT, unknown
   Section 5  — _handle_open_request(): send_frame CHANNEL_OPEN_RESPONSE
   Section 6  — _handle_pairing_request(): parse OK, parse error,
-               pubblica bluetooth.pairing_request,
+               pubblica bluetooth_manager.pairing_request,
                invia PAIRING_RESPONSE already_paired=True
-  Section 7  — _handle_auth_data(): pubblica bluetooth.auth_data
-  Section 8  — _handle_auth_result(): pubblica bluetooth.auth_result
+  Section 7  — _handle_auth_data(): pubblica bluetooth_manager.auth_data
+  Section 8  — _handle_auth_result(): pubblica bluetooth_manager.auth_result
 """
 
 from __future__ import annotations
@@ -226,7 +226,7 @@ class TestHandlePairingRequest:
              patch.object(bm, "send_frame"):
             bm._handle_pairing_request(b"")
         bm.bus.publish.assert_any_call(
-            "bluetooth.pairing_request",
+            "bluetooth_manager.pairing_request",
             {"phone_address": "aa:bb:cc", "phone_name": "TestPhone", "pairing_method": 1},
         )
 
@@ -267,7 +267,7 @@ class TestHandleAuthData:
     def test_publishes_auth_data(self, bm):
         bm._handle_auth_data(b"\x01\x02\x03")
         bm.bus.publish.assert_called_with(
-            "bluetooth.auth_data", {"data_hex": b"\x01\x02\x03".hex()}
+            "bluetooth_manager.auth_data", {"data_hex": b"\x01\x02\x03".hex()}
         )
 
     @pytest.mark.unit
@@ -286,7 +286,7 @@ class TestHandleAuthResult:
     def test_publishes_auth_result(self, bm):
         bm._handle_auth_result(b"\xFF")
         bm.bus.publish.assert_called_with(
-            "bluetooth.auth_result", {"data_hex": b"\xFF".hex()}
+            "bluetooth_manager.auth_result", {"data_hex": b"\xFF".hex()}
         )
 
     @pytest.mark.unit

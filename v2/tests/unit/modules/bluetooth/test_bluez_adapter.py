@@ -47,7 +47,6 @@ import importlib
 from unittest.mock import MagicMock, patch, call
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Install dbus / gi stubs at module level
 # ---------------------------------------------------------------------------
@@ -85,12 +84,13 @@ _install_stubs()
 # Import module under test
 # ---------------------------------------------------------------------------
 
+_this_module = __name__
 for _k in list(sys.modules.keys()):
-    if "bluez_adapter" in _k:
+    if _k != _this_module and "bluez_adapter" in _k:
         del sys.modules[_k]
 
 with patch("shared.logger.get_logger", return_value=MagicMock()):
-    import modules.bluetooth.bluez_adapter as _ba_mod
+    import bluetooth_manager.bluez_adapter as _ba_mod
     importlib.reload(_ba_mod)
 
 BluezAdapter = _ba_mod.BluezAdapter

@@ -7,10 +7,10 @@ Strategy:
   All external dependencies are mocked before import:
     - dbus, dbus.mainloop.glib    → sys.modules stubs
     - gi / gi.repository.GLib    → sys.modules stubs
-    - bluetooth.bluez_adapter.BluezAdapter
-    - bluetooth.discovery.DiscoverySession
-    - bluetooth.pairing.PairingAgent
-    - bluetooth.paired_devices    (module-level mock)
+    - bluetooth_manager.bluez_adapter.BluezAdapter
+    - bluetooth_manager.discovery.DiscoverySession
+    - bluetooth_manager.pairing.PairingAgent
+    - bluetooth_manager.paired_devices    (module-level mock)
     - shared.bus_client.BusClient
     - shared.logger.get_logger
     - shared.config_client.ConfigClient
@@ -27,7 +27,7 @@ Covers:
                each affected branch (adapter_name, discoverable, autoconnect_enabled)
   Section 5  — Boot: on_system_readytostart, on_system_start priority filter,
                on_system_start success path calls adapter.init/register_profiles,
-               on_system_start dbus failure publishes bluetooth.error,
+               on_system_start dbus failure publishes bluetooth_manager.error,
                on_system_stop calls adapter shutdown + bus.stop
   Section 6  — on_discover: adapter None → error, discovery already running → ignored,
                happy path creates DiscoverySession + start, custom duration used
@@ -55,7 +55,6 @@ import importlib
 import threading
 from unittest.mock import MagicMock, patch, call
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Install stubs for dbus / gi BEFORE any import of the module under test
@@ -89,7 +88,7 @@ def _install_dbus_stubs():
 
 _install_dbus_stubs()
 
-_MOD = "modules.bluetooth.main"
+_MOD = "bluetooth_manager.main"
 
 
 # ---------------------------------------------------------------------------
@@ -166,17 +165,19 @@ def bt():
         if "bluetooth" in key and "test" not in key:
             del sys.modules[key]
 
-    with patch("shared.bus_client.BusClient", return_value=mock_bus), \
+    # Pre-populate sys.modules with the mocked paired_devices module
+    sys.modules["bluetooth_manager.paired_devices"] = mock_paired
+
+    with patch("bluetooth_manager.bluez_adapter.BluezAdapter",  mock_adapter_cls), \
+         patch("bluetooth_manager.discovery.DiscoverySession",  mock_discovery_cls), \
+         patch("bluetooth_manager.pairing.PairingAgent",        mock_pairing_cls), \
+         patch("shared.bus_client.BusClient", return_value=mock_bus), \
          patch("shared.logger.get_logger", return_value=mock_log), \
          patch("shared.config_client.ConfigClient", return_value=mock_cfg_inst), \
          patch("shared.config_schema.field_bool",   side_effect=lambda default=True,  **kw: _field_stub(default)), \
          patch("shared.config_schema.field_int",    side_effect=lambda default=0,     **kw: _field_stub(default)), \
-         patch("shared.config_schema.field_string", side_effect=lambda default="",    **kw: _field_stub(default)), \
-         patch("bluetooth.bluez_adapter.BluezAdapter",  mock_adapter_cls), \
-         patch("bluetooth.discovery.DiscoverySession",  mock_discovery_cls), \
-         patch("bluetooth.pairing.PairingAgent",        mock_pairing_cls), \
-         patch("bluetooth.paired_devices",              mock_paired):
-        import modules.bluetooth.main as mod
+         patch("shared.config_schema.field_string", side_effect=lambda default="",    **kw: _field_stub(default)):
+        import bluetooth_manager.main as mod
         importlib.reload(mod)
         mod.bus = mock_bus
         mod.log = mock_log
@@ -290,7 +291,7 @@ class TestOnConfigLoaded:
         with patch.object(mod, "_start_autoconnect"), \
              patch.object(mod, "BluezAdapter", mock_adapter_inst, create=True):
             mock_pairing_cls.reset_mock()
-            with patch("bluetooth.pairing.PairingAgent", mock_pairing_cls):
+            with patch("bluetooth_manager.pairing.PairingAgent", mock_pairing_cls):
                 mod._on_config_loaded({})
         mock_pairing_inst.register.assert_called()
 
@@ -396,7 +397,7 @@ class TestBootHandlers:
         with patch.object(mod, "_start_glib_mainloop"):
             mock_bus.publish.reset_mock()
             mod.on_system_start("system.start", {"priority": 1})
-        assert "bluetooth.error" in _topics(mock_bus)
+        assert "bluetooth_manager.error" in _topics(mock_bus)
 
     @pytest.mark.unit
     def test_system_stop_calls_bus_stop(self, bt):
@@ -437,8 +438,8 @@ class TestOnDiscover:
         mod, mock_bus, *_ = bt
         mod._adapter = None
         mock_bus.publish.reset_mock()
-        mod.on_discover("bluetooth.discover", {"duration_sec": 10})
-        assert "bluetooth.error" in _topics(mock_bus)
+        mod.on_discover("bluetooth_manager.discover", {"duration_sec": 10})
+        assert "bluetooth_manager.error" in _topics(mock_bus)
 
     @pytest.mark.unit
     def test_discovery_already_running_ignored(self, bt):
@@ -448,7 +449,7 @@ class TestOnDiscover:
         mock_disc.is_running = True
         mod._discovery = mock_disc
         mock_discovery_cls.reset_mock()
-        mod.on_discover("bluetooth.discover", {"duration_sec": 5})
+        mod.on_discover("bluetooth_manager.discover", {"duration_sec": 5})
         mock_discovery_cls.assert_not_called()
 
     @pytest.mark.unit
@@ -456,14 +457,14 @@ class TestOnDiscover:
         mod, _, _, mock_adapter_inst, mock_discovery_cls, mock_discovery_inst, *_ = bt
         mod._adapter = mock_adapter_inst
         mock_discovery_cls.reset_mock()
-        mod.on_discover("bluetooth.discover", {"duration_sec": 10})
+        mod.on_discover("bluetooth_manager.discover", {"duration_sec": 10})
         mock_discovery_cls.assert_called_once()
 
     @pytest.mark.unit
     def test_uses_custom_duration(self, bt):
         mod, _, _, mock_adapter_inst, mock_discovery_cls, mock_discovery_inst, *_ = bt
         mod._adapter = mock_adapter_inst
-        mod.on_discover("bluetooth.discover", {"duration_sec": 25})
+        mod.on_discover("bluetooth_manager.discover", {"duration_sec": 25})
         mock_discovery_inst.start.assert_called_with(duration_sec=25)
 
     @pytest.mark.unit
@@ -471,7 +472,7 @@ class TestOnDiscover:
         mod, _, _, mock_adapter_inst, mock_discovery_cls, mock_discovery_inst, *_ = bt
         mod._adapter = mock_adapter_inst
         mod._config["discovery_duration_sec"] = 15
-        mod.on_discover("bluetooth.discover", {})
+        mod.on_discover("bluetooth_manager.discover", {})
         mock_discovery_inst.start.assert_called_with(duration_sec=15)
 
 
@@ -486,22 +487,22 @@ class TestOnPair:
         mod, mock_bus, *_ = bt
         mod._pairing = None
         mock_bus.publish.reset_mock()
-        mod.on_pair("bluetooth.pair", {"device_address": "AA:BB:CC:DD:EE:FF"})
-        assert "bluetooth.error" in _topics(mock_bus)
+        mod.on_pair("bluetooth_manager.pair", {"device_address": "AA:BB:CC:DD:EE:FF"})
+        assert "bluetooth_manager.error" in _topics(mock_bus)
 
     @pytest.mark.unit
     def test_missing_address_publishes_error(self, bt):
         mod, mock_bus, _, _, _, _, _, mock_pairing_inst, _ = bt
         mod._pairing = mock_pairing_inst
         mock_bus.publish.reset_mock()
-        mod.on_pair("bluetooth.pair", {})
-        assert "bluetooth.error" in _topics(mock_bus)
+        mod.on_pair("bluetooth_manager.pair", {})
+        assert "bluetooth_manager.error" in _topics(mock_bus)
 
     @pytest.mark.unit
     def test_calls_pairing_pair(self, bt):
         mod, _, _, _, _, _, _, mock_pairing_inst, _ = bt
         mod._pairing = mock_pairing_inst
-        mod.on_pair("bluetooth.pair", {"device_address": "AA:BB:CC:DD:EE:FF"})
+        mod.on_pair("bluetooth_manager.pair", {"device_address": "AA:BB:CC:DD:EE:FF"})
         mock_pairing_inst.pair.assert_called_once_with("AA:BB:CC:DD:EE:FF")
 
 
@@ -516,15 +517,15 @@ class TestConfirmRejectPairing:
         mod, mock_bus, _, _, _, _, _, mock_pairing_inst, _ = bt
         mod._pairing = mock_pairing_inst
         mock_bus.publish.reset_mock()
-        mod.on_confirm_pairing("bluetooth.confirm_pairing", {"device_address": "AA:BB"})
-        assert "bluetooth.error" in _topics(mock_bus)
+        mod.on_confirm_pairing("bluetooth_manager.confirm_pairing", {"device_address": "AA:BB"})
+        assert "bluetooth_manager.error" in _topics(mock_bus)
 
     @pytest.mark.unit
     def test_confirm_happy_path(self, bt):
         mod, _, _, _, _, _, _, mock_pairing_inst, _ = bt
         mod._pairing = mock_pairing_inst
         mod.on_confirm_pairing(
-            "bluetooth.confirm_pairing",
+            "bluetooth_manager.confirm_pairing",
             {"device_address": "AA:BB:CC:DD:EE:FF", "pin": "1234"}
         )
         mock_pairing_inst.confirm.assert_called_once_with("AA:BB:CC:DD:EE:FF", "1234")
@@ -534,7 +535,7 @@ class TestConfirmRejectPairing:
         mod, _, _, _, _, _, _, mock_pairing_inst, _ = bt
         mod._pairing = mock_pairing_inst
         mod.on_reject_pairing(
-            "bluetooth.reject_pairing",
+            "bluetooth_manager.reject_pairing",
             {"device_address": "AA:BB:CC:DD:EE:FF"}
         )
         mock_pairing_inst.reject.assert_called_once_with("AA:BB:CC:DD:EE:FF")
@@ -543,13 +544,13 @@ class TestConfirmRejectPairing:
     def test_reject_no_pairing_no_crash(self, bt):
         mod, *_ = bt
         mod._pairing = None
-        mod.on_reject_pairing("bluetooth.reject_pairing", {"device_address": "AA:BB"})  # must not raise
+        mod.on_reject_pairing("bluetooth_manager.reject_pairing", {"device_address": "AA:BB"})  # must not raise
 
     @pytest.mark.unit
     def test_reject_missing_address_no_call(self, bt):
         mod, _, _, _, _, _, _, mock_pairing_inst, _ = bt
         mod._pairing = mock_pairing_inst
-        mod.on_reject_pairing("bluetooth.reject_pairing", {})
+        mod.on_reject_pairing("bluetooth_manager.reject_pairing", {})
         mock_pairing_inst.reject.assert_not_called()
 
 
@@ -563,7 +564,7 @@ class TestOnRfcommConnected:
     def test_sets_autoconnect_stop_event(self, bt):
         mod, *_ = bt
         mod._autoconnect_stop.clear()
-        mod.on_rfcomm_connected("bluetooth.rfcomm.connected", {"device_address": "AA:BB"})
+        mod.on_rfcomm_connected("bluetooth_manager.rfcomm.connected", {"device_address": "AA:BB"})
         assert mod._autoconnect_stop.is_set()
 
 
@@ -577,7 +578,7 @@ class TestOnTryAutoconnect:
     def test_calls_start_autoconnect(self, bt):
         mod, *_ = bt
         with patch.object(mod, "_start_autoconnect") as mock_ac:
-            mod.on_try_autoconnect("bluetooth.try_autoconnect", {})
+            mod.on_try_autoconnect("bluetooth_manager.try_autoconnect", {})
         mock_ac.assert_called_once()
 
 
@@ -592,8 +593,8 @@ class TestOnPairedList:
         mod, mock_bus, *_ = bt
         mod._adapter = None
         mock_bus.publish.reset_mock()
-        mod.on_paired_list("bluetooth.paired.list", {})
-        assert "bluetooth.error" in _topics(mock_bus)
+        mod.on_paired_list("bluetooth_manager.paired.list", {})
+        assert "bluetooth_manager.error" in _topics(mock_bus)
 
     @pytest.mark.unit
     def test_publishes_paired_devices(self, bt):
@@ -601,8 +602,8 @@ class TestOnPairedList:
         mod._adapter = mock_adapter_inst
         mock_paired.list_paired.return_value = [{"address": "AA:BB", "name": "Phone"}]
         mock_bus.publish.reset_mock()
-        mod.on_paired_list("bluetooth.paired.list", {})
-        payload = _payload(mock_bus, "bluetooth.paired.devices")
+        mod.on_paired_list("bluetooth_manager.paired.list", {})
+        payload = _payload(mock_bus, "bluetooth_manager.paired.devices")
         assert payload["devices"] == [{"address": "AA:BB", "name": "Phone"}]
 
     @pytest.mark.unit
@@ -611,8 +612,8 @@ class TestOnPairedList:
         mod._adapter = mock_adapter_inst
         mock_paired.list_paired.return_value = []
         mock_bus.publish.reset_mock()
-        mod.on_paired_list("bluetooth.paired.list", {})
-        payload = _payload(mock_bus, "bluetooth.paired.devices")
+        mod.on_paired_list("bluetooth_manager.paired.list", {})
+        payload = _payload(mock_bus, "bluetooth_manager.paired.devices")
         assert payload["devices"] == []
 
 
@@ -626,16 +627,16 @@ class TestOnPairedRemove:
     def test_missing_address_publishes_error(self, bt):
         mod, mock_bus, *_ = bt
         mock_bus.publish.reset_mock()
-        mod.on_paired_remove("bluetooth.paired.remove", {})
-        assert "bluetooth.error" in _topics(mock_bus)
+        mod.on_paired_remove("bluetooth_manager.paired.remove", {})
+        assert "bluetooth_manager.error" in _topics(mock_bus)
 
     @pytest.mark.unit
     def test_adapter_none_publishes_error(self, bt):
         mod, mock_bus, *_ = bt
         mod._adapter = None
         mock_bus.publish.reset_mock()
-        mod.on_paired_remove("bluetooth.paired.remove", {"device_address": "AA:BB"})
-        assert "bluetooth.error" in _topics(mock_bus)
+        mod.on_paired_remove("bluetooth_manager.paired.remove", {"device_address": "AA:BB"})
+        assert "bluetooth_manager.error" in _topics(mock_bus)
 
     @pytest.mark.unit
     def test_success_publishes_removed(self, bt):
@@ -643,8 +644,8 @@ class TestOnPairedRemove:
         mod._adapter = mock_adapter_inst
         mock_paired.remove.return_value = True
         mock_bus.publish.reset_mock()
-        mod.on_paired_remove("bluetooth.paired.remove", {"device_address": "AA:BB"})
-        payload = _payload(mock_bus, "bluetooth.paired.removed")
+        mod.on_paired_remove("bluetooth_manager.paired.remove", {"device_address": "AA:BB"})
+        payload = _payload(mock_bus, "bluetooth_manager.paired.removed")
         assert payload["device_address"] == "AA:BB"
 
     @pytest.mark.unit
@@ -653,8 +654,8 @@ class TestOnPairedRemove:
         mod._adapter = mock_adapter_inst
         mock_paired.remove.return_value = False
         mock_bus.publish.reset_mock()
-        mod.on_paired_remove("bluetooth.paired.remove", {"device_address": "AA:BB"})
-        assert "bluetooth.paired.failed" in _topics(mock_bus)
+        mod.on_paired_remove("bluetooth_manager.paired.remove", {"device_address": "AA:BB"})
+        assert "bluetooth_manager.paired.failed" in _topics(mock_bus)
 
 
 # ===========================================================================
@@ -667,23 +668,23 @@ class TestOnPairedConnectDisconnect:
     def test_connect_missing_address_publishes_error(self, bt):
         mod, mock_bus, *_ = bt
         mock_bus.publish.reset_mock()
-        mod.on_paired_connect("bluetooth.paired.connect", {})
-        assert "bluetooth.error" in _topics(mock_bus)
+        mod.on_paired_connect("bluetooth_manager.paired.connect", {})
+        assert "bluetooth_manager.error" in _topics(mock_bus)
 
     @pytest.mark.unit
     def test_connect_adapter_none_publishes_error(self, bt):
         mod, mock_bus, *_ = bt
         mod._adapter = None
         mock_bus.publish.reset_mock()
-        mod.on_paired_connect("bluetooth.paired.connect", {"device_address": "AA:BB"})
-        assert "bluetooth.error" in _topics(mock_bus)
+        mod.on_paired_connect("bluetooth_manager.paired.connect", {"device_address": "AA:BB"})
+        assert "bluetooth_manager.error" in _topics(mock_bus)
 
     @pytest.mark.unit
     def test_connect_calls_paired_devices_connect(self, bt):
         mod, _, _, mock_adapter_inst, _, _, _, _, mock_paired = bt
         mod._adapter = mock_adapter_inst
         mock_paired.connect.reset_mock()
-        mod.on_paired_connect("bluetooth.paired.connect", {"device_address": "AA:BB"})
+        mod.on_paired_connect("bluetooth_manager.paired.connect", {"device_address": "AA:BB"})
         mock_paired.connect.assert_called_once()
         call_kwargs = mock_paired.connect.call_args
         assert call_kwargs.args[1] == "AA:BB" or call_kwargs.kwargs.get("address") == "AA:BB" \
@@ -693,23 +694,23 @@ class TestOnPairedConnectDisconnect:
     def test_disconnect_missing_address_publishes_error(self, bt):
         mod, mock_bus, *_ = bt
         mock_bus.publish.reset_mock()
-        mod.on_paired_disconnect("bluetooth.paired.disconnect", {})
-        assert "bluetooth.error" in _topics(mock_bus)
+        mod.on_paired_disconnect("bluetooth_manager.paired.disconnect", {})
+        assert "bluetooth_manager.error" in _topics(mock_bus)
 
     @pytest.mark.unit
     def test_disconnect_adapter_none_publishes_error(self, bt):
         mod, mock_bus, *_ = bt
         mod._adapter = None
         mock_bus.publish.reset_mock()
-        mod.on_paired_disconnect("bluetooth.paired.disconnect", {"device_address": "AA:BB"})
-        assert "bluetooth.error" in _topics(mock_bus)
+        mod.on_paired_disconnect("bluetooth_manager.paired.disconnect", {"device_address": "AA:BB"})
+        assert "bluetooth_manager.error" in _topics(mock_bus)
 
     @pytest.mark.unit
     def test_disconnect_calls_paired_devices_disconnect(self, bt):
         mod, _, _, mock_adapter_inst, _, _, _, _, mock_paired = bt
         mod._adapter = mock_adapter_inst
         mock_paired.disconnect.reset_mock()
-        mod.on_paired_disconnect("bluetooth.paired.disconnect", {"device_address": "AA:BB"})
+        mod.on_paired_disconnect("bluetooth_manager.paired.disconnect", {"device_address": "AA:BB"})
         mock_paired.disconnect.assert_called_once()
 
 
@@ -724,7 +725,7 @@ class TestInternalCallbacks:
         mod, mock_bus, *_ = bt
         mock_bus.publish.reset_mock()
         mod._on_device_found("AA:BB:CC:DD:EE:FF", "MyPhone", -55)
-        payload = _payload(mock_bus, "bluetooth.device.found")
+        payload = _payload(mock_bus, "bluetooth_manager.device.found")
         assert payload == {"address": "AA:BB:CC:DD:EE:FF", "name": "MyPhone", "rssi": -55}
 
     @pytest.mark.unit
@@ -733,7 +734,7 @@ class TestInternalCallbacks:
         mock_bus.publish.reset_mock()
         devices = [{"address": "AA:BB", "name": "Phone"}]
         mod._on_discovery_done(devices)
-        payload = _payload(mock_bus, "bluetooth.discovery.completed")
+        payload = _payload(mock_bus, "bluetooth_manager.discovery.completed")
         assert payload["devices"] == devices
 
     @pytest.mark.unit
@@ -741,7 +742,7 @@ class TestInternalCallbacks:
         mod, mock_bus, *_ = bt
         mock_bus.publish.reset_mock()
         mod._on_pin_requested("AA:BB:CC:DD:EE:FF", "1234")
-        payload = _payload(mock_bus, "bluetooth.pairing.pin")
+        payload = _payload(mock_bus, "bluetooth_manager.pairing.pin")
         assert payload == {"device_address": "AA:BB:CC:DD:EE:FF", "pin": "1234"}
 
     @pytest.mark.unit
@@ -749,7 +750,7 @@ class TestInternalCallbacks:
         mod, mock_bus, *_ = bt
         mock_bus.publish.reset_mock()
         mod._on_pairing_completed("AA:BB:CC:DD:EE:FF")
-        payload = _payload(mock_bus, "bluetooth.pairing.completed")
+        payload = _payload(mock_bus, "bluetooth_manager.pairing.completed")
         assert payload == {"device_address": "AA:BB:CC:DD:EE:FF"}
 
     @pytest.mark.unit
@@ -757,7 +758,7 @@ class TestInternalCallbacks:
         mod, mock_bus, *_ = bt
         mock_bus.publish.reset_mock()
         mod._on_pairing_failed("AA:BB:CC:DD:EE:FF", "auth failed")
-        payload = _payload(mock_bus, "bluetooth.pairing.failed")
+        payload = _payload(mock_bus, "bluetooth_manager.pairing.failed")
         assert payload == {"device_address": "AA:BB:CC:DD:EE:FF", "error": "auth failed"}
 
 

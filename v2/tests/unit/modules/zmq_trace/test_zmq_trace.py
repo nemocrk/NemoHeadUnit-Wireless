@@ -68,23 +68,9 @@ from __future__ import annotations
 import importlib
 import json
 import sys
-import threading
-import time
-from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# sys.path bootstrap
-# ---------------------------------------------------------------------------
-_V2 = Path(__file__).parents[4]
-_SHARED = _V2 / "shared"
-_MODULES = _V2 / "modules"
-for _p in (_V2, _SHARED, _MODULES):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
 
 # ---------------------------------------------------------------------------
 # Module import with heavy side-effects stubbed

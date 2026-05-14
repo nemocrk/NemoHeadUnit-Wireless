@@ -44,11 +44,8 @@ from __future__ import annotations
 import sys
 import types
 import importlib
-import threading
-import time
 from unittest.mock import MagicMock, patch, call
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Stubs
@@ -62,12 +59,13 @@ def _install_stubs():
 
 _install_stubs()
 
+_this_module = __name__
 for _k in list(sys.modules.keys()):
-    if "discovery" in _k and "bluetooth" in _k:
+    if _k != _this_module and "bluez_adapter" in _k:
         del sys.modules[_k]
 
 with patch("shared.logger.get_logger", return_value=MagicMock()):
-    import modules.bluetooth.discovery as _disc_mod
+    import bluetooth_manager.discovery as _disc_mod
     importlib.reload(_disc_mod)
 
 DiscoverySession = _disc_mod.DiscoverySession

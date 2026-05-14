@@ -32,23 +32,10 @@ from __future__ import annotations
 
 import base64
 import struct
-import sys
 import types
-from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# sys.path bootstrap
-# ---------------------------------------------------------------------------
-_V2           = Path(__file__).parents[3]
-_MODULES      = _V2 / "modules"
-_CHANNEL_MODS = _MODULES / "channel_modules"
-_PROTOS       = _V2 / "protos"
-for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 # ---------------------------------------------------------------------------
 # Proto enum aliases

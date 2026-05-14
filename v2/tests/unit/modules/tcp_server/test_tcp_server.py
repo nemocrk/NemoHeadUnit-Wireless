@@ -89,7 +89,7 @@ def ts():
          patch("tcp_server.frame_relay.FrameRelay", mock_relay_cls), \
          patch("tcp_server.aa_cryptor.AACryptor", mock_cryptor_cls), \
          patch("tcp_server.frame_codec.FrameAssembler", mock_assembler_cls):
-        import modules.tcp_server.main as mod
+        import tcp_server.main as mod
         importlib.reload(mod)
         mod.bus = mock_bus
         mod._server = None

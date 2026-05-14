@@ -39,20 +39,9 @@ from __future__ import annotations
 import struct
 import sys
 import types
-from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# sys.path bootstrap — make v2/modules importable
-# ---------------------------------------------------------------------------
-_V2      = Path(__file__).parents[3]
-_MODULES = _V2 / "modules"
-for _p in (_V2, _MODULES):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
 
 # ---------------------------------------------------------------------------
 # Minimal proto stubs — enough for the state machine logic
@@ -199,19 +188,24 @@ def hs_factory():
     ):
         # Remove stale module cache before each test
         for mod_name in list(sys.modules):
-            if "oaa_control_channel.handshake" in mod_name:
-                del sys.modules[mod_name]
+            if "oaa_control_channel" in mod_name or "shared" in mod_name:
+                if mod_name not in sys_patch:
+                    del sys.modules[mod_name]
+
+        # Import service_discovery first to populate sys.modules so patch can find it
+        import importlib
+        import oaa_control_channel.service_discovery as sd_mod
+        importlib.reload(sd_mod)
 
         with (
-            patch("oaa_control_channel.service_discovery.build_from_schema_cfg", mock_build),
-            patch("oaa_control_channel.service_discovery.channels_from_sdr_bytes", mock_channels),
-            patch("oaa_control_channel.service_discovery.message_from_sdr_bytes", mock_msg_from),
+            patch.object(sd_mod, "build_from_schema_cfg", mock_build),
+            patch.object(sd_mod, "channels_from_sdr_bytes", mock_channels),
+            patch.object(sd_mod, "message_from_sdr_bytes", mock_msg_from),
             patch("shared.proto_utils.decode_proto",    mock_decode),
             patch("shared.proto_utils.encode_proto",    mock_encode),
             patch("shared.proto_utils.proto_to_dict",   mock_proto_to_dict),
         ):
             # Import the module under test inside the patch context
-            import importlib
             if "oaa_control_channel.handshake" in sys.modules:
                 del sys.modules["oaa_control_channel.handshake"]
             import oaa_control_channel.handshake as hs_mod

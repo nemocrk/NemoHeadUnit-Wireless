@@ -47,24 +47,11 @@ Coverage targets (§1.3 TEST_SUITE_ARCHITECTURE):
 
 from __future__ import annotations
 
-import sys
 import types
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# sys.path bootstrap
-# ---------------------------------------------------------------------------
-_V2           = Path(__file__).parents[3]
-_MODULES      = _V2 / "modules"
-_CHANNEL_MODS = _MODULES / "channel_modules"
-for _p in (_V2, _MODULES, _CHANNEL_MODS):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
 
 # ---------------------------------------------------------------------------
 # Minimal concrete subclass for testing

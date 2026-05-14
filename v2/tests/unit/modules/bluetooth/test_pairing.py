@@ -40,10 +40,8 @@ from __future__ import annotations
 import sys
 import types
 import importlib
-import threading
 from unittest.mock import MagicMock, patch, call
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Stubs
@@ -77,12 +75,13 @@ def _install_stubs():
 
 _install_stubs()
 
+_this_module = __name__
 for _k in list(sys.modules.keys()):
-    if "pairing" in _k and "bluetooth" in _k:
+    if _k != _this_module and "bluez_adapter" in _k:
         del sys.modules[_k]
 
 with patch("shared.logger.get_logger", return_value=MagicMock()):
-    import modules.bluetooth.pairing as _pair_mod
+    import bluetooth_manager.pairing as _pair_mod
     importlib.reload(_pair_mod)
 
 PairingAgent = _pair_mod.PairingAgent

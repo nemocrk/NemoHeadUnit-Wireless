@@ -134,7 +134,7 @@ def vu():
 
     with patch("shared.bus_client.BusClient", return_value=mock_bus), \
          patch("shared.logger.get_logger", return_value=mock_log):
-        import modules.video_ui.main as mod
+        import video_ui.main as mod
         importlib.reload(mod)
         mod.bus = mock_bus
         mod.log = mock_log
@@ -478,21 +478,21 @@ class TestOnBluetoothPairingCompleted:
     def test_waiting_bt_transitions_to_handshake(self, vu):
         mod, _ = vu
         mod._conn_state = mod._STATE_WAITING_BT
-        mod.on_bluetooth_pairing_completed("bluetooth.pairing.completed", {})
+        mod.on_bluetooth_pairing_completed("bluetooth_manager.pairing.completed", {})
         assert mod._conn_state == mod._STATE_HANDSHAKE
 
     @pytest.mark.unit
     def test_handshake_not_changed(self, vu):
         mod, _ = vu
         mod._conn_state = mod._STATE_HANDSHAKE
-        mod.on_bluetooth_pairing_completed("bluetooth.pairing.completed", {})
+        mod.on_bluetooth_pairing_completed("bluetooth_manager.pairing.completed", {})
         assert mod._conn_state == mod._STATE_HANDSHAKE
 
     @pytest.mark.unit
     def test_streaming_not_changed(self, vu):
         mod, _ = vu
         mod._conn_state = mod._STATE_STREAMING
-        mod.on_bluetooth_pairing_completed("bluetooth.pairing.completed", {})
+        mod.on_bluetooth_pairing_completed("bluetooth_manager.pairing.completed", {})
         assert mod._conn_state == mod._STATE_STREAMING
 
 

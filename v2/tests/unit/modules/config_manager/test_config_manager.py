@@ -55,21 +55,22 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, call, mock_open
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Import module under test
 # ---------------------------------------------------------------------------
 
-for _k in list(sys.modules.keys()):
-    if "config_manager" in _k and "test" not in _k:
-        del sys.modules[_k]
+
+# _this_module = __name__
+# for _k in list(sys.modules.keys()):
+#     if _k != _this_module and "config_manager" in _k:
+#         del sys.modules[_k]
 
 _mock_bus_instance = MagicMock()
 _mock_bus_class    = MagicMock(return_value=_mock_bus_instance)
 
 with patch("shared.bus_client.BusClient", _mock_bus_class), \
      patch("shared.logger.get_logger", return_value=MagicMock()):
-    import modules.config_manager.main as _cm_mod
+    import config_manager.main as _cm_mod
     importlib.reload(_cm_mod)
 
 
@@ -136,7 +137,7 @@ class TestConfigPath:
     def test_ends_with_module_yaml(self, cm):
         mod, _ = cm
         result = mod._config_path("bluetooth")
-        assert result.name == "bluetooth.yaml"
+        assert result.name == "bluetooth_manager.yaml"
 
     @pytest.mark.unit
     def test_parent_is_config_dir(self, cm):
@@ -304,7 +305,7 @@ class TestSchemaDictForResponse:
     def test_returns_dict_when_schema_present(self, cm):
         mod, _ = cm
         mod._schemas["bt"] = {"pin": _make_scalar_field()}
-        with patch("modules.config_manager.main.schema_to_dict", return_value={"pin": {"type": "string"}}):
+        with patch("config_manager.main.schema_to_dict", return_value={"pin": {"type": "string"}}):
             result = mod._schema_dict_for_response("bt")
         assert isinstance(result, dict)
 
@@ -445,7 +446,7 @@ class TestOnConfigGet:
         mod, mock_bus = cm
         raw_schema = {"pin": {"type": "string", "default": "0000"}}
         with patch.object(mod, "_load_config", return_value={"pin": "1234"}), \
-             patch("modules.config_manager.main.schema_from_dict", return_value={"pin": MagicMock()}):
+             patch("config_manager.main.schema_from_dict", return_value={"pin": MagicMock()}):
             mod.on_config_get("config.get", {"module": "bt", "schema": raw_schema})
         assert "bt" in mod._schemas
 
@@ -454,7 +455,7 @@ class TestOnConfigGet:
         mod, mock_bus = cm
         mod._schemas["bt"] = {"pin": _make_scalar_field()}
         with patch.object(mod, "_load_config", return_value={"pin": "1234"}), \
-             patch("modules.config_manager.main.schema_to_dict", return_value={"pin": {"type": "string"}}):
+             patch("config_manager.main.schema_to_dict", return_value={"pin": {"type": "string"}}):
             mod.on_config_get("config.get", {"module": "bt"})
         payload = _published_payload(mock_bus, "config.response")
         assert "schema" in payload
@@ -537,7 +538,7 @@ class TestOnConfigSet:
         from shared.config_schema import ConfigFieldSchema
         field = MagicMock(spec=ConfigFieldSchema)
         mod._schemas["bt"] = {"volume": field}
-        with patch("modules.config_manager.main.validate_value", return_value=80) as mock_validate, \
+        with patch("config_manager.main.validate_value", return_value=80) as mock_validate, \
              patch.object(mod, "_load_config", return_value={}), \
              patch.object(mod, "_save_config", return_value=True):
             mod.on_config_set("config.set", {"module": "bt", "key": "volume", "value": "80"})
@@ -551,7 +552,7 @@ class TestOnConfigSet:
         from shared.config_schema import ConfigFieldSchema
         field = MagicMock(spec=ConfigFieldSchema)
         mod._schemas["bt"] = {"volume": field}
-        with patch("modules.config_manager.main.validate_value", side_effect=ValueError("out of range")), \
+        with patch("config_manager.main.validate_value", side_effect=ValueError("out of range")), \
              patch.object(mod, "_load_config", return_value={}), \
              patch.object(mod, "_save_config") as mock_save:
             mod.on_config_set("config.set", {"module": "bt", "key": "volume", "value": "999"})
@@ -565,7 +566,7 @@ class TestOnConfigSet:
         from shared.config_schema import ConfigFieldSchema
         field = MagicMock(spec=ConfigFieldSchema)
         mod._schemas["bt"] = {"volume": field}
-        with patch("modules.config_manager.main.validate_value", side_effect=ValueError("out of range")), \
+        with patch("config_manager.main.validate_value", side_effect=ValueError("out of range")), \
              patch.object(mod, "_load_config", return_value={}):
             mod.on_config_set("config.set", {"module": "bt", "key": "volume", "value": "999"})
         payload = _published_payload(mock_bus, "config.error")
@@ -579,7 +580,7 @@ class TestOnConfigSet:
         from shared.config_schema import ConfigFieldList
         field = MagicMock(spec=ConfigFieldList)
         mod._schemas["svc"] = {"channels": field}
-        with patch("modules.config_manager.main.validate_value") as mock_validate, \
+        with patch("config_manager.main.validate_value") as mock_validate, \
              patch.object(mod, "_load_config", return_value={}), \
              patch.object(mod, "_save_config", return_value=True):
             mod.on_config_set("config.set", {"module": "svc", "key": "channels", "value": [{"id": 1}]})

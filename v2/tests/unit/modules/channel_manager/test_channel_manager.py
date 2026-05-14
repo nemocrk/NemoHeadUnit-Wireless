@@ -42,7 +42,7 @@ def reg():
     """Pure-Python registry module — stateless, import once per session."""
     if _REGISTRY_MOD in sys.modules:
         del sys.modules[_REGISTRY_MOD]
-    import modules.channel_manager.registry as mod
+    import channel_manager.registry as mod
     importlib.reload(mod)
     return mod
 
@@ -79,7 +79,7 @@ def cm(tmp_path):
     with patch("shared.bus_client.BusClient", return_value=mock_bus_instance), \
          patch("shared.logger.get_logger", return_value=MagicMock()), \
          patch("modules.channel_manager.launcher.Launcher", mock_launcher_cls):
-        import modules.channel_manager.main as mod
+        import channel_manager.main as mod
         importlib.reload(mod)
         mod.bus = mock_bus_instance
         mod._session = None
