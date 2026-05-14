@@ -40,10 +40,14 @@ import yaml
 
 def _make_client(broker, name: str):
     """Create a BusClient patched to use the in-process broker addresses."""
+    if isinstance(broker, dict):
+        pub_addr, sub_addr = broker["pub_addr"], broker["sub_addr"]
+    else:
+        pub_addr, sub_addr = broker.pub_addr, broker.sub_addr
     import shared.bus_client as bc_mod
     importlib.reload(bc_mod)
-    bc_mod.BROKER_PUB_ADDR = broker.pub_addr
-    bc_mod.BROKER_SUB_ADDR = broker.sub_addr
+    bc_mod.BROKER_PUB_ADDR = pub_addr
+    bc_mod.BROKER_SUB_ADDR = sub_addr
     with patch("shared.bus_client.BusTracer", return_value=MagicMock()):
         client = bc_mod.BusClient(module_name=name)
     return client
@@ -75,10 +79,14 @@ def _load_cm(broker, config_dir: Path):
     override CONFIG_DIR to a tmp path, and start the module bus.
     Returns (mod, bus_thread).
     """
+    if isinstance(broker, dict):
+        pub_addr, sub_addr = broker["pub_addr"], broker["sub_addr"]
+    else:
+        pub_addr, sub_addr = broker.pub_addr, broker.sub_addr
     import shared.bus_client as bc_mod
     importlib.reload(bc_mod)
-    bc_mod.BROKER_PUB_ADDR = broker.pub_addr
-    bc_mod.BROKER_SUB_ADDR = broker.sub_addr
+    bc_mod.BROKER_PUB_ADDR = pub_addr
+    bc_mod.BROKER_SUB_ADDR = sub_addr
 
     with patch("shared.bus_client.BusTracer", return_value=MagicMock()):
         import config_manager.main as cm_mod

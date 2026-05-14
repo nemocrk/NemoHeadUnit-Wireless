@@ -130,6 +130,11 @@ def _load_bt(in_process_broker):
         import bluetooth_manager.main as bt
         importlib.reload(bt)
 
+    bt.BluezAdapter = mock_adapter_cls
+    bt.DiscoverySession = mock_discovery_cls
+    bt.PairingAgent = mock_pairing_cls
+    bt.paired_devices = mock_paired_mod
+
     # Attach mocks for assertion access
     bt._mock_adapter_cls   = mock_adapter_cls
     bt._mock_adapter       = mock_adapter_instance
@@ -164,7 +169,7 @@ class TestBootProtocol:
         spy.stop()
 
         assert ok, "system.module_ready non ricevuto"
-        assert received[0]["name"] == "bluetooth"
+        assert received[0]["name"] == "bluetooth_manager"
         assert received[0]["priority"] == bt.PRIORITY
 
     @pytest.mark.integration
@@ -883,7 +888,7 @@ class TestConfigCallbacks:
         spy.stop()
 
         assert ok, "system.ready non ricevuto"
-        assert received[0]["name"] == "bluetooth"
+        assert received[0]["name"] == "bluetooth_manager"
         assert received[0]["priority"] == bt.PRIORITY
 
     @pytest.mark.integration

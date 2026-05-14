@@ -81,10 +81,10 @@ def _parse_aa_frame(data: bytes) -> tuple[int, bytes] | None:
 # Fixture: prova a importare il vero Packet se disponibile
 # ---------------------------------------------------------------------------
 try:
-    from rfcomm_handshake.packet import Packet as _RealPacket
+    from rfcomm_handshake import packet as _RealPacket
 
     def _encode(msg_id: int, payload: bytes) -> bytes:
-        return _RealPacket(msg_id=msg_id, payload=payload).encode()
+        return _RealPacket.encode(msg_id=msg_id, payload=payload)
 
     def _decode(data: bytes):
         return _RealPacket.decode(data)

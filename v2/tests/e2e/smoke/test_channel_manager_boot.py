@@ -167,7 +167,7 @@ class TestChannelManagerBootSmoke:
         with e2e_stack(
             in_process_broker,
             modules=_MODULES_FULL,
-            extra_config={"channel_manager": {"channel_ready_timeout_s": 1}},
+            boot_timeout=2.0,
         ) as stack:
             # Iniettiamo un canale inesistente nella config del channel_manager
             stack.publish(

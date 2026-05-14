@@ -428,8 +428,10 @@ class TestMultiClient:
         time.sleep(0.1)
         for i in range(10):
             p = _make_client(in_process_broker, f"pub_{i}")
-            p.publish(topic, {"src": i})
             publishers.append(p)
+        time.sleep(0.25)
+        for i, p in enumerate(publishers):
+            p.publish(topic, {"src": i})
 
         ok = _wait_received(received, 10, timeout=3.0)
         for p in publishers:
@@ -619,6 +621,7 @@ class TestRobustness:
         t, payload_bytes = received[0]
         assert t == b"test.raw"
         decoded = json.loads(payload_bytes.decode())
+        decoded.pop("_trace", None)
         assert decoded == {"hello": "world"}
 
     @pytest.mark.integration
@@ -895,9 +898,9 @@ class TestBrokerIsolation:
     @pytest.mark.integration
     def test_messages_dont_leak_between_isolated_brokers(self, in_process_broker):
         """Messaggi pubblicati su un broker non raggiungono client di un altro broker."""
-        # Crea un secondo broker isolato
         import uuid as _uuid
-        from v2.tests.conftest import _BrokerThread  # riusa la classe dal conftest
+        from conftest import _BrokerThread
+
         uid = _uuid.uuid4().hex
         pub2 = f"ipc:///tmp/nemotest-{uid}.pub"
         sub2 = f"ipc:///tmp/nemotest-{uid}.sub"
@@ -905,42 +908,26 @@ class TestBrokerIsolation:
         broker2.start()
         broker2.ready.wait(timeout=2.0)
         time.sleep(0.05)
+        broker2_addrs = {"pub_addr": pub2, "sub_addr": sub2}
 
         received_broker1 = []
         received_broker2 = []
 
-        import shared.bus_client as _bc_mod
-
-        # Sub su broker 1
-        _bc_mod.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
-        _bc_mod.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
-        from shared.bus_client import BusClient
-        sub1 = BusClient("sub1")
+        sub1 = _make_client(in_process_broker, "sub1")
         sub1.subscribe("test.isolation", lambda t, p: received_broker1.append(p))
         sub1.start(blocking=False)
 
-        # Sub su broker 2
-        _bc_mod.BROKER_PUB_ADDR = pub2
-        _bc_mod.BROKER_SUB_ADDR = sub2
-        from importlib import reload
-        import shared.bus_client
-        reload(shared.bus_client)
-        from shared.bus_client import BusClient as BusClient2
-        sub2_client = BusClient2("sub2")
+        sub2_client = _make_client(broker2_addrs, "sub2")
         sub2_client.subscribe("test.isolation", lambda t, p: received_broker2.append(p))
         sub2_client.start(blocking=False)
 
-        time.sleep(0.1)
+        time.sleep(0.2)
 
-        # Pubblica solo su broker 1
-        _bc_mod.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
-        _bc_mod.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
-        reload(shared.bus_client)
-        from shared.bus_client import BusClient as BusClient3
-        pub1 = BusClient3("pub1")
+        pub1 = _make_client(in_process_broker, "pub1")
+        time.sleep(0.1)
         pub1.publish("test.isolation", {"broker": 1})
 
-        _wait_received(received_broker1, 1, timeout=1.0)
+        ok = _wait_received(received_broker1, 1, timeout=1.0)
         time.sleep(0.2)  # attesa extra per eventuale leakage
 
         pub1.stop()
@@ -948,5 +935,5 @@ class TestBrokerIsolation:
         sub2_client.stop()
         broker2.stop()
 
-        assert len(received_broker1) >= 1, "sub1 non ha ricevuto nulla"
+        assert ok, "sub1 non ha ricevuto nulla"
         assert len(received_broker2) == 0, "sub2 ha ricevuto dati dal broker sbagliato (leakage!)"

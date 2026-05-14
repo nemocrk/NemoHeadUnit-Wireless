@@ -39,6 +39,7 @@ _TOPIC_CROSS = "perf.latency.cross"
 _P50_MAX_MS = float(os.getenv("PERF_P50_MS", "2.0"))
 _P95_MAX_MS = float(os.getenv("PERF_P95_MS", "5.0"))
 _P99_MAX_MS = float(os.getenv("PERF_P99_MS", "10.0"))
+_BURST_P99_MAX_MS = float(os.getenv("PERF_BURST_P99_MS", "20.0"))
 
 
 def _percentile(data: list[float], p: int) -> float:
@@ -198,7 +199,8 @@ class TestBusLatency:
 
         if len(latencies) >= n * 0.9:  # almeno 90% dei messaggi
             p99 = _percentile(latencies, 99)
-            assert p99 < 20.0, f"Burst p99 {p99:.2f}ms > soglia 20ms"
+            assert p99 < _BURST_P99_MAX_MS, \
+                f"Burst p99 {p99:.2f}ms > soglia {_BURST_P99_MAX_MS}ms"
 
     def test_latency_large_payload_64kb(self, in_process_broker):
         """Payload 64KB: p95 entro 15ms."""

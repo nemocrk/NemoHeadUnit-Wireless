@@ -37,7 +37,7 @@ pytestmark = pytest.mark.fuzz
 # Import condizionale del decoder AA
 # ---------------------------------------------------------------------------
 try:
-    from rfcomm_handshake.packet import Packet as _AaPacket  # type: ignore
+    from rfcomm_handshake import packet as _AaPacket  # type: ignore
     _HAS_PACKET = True
 except ImportError:
     _HAS_PACKET = False
@@ -56,7 +56,7 @@ except ImportError:
 class _StubDecoder:
     """
     Decoder stub conforme al wire format AA:
-      [2B msg_id][2B payload_len][payload]
+      [2B payload_len][2B msg_id][payload]
     Ritorna (msg_id, payload) o None su input non valido.
     """
     HEADER_SIZE = 4  # 2B msg_id + 2B length
@@ -66,7 +66,7 @@ class _StubDecoder:
     def decode(cls, raw: bytes) -> Optional[tuple]:
         if len(raw) < cls.HEADER_SIZE:
             return None
-        msg_id, length = struct.unpack_from(">HH", raw, 0)
+        length, msg_id = struct.unpack_from(">HH", raw, 0)
         if length > cls.MAX_FRAME_SIZE:
             return None
         if len(raw) < cls.HEADER_SIZE + length:
@@ -77,7 +77,7 @@ class _StubDecoder:
     @classmethod
     def encode(cls, msg_id: int, payload: bytes) -> bytes:
         length = len(payload)
-        return struct.pack(">HH", msg_id & 0xFFFF, length & 0xFFFF) + payload
+        return struct.pack(">HH", length & 0xFFFF, msg_id & 0xFFFF) + payload
 
 
 def _decode(raw: bytes) -> Optional[tuple]:
@@ -154,7 +154,7 @@ class TestAaWireFormatFuzz:
         fake_length = len(payload) + extra
         if fake_length > 0xFFFF:
             fake_length = 0xFFFF
-        raw = struct.pack(">HH", msg_id, fake_length) + payload
+        raw = struct.pack(">HH", fake_length, msg_id) + payload
         result = _decode(raw)
         assert result is None
 
@@ -165,10 +165,11 @@ class TestAaWireFormatFuzz:
     @settings(max_examples=100, deadline=None)
     def test_fuzz_zero_length_frame(self, msg_id: int):
         """Frame con payload vuoto (length=0) deve decodificare o restituire None."""
-        raw = struct.pack(">HH", msg_id, 0)
+        raw = struct.pack(">HH", 0, msg_id)
         result = _decode(raw)
         # Accettabile: None oppure (msg_id, b"")
-        assert result is None or (isinstance(result, tuple) and result[1] == b"")
+        decoded_payload = result[1] if isinstance(result, tuple) else getattr(result, "payload", None)
+        assert result is None or decoded_payload == b""
 
     # ------------------------------------------------------------------
     # §1.5 Varint negativo nel campo length (se il parser usa varint)

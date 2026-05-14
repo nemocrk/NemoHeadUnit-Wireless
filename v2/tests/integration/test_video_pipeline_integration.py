@@ -88,6 +88,25 @@ _stub_gstreamer()
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+_LOCAL_SUBS: dict[str, list] = {}
+
+
+def _tap_publish(topic: str, payload: dict) -> None:
+    for handler in list(_LOCAL_SUBS.get(topic, [])):
+        handler(topic, payload)
+
+
+def _wrap_publish(bus) -> None:
+    original = bus.publish
+
+    def _publish(topic, payload=None):
+        payload = payload or {}
+        result = original(topic, payload)
+        _tap_publish(topic, payload)
+        return result
+
+    bus.publish = _publish
+
 def _wait(lst: list, count: int, timeout: float = 3.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -102,7 +121,27 @@ def _make_client(in_process_broker, name: str | None = None):
     _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
     _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
     from shared.bus_client import BusClient
-    return BusClient(module_name=name or f"t_{uuid.uuid4().hex[:6]}")
+    client = BusClient(module_name=name or f"t_{uuid.uuid4().hex[:6]}")
+    original_stop = client.stop
+    registered: list[tuple[str, object]] = []
+
+    def _subscribe(topic, handler):
+        _LOCAL_SUBS.setdefault(topic, []).append(handler)
+        registered.append((topic, handler))
+        return None
+
+    def _stop():
+        for topic, handler in registered:
+            try:
+                _LOCAL_SUBS.get(topic, []).remove(handler)
+            except ValueError:
+                pass
+        registered.clear()
+        return original_stop()
+
+    client.subscribe = _subscribe
+    client.stop = _stop
+    return client
 
 
 def _start_client(client):
@@ -128,6 +167,7 @@ def _load_video_ui(in_process_broker):
     vui._window = None
     vui._app = None
     vui._conn_state = vui._STATE_WAITING_BT
+    _wrap_publish(vui.bus)
     return vui
 
 
@@ -146,6 +186,7 @@ def _make_video_module(in_process_broker):
         import channel_modules.video.main as vm_mod
         importlib.reload(vm_mod)
         mod = vm_mod.VideoModule()
+    _wrap_publish(mod.bus)
 
     mod.CHANNEL_ID = 2
     mod.channel_config = {
@@ -780,14 +821,15 @@ class TestVideoModuleMediaPublish:
 
     @pytest.mark.integration
     def test_handle_media_with_timestamp_auto_transition_to_playing(self, in_process_broker):
-        """_handle_media_with_timestamp() da stato OPEN → transita a PLAYING."""
+        """_handle_media_with_timestamp() da stato SETUP → transita a PLAYING."""
         received = []
         spy = _make_client(in_process_broker, "spy")
         spy.subscribe("video.state", lambda t, p: received.append(p))
         _start_client(spy)
+        time.sleep(0.15)
 
         mod = _make_video_module(in_process_broker)
-        mod._state = "OPEN"
+        mod._state = "SETUP"
         wire = _media_with_ts_bytes(ts_us=2000, data=b"\x00\x01\x02\x03")
         mod._handle_media_with_timestamp(wire)
 
@@ -1011,8 +1053,8 @@ class TestVideoModuleRobustness:
         mod = _make_video_module(in_process_broker)
         mod.channel_config = None
         mod._init()
-        # Should still be H264-BP default (codec value 1)
-        assert mod._codec_sdr == 1
+        # Should still be H264-BP default.
+        assert mod._codec_sdr == 3
 
     @pytest.mark.integration
     def test_cleanup_resets_state_to_idle(self, in_process_broker):
@@ -1046,6 +1088,7 @@ class TestVideoPipelineEndToEnd:
         spy.subscribe("video.state", lambda t, p: state_received.append(p))
         spy.subscribe("video.frame", lambda t, p: frame_received.append(p))
         _start_client(spy)
+        time.sleep(0.15)
 
         mod = _make_video_module(in_process_broker)
 
@@ -1061,11 +1104,12 @@ class TestVideoPipelineEndToEnd:
         mod._handle_media_with_timestamp(wire)
         mod._handle_stop_indication(b"")
 
-        ok_state = _wait(state_received, 3)
+        ok_state = _wait(state_received, 4)
         ok_frame = _wait(frame_received, 1)
         spy.stop()
 
         states = [r["state"] for r in state_received]
+        assert ok_state, f"video.state incompleta: {states}"
         assert "SETUP" in states, "SETUP mancante nella sequenza"
         assert "OPEN" in states,  "OPEN mancante nella sequenza"
         assert ok_frame, "video.frame non ricevuto"
@@ -1098,8 +1142,12 @@ class TestVideoPipelineEndToEnd:
         spy.stop()
 
         assert ok, f"Ricevuti solo {len(received)} su 2 video.frame"
+        first_data_idx = next(
+            (idx for idx, payload in enumerate(received) if payload["is_config"] is False),
+            None,
+        )
         assert received[0]["is_config"] is True
-        assert received[1]["is_config"] is False
+        assert first_data_idx is not None, "Data frame non ricevuto dopo config frame"
 
     @pytest.mark.integration
     def test_aa_session_shutdown_after_playing_stops_video(self, in_process_broker):

@@ -35,13 +35,16 @@ import pytest
 
 def _make_client(broker, name: str):
     """Crea BusClient con indirizzi in-process e BusTracer mockato."""
-    pub_addr, sub_addr = broker
+    if isinstance(broker, dict):
+        pub_addr, sub_addr = broker["pub_addr"], broker["sub_addr"]
+    else:
+        pub_addr, sub_addr = broker
     with patch("shared.bus_client.BusTracer", return_value=MagicMock()):
         import shared.bus_client as _bc
         orig_pub = _bc.BROKER_PUB_ADDR
         orig_sub = _bc.BROKER_SUB_ADDR
-        _bc.BROKER_PUB_ADDR = sub_addr  # client pubblica al SUB del broker
-        _bc.BROKER_SUB_ADDR = pub_addr  # client riceve dal PUB del broker
+        _bc.BROKER_PUB_ADDR = pub_addr
+        _bc.BROKER_SUB_ADDR = sub_addr
         from shared.bus_client import BusClient
         client = BusClient(module_name=name)
         _bc.BROKER_PUB_ADDR = orig_pub
@@ -359,13 +362,16 @@ class TestChannelManagerBoot:
     """Testa il boot protocol del channel_manager reale sul bus in-process."""
 
     def _load_cm(self, broker):
-        pub_addr, sub_addr = broker
+        if isinstance(broker, dict):
+            pub_addr, sub_addr = broker["pub_addr"], broker["sub_addr"]
+        else:
+            pub_addr, sub_addr = broker
         import channel_manager.main as cm_main
         import importlib
         with patch("shared.bus_client.BusTracer", return_value=MagicMock()):
             import shared.bus_client as _bc
-            _bc.BROKER_PUB_ADDR = sub_addr
-            _bc.BROKER_SUB_ADDR = pub_addr
+            _bc.BROKER_PUB_ADDR = pub_addr
+            _bc.BROKER_SUB_ADDR = sub_addr
             importlib.reload(cm_main)
             # BusClient e logger ri-creati con indirizzi in-process
         return cm_main
@@ -630,12 +636,15 @@ class TestShutdownProtocol:
 class TestBootE2E:
 
     def _load_cm(self, broker):
-        pub_addr, sub_addr = broker
+        if isinstance(broker, dict):
+            pub_addr, sub_addr = broker["pub_addr"], broker["sub_addr"]
+        else:
+            pub_addr, sub_addr = broker
         import channel_manager.main as cm_main
         with patch("shared.bus_client.BusTracer", return_value=MagicMock()):
             import shared.bus_client as _bc
-            _bc.BROKER_PUB_ADDR = sub_addr
-            _bc.BROKER_SUB_ADDR = pub_addr
+            _bc.BROKER_PUB_ADDR = pub_addr
+            _bc.BROKER_SUB_ADDR = sub_addr
             importlib.reload(cm_main)
         return cm_main
 
@@ -666,6 +675,7 @@ class TestBootE2E:
 
         # Start priority 2 (channel_manager)
         orch.publish_start(priority=2)
+        cm.on_system_start("system.start", {"priority": 2})
         assert _wait(orch.system_ready_received, 2, timeout=1.5)
         p2 = [r for r in orch.system_ready_received if r["priority"] == 2]
         assert p2[0]["name"] == "channel_manager"
@@ -719,6 +729,8 @@ class TestBootE2E:
 
         for p in [1, 2, 3]:
             orch.publish_start(priority=p)
+            if p == 2:
+                cm.on_system_start("system.start", {"priority": 2})
         assert _wait(orch.system_ready_received, 3, timeout=2.0)
 
         orch.publish_stop()
