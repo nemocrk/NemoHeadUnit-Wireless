@@ -2,35 +2,52 @@
 # NemoHeadUnit-Wireless — CI Test Suite
 # Rif: docs/TEST_SUITE_ARCHITECTURE.md, docs/roadmap-current.md v3.5
 #
+# !! SOLO ON-DEMAND via workflow_dispatch !!
+#
+# Input:
+#   suite  — quale suite eseguire:
+#             "unit-integration"  blocca merge  (default)
+#             "e2e-smoke"         blocca merge
+#             "fuzz"              informativo
+#             "performance"       informativo
+#             "e2e-full"          sessione AA completa
+#             "all"               tutte e 5
+#
 # Job:
 #   1. unit-integration  — marker unit|integration + coverage ≥ 80%  [blocca merge]
 #   2. e2e-smoke         — marker e2e_smoke                           [blocca merge]
 #   3. fuzz              — marker fuzz (Hypothesis)                   [informativo]
 #   4. performance       — marker performance                         [informativo]
+#   5. e2e-full          — sessione AA completa                       [informativo]
+#
+# Secrets richiesti:
+#   CODECOV_TOKEN  — da https://app.codecov.io → repo settings → token
 # ---------------------------------------------------------------------------
 
 name: Test Suite
 
 on:
-  push:
-    branches: ["main", "dev", "feature/**"]
-  pull_request:
-    branches: ["main", "dev"]
   workflow_dispatch:
     inputs:
-      run_e2e_full:
-        description: "Esegui anche e2e_full (sessione AA completa)"
-        required: false
-        default: "false"
+      suite:
+        description: "Suite da eseguire"
+        required: true
+        default: "unit-integration"
         type: choice
-        options: ["true", "false"]
+        options:
+          - "unit-integration"
+          - "e2e-smoke"
+          - "fuzz"
+          - "performance"
+          - "e2e-full"
+          - "all"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.12"
+  PYTHON_VERSION: "3.14"
   PIP_CACHE_DIR: ~/.cache/pip
 
 # ===========================================================================
@@ -44,6 +61,9 @@ jobs:
     name: "Unit & Integration (≥ 80% coverage)"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    if: |
+      github.event.inputs.suite == 'unit-integration' ||
+      github.event.inputs.suite == 'all'
 
     steps:
       - name: Checkout
@@ -53,6 +73,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
           cache: pip
 
       - name: Install system dependencies
@@ -68,7 +89,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r v2/tests/requirements-test.txt
-          # Installa il pacchetto v2 in modalità editable (se setup.py/pyproject.toml esiste)
           if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
             pip install -e v2/
           fi
@@ -95,7 +115,27 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           HYPOTHESIS_SEED: 0
 
-      - name: Upload coverage report
+      - name: Upload coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          flags: unit-integration
+          name: NemoHeadUnit-v2
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Post coverage comment on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: py-cov-action/python-coverage-comment-action@v3
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COVERAGE_DATA_FILE: coverage.xml
+          ANNOTATE_MISSING_LINES: true
+          ANNOTATION_TYPE: warning
+
+      - name: Upload coverage report (artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -105,7 +145,7 @@ jobs:
             coverage-html/
           retention-days: 14
 
-      - name: Coverage summary (PR comment-ready)
+      - name: Coverage summary (log)
         if: always()
         run: |
           python -c "
@@ -124,7 +164,9 @@ jobs:
     name: "E2E Smoke"
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: unit-integration
+    if: |
+      github.event.inputs.suite == 'e2e-smoke' ||
+      github.event.inputs.suite == 'all'
 
     steps:
       - name: Checkout
@@ -134,6 +176,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
           cache: pip
 
       - name: Install system dependencies
@@ -169,8 +212,9 @@ jobs:
     name: "Fuzz (Hypothesis)"
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: unit-integration
-    # Non blocca il merge
+    if: |
+      github.event.inputs.suite == 'fuzz' ||
+      github.event.inputs.suite == 'all'
     continue-on-error: true
 
     steps:
@@ -181,6 +225,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
           cache: pip
 
       - name: Install dependencies
@@ -231,7 +276,9 @@ jobs:
     name: "Performance Benchmarks"
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: unit-integration
+    if: |
+      github.event.inputs.suite == 'performance' ||
+      github.event.inputs.suite == 'all'
     continue-on-error: true
 
     steps:
@@ -242,6 +289,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
           cache: pip
 
       - name: Install system dependencies
@@ -279,16 +327,15 @@ jobs:
           retention-days: 30
 
   # -------------------------------------------------------------------------
-  # JOB 5 — E2E Full (nightly / manuale, non blocca merge)
+  # JOB 5 — E2E Full (solo on-demand, non blocca merge)
   # -------------------------------------------------------------------------
   e2e-full:
-    name: "E2E Full Session (nightly)"
+    name: "E2E Full Session"
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Gira solo di notte o se esplicitamente richiesto via workflow_dispatch
     if: |
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.run_e2e_full == 'true')
+      github.event.inputs.suite == 'e2e-full' ||
+      github.event.inputs.suite == 'all'
     continue-on-error: true
 
     steps:
@@ -299,6 +346,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          allow-prereleases: true
           cache: pip
 
       - name: Install dependencies
@@ -320,8 +368,3 @@ jobs:
             --tb=long
         env:
           QT_QPA_PLATFORM: offscreen
-
-# Schedule nightly per e2e_full
-on:
-  schedule:
-    - cron: "0 2 * * *"  # ogni notte alle 02:00 UTC
