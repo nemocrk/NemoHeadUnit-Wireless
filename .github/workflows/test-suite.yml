@@ -60,6 +60,8 @@ jobs:
     name: "Unit & Integration (≥ 80% coverage)"
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
     if: |
       github.event.inputs.suite == 'unit-integration' ||
       github.event.inputs.suite == 'all'
@@ -104,6 +106,9 @@ jobs:
         shell: bash -el {0}
         run: |
           pytest \
+            --rootdir=. \
+            -c v2/tests/pytest.ini \
+            v2/tests/ \
             -m "unit or integration" \
             --cov=v2 \
             --cov-report=xml:coverage.xml \
@@ -115,6 +120,7 @@ jobs:
             --tb=short \
             -p no:warnings
         env:
+          PYTHONPATH: .
           QT_QPA_PLATFORM: offscreen
           HYPOTHESIS_SEED: 0
 
@@ -241,11 +247,15 @@ jobs:
         shell: bash -el {0}
         run: |
           pytest \
+            --rootdir=. \
+            -c v2/tests/pytest.ini \
+            v2/tests/ \
             -m e2e_smoke \
             --timeout=60 \
             -v \
             --tb=short
         env:
+          PYTHONPATH: .
           QT_QPA_PLATFORM: offscreen
 
   # -------------------------------------------------------------------------
@@ -291,12 +301,16 @@ jobs:
         shell: bash -el {0}
         run: |
           pytest \
+            --rootdir=. \
+            -c v2/tests/pytest.ini \
+            v2/tests/ \
             -m fuzz \
             --timeout=60 \
             -v \
             --tb=short \
             -p no:warnings
         env:
+          PYTHONPATH: .
           HYPOTHESIS_SEED: ${{ github.run_number }}
 
       - name: Save Hypothesis database
@@ -356,6 +370,9 @@ jobs:
         shell: bash -el {0}
         run: |
           pytest \
+            --rootdir=. \
+            -c v2/tests/pytest.ini \
+            v2/tests/ \
             -m performance \
             --timeout=120 \
             -v \
@@ -363,6 +380,7 @@ jobs:
             --json-report \
             --json-report-file=perf-results.json
         env:
+          PYTHONPATH: .
           QT_QPA_PLATFORM: offscreen
 
       - name: Upload performance results
@@ -414,9 +432,13 @@ jobs:
         shell: bash -el {0}
         run: |
           pytest \
+            --rootdir=. \
+            -c v2/tests/pytest.ini \
+            v2/tests/ \
             -m e2e_full \
             --timeout=120 \
             -v \
             --tb=long
         env:
+          PYTHONPATH: .
           QT_QPA_PLATFORM: offscreen
