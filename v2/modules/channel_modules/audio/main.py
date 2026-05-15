@@ -502,6 +502,7 @@ class AudioModule(BaseChannelModule):
             # Threshold reached — flush the whole buffer in one write.
             pcm = b"".join(self._prebuffer)
             self._prebuffer.clear()
+            self._prebuffer_bytes = 0  # reset accounting after flush
             self.log.info(
                 "prebuffer ch=%d threshold reached (%d bytes) — flushing to pacat",
                 self.CHANNEL_ID, len(pcm),
