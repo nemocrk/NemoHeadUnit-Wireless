@@ -356,16 +356,30 @@ class Logger:
     def critical(self, msg: str, *args, **kwargs) -> None:
         self._proxy.critical(msg % args if args else msg)
 
-    def exception(self, exc_info=None) -> None:
-        """Log an exception with full traceback - same API as stdlib logging."""
+    def exception(self, msg: str = "Exception", exc_info=None) -> None:
+        """Log an exception with full traceback.
+
+        Uses the active exception from sys.exc_info() when called inside an
+        except block (the common case).  An explicit exception object can also
+        be passed via *exc_info* to override the active context.
+
+        This fixes the previous behaviour where passing a plain string while
+        inside an except block would raise AttributeError because the old
+        implementation called exc_info.__traceback__ on the string.
+        """
         if exc_info is not None:
-            import traceback
-            import sys
-            if isinstance(exc_info, tuple):
-                traceback.print_exception(*exc_info, file=sys.stderr)
+            # Caller supplied an explicit exception object.
+            exc = exc_info
+            tb = exc.__traceback__ if hasattr(exc, "__traceback__") else None
+            self._proxy.opt(exception=(type(exc), exc, tb)).error(msg)
+        else:
+            # Use the active exception context (standard usage inside except:).
+            exc_type, exc_val, exc_tb = sys.exc_info()
+            if exc_type is not None:
+                self._proxy.opt(exception=(exc_type, exc_val, exc_tb)).error(msg)
             else:
-                traceback.print_exception(type(exc_info), exc_info, exc_info.__traceback__, file=sys.stderr)
-        self._proxy.error(f"Exception logged")
+                # No active exception — just log the message as an error.
+                self._proxy.error(msg)
 
 # ---------------------------------------------------------------------------
 # LoggerManager — registry of per-module Logger instances
@@ -438,15 +452,19 @@ def run_subprocess_and_log(
     kwargs.pop("text", None)
     bufsize = kwargs.pop("bufsize", 1)
 
-    process = subprocess.Popen(
-        *popenargs,
-        stdin=subprocess.PIPE if input else None,
-        stdout=subprocess.PIPE if capture_output else None,
-        stderr=subprocess.PIPE if capture_output else None,
-        text=True,
-        bufsize=bufsize,
-        **kwargs,
-    )
+    try:
+        process = subprocess.Popen(
+            *popenargs,
+            stdin=subprocess.PIPE if input else None,
+            stdout=subprocess.PIPE if capture_output else None,
+            stderr=subprocess.PIPE if capture_output else None,
+            text=True,
+            bufsize=bufsize,
+            **kwargs,
+        )
+    except Exception as exc:
+        logger.error(f"Subprocess spawn failed: {exc}")
+        raise
 
     try:
         if input:
