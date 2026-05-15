@@ -161,6 +161,9 @@ class ChannelManagerSession:
             self._stopped.clear()
             self._all_ready.clear()
             self._all_stopped.clear()
+            # If no children were started, the session is immediately ready.
+            if not self._expected:
+                self._all_ready.set()
 
         log.info(
             "Waiting for %d channel module(s) to become ready: %s",
@@ -214,6 +217,7 @@ class ChannelManagerSession:
     def wait_all_ready(self, sdr_bytes_hex: str) -> bool:
         """
         Block until all children are ready or timeout.
+        An empty session (zero expected children) is considered immediately ready.
         On success publishes channel_manager.channels_ready.
         Returns True on success, False on timeout.
         """
