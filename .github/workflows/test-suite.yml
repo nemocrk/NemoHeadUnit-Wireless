@@ -20,8 +20,8 @@
 #   4. performance       — marker performance                         [informativo]
 #   5. e2e-full          — sessione AA completa                       [informativo]
 #
-# Secrets richiesti:
-#   CODECOV_TOKEN  — da https://app.codecov.io → repo settings → token
+# Nessun secret esterno richiesto.
+# Il badge coverage.svg viene committato automaticamente in docs/badges/.
 # ---------------------------------------------------------------------------
 
 name: Test Suite
@@ -68,6 +68,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # token con write access per poter fare il commit del badge
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -115,25 +118,22 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           HYPOTHESIS_SEED: 0
 
-      - name: Upload coverage to Codecov
+      - name: Generate coverage badge SVG
         if: always()
-        uses: codecov/codecov-action@v4
-        with:
-          files: coverage.xml
-          flags: unit-integration
-          name: NemoHeadUnit-v2
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: |
+          pip install coverage-badge
+          mkdir -p docs/badges
+          coverage-badge -o docs/badges/coverage.svg -f
 
-      - name: Post coverage comment on PR
-        if: always() && github.event_name == 'pull_request'
-        uses: py-cov-action/python-coverage-comment-action@v3
-        with:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COVERAGE_DATA_FILE: coverage.xml
-          ANNOTATE_MISSING_LINES: true
-          ANNOTATION_TYPE: warning
+      - name: Commit coverage badge
+        if: always()
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/badges/coverage.svg
+          # commit solo se il file è cambiato
+          git diff --cached --quiet || git commit -m "ci: aggiorna coverage badge [skip ci]"
+          git push
 
       - name: Upload coverage report (artifact)
         if: always()
