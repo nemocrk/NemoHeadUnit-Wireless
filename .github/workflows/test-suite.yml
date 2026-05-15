@@ -47,8 +47,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.14"
-  PIP_CACHE_DIR: ~/.cache/pip
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 # ===========================================================================
 jobs:
@@ -69,15 +68,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # token con write access per poter fare il commit del badge
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v2
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          allow-prereleases: true
-          cache: pip
+          environment-file: environment.yml
+          init-shell: bash
+          cache-environment: true
+          post-cleanup: all
 
       - name: Install system dependencies
         run: |
@@ -88,9 +87,9 @@ jobs:
             libdbus-1-dev \
             libglib2.0-dev
 
-      - name: Install Python dependencies
+      - name: Install test dependencies
+        shell: bash -el {0}
         run: |
-          python -m pip install --upgrade pip
           pip install -r v2/tests/requirements-test.txt
           if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
             pip install -e v2/
@@ -102,6 +101,7 @@ jobs:
           echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> $GITHUB_ENV
 
       - name: Run unit + integration tests
+        shell: bash -el {0}
         run: |
           pytest \
             -m "unit or integration" \
@@ -120,10 +120,48 @@ jobs:
 
       - name: Generate coverage badge SVG
         if: always()
+        shell: bash -el {0}
         run: |
-          pip install coverage-badge
           mkdir -p docs/badges
-          coverage-badge -o docs/badges/coverage.svg -f
+          python - <<'EOF'
+          import xml.etree.ElementTree as ET, sys, pathlib
+
+          cov_file = pathlib.Path("coverage.xml")
+          if not cov_file.exists():
+              pct = 0.0
+          else:
+              root = ET.parse(cov_file).getroot()
+              pct = float(root.attrib.get("line-rate", 0)) * 100
+
+          if pct >= 90:   color = "#4c1"
+          elif pct >= 80: color = "#97ca00"
+          elif pct >= 60: color = "#dfb317"
+          else:           color = "#e05d44"
+
+          label = "coverage"
+          value = f"{pct:.0f}%"
+          lw, vw = 62, len(value) * 7 + 10
+          tw = lw + vw
+
+          svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{tw}" height="20">
+            <linearGradient id="s" x2="0" y2="100%">
+              <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+              <stop offset="1" stop-opacity=".1"/>
+            </linearGradient>
+            <rect rx="3" width="{tw}" height="20" fill="#555"/>
+            <rect rx="3" x="{lw}" width="{vw}" height="20" fill="{color}"/>
+            <rect rx="3" width="{tw}" height="20" fill="url(#s)"/>
+            <g fill="#fff" text-anchor="middle" font-family="DejaVu Sans,Verdana,Geneva,sans-serif" font-size="11">
+              <text x="{lw//2}" y="15" fill="#010101" fill-opacity=".3">{label}</text>
+              <text x="{lw//2}" y="14">{label}</text>
+              <text x="{lw + vw//2}" y="15" fill="#010101" fill-opacity=".3">{value}</text>
+              <text x="{lw + vw//2}" y="14">{value}</text>
+            </g>
+          </svg>"""
+
+          pathlib.Path("docs/badges/coverage.svg").write_text(svg)
+          print(f"Badge generato: {pct:.0f}%")
+          EOF
 
       - name: Commit coverage badge
         if: always()
@@ -131,7 +169,6 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/badges/coverage.svg
-          # commit solo se il file è cambiato
           git diff --cached --quiet || git commit -m "ci: aggiorna coverage badge [skip ci]"
           git push
 
@@ -147,14 +184,18 @@ jobs:
 
       - name: Coverage summary (log)
         if: always()
+        shell: bash -el {0}
         run: |
           python -c "
           import xml.etree.ElementTree as ET, sys
-          tree = ET.parse('coverage.xml')
-          root = tree.getroot()
-          pct = float(root.attrib.get('line-rate', 0)) * 100
-          print(f'Coverage: {pct:.1f}%')
-          sys.exit(0 if pct >= 80 else 1)
+          try:
+              root = ET.parse('coverage.xml').getroot()
+              pct = float(root.attrib.get('line-rate', 0)) * 100
+              print(f'Coverage: {pct:.1f}%')
+              sys.exit(0 if pct >= 80 else 1)
+          except FileNotFoundError:
+              print('coverage.xml non trovato')
+              sys.exit(1)
           "
 
   # -------------------------------------------------------------------------
@@ -172,12 +213,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v2
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          allow-prereleases: true
-          cache: pip
+          environment-file: environment.yml
+          init-shell: bash
+          cache-environment: true
+          post-cleanup: all
 
       - name: Install system dependencies
         run: |
@@ -187,15 +229,16 @@ jobs:
             bluez \
             bluetooth
 
-      - name: Install Python dependencies
+      - name: Install test dependencies
+        shell: bash -el {0}
         run: |
-          python -m pip install --upgrade pip
           pip install -r v2/tests/requirements-test.txt
           if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
             pip install -e v2/
           fi
 
       - name: Run E2E smoke tests
+        shell: bash -el {0}
         run: |
           pytest \
             -m e2e_smoke \
@@ -221,16 +264,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v2
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          allow-prereleases: true
-          cache: pip
+          environment-file: environment.yml
+          init-shell: bash
+          cache-environment: true
+          post-cleanup: all
 
-      - name: Install dependencies
+      - name: Install test dependencies
+        shell: bash -el {0}
         run: |
-          python -m pip install --upgrade pip
           pip install -r v2/tests/requirements-test.txt
           if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
             pip install -e v2/
@@ -244,6 +288,7 @@ jobs:
           restore-keys: hypothesis-db-main
 
       - name: Run fuzz tests
+        shell: bash -el {0}
         run: |
           pytest \
             -m fuzz \
@@ -285,21 +330,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v2
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          allow-prereleases: true
-          cache: pip
+          environment-file: environment.yml
+          init-shell: bash
+          cache-environment: true
+          post-cleanup: all
 
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libzmq3-dev
 
-      - name: Install dependencies
+      - name: Install test dependencies
+        shell: bash -el {0}
         run: |
-          python -m pip install --upgrade pip
           pip install -r v2/tests/requirements-test.txt
           pip install pytest-json-report
           if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
@@ -307,6 +353,7 @@ jobs:
           fi
 
       - name: Run performance benchmarks
+        shell: bash -el {0}
         run: |
           pytest \
             -m performance \
@@ -342,24 +389,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v2
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          allow-prereleases: true
-          cache: pip
+          environment-file: environment.yml
+          init-shell: bash
+          cache-environment: true
+          post-cleanup: all
 
-      - name: Install dependencies
+      - name: Install system dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libzmq3-dev bluez bluetooth
-          python -m pip install --upgrade pip
+
+      - name: Install test dependencies
+        shell: bash -el {0}
+        run: |
           pip install -r v2/tests/requirements-test.txt
           if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
             pip install -e v2/
           fi
 
       - name: Run E2E full session tests
+        shell: bash -el {0}
         run: |
           pytest \
             -m e2e_full \
