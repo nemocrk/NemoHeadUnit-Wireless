@@ -378,6 +378,13 @@ _ONEOF_CHANNEL_FIELDS = (
     "phone_status_channel",
 )
 
+# Audio codec enum values that identify a PCM/AAC audio av_channel.
+_AUDIO_CODEC_VALUES = frozenset({
+    MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC_ADTS,
+    MediaCodecType.MEDIA_CODEC_AUDIO_PCM,
+    MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC,
+})
+
 
 def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
     """Parse serialised ServiceDiscoveryResponse *bytes* and return the channel
@@ -393,6 +400,11 @@ def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
     "audio_type" (AudioType int, only when av_type == AUDIO) so that
     registry.resolve_module_type() can distinguish VIDEO from the three
     audio stream types without importing proto enums.
+
+    Audio channels are identified by EITHER:
+      - codec being one of the audio codec enum values (ch 4 — MediaAudio), OR
+      - stream_type == AVStreamType.AUDIO (ch 5/6 — SpeechAudio / SystemAudio,
+        which omit a codec but set stream_type explicitly).
 
     Args:
         sdr_bytes: raw proto bytes from build_from_schema_cfg().
@@ -420,8 +432,17 @@ def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
                     # Expose stream_type (VIDEO vs AUDIO) and, for AUDIO
                     # channels, also audio_type (MEDIA / SPEECH / SYSTEM)
                     # so registry.resolve_module_type() can route correctly.
+                    #
+                    # An av_channel is an audio channel when:
+                    #   (a) its codec is one of the known audio codec values
+                    #       (e.g. ch 4 — MediaAudio with AAC codec), OR
+                    #   (b) its stream_type is AVStreamType.AUDIO
+                    #       (e.g. ch 5/6 — SpeechAudio / SystemAudio which
+                    #        omit a codec and rely on stream_type instead).
                     av_dict: dict = {"av_type": sub.codec}
-                    if sub.codec == MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC_ADTS or sub.codec == MediaCodecType.MEDIA_CODEC_AUDIO_PCM or sub.codec == MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC:
+                    is_audio_codec  = sub.codec in _AUDIO_CODEC_VALUES
+                    is_audio_stream = sub.stream_type == AVStreamType.AUDIO
+                    if is_audio_codec or is_audio_stream:
                         av_dict["audio_type"] = sub.audio_type
                     entry["av_channel"] = av_dict
                 else:
