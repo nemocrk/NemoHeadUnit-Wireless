@@ -1,13 +1,91 @@
 # Session Handoff — NemoHeadUnit-Wireless v2 Test Suite
 
 > **Scopo**: documento di continuità per sessioni AI successive.
-> **Aggiornato**: 2026-05-13 — **TEST SUITE COMPLETA** (Fase 0–5 chiuse, 57 file, ~3120 test)
+> **Aggiornato**: 2026-05-15 — **TUTTI I BUG DI PRODUZIONE FIXATI**
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**57 file di test, ~3120 test + 3 helper E2E** su `main`. Tutte le fasi completate. **Prossimo: coverage report + top-up moduli sotto 80%.**
+**Test suite completa (57 file, ~3120 test) + tutti e 5 i bug di `KNOWN_PRODUCTION_BUGS.md` risolti.** Prossimo: coverage report + top-up moduli sotto 80%.
+
+---
+
+## 2026-05-15 — Fix tutti i bug di produzione
+
+**Cosa cambiato:**
+
+- **Bug #1 — `AudioModule._prebuffer_bytes`** non resettato dopo flush
+  - Commit: `dea274a` (fatto da utente prima di questa sessione)
+  - File: `v2/modules/channel_modules/audio/main.py`
+
+- **Bug #2 — `ServiceDiscovery` `audio_type` perso per ch 5/6**
+  - Commit: [`987ffb3`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/987ffb3cf61281ebb559e25564f1f9490fd106a6)
+  - File: `v2/modules/oaa_control_channel/service_discovery.py`
+  - Fix: `channels_from_sdr_bytes()` ora imposta `audio_type` anche quando
+    `stream_type == AVStreamType.AUDIO` (fallback per ch 5/6 senza codec).
+    Estratto `_AUDIO_CODEC_VALUES` frozenset.
+
+- **Bug #3 — `Logger.Popen` fuori dal `try`**
+  - Verificato: già corretto nel codice attuale, nessuna modifica necessaria.
+
+- **Bug #4 — `Logger.exception()` con `sys.exc_info()`**
+  - Commit: `1f4f227` (fatto da utente prima di questa sessione)
+  - File: `v2/shared/logger.py`
+
+- **Bug #5 — `ChannelManager` sessione vuota in timeout**
+  - Commit: `fb5d2a3` (fatto da utente prima di questa sessione)
+  - File: `v2/modules/channel_manager/main.py`
+
+- **`docs/KNOWN_PRODUCTION_BUGS.md`** aggiornato con tutti i fix — commit [`9ab40b7`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/9ab40b7778864bb4f7d87bfee51fe24fc7045262)
+
+**Perchè:** Chiudere tutti i bug noti prima di procedere con il coverage report.
+
+**Status:** Completato ✅
+
+**Prossimi 3 passi:**
+1. **Eseguire coverage report**: `pytest --cov=v2 --cov-report=html --cov-report=term-missing`
+2. **Top-up test mirati** sui moduli sotto soglia 80%
+3. **Verifica CI**: `pytest -m "unit or integration" --cov-fail-under=80` in green
+
+---
+
+## Handoff precedenti (sommario)
+
+| Data | Cosa | Status |
+|---|---|---|
+| 2026-05-15 | Fix 5 bug produzione da KNOWN_PRODUCTION_BUGS.md | ✅ |
+| 2026-05-13 | Fase 5 §2/§3 (chiude test suite) | ✅ |
+| 2026-05-13 | Fase 4 §5/§6 + Fase 5 §1 | ✅ |
+| 2026-05-13 | Fase 4 §2/§3/§4 | ✅ |
+| 2026-05-13 | Fase 3 Full + Fase 4 §1 | ✅ |
+| 2026-05-13 | Fase 3 Smoke §2/§3 | ✅ |
+| 2026-05-13 | Unit rfcomm_handshake + channel_manager | ✅ |
+| 2026-05-13 | E2E Helpers | ✅ |
+
+---
+
+## Comandi Utili
+
+```bash
+# Coverage report
+pytest --cov=v2 --cov-report=html --cov-report=term-missing
+
+# Fuzz (tutti)
+pytest -m fuzz -v
+
+# Performance
+pytest -m performance -v
+
+# Smoke CI
+pytest -m e2e_smoke -v
+
+# Unit + integration (blocca merge)
+pytest -m "unit or integration" --cov=v2 --cov-fail-under=80
+
+# Tutto
+pytest -v --cov=v2
+```
 
 ---
 
@@ -69,8 +147,8 @@
 | `performance/test_video_frame_rate.py` | `14df4e6` | ~7 | |
 | `performance/test_aa_frame_decode.py` | `1b22850` | ~6 | |
 | `fuzz/test_aa_wire_format.py` | — | ~12 | Fase 5 §1 |
-| `fuzz/test_proto_utils_roundtrip.py` | — | ~10 | **Fase 5 §2** |
-| `fuzz/test_bus_payload_malformed.py` | — | ~10 | **Fase 5 §3** |
+| `fuzz/test_proto_utils_roundtrip.py` | — | ~10 | Fase 5 §2 |
+| `fuzz/test_bus_payload_malformed.py` | — | ~10 | Fase 5 §3 |
 
 **Totale: ~3120 test in 57 file + 3 helper + 3 infra.**
 
@@ -100,91 +178,4 @@ class TestXxxFuzz:
     # @given(st.binary() | st.text() | st.integers() | ...)
     # @settings(max_examples=500, suppress_health_check=[HealthCheck.too_slow])
     # Mai assert su valori specifici: assert su proprietà (no crash, no hang)
-    # Ogni test deve completare in < 30s
-
-    # Proto roundtrip property:
-    # @given(st.binary())
-    # def test_roundtrip(raw): decoded = decode(raw); assert encode(decoded) == raw  # o None-safe
-
-    # Bus payload property:
-    # @given(st.one_of(st.text(), st.integers(), st.binary(), st.floats(allow_nan=False)))
-    # def test_publish_no_crash(val): bus.publish(topic, {"v": val})  # no exception
-```
-
----
-
-## 2026-05-13 — Fase 5 §2/§3 (chiude test suite)
-
-**Cosa cambiato:**
-
-- **`fuzz/test_proto_utils_roundtrip.py`** (~10 test `@pytest.mark.fuzz`)
-  - `test_fuzz_encode_decode_roundtrip` — `@given(st.binary())`: encode→decode→encode idempotente
-  - `test_fuzz_decode_arbitrary_bytes` — nessun crash su bytes arbitrari
-  - `test_fuzz_decode_valid_proto_structure` — struttura protobuf valida sempre decodificabile
-  - `test_fuzz_field_overflow` — field ID > INT32_MAX
-  - `test_fuzz_repeated_field_huge` — campo repeated con 10k elementi
-  - `test_fuzz_nested_message_deep` — messaggi annidati fino a depth 100
-  - `test_fuzz_unicode_string_field` — stringhe Unicode arbitrarie
-  - `test_fuzz_integer_extremes` — int64 min/max, 0, negativi
-  - `test_fuzz_float_specials` — inf, -inf, nan (gestiti gracefully)
-  - `test_fuzz_proto_no_hang` — decode non blocca > 50ms
-
-- **`fuzz/test_bus_payload_malformed.py`** (~10 test `@pytest.mark.fuzz`)
-  - `test_fuzz_publish_any_value` — `@given(st.one_of(...))`: publish non crasha
-  - `test_fuzz_publish_nested_dict` — dict arbitrariamente annidato
-  - `test_fuzz_publish_list_payload` — lista come payload value
-  - `test_fuzz_publish_none_value` — None come value di campo
-  - `test_fuzz_publish_wrong_types` — tipi errati (bytes, set, object)
-  - `test_fuzz_subscribe_topic_arbitrary` — topic string arbitraria → no crash
-  - `test_fuzz_malformed_json_string` — stringa JSON-like malformata
-  - `test_fuzz_large_payload` — payload 1MB+ non blocca il bus
-  - `test_fuzz_concurrent_malformed` — N thread pubblicano payload errati in parallelo
-  - `test_fuzz_handler_receives_original` — handler sempre riceve il payload originale invariato
-
-**Perché:** Completare la Fase 5 e chiudere la test suite.
-
-**Status:** Completato ✅ — **TEST SUITE COMPLETA**
-
-**Prossimi 3 passi:**
-
-1. **IMMEDIATO** — Verificare docs/KNOWN_PRODUCTION_BUGS.md
-2. **IMMEDIATO** — Eseguire `pytest --cov=v2 --cov-report=html` e identificare moduli sotto 80%
-3. Top-up test unit mirati sui moduli sotto soglia
-4. Verifica CI: `pytest -m "unit or integration" --cov-fail-under=80` in green
-
----
-
-## Handoff precedenti (sommario)
-
-| Data | Cosa | Status |
-|---|---|---|
-| 2026-05-13 | Fase 4 §5/§6 + Fase 5 §1 | ✅ |
-| 2026-05-13 | Fase 4 §2/§3/§4 | ✅ |
-| 2026-05-13 | Fase 3 Full + Fase 4 §1 | ✅ |
-| 2026-05-13 | Fase 3 Smoke §2/§3 | ✅ |
-| 2026-05-13 | Unit rfcomm_handshake + channel_manager | ✅ |
-| 2026-05-13 | E2E Helpers | ✅ |
-
----
-
-## Comandi Utili
-
-```bash
-# Coverage report
-pytest --cov=v2 --cov-report=html --cov-report=term-missing
-
-# Fuzz (tutti)
-pytest -m fuzz -v
-
-# Performance
-pytest -m performance -v
-
-# Smoke CI
-pytest -m e2e_smoke -v
-
-# Unit + integration (blocca merge)
-pytest -m "unit or integration" --cov=v2 --cov-fail-under=80
-
-# Tutto
-pytest -v --cov=v2
 ```
