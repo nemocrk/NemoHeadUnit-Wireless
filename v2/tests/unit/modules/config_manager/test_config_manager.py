@@ -15,8 +15,9 @@ Strategy:
   I/O file viene controllato via:
     - patch.object(mod, "_load_config") / patch.object(mod, "_save_config")
     per i test degli handler di alto livello
-    - patch("builtins.open") + patch("yaml.safe_load") / "yaml.safe_dump"
+    - patch("pathlib.Path.open") + patch("yaml.safe_load") / "yaml.safe_dump"
     per i test diretti di _load_config/_save_config
+    (_load_config usa Path.open(), non builtins.open())
 
 Covers:
   Section 1  — _config_path(): formato path corretto
@@ -165,7 +166,7 @@ class TestLoadConfig:
         mod, _ = cm
         data = {"pin": "1234", "enabled": True}
         with patch("pathlib.Path.exists", return_value=True), \
-             patch("builtins.open", mock_open(read_data="")), \
+             patch("pathlib.Path.open", mock_open(read_data="")), \
              patch("yaml.safe_load", return_value=data):
             result = mod._load_config("bluetooth")
         assert result == data
@@ -174,7 +175,7 @@ class TestLoadConfig:
     def test_returns_empty_when_yaml_not_dict(self, cm):
         mod, _ = cm
         with patch("pathlib.Path.exists", return_value=True), \
-             patch("builtins.open", mock_open(read_data="")), \
+             patch("pathlib.Path.open", mock_open(read_data="")), \
              patch("yaml.safe_load", return_value=["not", "a", "dict"]):
             result = mod._load_config("bluetooth")
         assert result == {}
@@ -183,7 +184,7 @@ class TestLoadConfig:
     def test_returns_empty_on_exception(self, cm):
         mod, _ = cm
         with patch("pathlib.Path.exists", return_value=True), \
-             patch("builtins.open", side_effect=OSError("permission denied")):
+             patch("pathlib.Path.open", side_effect=OSError("permission denied")):
             result = mod._load_config("bluetooth")
         assert result == {}
 
@@ -191,7 +192,7 @@ class TestLoadConfig:
     def test_returns_empty_when_yaml_is_none(self, cm):
         mod, _ = cm
         with patch("pathlib.Path.exists", return_value=True), \
-             patch("builtins.open", mock_open(read_data="")), \
+             patch("pathlib.Path.open", mock_open(read_data="")), \
              patch("yaml.safe_load", return_value=None):
             result = mod._load_config("bluetooth")
         assert result == {}
