@@ -122,9 +122,13 @@ def _polkit_check(sender: str, action_id: str, system_bus: dbus.SystemBus) -> No
     if the check fails or the caller is not in the ap_manager group.
     """
     try:
+        # introspect=False: prevents dbus-python from calling Introspect() on
+        # the polkitd proxy before CheckAuthorization(). polkitd (uid=981)
+        # rejects Introspect calls from root (uid=0) with AccessDenied.
         polkit = system_bus.get_object(
             "org.freedesktop.PolicyKit1",
             "/org/freedesktop/PolicyKit1/Authority",
+            introspect=False,
         )
         authority = dbus.Interface(polkit, "org.freedesktop.PolicyKit1.Authority")
 
