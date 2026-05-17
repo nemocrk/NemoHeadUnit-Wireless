@@ -21,8 +21,10 @@
 #           org.nemo.APManager.service
 #         /etc/dbus-1/system.d/
 #           org.nemo.APManager.conf
+#         /usr/share/dbus-1/system-services/
+#           org.nemo.APManager.service  (D-Bus activation file)
 #         /usr/share/polkit-1/actions/
-#           org.nemo.APManager.policy
+#           org.nemo.apmanager.policy   (lowercase — polkitd 127 case-sensitive)
 #         /etc/polkit-1/rules.d/
 #           org.nemo.bluetooth.rules
 #   4.  Builds the .deb with FPM
@@ -188,11 +190,25 @@ mkdir -p "${DBUS_STAGE}"
 log "  Copying D-Bus policy"
 cp "${SERVICES_SRC}/org.nemo.APManager.conf" "${DBUS_STAGE}/"
 
+# —— /usr/share/dbus-1/system-services/ ——
+# This activation file tells the bus daemon that org.nemo.APManager is a
+# legitimate root-owned service.  Without it, polkitd rejects
+# CheckAuthorization calls from the service with AccessDenied.
+DBUS_SERVICES_STAGE="${STAGE_DIR}/usr/share/dbus-1/system-services"
+mkdir -p "${DBUS_SERVICES_STAGE}"
+log "  Copying D-Bus activation file"
+cp "${SERVICES_SRC}/org.nemo.APManager.dbus-service" \
+   "${DBUS_SERVICES_STAGE}/org.nemo.APManager.service"
+
 # —— /usr/share/polkit-1/actions/ ——
 POLKIT_STAGE="${STAGE_DIR}/usr/share/polkit-1/actions"
 mkdir -p "${POLKIT_STAGE}"
-log "  Copying PolicyKit policy"
-cp "${SERVICES_SRC}/org.nemo.APManager.policy" "${POLKIT_STAGE}/"
+log "  Copying PolicyKit policy (installed as lowercase filename for polkitd 127)"
+# polkitd 127 is case-sensitive on filenames: the filename prefix must match
+# the action ID prefix exactly.  Action IDs use 'org.nemo.apmanager.*' so
+# the file must be named org.nemo.apmanager.policy (all lowercase).
+cp "${SERVICES_SRC}/org.nemo.APManager.policy" \
+   "${POLKIT_STAGE}/org.nemo.apmanager.policy"
 
 # —— /etc/polkit-1/rules.d/ ——
 POLKIT_RULES_STAGE="${STAGE_DIR}/etc/polkit-1/rules.d"
