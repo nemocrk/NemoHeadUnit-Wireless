@@ -17,6 +17,8 @@
 #           hardware_fixes/   ← platform-specific fix scripts + registry
 #           bus_broker.py     ← ZMQ bus broker entry point
 #           environment.yml   ← Conda env spec (built on target by postinst)
+#           bin/
+#             nemo-headunit   ← launcher wrapper script
 #         /usr/lib/systemd/system/
 #           org.nemo.APManager.service
 #         /etc/dbus-1/system.d/
@@ -27,6 +29,8 @@
 #           org.nemo.apmanager.policy   (lowercase — polkitd 127 case-sensitive)
 #         /etc/polkit-1/rules.d/
 #           org.nemo.bluetooth.rules
+#         /usr/share/applications/
+#           nemo-headunit.desktop
 #   4.  Builds the .deb with FPM
 #   5.  Runs dpkg-deb --info + dpkg-deb --contents to verify the package
 #
@@ -168,6 +172,12 @@ if [ -f "${BOOTSTRAP_CONDA}" ]; then
     chmod +x "${APP_OPT}/bootstrap_conda.sh"
 fi
 
+# —— /opt/nemo-headunit/bin/ (launcher wrapper) ——
+mkdir -p "${APP_OPT}/bin"
+log "  Copying launcher script"
+cp "${REPO_ROOT}/packaging/nemo-headunit.sh" "${APP_OPT}/bin/nemo-headunit"
+chmod 755 "${APP_OPT}/bin/nemo-headunit"
+
 # Prune bytecode / tests
 log "  Pruning bytecode and test files"
 find "${APP_OPT}/v2" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
@@ -215,6 +225,12 @@ POLKIT_RULES_STAGE="${STAGE_DIR}/etc/polkit-1/rules.d"
 mkdir -p "${POLKIT_RULES_STAGE}"
 log "  Copying polkit JS rules"
 cp "${BT_RULES}" "${POLKIT_RULES_STAGE}/"
+
+# —— /usr/share/applications/ (.desktop entry) ——
+APPS_STAGE="${STAGE_DIR}/usr/share/applications"
+mkdir -p "${APPS_STAGE}"
+log "  Copying .desktop entry"
+cp "${REPO_ROOT}/packaging/nemo-headunit.desktop" "${APPS_STAGE}/"
 
 # ---------------------------------------------------------------------------
 # Step 4 — Build --depends list
