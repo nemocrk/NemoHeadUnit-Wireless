@@ -129,7 +129,9 @@ def _polkit_check(sender: str, action_id: str, system_bus: dbus.SystemBus) -> No
         authority = dbus.Interface(polkit, "org.freedesktop.PolicyKit1.Authority")
 
         subject = ("system-bus-name", {"name": dbus.String(sender)})
-        details = {}
+        # Must be an explicitly typed dbus.Dictionary — passing a plain Python {}
+        # causes dbus-python to raise "Unable to guess signature from an empty dict".
+        details = dbus.Dictionary({}, signature="sv")
         flags   = dbus.UInt32(0)
         cancel  = ""
 
