@@ -546,7 +546,15 @@ class APManagerService(dbus.service.Object):
 
 def main():
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-    system_bus = dbus.SystemBus()
+    
+    try:
+        system_bus = dbus.SystemBus()
+    except dbus.exceptions.DBusException as e:
+        log.error(f"Failed to connect to system D-Bus: {e}")
+        log.error("Ensure D-Bus daemon is running and accessible.")
+        log.error(f"DBUS_SYSTEM_BUS_ADDRESS: {os.environ.get('DBUS_SYSTEM_BUS_ADDRESS', '(not set)')}")
+        raise SystemExit(1)
+    
     service    = APManagerService(system_bus)  # noqa: F841
 
     loop = GLib.MainLoop()

@@ -115,6 +115,7 @@ configure)
     log "Setting permissions on ${APP_DIR}"
     chown -R root:root "${APP_DIR}"
     chmod -R a+rX,u+w "${APP_DIR}"
+    chmod -R a+rwX,u+w "${APP_DIR}/v2/config"
     if [ -x "${CONDA_ENV_DIR}/bin/python" ]; then
         chmod +x "${CONDA_ENV_DIR}/bin/python"
     fi

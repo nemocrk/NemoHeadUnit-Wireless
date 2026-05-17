@@ -28,8 +28,10 @@ StandardError=journal
 SyslogIdentifier=ap-manager-service
 
 # Minimal environment — explicit PATH covers hostapd, dnsmasq, ip, iw, rfkill, nmcli
+# Explicitly use system D-Bus socket to avoid venv path resolution issues
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
 
 [Install]
 WantedBy=multi-user.target

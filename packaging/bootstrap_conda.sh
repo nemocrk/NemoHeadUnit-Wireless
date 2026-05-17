@@ -66,6 +66,8 @@ export PATH="${MINICONDA_INSTALL_DIR}/bin:${PATH}"
 # shellcheck source=/dev/null
 source "${MINICONDA_INSTALL_DIR}/etc/profile.d/conda.sh"
 
+conda tos accept
+
 echo -e "${GREEN}[bootstrap_conda] Miniconda installato in ${MINICONDA_INSTALL_DIR}${NC}"
 echo -e "${YELLOW}[bootstrap_conda] Per usare conda nelle shell utente aggiungi a ~/.bashrc:${NC}"
 echo -e "${YELLOW}  export PATH=${MINICONDA_INSTALL_DIR}/bin:\$PATH${NC}"
