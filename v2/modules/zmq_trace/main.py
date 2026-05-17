@@ -327,30 +327,50 @@ def print_report(summary, d_pub, d_recv, d_bytes, d_mod_pub, d_mod_recv, d_pub_d
 
 def _on_config_loaded(config: dict) -> None:
     global _config
-    if config:
-        merged = dict(_config)
-        for k in _SCHEMA:
-            if k in config:
-                merged[k] = config[k]
-        _config = merged
+    if not config:
+        log.info("No persisted config found — defaults seeded by config_manager.")
+        return
+    merged = {k: v.default for k, v in _SCHEMA.items()}
+    merged.update({k: v for k, v in config.items() if k in _SCHEMA and not isinstance(v, (dict, list))})
+    _config = merged
     log.info(f"Config loaded: {_config}")
 
 
 def _on_config_changed(key: str, value) -> None:
-    if key in _SCHEMA:
-        _config[key] = value
-        log.info(f"Config changed: {key}={value!r}")
+    if key not in _SCHEMA:
+        log.warning(f"config.changed: unknown key '{key}' — ignoring")
+        return
+    if isinstance(value, (dict, list)):
+        log.warning(f"config.changed: structural value for '{key}' rejected")
+        return
+    _config[key] = value
+    log.info(f"Config changed: {key}={value!r}")
 
 
-def on_system_readytostart(topic: str = "", payload: dict | None = None) -> None:
-    bus.publish("system.module_ready", {"name": MODULE_NAME, "priority": PRIORITY})
+# ---------------------------------------------------------------------------
+# Boot protocol handlers
+# ---------------------------------------------------------------------------
+
+def on_system_readytostart() -> None:
+    """
+    Orchestrator is ready to begin the multi-step boot.
+    Announce this module's name and priority so main.py can build
+    the startup plan before issuing system.start messages.
+    """
+    log.info(f"system.readytostart received — announcing priority {PRIORITY}")
+    bus.publish("system.module_ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
 
 
 def on_system_start(topic: str, payload: dict) -> None:
     if payload.get("priority") != PRIORITY:
         return
-    log.info("zmq_trace started")
+    log.info(f"system.start priority={PRIORITY} received — initialising...")
+    cfg.get(schema=_SCHEMA)
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
+    log.info(f"system.ready published (priority={PRIORITY})")
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
@@ -365,15 +385,21 @@ def run() -> None:
     cfg.register()
 
     bus.subscribe("system.readytostart", on_system_readytostart)
-    bus.subscribe("system.start", on_system_start)
-    bus.subscribe("system.stop", on_system_stop)
+    bus.subscribe("system.start",        on_system_start)
+    bus.subscribe("system.stop",         on_system_stop)
 
     metrics = Metrics()
     threading.Thread(target=collector_loop, args=(metrics,), daemon=True, name="trace-collector").start()
     threading.Thread(target=reporter_loop, args=(metrics,), daemon=True, name="trace-reporter").start()
 
-    cfg.get(defaults=_config, schema=_SCHEMA)
-    bus.start()
+    log.info("Module started, waiting for messages...")
+    bus_thread = bus.start(blocking=False)
+    time.sleep(0.05)
+    on_system_readytostart()
+    try:
+        bus_thread.join()
+    except KeyboardInterrupt:
+        pass  # gestito dal main via system.stop
 
 
 if __name__ == "__main__":
