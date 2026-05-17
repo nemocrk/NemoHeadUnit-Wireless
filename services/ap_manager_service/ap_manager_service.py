@@ -115,27 +115,37 @@ def _config_from_dbus_dict(d: dict) -> APConfig:
 # PolicyKit helper
 # ---------------------------------------------------------------------------
 
-def _polkit_check(sender: str, action_id: str, system_bus: dbus.SystemBus) -> None:
+def _polkit_check(sender: str, action_id: str) -> None:
     """
     Ask PolicyKit whether `sender` is authorised for `action_id`.
-    Raises dbus.DBusException with error name org.nemo.APManager.Error.NotAuthorized
-    if the check fails or the caller is not in the ap_manager group.
+
+    Uses a private SystemBus connection dedicated to polkit calls.
+    The main service connection (which owns org.nemo.APManager) has
+    stricter D-Bus policy rules that cause polkitd to reject the
+    CheckAuthorization reply with AccessDenied.  A private connection
+    with no registered bus name is treated as a plain root connection
+    and the polkit round-trip succeeds.
+
+    Raises dbus.DBusException(name=org.nemo.APManager.Error.NotAuthorized)
+    if the check fails.
     """
+    polkit_bus = None
     try:
-        # introspect=False: prevents dbus-python from calling Introspect() on
-        # the polkitd proxy before CheckAuthorization(). polkitd (uid=981)
-        # rejects Introspect calls from root (uid=0) with AccessDenied.
-        polkit = system_bus.get_object(
+        polkit_bus = dbus.SystemBus(private=True)
+        polkit = polkit_bus.get_object(
             "org.freedesktop.PolicyKit1",
             "/org/freedesktop/PolicyKit1/Authority",
             introspect=False,
         )
         authority = dbus.Interface(polkit, "org.freedesktop.PolicyKit1.Authority")
 
-        subject = ("system-bus-name", {"name": dbus.String(sender)})
-        # Must be an explicitly typed dbus.Dictionary — passing a plain Python {}
-        # causes dbus-python to raise "Unable to guess signature from an empty dict".
-        details = dbus.Dictionary({}, signature="sv")
+        # subject: (sa{sv})  — dict values are variants
+        subject = (
+            "system-bus-name",
+            dbus.Dictionary({"name": dbus.String(sender)}, signature="sv"),
+        )
+        # details: a{ss}  — plain string→string map
+        details = dbus.Dictionary({}, signature="ss")
         flags   = dbus.UInt32(0)
         cancel  = ""
 
@@ -155,6 +165,12 @@ def _polkit_check(sender: str, action_id: str, system_bus: dbus.SystemBus) -> No
             "PolicyKit unavailable",
             name="org.nemo.APManager.Error.NotAuthorized",
         )
+    finally:
+        if polkit_bus is not None:
+            try:
+                polkit_bus.close()
+            except Exception:
+                pass
 
 # ---------------------------------------------------------------------------
 # Low-level subprocess helpers (all run as root — no sudo needed)
@@ -452,7 +468,7 @@ class APManagerService(dbus.service.Object):
         sender_keyword="sender",
     )
     def Start(self, config: dict, sender: str = None) -> tuple:
-        _polkit_check(sender, POLKIT_ACTION_START, self._system_bus)
+        _polkit_check(sender, POLKIT_ACTION_START)
 
         if self._runner.is_running():
             raise dbus.DBusException(
@@ -489,7 +505,7 @@ class APManagerService(dbus.service.Object):
         sender_keyword="sender",
     )
     def Stop(self, sender: str = None) -> tuple:
-        _polkit_check(sender, POLKIT_ACTION_STOP, self._system_bus)
+        _polkit_check(sender, POLKIT_ACTION_STOP)
 
         if not self._runner.is_running():
             raise dbus.DBusException(
@@ -508,7 +524,7 @@ class APManagerService(dbus.service.Object):
         sender_keyword="sender",
     )
     def Status(self, sender: str = None) -> tuple:
-        _polkit_check(sender, POLKIT_ACTION_STATUS, self._system_bus)
+        _polkit_check(sender, POLKIT_ACTION_STATUS)
 
         running = self._runner.is_running()
         state   = "running" if running else "stopped"
