@@ -127,30 +127,48 @@ class _DBusAPClient:
     def __init__(self, system_bus: dbus.SystemBus):
         self._bus = system_bus
 
-    def _proxy(self):
-        obj = self._bus.get_object(_DBUS_BUS_NAME, _DBUS_OBJECT_PATH)
+    def _proxy(self) -> dbus.Interface:
+        # introspect=False: prevents dbus-python from calling Introspect() on
+        # APManagerService (uid=0) from this process (uid=1000).  The D-Bus
+        # policy only allows uid=1000 to send org.nemo.APManager method calls,
+        # not org.freedesktop.DBus.Introspectable ones, so the auto-introspect
+        # round-trip is rejected with AccessDenied.
+        obj = self._bus.get_object(
+            _DBUS_BUS_NAME, _DBUS_OBJECT_PATH, introspect=False
+        )
         return dbus.Interface(obj, _DBUS_INTERFACE)
 
     def start(self, config: dict) -> tuple[bool, str]:
         """
         Call Start(config: a{sv}) on the service.
         Returns (True, "") on success or raises dbus.DBusException.
+
+        We pass dbus_signature='a{sv}' explicitly because without successful
+        introspection dbus-python cannot infer the argument signature and
+        raises: 'Unable to set arguments ... signature None: TypeError'
         """
-        dbus_config = {k: dbus.String(str(v)) if not isinstance(v, int)
-                       else dbus.Int32(v)
-                       for k, v in config.items()}
-        return self._proxy().Start(dbus_config)
+        dbus_config = dbus.Dictionary(
+            {
+                k: dbus.String(str(v)) if not isinstance(v, int) else dbus.Int32(v)
+                for k, v in config.items()
+            },
+            signature="sv",
+        )
+        return self._proxy().Start(dbus_config, dbus_interface=_DBUS_INTERFACE,
+                                   signature="a{sv}")
 
     def stop(self) -> tuple[bool, str]:
         """Call Stop() on the service. Returns (True, "") on success."""
-        return self._proxy().Stop()
+        return self._proxy().Stop(dbus_interface=_DBUS_INTERFACE, signature="")
 
     def status(self) -> dict:
         """
         Call Status() and return a normalised dict:
           {state, ssid, bssid, gateway_ip, key, dhcp_clients}
         """
-        state, ssid, bssid, gateway_ip, key, dhcp_clients = self._proxy().Status()
+        state, ssid, bssid, gateway_ip, key, dhcp_clients = self._proxy().Status(
+            dbus_interface=_DBUS_INTERFACE, signature=""
+        )
         return {
             "state":        str(state),
             "ssid":         str(ssid),
