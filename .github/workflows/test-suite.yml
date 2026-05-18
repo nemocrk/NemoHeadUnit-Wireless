@@ -110,11 +110,13 @@ jobs:
             -c v2/tests/pytest.ini \
             v2/tests/ \
             -m "unit or integration" \
+            -n auto \
             --cov=v2 \
             --cov-report=xml:coverage.xml \
             --cov-report=html:coverage-html \
             --cov-report=term-missing \
             --cov-fail-under=80 \
+            --omit="app/*,v2/protos/*" \
             --timeout=30 \
             -v \
             --tb=short \
