@@ -219,7 +219,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
         {
             "channel_id": 5,
             "av_channel": {
-                "stream_type": "AUDIO",
+                "codec": "MEDIA_CODEC_AUDIO_PCM",
                 "audio_type":  "SPEECH",
                 "audio_configs": [
                     {"sample_rate": 48000, "bit_depth": 16, "channel_count": 1},
@@ -230,7 +230,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
         {
             "channel_id": 6,
             "av_channel": {
-                "stream_type": "AUDIO",
+                "codec": "MEDIA_CODEC_AUDIO_PCM",
                 "audio_type":  "SYSTEM",
                 "audio_configs": [
                     {"sample_rate": 48000, "bit_depth": 16, "channel_count": 1},
@@ -241,7 +241,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
         {
             "channel_id": 7,
             "av_input_channel": {
-                "stream_type": "AUDIO",
+                "codec": "MEDIA_CODEC_AUDIO_PCM",
                 "audio_config": {"sample_rate": 48000, "bit_depth": 16, "channel_count": 1},
             },
         },
@@ -416,6 +416,8 @@ def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
     try:
         resp = ServiceDiscoveryResponse()
         resp.ParseFromString(sdr_bytes)
+        log.info("channels_from_sdr_bytes: parsed SDR proto with %d channels", len(resp.channels))
+        log.debug("channels_from_sdr_bytes: full proto message:\n%s", resp)
     except Exception as exc:
         log.error("channels_from_sdr_bytes: parse error — %s", exc)
         return []
@@ -441,8 +443,7 @@ def channels_from_sdr_bytes(sdr_bytes: bytes) -> list[dict]:
                     #        omit a codec and rely on stream_type instead).
                     av_dict: dict = {"av_type": sub.codec}
                     is_audio_codec  = sub.codec in _AUDIO_CODEC_VALUES
-                    is_audio_stream = sub.stream_type == AVStreamType.AUDIO
-                    if is_audio_codec or is_audio_stream:
+                    if is_audio_codec:
                         av_dict["audio_type"] = sub.audio_type
                     entry["av_channel"] = av_dict
                 else:

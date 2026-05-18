@@ -65,6 +65,7 @@ from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 from oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessage                    # noqa: E402
 from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage                   # noqa: E402
 from oaa.av.AVChannelSetupResponseMessage_pb2 import AVChannelSetupResponse        # noqa: E402
+from oaa.av.AVChannelSetupRequestMessage_pb2 import AVChannelSetupRequest         # noqa: E402
 from oaa.av.AVChannelSetupStatusEnum_pb2 import AVChannelSetupStatus               # noqa: E402
 from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse         # noqa: E402
 from oaa.av.AVInputOpenRequestMessage_pb2 import AVInputOpenRequest                # noqa: E402
@@ -235,6 +236,15 @@ class AVInputModule(BaseChannelModule):
     def _handle_setup_request(self, body: bytes) -> None:
         max_unacked = self._config.get("max_unacked", 1)
         self._max_unacked = max_unacked
+        req = AVChannelSetupRequest()
+        try:
+            req.ParseFromString(body)
+            self.log.info(
+                "AVChannelSetupRequest ch=%d media_codec_type=%d max_unacked=%d",
+                self.CHANNEL_ID, req.media_codec_type, max_unacked,
+            )
+        except Exception as exc:
+            self.log.warning("AVChannelSetupRequest parse error ch=%d — %s", self.CHANNEL_ID, exc)
         resp = AVChannelSetupResponse()
         resp.media_status = AVChannelSetupStatus.Enum.OK
         resp.max_unacked  = max_unacked
