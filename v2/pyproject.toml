@@ -87,6 +87,8 @@ omit = [
     "app/*",
     "v2/protos/*",
     "protos/*",
+    "v2/tests/*",
+    "tests/*",
 ]
 
 [tool.coverage.report]
