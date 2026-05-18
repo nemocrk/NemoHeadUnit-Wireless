@@ -91,11 +91,7 @@ jobs:
 
       - name: Install test dependencies
         shell: bash -el {0}
-        run: |
-          pip install -r v2/tests/requirements-test.txt
-          if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
-            pip install -e v2/
-          fi
+        run: pip install -e "v2/[test]"
 
       - name: Start D-Bus session (per test bluetooth)
         run: |
@@ -107,7 +103,7 @@ jobs:
         run: |
           pytest \
             --rootdir=. \
-            -c v2/tests/pytest.ini \
+            -c v2/pyproject.toml \
             v2/tests/ \
             -m "unit or integration" \
             -n auto \
@@ -116,7 +112,6 @@ jobs:
             --cov-report=html:coverage-html \
             --cov-report=term-missing \
             --cov-fail-under=80 \
-            --omit="app/*,v2/protos/*" \
             --timeout=30 \
             -v \
             --tb=short \
@@ -239,18 +234,14 @@ jobs:
 
       - name: Install test dependencies
         shell: bash -el {0}
-        run: |
-          pip install -r v2/tests/requirements-test.txt
-          if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
-            pip install -e v2/
-          fi
+        run: pip install -e "v2/[test]"
 
       - name: Run E2E smoke tests
         shell: bash -el {0}
         run: |
           pytest \
             --rootdir=. \
-            -c v2/tests/pytest.ini \
+            -c v2/pyproject.toml \
             v2/tests/ \
             -m e2e_smoke \
             --timeout=60 \
@@ -286,11 +277,7 @@ jobs:
 
       - name: Install test dependencies
         shell: bash -el {0}
-        run: |
-          pip install -r v2/tests/requirements-test.txt
-          if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
-            pip install -e v2/
-          fi
+        run: pip install -e "v2/[test]"
 
       - name: Restore Hypothesis database
         uses: actions/cache@v4
@@ -304,7 +291,7 @@ jobs:
         run: |
           pytest \
             --rootdir=. \
-            -c v2/tests/pytest.ini \
+            -c v2/pyproject.toml \
             v2/tests/ \
             -m fuzz \
             --timeout=60 \
@@ -362,18 +349,15 @@ jobs:
       - name: Install test dependencies
         shell: bash -el {0}
         run: |
-          pip install -r v2/tests/requirements-test.txt
+          pip install -e "v2/[test]"
           pip install pytest-json-report
-          if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
-            pip install -e v2/
-          fi
 
       - name: Run performance benchmarks
         shell: bash -el {0}
         run: |
           pytest \
             --rootdir=. \
-            -c v2/tests/pytest.ini \
+            -c v2/pyproject.toml \
             v2/tests/ \
             -m performance \
             --timeout=120 \
@@ -424,18 +408,14 @@ jobs:
 
       - name: Install test dependencies
         shell: bash -el {0}
-        run: |
-          pip install -r v2/tests/requirements-test.txt
-          if [ -f v2/pyproject.toml ] || [ -f v2/setup.py ]; then
-            pip install -e v2/
-          fi
+        run: pip install -e "v2/[test]"
 
       - name: Run E2E full session tests
         shell: bash -el {0}
         run: |
           pytest \
             --rootdir=. \
-            -c v2/tests/pytest.ini \
+            -c v2/pyproject.toml \
             v2/tests/ \
             -m e2e_full \
             --timeout=120 \
