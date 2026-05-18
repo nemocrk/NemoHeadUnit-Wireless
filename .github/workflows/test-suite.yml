@@ -107,7 +107,8 @@ jobs:
             v2/tests/ \
             -m "unit or integration" \
             -n auto \
-            --cov=v2 \
+            --cov=. \
+            --cov-config=v2/pyproject.toml \
             --cov-report=xml:coverage.xml \
             --cov-report=html:coverage-html \
             --cov-report=term-missing \

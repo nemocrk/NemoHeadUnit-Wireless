@@ -62,8 +62,7 @@
                 "-v",
                 "-s",
                 "--tb=long",
-                "--log-cli-level=DEBUG",
-                "--no-cov"
+                "--log-cli-level=DEBUG"
             ],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
