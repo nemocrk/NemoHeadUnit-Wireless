@@ -401,14 +401,14 @@ class TestChannelsFromSdrBytes:
         # Tracked in v2/tests/KNOWN_PRODUCTION_BUGS.md: speech/system audio
         # defaults use stream_type instead of codec, so channels_from_sdr_bytes
         # does not currently expose audio_type for these two channels.
-        assert "audio_type" not in ch5["av_channel"]
+        assert "audio_type" in ch5["av_channel"]
 
     @pytest.mark.unit
     def test_system_audio_audio_type_is_system(self, sd, sdr_bytes):
         result = sd.channels_from_sdr_bytes(sdr_bytes)
         ch6 = next(c for c in result if c["channel_id"] == 6)
         # See v2/tests/KNOWN_PRODUCTION_BUGS.md.
-        assert "audio_type" not in ch6["av_channel"]
+        assert "audio_type" in ch6["av_channel"]
 
 
 # ===========================================================================

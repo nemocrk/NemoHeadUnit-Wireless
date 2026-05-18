@@ -101,22 +101,22 @@ class TestResolveModuleType:
 
     @pytest.mark.unit
     def test_av_video_returns_video(self, reg):
-        ch = {"channel_id": 3, "av_channel": {"av_type": reg.AV_STREAM_VIDEO}}
+        ch = {"channel_id": 3, "av_channel": {"av_type": list(reg._VIDEO_CODEC_VALUES)[0]}}
         assert reg.resolve_module_type(3, ch) == "video"
 
     @pytest.mark.unit
     def test_av_audio_media_returns_audio(self, reg):
-        ch = {"channel_id": 4, "av_channel": {"av_type": reg.AV_STREAM_AUDIO, "audio_type": reg.AUDIO_TYPE_MEDIA}}
+        ch = {"channel_id": 4, "av_channel": {"av_type": list(reg._AUDIO_CODEC_VALUES)[0], "audio_type": reg.AUDIO_TYPE_MEDIA}}
         assert reg.resolve_module_type(4, ch) == "audio"
 
     @pytest.mark.unit
     def test_av_audio_speech_returns_audio(self, reg):
-        ch = {"channel_id": 5, "av_channel": {"av_type": reg.AV_STREAM_AUDIO, "audio_type": reg.AUDIO_TYPE_SPEECH}}
+        ch = {"channel_id": 5, "av_channel": {"av_type": list(reg._AUDIO_CODEC_VALUES)[0], "audio_type": reg.AUDIO_TYPE_SPEECH}}
         assert reg.resolve_module_type(5, ch) == "audio"
 
     @pytest.mark.unit
     def test_av_audio_system_returns_audio(self, reg):
-        ch = {"channel_id": 6, "av_channel": {"av_type": reg.AV_STREAM_AUDIO, "audio_type": reg.AUDIO_TYPE_SYSTEM}}
+        ch = {"channel_id": 6, "av_channel": {"av_type": list(reg._AUDIO_CODEC_VALUES)[0], "audio_type": reg.AUDIO_TYPE_SYSTEM}}
         assert reg.resolve_module_type(6, ch) == "audio"
 
     @pytest.mark.unit
@@ -176,7 +176,7 @@ class TestResolveModuleType:
 
     @pytest.mark.unit
     def test_av_audio_unknown_audio_type_raises_key_error(self, reg):
-        ch = {"channel_id": 4, "av_channel": {"av_type": reg.AV_STREAM_AUDIO, "audio_type": 99}}
+        ch = {"channel_id": 4, "av_channel": {"av_type": list(reg._AUDIO_CODEC_VALUES)[0], "audio_type": 99}}
         with pytest.raises(KeyError):
             reg.resolve_module_type(4, ch)
 

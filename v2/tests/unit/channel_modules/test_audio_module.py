@@ -412,11 +412,7 @@ class TestPrebuffer:
         module._write_audio(pcm)
         proc.stdin.write.assert_called_once()
         assert module._prebuffer == []  # flushed
-        # Tracked in v2/tests/KNOWN_PRODUCTION_BUGS.md:
-        # AudioModule flushes buffered PCM but leaves the accounting counter at
-        # the flushed byte count.  The production behavior still proves that the
-        # buffer was flushed and the stream received the PCM once.
-        assert module._prebuffer_bytes == len(pcm)
+        assert module._prebuffer_bytes == 0
 
     @pytest.mark.unit
     def test_after_flush_writes_directly(self):
