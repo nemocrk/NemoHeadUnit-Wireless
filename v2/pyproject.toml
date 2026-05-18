@@ -85,13 +85,12 @@ timeout_func_only = true
 # ---------------------------------------------------------------------------
 [tool.coverage.run]
 relative_files = true
-source = ["."]
+source = ["v2"]
 omit = [
-    "app/*",
-    "v2/protos/*",
-    "protos/*",
-    "v2/tests/*",
-    "tests/*",
+    "*/app/*",
+    "*/protos/*",
+    "*/services/*",
+    "*/tests/*",
 ]
 
 [tool.coverage.report]

@@ -165,8 +165,9 @@ def _install_fake_protos():
 _install_fake_protos()
 
 # Remove cached module so fresh import picks up fakes
+_this_module = __name__
 for _k in list(sys.modules.keys()):
-    if "message_to_proto" in _k:
+    if _k != _this_module and "message_to_proto" in _k:
         del sys.modules[_k]
 
 import tcp_server.message_to_proto as m2p

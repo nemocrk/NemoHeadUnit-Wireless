@@ -42,6 +42,32 @@
                 "${workspaceFolder}/v2/tests/",
                 "--collect-only"
             ]
+        },
+        {
+            "name": "pytest (unit+integration)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "--rootdir=.",
+                "-c",
+                "v2/pyproject.toml",
+                "v2/tests",
+                "-m",
+                "unit or integration",
+                "--cov=.",
+                "--cov-config=v2/pyproject.toml",
+                "--cov-report=term-missing",
+                "--cov-fail-under=80",
+                "-v",
+                "-s",
+                "--tb=long",
+                "--log-cli-level=DEBUG",
+                "--no-cov"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
         }
     ],
     "inputs": [

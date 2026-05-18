@@ -38,6 +38,14 @@ import pytest
 # ---------------------------------------------------------------------------
 # Module under test
 # ---------------------------------------------------------------------------
+# first of all restore the real shared.proto_utils and google.protobuf.json_format module if it was replaced by a fake in other tests
+import importlib
+import sys
+if "shared.proto_utils" in sys.modules:
+    importlib.reload(sys.modules["shared.proto_utils"])
+if "google.protobuf.json_format" in sys.modules:
+    importlib.reload(sys.modules["google.protobuf.json_format"])
+
 from shared.proto_utils import (  # noqa: E402
     decode_proto,
     encode_proto,

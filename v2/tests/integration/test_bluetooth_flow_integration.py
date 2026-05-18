@@ -791,7 +791,7 @@ class TestAutoconnectStateMachine:
         bt = _load_bt(in_process_broker)
         with patch.object(bt, "_start_autoconnect", wraps=bt._start_autoconnect) as spy_ac:
             # Need to monkey-patch the module-level function since it's called directly
-            with patch("bluetooth_manager.main._start_autoconnect") as mock_start:
+            with patch.object(bt, "_start_autoconnect") as mock_start:
                 bt.on_try_autoconnect("bluetooth_manager.try_autoconnect", {})
         mock_start.assert_called_once()
 
