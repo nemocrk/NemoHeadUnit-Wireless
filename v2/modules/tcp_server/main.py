@@ -216,7 +216,7 @@ def on_frame_send(topic: str, payload: dict) -> None:
     
     if _JSONL_LOG:
         with open(_JSONL_LOG, "a") as f:
-            f.write(f"[CH{channel_id}]{frame_data_to_dict({'channel_id': channel_id, 'message_id': message_id, 'encrypted': ssl_active, 'payload_hex': body.hex()})}\n")
+            f.write(f"{frame_data_to_dict({'type':'HU->Phone','channel_id': channel_id, 'message_id': message_id, 'encrypted': ssl_active, 'payload_hex': body.hex()})}\n")
 
     try:
         with _crypto_lock:
@@ -480,7 +480,7 @@ def _on_raw_frame(channel_id: int, flags: int, payload: bytes, total_size: int) 
     # append to jsonl log for offline analysis (e.g. frame size vs message_id patterns)
     if _JSONL_LOG:
         with open(_JSONL_LOG, "a") as f:
-            f.write(f"[CH{channel_id}]{frame_data_to_dict(frame_data)}\n")
+            f.write(f"{frame_data_to_dict({**frame_data, 'type': 'Phone->HU'})}\n")
     log.debug(
         "_on_raw_frame: ch=%d msg=0x%04x enc=%s body_len=%d",
         channel_id, message_id, encrypted, len(body),

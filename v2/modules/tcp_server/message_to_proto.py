@@ -64,35 +64,35 @@ def proto_name_to_class(proto_name: str):
     from oaa.video.UpdateHuUiConfigResponse_pb2 import UpdateHuUiConfigResponse
     from oaa.av.AVChannelMediaStatsMessage_pb2 import AVChannelMediaStats
     from oaa.av.AVChannelMediaOptionsMessage_pb2 import AVChannelMediaOptions
+    """
+        [Module Descriptor]: oaa/av/AVChannelMessageIdsEnum.proto
+        └─ AVChannelMessage.Enum (Enum)
+            ├── AV_MEDIA_WITH_TIMESTAMP_INDICATION = 0
+            ├── AV_MEDIA_INDICATION = 1
+            ├── SETUP_REQUEST = 32768
+            ├── START_INDICATION = 32769
+            ├── STOP_INDICATION = 32770
+            ├── SETUP_RESPONSE = 32771
+            ├── AV_MEDIA_ACK_INDICATION = 32772
+            ├── AV_INPUT_OPEN_REQUEST = 32773
+            ├── AV_INPUT_OPEN_RESPONSE = 32774
+            ├── VIDEO_FOCUS_REQUEST = 32775
+            ├── VIDEO_FOCUS_INDICATION = 32776
+            ├── VIDEO_FOCUS_NOTIFICATION = 32777
+            ├── UPDATE_UI_CONFIG_REQUEST = 32778
+            ├── UPDATE_UI_CONFIG_REPLY = 32779
+            ├── AUDIO_UNDERFLOW = 32780
+            ├── ACTION_TAKEN = 32781
+            ├── OVERLAY_PARAMETERS = 32782
+            ├── OVERLAY_START = 32783
+            ├── OVERLAY_STOP = 32784
+            ├── OVERLAY_SESSION_UPDATE = 32785
+            ├── UPDATE_HU_UI_CONFIG_REQUEST = 32786
+            ├── UPDATE_HU_UI_CONFIG_RESPONSE = 32787
+            ├── MEDIA_STATS = 32788
+            ├── MEDIA_OPTIONS = 32789
+    """
     av_switcher = {
-        """
-            [Module Descriptor]: oaa/av/AVChannelMessageIdsEnum.proto
-            └─ AVChannelMessage.Enum (Enum)
-                ├── AV_MEDIA_WITH_TIMESTAMP_INDICATION = 0
-                ├── AV_MEDIA_INDICATION = 1
-                ├── SETUP_REQUEST = 32768
-                ├── START_INDICATION = 32769
-                ├── STOP_INDICATION = 32770
-                ├── SETUP_RESPONSE = 32771
-                ├── AV_MEDIA_ACK_INDICATION = 32772
-                ├── AV_INPUT_OPEN_REQUEST = 32773
-                ├── AV_INPUT_OPEN_RESPONSE = 32774
-                ├── VIDEO_FOCUS_REQUEST = 32775
-                ├── VIDEO_FOCUS_INDICATION = 32776
-                ├── VIDEO_FOCUS_NOTIFICATION = 32777
-                ├── UPDATE_UI_CONFIG_REQUEST = 32778
-                ├── UPDATE_UI_CONFIG_REPLY = 32779
-                ├── AUDIO_UNDERFLOW = 32780
-                ├── ACTION_TAKEN = 32781
-                ├── OVERLAY_PARAMETERS = 32782
-                ├── OVERLAY_START = 32783
-                ├── OVERLAY_STOP = 32784
-                ├── OVERLAY_SESSION_UPDATE = 32785
-                ├── UPDATE_HU_UI_CONFIG_REQUEST = 32786
-                ├── UPDATE_HU_UI_CONFIG_RESPONSE = 32787
-                ├── MEDIA_STATS = 32788
-                ├── MEDIA_OPTIONS = 32789
-        """
         "AV_MEDIA_WITH_TIMESTAMP_INDICATION": bytes,
         "AV_MEDIA_INDICATION": bytes,
         "SETUP_REQUEST": AVChannelSetupRequest,
@@ -300,26 +300,40 @@ def frame_data_to_dict(frame_data: dict) -> dict:
     from google.protobuf.json_format import MessageToDict  # lazy import
     message_id = frame_data.get("message_id")
     payload_hex = frame_data.get("payload_hex")  # Assuming payload is in hex format and needs to be parsed
+    channel_id = frame_data.get("channel_id")
     message_name = None
     parsed_payload = None
     try:
         message_name = message_id_to_proto_name(message_id)
         proto_class = proto_name_to_class(message_name)
         parsed_message = proto_class()
-        parsed_message.ParseFromString(bytes.fromhex(payload_hex))
-        parsed_payload = MessageToDict(parsed_message)
+        if not isinstance(parsed_message, bytes):
+            parsed_message.ParseFromString(bytes.fromhex(payload_hex))
+            parsed_payload = MessageToDict(parsed_message)
+        else:
+            parsed_payload = {"raw_bytes": "0x..."}  # Placeholder for messages we don't have protobuf classes for
     except Exception as exc:
         # If we fail to parse the message, we can log the error and return the original payload as hex
         print(f"Failed to parse message_id {message_id} with payload {payload_hex}: {exc}")
         parsed_payload = payload_hex  # Fallback to raw hex if parsing fails
     return {
+        "type": frame_data.get("type"),
+        "channel_id": channel_id,
         "message_id": message_id,
         "message_name": message_name,
         "payload_as_dict": parsed_payload,
     }
 
 
-print (frame_data_to_dict({
-    "message_id": 0x8001, 
-    "payload_hex": "0802120d596f7554756265204d75736963183f200028003000"  # This is a hex representation of a protobuf message, which we will attempt to parse
-}))
+# print (frame_data_to_dict({
+#     "type": "Phone->HU",
+#     "channel_id": 1,
+#     "message_id": 0x8001, 
+#     "payload_hex": "0802120d596f7554756265204d75736963183f200028003000"  # This is a hex representation of a protobuf message, which we will attempt to parse
+# }))
+# print (frame_data_to_dict({
+#     "type": "Phone->HU",
+#     "channel_id": 3,
+#     "message_id": 0, 
+#     "payload_hex": "0802120d596f7554756265204d75736963183f200028003000"  # This is a hex representation of a protobuf message, which we will attempt to parse
+# }))

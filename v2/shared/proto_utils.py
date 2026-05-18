@@ -376,7 +376,7 @@ def dict_to_proto(msg: Any, data: dict) -> None:
             continue
 
         field_desc = fields_by_name[key]
-        is_repeated = field_desc.label == field_desc.LABEL_REPEATED
+        is_repeated = field_desc.is_repeated
 
         if is_repeated:
             proto_list = getattr(msg, key)
@@ -451,7 +451,7 @@ def schema_from_proto_message(
 
     for field_desc in descriptor.fields:
         fname = field_desc.name
-        is_repeated = field_desc.label == _descriptor.FieldDescriptor.LABEL_REPEATED
+        is_repeated = field_desc.is_repeated
 
         # --- oneof handling ---
         if fname in oneof_names:
