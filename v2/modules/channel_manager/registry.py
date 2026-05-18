@@ -43,6 +43,15 @@ Public API
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_REPO_ROOT  = Path(__file__).parent.parent.parent.parent
+_PROTO_ROOT = _REPO_ROOT / "v2" / "protos"
+
+for _p in (_REPO_ROOT, _PROTO_ROOT):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 # ---------------------------------------------------------------------------
 # Sentinel exception — "known but not yet implemented"
@@ -59,17 +68,29 @@ class SkipChannel(Exception):
 # AVStreamType constants  (mirrors AVStreamTypeEnum proto)
 # ---------------------------------------------------------------------------
 
-AV_STREAM_AUDIO = 1   # AVStreamType.AUDIO
-AV_STREAM_VIDEO = 3   # AVStreamType.VIDEO
+from oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType                     # noqa: E402
+_AUDIO_CODEC_VALUES = frozenset({
+    MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC_ADTS,
+    MediaCodecType.MEDIA_CODEC_AUDIO_PCM,
+    MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC,
+})
+_VIDEO_CODEC_VALUES = frozenset({
+    MediaCodecType.MEDIA_CODEC_VIDEO_H264_BP,
+    MediaCodecType.MEDIA_CODEC_VIDEO_VP9,
+    MediaCodecType.MEDIA_CODEC_VIDEO_AV1,
+    MediaCodecType.MEDIA_CODEC_VIDEO_H265,
+})
 
 # ---------------------------------------------------------------------------
 # AudioType constants  (mirrors AudioTypeEnum proto)
 # ---------------------------------------------------------------------------
 
-AUDIO_TYPE_SPEECH  = 1   # AudioType.SPEECH
-AUDIO_TYPE_SYSTEM  = 2   # AudioType.SYSTEM
-AUDIO_TYPE_MEDIA   = 3   # AudioType.MEDIA
-AUDIO_TYPE_ALARM   = 4   # AudioType.ALARM
+from oaa.audio.AudioTypeEnum_pb2 import AudioType  # noqa: E402
+
+AUDIO_TYPE_SPEECH  = AudioType.SPEECH
+AUDIO_TYPE_SYSTEM  = AudioType.SYSTEM
+AUDIO_TYPE_MEDIA   = AudioType.MEDIA
+AUDIO_TYPE_ALARM   = AudioType.ALARM
 
 # ---------------------------------------------------------------------------
 # Descriptor keys that are known but not yet implemented
@@ -110,10 +131,10 @@ def resolve_module_type(channel_id: int, channel_descriptor: dict) -> str:
         av = channel_descriptor["av_channel"]
         av_type = av.get("av_type")
 
-        if av_type == AV_STREAM_VIDEO:
+        if av_type in _VIDEO_CODEC_VALUES:
             return "video"
 
-        if av_type == AV_STREAM_AUDIO:
+        if av_type in _AUDIO_CODEC_VALUES:
             audio_type = av.get("audio_type")
             if audio_type == AUDIO_TYPE_MEDIA:
                 return "audio"
