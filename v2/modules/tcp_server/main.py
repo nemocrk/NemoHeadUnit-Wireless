@@ -96,6 +96,9 @@ from tcp_server.frame_relay import FrameRelay     # noqa: E402
 from tcp_server.frame_codec import encode, FrameAssembler  # noqa: E402
 from tcp_server.aa_cryptor import AACryptor       # noqa: E402
 
+from tcp_server.message_to_proto import frame_data_to_dict  # noqa: E402
+_JSONL_LOG = os.getenv("AA_FRAME_RECEIVED_JSONL")  # if set, append one JSON dict per received frame for offline analysis
+
 # ---------------------------------------------------------------------------
 # Module identity
 # ---------------------------------------------------------------------------
@@ -210,6 +213,10 @@ def on_frame_send(topic: str, payload: dict) -> None:
     except (KeyError, ValueError) as exc:
         log.error("on_frame_send: malformed payload — %s", exc)
         return
+    
+    if _JSONL_LOG:
+        with open(_JSONL_LOG, "a") as f:
+            f.write(f"[CH{channel_id}]{frame_data_to_dict({'channel_id': channel_id, 'message_id': message_id, 'encrypted': ssl_active, 'payload_hex': body.hex()})}\n")
 
     try:
         with _crypto_lock:
@@ -470,6 +477,10 @@ def _on_raw_frame(channel_id: int, flags: int, payload: bytes, total_size: int) 
         received_data["payload_hex"] = frame_data["payload_hex"]
     bus.publish("aa.frame.received", received_data)
     bus.publish(f"aa.frame.ch{channel_id}", frame_data)
+    # append to jsonl log for offline analysis (e.g. frame size vs message_id patterns)
+    if _JSONL_LOG:
+        with open(_JSONL_LOG, "a") as f:
+            f.write(f"[CH{channel_id}]{frame_data_to_dict(frame_data)}\n")
     log.debug(
         "_on_raw_frame: ch=%d msg=0x%04x enc=%s body_len=%d",
         channel_id, message_id, encrypted, len(body),
