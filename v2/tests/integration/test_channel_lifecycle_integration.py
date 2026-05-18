@@ -344,6 +344,7 @@ class TestWaitAllReady:
     def test_wait_all_ready_no_channels_returns_true(self, in_process_broker):
         """Con lista vuota, documenta il comportamento corrente di timeout."""
         received = []
+        sdr = _sdr_hex()
         spy = _make_bus_client(in_process_broker, "spy")
         spy.subscribe("channel_manager.channels_ready", lambda t, p: received.append(p))
         spy.start(blocking=False)
@@ -353,14 +354,14 @@ class TestWaitAllReady:
         mock_launcher = MagicMock()
         mock_launcher.start_all.return_value = []  # nessun modulo
         session._launcher = mock_launcher
-        session.start(_sdr_hex(), [])  # lista vuota
+        session.start(sdr, [])  # lista vuota
 
-        sdr = _sdr_hex()
         result = session.wait_all_ready(sdr)
+        time.sleep(0.1)
         spy.stop()
 
         assert result is True
-        assert received == []
+        assert received == [{"sdr_bytes_hex": sdr}], "channels_ready dovrebbe essere pubblicato anche senza canali"
 
     @pytest.mark.integration
     def test_wait_all_ready_in_background_thread(self, in_process_broker):
