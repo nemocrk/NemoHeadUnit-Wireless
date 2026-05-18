@@ -79,10 +79,13 @@ timeout_func_only = true
 
 # ---------------------------------------------------------------------------
 # coverage
-# Esclude codice generato (protos) e entry-point applicativo (app)
+# relative_files = true: i path negli omit sono relativi alla CWD del runner
+# (root del repo), così "v2/protos/*" matcha correttamente.
+# source usa il path relativo alla CWD, non il nome del package installato.
 # ---------------------------------------------------------------------------
 [tool.coverage.run]
-source = ["v2"]
+relative_files = true
+source = ["."]
 omit = [
     "app/*",
     "v2/protos/*",
