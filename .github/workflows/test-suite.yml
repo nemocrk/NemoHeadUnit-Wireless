@@ -91,7 +91,7 @@ jobs:
 
       - name: Install test dependencies
         shell: bash -el {0}
-        run: pip install -e "v2/[test]"
+        run: pip install "v2/[test]"
 
       - name: Start D-Bus session (per test bluetooth)
         run: |
@@ -234,7 +234,7 @@ jobs:
 
       - name: Install test dependencies
         shell: bash -el {0}
-        run: pip install -e "v2/[test]"
+        run: pip install "v2/[test]"
 
       - name: Run E2E smoke tests
         shell: bash -el {0}
@@ -277,7 +277,7 @@ jobs:
 
       - name: Install test dependencies
         shell: bash -el {0}
-        run: pip install -e "v2/[test]"
+        run: pip install "v2/[test]"
 
       - name: Restore Hypothesis database
         uses: actions/cache@v4
@@ -349,7 +349,7 @@ jobs:
       - name: Install test dependencies
         shell: bash -el {0}
         run: |
-          pip install -e "v2/[test]"
+          pip install "v2/[test]"
           pip install pytest-json-report
 
       - name: Run performance benchmarks
@@ -408,7 +408,7 @@ jobs:
 
       - name: Install test dependencies
         shell: bash -el {0}
-        run: pip install -e "v2/[test]"
+        run: pip install "v2/[test]"
 
       - name: Run E2E full session tests
         shell: bash -el {0}
