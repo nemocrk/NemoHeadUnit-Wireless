@@ -14,7 +14,7 @@ build-backend = "setuptools.build_meta"
 name = "nemo-head-unit"
 version = "2.0.0"
 description = "NemoHeadUnit-Wireless v2 — wireless Android Auto head unit"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 
 # ---------------------------------------------------------------------------
 # Dev / test dependencies
@@ -86,6 +86,7 @@ source = ["v2"]
 omit = [
     "app/*",
     "v2/protos/*",
+    "protos/*",
 ]
 
 [tool.coverage.report]

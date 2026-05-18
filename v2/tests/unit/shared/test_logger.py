@@ -635,7 +635,4 @@ class TestRunSubprocessAndLog:
                 _lg.run_subprocess_and_log(
                     self.mock_logger, ["cmd"]
                 )
-        # Tracked in v2/tests/KNOWN_PRODUCTION_BUGS.md: Popen happens before
-        # run_subprocess_and_log enters its try/except, so spawn failures are
-        # re-raised without being logged.
         self.mock_logger.error.assert_called_with("Subprocess spawn failed: boom")

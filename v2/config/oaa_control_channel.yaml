@@ -1,0 +1,77 @@
+can_play_native_media_during_vr: true
+car_model: Universal
+car_serial: '20250101'
+car_year: '2025'
+channels:
+- channel_id: 1
+  input_channel:
+    supported_keycodes:
+    - 3
+    - 4
+    - 84
+    - 85
+    - 86
+    - 87
+    - 88
+    - 126
+    - 127
+    - 219
+    - 231
+    touch_screen_configs:
+    - height: 720
+      width: 1280
+- channel_id: 2
+  sensor_channel:
+    sensors:
+    - type: NIGHT_DATA
+    - type: DRIVING_STATUS
+    - type: PARKING_BRAKE
+- av_channel:
+    codec: MEDIA_CODEC_VIDEO_H264_BP
+    video_configs:
+    - dpi: 140
+      margin_height: 0
+      margin_width: 0
+      video_fps: _30
+      video_resolution: VIDEO_1280x720
+  channel_id: 3
+- av_channel:
+    audio_configs:
+    - bit_depth: 16
+      channel_count: 2
+      sample_rate: 48000
+    audio_type: MEDIA
+    codec: MEDIA_CODEC_AUDIO_AAC_LC_ADTS
+  channel_id: 4
+- av_channel:
+    audio_configs:
+    - bit_depth: 16
+      channel_count: 1
+      sample_rate: 48000
+    audio_type: SPEECH
+    codec: MEDIA_CODEC_AUDIO_PCM
+  channel_id: 5
+- av_channel:
+    audio_configs:
+    - bit_depth: 16
+      channel_count: 1
+      sample_rate: 48000
+    audio_type: SYSTEM
+    codec: MEDIA_CODEC_AUDIO_PCM
+  channel_id: 6
+- av_input_channel:
+    audio_config:
+      bit_depth: 16
+      channel_count: 1
+      sample_rate: 48000
+    codec: MEDIA_CODEC_AUDIO_PCM
+  channel_id: 7
+display_name: ''
+driver_position: LEFT
+head_unit_name: NemoHeadUnit
+headunit_manufacturer: Nemo
+headunit_model: NemoHeadUnit-Wireless
+probe_for_support: false
+session_configuration: 0
+sw_build: '1'
+sw_version: '2.0'

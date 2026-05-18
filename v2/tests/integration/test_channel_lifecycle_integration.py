@@ -359,8 +359,7 @@ class TestWaitAllReady:
         result = session.wait_all_ready(sdr)
         spy.stop()
 
-        # Known production bug: no expected channels should be ready immediately.
-        assert result is False
+        assert result is True
         assert received == []
 
     @pytest.mark.integration

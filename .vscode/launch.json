@@ -1,6 +1,17 @@
 {
+    "version": "0.2.0", // AGGIUNGI QUESTA RIGA QUI
     "configurations": [
-
+        {
+            "name": "Python: Debug Tests",
+            "type": "debugpy", // Nelle versioni più vecchie era "python"
+            "request": "launch",
+            "program": "${file}",
+            "purpose": [
+                "debug-test"
+            ], // QUESTO È IL CAMPO FONDAMENTALE PER I TEST
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
         {
             "name": "Standard Version",
             "type": "debugpy",
