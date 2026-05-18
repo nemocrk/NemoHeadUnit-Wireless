@@ -341,20 +341,28 @@ class BusClient:
         try:
             handler(topic, payload)
             callback_us = (time.monotonic_ns() - cb_start_ns) / 1000.0
-            self._tracer.emit(
-                "recv_ok",
-                topic=topic,
-                src_module=src_module,
-                seq=seq,
-                bytes=size,
-                latency_us=latency_us,
-                callback_us=callback_us,
-                seq_gap=seq_gap,
-                duplicate=duplicate,
-                seq_rewind=seq_rewind,
-                rcvhwm=self._sub.getsockopt(zmq.RCVHWM),
-                callback=callback_name,
-            )
+            get_sock_opt_ok = False
+            try:
+                self._sub.getsockopt(zmq.RCVHWM)
+                get_sock_opt_ok = True
+            except Exception:
+                # Avoid tracing errors interfering with normal message processing.
+                pass
+            if get_sock_opt_ok:
+                self._tracer.emit(
+                    "recv_ok",
+                    topic=topic,
+                    src_module=src_module,
+                    seq=seq,
+                    bytes=size,
+                    latency_us=latency_us,
+                    callback_us=callback_us,
+                    seq_gap=seq_gap,
+                    duplicate=duplicate,
+                    seq_rewind=seq_rewind,
+                    rcvhwm=self._sub.getsockopt(zmq.RCVHWM),
+                    callback=callback_name,
+                )
         except Exception as e:
             callback_us = (time.monotonic_ns() - cb_start_ns) / 1000.0
             self._tracer.emit(
