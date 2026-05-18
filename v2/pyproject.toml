@@ -5,7 +5,7 @@
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 # ---------------------------------------------------------------------------
 # Project metadata
@@ -34,6 +34,8 @@ test = [
 # ---------------------------------------------------------------------------
 # pytest
 # Rif: docs/TEST_SUITE_ARCHITECTURE.md §5
+# Note: addopts deve essere una stringa unica, non una lista,
+#       per evitare che pytest-xdist riceva ' auto' con spazio iniziale.
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 testpaths  = ["v2/tests"]
@@ -60,12 +62,7 @@ filterwarnings = [
     "ignore::ResourceWarning",
 ]
 
-addopts = [
-    "--strict-markers",
-    "--tb=short",
-    "-q",
-    "-n auto",
-]
+addopts = "--strict-markers --tb=short -q -n auto"
 
 timeout = 60
 timeout_method = "thread"
