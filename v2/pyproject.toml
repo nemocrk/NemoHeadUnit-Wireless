@@ -32,6 +32,15 @@ test = [
 ]
 
 # ---------------------------------------------------------------------------
+# Package discovery
+# Nessun package da installare: il progetto usa PYTHONPATH diretto.
+# Senza questa dichiarazione esplicita setuptools fallisce con
+# "Multiple top-level packages discovered in a flat-layout".
+# ---------------------------------------------------------------------------
+[tool.setuptools]
+packages = []
+
+# ---------------------------------------------------------------------------
 # pytest
 # Rif: docs/TEST_SUITE_ARCHITECTURE.md §5
 # Note: addopts deve essere una stringa unica, non una lista,
