@@ -1,5 +1,5 @@
 """
-NemoHeadUnit-Wireless v2 — audio_manager
+NemoHeadUnit-Wireless — audio_manager
 
 Centralised audio device and volume manager.
 
@@ -59,11 +59,11 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # sys.path bootstrap
 # ---------------------------------------------------------------------------
-_HERE    = Path(__file__).parent        # v2/modules/audio_manager/
-_MODULES = _HERE.parent                 # v2/modules/
-_V2      = _MODULES.parent              # v2/
+_HERE      = Path(__file__).parent   # modules/audio_manager/
+_MODULES   = _HERE.parent            # modules/
+_REPO_ROOT = _MODULES.parent         # root
 
-for _p in (_V2, _MODULES):
+for _p in (_REPO_ROOT, _MODULES):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
@@ -199,7 +199,6 @@ def _enum_sources_pactl() -> list[str]:
 
 
 def enumerate_sinks() -> list[str]:
-    """Return sink list: wpctl primary, pactl fallback."""
     result = _enum_sinks_wpctl()
     if len(result) > 1:
         return result
@@ -207,7 +206,6 @@ def enumerate_sinks() -> list[str]:
 
 
 def enumerate_sources() -> list[str]:
-    """Return source list: wpctl primary, pactl fallback."""
     result = _enum_sources_wpctl()
     if len(result) > 1:
         return result
@@ -219,25 +217,8 @@ def enumerate_sources() -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _get_sink_input_index(stream_name: str) -> int | None:
-    """Return the pactl sink-input index for a pacat stream by name.
-
-    pacat is launched with `--stream-name=ch<channel_id>`, so stream_name
-    should be e.g. "ch4", "ch6".
-
-    Uses `pactl list sink-inputs short` which is fast (~10 ms) because it
-    only retrieves a one-liner per active sink-input.
-    """
+    """Return the pactl sink-input index for a pacat stream by name."""
     try:
-        result = subprocess.run(
-            ["pactl", "list", "sink-inputs", "short"],
-            capture_output=True, text=True, timeout=2,
-        )
-        for line in result.stdout.splitlines():
-            # Format: <index>\t<sink-id>\t<client-id>\t<format>\t<state>
-            # The stream name is NOT in the short listing; we need to
-            # cross-reference with `pactl list sink-inputs` (verbose).
-            pass
-        # Short listing does not include stream-name.  Use verbose parse.
         result_verbose = subprocess.run(
             ["pactl", "list", "sink-inputs"],
             capture_output=True, text=True, timeout=2,
@@ -248,8 +229,6 @@ def _get_sink_input_index(stream_name: str) -> int | None:
             if stripped.startswith("Sink Input #"):
                 current_index = int(stripped.split("#")[1])
             elif stripped.startswith("media.name") or "stream.name" in stripped:
-                # e.g.  media.name = "ch4"
-                #        stream.name = "ch4"
                 if f'"{stream_name}"' in stripped or f"= {stream_name}" in stripped:
                     return current_index
         return None
@@ -263,11 +242,6 @@ def _get_sink_input_index(stream_name: str) -> int | None:
 # ---------------------------------------------------------------------------
 
 def _set_global_volume(volume: int) -> bool:
-    """Set global system volume via `wpctl set-volume @DEFAULT_SINK@`.
-
-    volume: 0-100 (percent).
-    Returns True on success.
-    """
     try:
         subprocess.run(
             ["wpctl", "set-volume", "@DEFAULT_SINK@", f"{volume}%"],
@@ -281,12 +255,6 @@ def _set_global_volume(volume: int) -> bool:
 
 
 def _set_channel_volume(channel_id: int, volume: int) -> bool:
-    """Set per-channel pacat sink-input volume via `pactl set-sink-input-volume`.
-
-    Looks up the sink-input index by stream name `ch<channel_id>`.
-    volume: 0-100 (percent).
-    Returns True on success.
-    """
     stream_name = f"ch{channel_id}"
     index = _get_sink_input_index(stream_name)
     if index is None:
@@ -304,10 +272,7 @@ def _set_channel_volume(channel_id: int, volume: int) -> bool:
         log.info("Channel volume ch=%d (sink-input #%d) → %d%%", channel_id, index, volume)
         return True
     except Exception as exc:
-        log.warning(
-            "_set_channel_volume: pactl failed ch=%d index=%d — %s",
-            channel_id, index, exc,
-        )
+        log.warning("_set_channel_volume: pactl failed ch=%d index=%d — %s", channel_id, index, exc)
         return False
 
 
@@ -315,7 +280,7 @@ def _set_channel_volume(channel_id: int, volume: int) -> bool:
 # Schema builder (dynamic — depends on enumerated devices)
 # ---------------------------------------------------------------------------
 
-_CHANNEL_IDS = (4, 6, 10)   # MEDIA, SPEECH, SYSTEM
+_CHANNEL_IDS = (4, 6, 10)
 
 
 def _build_schema(sinks: list[str], sources: list[str]) -> dict:
@@ -355,7 +320,6 @@ _udev_thread: threading.Thread | None = None
 # ---------------------------------------------------------------------------
 
 def _refresh_devices(publish: bool = True) -> None:
-    """Re-enumerate sinks and sources, update schema choices, publish on bus."""
     global _sinks, _sources, _schema
 
     new_sinks   = enumerate_sinks()
@@ -364,19 +328,13 @@ def _refresh_devices(publish: bool = True) -> None:
     changed = (new_sinks != _sinks) or (new_sources != _sources)
     _sinks   = new_sinks
     _sources = new_sources
-
-    # Rebuild schema so config_manager can update its widget choices.
-    _schema = _build_schema(_sinks, _sources)
+    _schema  = _build_schema(_sinks, _sources)
 
     if publish or changed:
         bus.publish("audio.sinks.list",   {"sinks":   _sinks})
         bus.publish("audio.sources.list", {"sources": _sources})
-        log.info(
-            "Devices refreshed — sinks=%s sources=%s",
-            _sinks, _sources,
-        )
+        log.info("Devices refreshed — sinks=%s sources=%s", _sinks, _sources)
 
-    # Validate current sink/source selections against new lists and re-publish.
     sink   = _config.get("sink",   "default")
     source = _config.get("source", "default")
 
@@ -407,11 +365,7 @@ def _poll_loop() -> None:
 def _start_poll_thread() -> None:
     global _poll_thread
     _poll_stop.clear()
-    _poll_thread = threading.Thread(
-        target=_poll_loop,
-        name="audio-manager-poll",
-        daemon=True,
-    )
+    _poll_thread = threading.Thread(target=_poll_loop, name="audio-manager-poll", daemon=True)
     _poll_thread.start()
 
 
@@ -420,16 +374,11 @@ def _start_poll_thread() -> None:
 # ---------------------------------------------------------------------------
 
 def _udev_loop() -> None:
-    """Listen for udev SOUND subsystem events and trigger device refresh.
-
-    Requires `pyudev`.  Gracefully skips if not installed.
-    """
     try:
         import pyudev  # type: ignore
     except ImportError:
         log.info("pyudev not available — hotplug detection disabled (polling only)")
         return
-
     try:
         context  = pyudev.Context()
         monitor  = pyudev.Monitor.from_netlink(context)
@@ -449,11 +398,7 @@ def _udev_loop() -> None:
 
 def _start_udev_thread() -> None:
     global _udev_thread
-    _udev_thread = threading.Thread(
-        target=_udev_loop,
-        name="audio-manager-udev",
-        daemon=True,
-    )
+    _udev_thread = threading.Thread(target=_udev_loop, name="audio-manager-udev", daemon=True)
     _udev_thread.start()
 
 
@@ -470,8 +415,6 @@ def _on_config_loaded(config: dict) -> None:
     merged.update({k: v for k, v in config.items() if k in _schema and not isinstance(v, (dict, list))})
     _config = merged
     log.info("Config loaded: %r", _config)
-
-    # Apply initial selections and volume immediately.
     bus.publish("audio.sink.selected",   {"sink":   _config.get("sink",   "default")})
     bus.publish("audio.source.selected", {"source": _config.get("source", "default")})
     vol = _config.get("volume", 80)
@@ -491,15 +434,12 @@ def _on_config_changed(key: str, value: Any) -> None:
 
     if key == "sink":
         bus.publish("audio.sink.selected", {"sink": value})
-
     elif key == "source":
         bus.publish("audio.source.selected", {"source": value})
-
     elif key == "volume":
         vol = int(value)
         if _set_global_volume(vol):
             bus.publish("audio.volume.changed", {"volume": vol})
-
     elif key.startswith("volume_ch"):
         try:
             ch_id = int(key.split("volume_ch")[1])
@@ -507,7 +447,6 @@ def _on_config_changed(key: str, value: Any) -> None:
             log.warning("config.changed: cannot parse channel id from key %r", key)
             return
         _set_channel_volume(ch_id, int(value))
-
     elif key == "poll_interval_s":
         log.info("poll_interval_s changed to %d — next poll will use new interval", value)
 
@@ -517,7 +456,6 @@ def _on_config_changed(key: str, value: Any) -> None:
 # ---------------------------------------------------------------------------
 
 def on_audio_volume_set(topic: str, payload: dict) -> None:
-    """Handle audio.volume.set {volume: int} — global volume via wpctl."""
     volume = payload.get("volume")
     if not isinstance(volume, int) or not (0 <= volume <= 100):
         log.warning("on_audio_volume_set: invalid payload %r", payload)
@@ -528,7 +466,6 @@ def on_audio_volume_set(topic: str, payload: dict) -> None:
 
 
 def on_audio_channel_volume_set(topic: str, payload: dict) -> None:
-    """Handle audio.channel_volume.set {channel_id: int, volume: int}."""
     channel_id = payload.get("channel_id")
     volume     = payload.get("volume")
     if not isinstance(channel_id, int) or not isinstance(volume, int):
@@ -548,35 +485,20 @@ def on_audio_channel_volume_set(topic: str, payload: dict) -> None:
 
 def on_system_readytostart() -> None:
     log.info("system.readytostart — announcing priority %d", PRIORITY)
-    bus.publish("system.module_ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
+    bus.publish("system.module_ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
 def on_system_start(topic: str, payload: dict) -> None:
     if payload.get("priority") != PRIORITY:
         return
-
     log.info("system.start priority=%d — initialising...", PRIORITY)
-
-    # Enumerate devices before requesting config so schema choices are
-    # populated when config_manager echoes them back.
     _refresh_devices(publish=True)
-
-    # Register dynamic schema (includes discovered device choices).
     cfg.on_config_loaded  = _on_config_loaded
     cfg.on_config_changed = _on_config_changed
     cfg.get(schema=_schema)
-
-    # Start background threads.
     _start_poll_thread()
     _start_udev_thread()
-
-    bus.publish("system.ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
+    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info("system.ready published (priority=%d)", PRIORITY)
 
 
@@ -592,13 +514,11 @@ def on_system_stop(topic: str, payload: dict) -> None:
 
 def run() -> None:
     cfg.register()
-
-    bus.subscribe("system.readytostart",         on_system_readytostart)
-    bus.subscribe("system.start",                on_system_start)
-    bus.subscribe("system.stop",                 on_system_stop)
-    bus.subscribe("audio.volume.set",            on_audio_volume_set)
-    bus.subscribe("audio.channel_volume.set",    on_audio_channel_volume_set)
-
+    bus.subscribe("system.readytostart",      on_system_readytostart)
+    bus.subscribe("system.start",             on_system_start)
+    bus.subscribe("system.stop",              on_system_stop)
+    bus.subscribe("audio.volume.set",         on_audio_volume_set)
+    bus.subscribe("audio.channel_volume.set", on_audio_channel_volume_set)
     log.info("audio_manager started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)
