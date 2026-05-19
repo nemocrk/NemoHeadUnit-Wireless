@@ -1,5 +1,5 @@
 # ===========================================================================
-# NemoHeadUnit-Wireless v2 — pyproject.toml
+# NemoHeadUnit-Wireless — pyproject.toml
 # Rif: docs/TEST_SUITE_ARCHITECTURE.md, docs/project-vision.md
 # ===========================================================================
 
@@ -13,7 +13,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nemo-head-unit"
 version = "2.0.0"
-description = "NemoHeadUnit-Wireless v2 — wireless Android Auto head unit"
+description = "NemoHeadUnit-Wireless — wireless Android Auto head unit"
 requires-python = ">=3.14"
 
 # ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ packages = []
 #       per evitare che pytest-xdist riceva ' auto' con spazio iniziale.
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths  = ["v2/tests"]
+testpaths  = ["tests"]
 python_files   = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
@@ -80,17 +80,18 @@ timeout_func_only = true
 # ---------------------------------------------------------------------------
 # coverage
 # relative_files = true: i path negli omit sono relativi alla CWD del runner
-# (root del repo), così "v2/protos/*" matcha correttamente.
+# (root del repo), così "protos/*" matcha correttamente.
 # source usa il path relativo alla CWD, non il nome del package installato.
 # ---------------------------------------------------------------------------
 [tool.coverage.run]
 relative_files = true
-source = ["v2"]
+source = ["."]
 omit = [
-    "*/app/*",
     "*/protos/*",
     "*/services/*",
     "*/tests/*",
+    "packaging/*",
+    "scripts/*",
 ]
 
 [tool.coverage.report]
