@@ -1,5 +1,5 @@
 """
-NemoHeadUnit-Wireless v2 — Main Orchestrator
+NemoHeadUnit-Wireless — Main Orchestrator
 
 Responsibilities:
   1. Start the bus broker as an independent subprocess
@@ -15,7 +15,7 @@ Responsibilities:
   5. Respond to system.get_modules with module list and status
 
 Module autodiscovery:
-  Any subfolder inside v2/modules/ that contains a main.py is treated as a module.
+  Any subfolder inside modules/ that contains a main.py is treated as a module.
   Folders whose name starts with '_' are excluded (e.g. _template).
   To disable a module, rename its main.py to main.py.disabled.
 
