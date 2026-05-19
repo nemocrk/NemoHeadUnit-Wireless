@@ -1,5 +1,5 @@
 """
-NemoHeadUnit-Wireless v2 — channel_modules/_template
+NemoHeadUnit-Wireless — channel_modules/_template
 
 TEMPLATE — copy this folder to channel_modules/<your_module>/ and:
   1. Rename the class:   TemplateModule  →  <YourModule>Module
@@ -87,15 +87,14 @@ from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# sys.path bootstrap — identical to audio / video / input / sensor
+# sys.path bootstrap
 # ---------------------------------------------------------------------------
-_HERE         = Path(__file__).parent          # v2/modules/channel_modules/_template/
-_CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
-_MODULES      = _CHANNEL_MODS.parent           # v2/modules/
-_V2           = _MODULES.parent                # v2/
-_PROTOS       = _V2 / "protos"                 # v2/protos/
+_HERE         = Path(__file__).parent   # modules/channel_modules/_template/
+_CHANNEL_MODS = _HERE.parent            # modules/channel_modules/
+_MODULES      = _CHANNEL_MODS.parent    # modules/
+_REPO_ROOT    = _MODULES.parent         # root
 
-for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
+for _p in (_REPO_ROOT, _MODULES, _CHANNEL_MODS, _REPO_ROOT / "protos"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
@@ -110,7 +109,7 @@ from shared.proto_utils import (                                 # noqa: E402
 from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Proto imports — AV shared (same set used by audio + video)
+# Proto imports — AV shared
 # ---------------------------------------------------------------------------
 from oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessage                   # noqa: E402
 from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage                  # noqa: E402
@@ -121,11 +120,10 @@ from oaa.av.AVChannelStartIndicationMessage_pb2 import AVChannelStartIndication 
 from oaa.av.AVMediaAckIndicationMessage_pb2 import AVMediaAckIndication           # noqa: E402
 from oaa.common.StatusEnum_pb2 import Status                                      # noqa: E402
 
-# TODO: add channel-type-specific proto imports here, e.g.:
-# from oaa.input.InputEventIndication_pb2 import InputEventIndication
+# TODO: add channel-type-specific proto imports here
 
 # ---------------------------------------------------------------------------
-# AA message ID aliases — copy the full block, add channel-specific ones below
+# AA message ID aliases
 # ---------------------------------------------------------------------------
 
 _MSG_AV_CHANNEL_SETUP_REQUEST                      = AVChannelMessage.SETUP_REQUEST
@@ -138,9 +136,6 @@ _MSG_AV_CHANNEL_AV_MEDIA_INDICATION                = AVChannelMessage.AV_MEDIA_I
 _MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION = AVChannelMessage.AV_MEDIA_WITH_TIMESTAMP_INDICATION
 _MSG_AV_CHANNEL_MEDIA_ACK                          = AVChannelMessage.AV_MEDIA_ACK_INDICATION
 
-# TODO: add channel-specific message IDs here, e.g.:
-# _MSG_INPUT_EVENT_INDICATION = InputChannelMessageIdsEnum.INPUT_EVENT_INDICATION
-
 
 # ---------------------------------------------------------------------------
 # TemplateModule
@@ -152,170 +147,54 @@ class TemplateModule(BaseChannelModule):
 
     Replace every occurrence of "Template" / "_template" with your module name.
     Read the class-level docstring in base_channel_module.py before starting.
-
-    Outgoing frame convention:
-      Use self.send_frame(message_id, proto_body) for ALL outgoing AA frames.
-      Never encode manually with encode_aa_frame() + bus.publish("aa.frame.send").
-      BaseChannelModule.send_frame() is the single authoritative point that
-      sets channel_id and the encrypted flag for all post-handshake traffic.
-
-      Exception — ChannelOpenResponse:
-        ChannelOpenResponse (ControlMessage.CHANNEL_OPEN_RESPONSE = 0x0008)
-        belongs to the ControlMessage namespace even on non-zero AV channels.
-        Pass control=True when sending it (no runtime effect; documents intent).
-
-    Required class attributes (set at class level, not in __init__):
-      MODULE_NAME — overridden by --module-name CLI
-      CHANNEL_ID  — overridden by --channel-id  CLI
-      PRIORITY    — boot priority (1 = default services tier)
     """
 
-    MODULE_NAME: str = "_template"  # TODO: replace with e.g. "input"
-    CHANNEL_ID:  int = -1            # always overridden by --channel-id
+    MODULE_NAME: str = "_template"
+    CHANNEL_ID:  int = -1
     PRIORITY:    int = 1
 
-    # ------------------------------------------------------------------
-    # Config schema
-    # ------------------------------------------------------------------
-
     def get_schema(self) -> dict:
-        """
-        Declare typed config keys for this module.
-
-        Use field_int / field_enum / field_str / field_bool from
-        shared.config_schema.  Return {} if this module needs no config.
-
-        Example:
-            return {
-                "max_unacked": field_int(default=1, min=1, max=16),
-            }
-        """
-        # TODO: replace {} with a real schema if this module needs config.
         return {}
-
-    # ------------------------------------------------------------------
-    # Construction
-    # ------------------------------------------------------------------
 
     def __init__(self) -> None:
         super().__init__()
-
-        # Session state — identical lifecycle to audio / video
         self._session_id: int = 0
-        self._state:      str = "IDLE"   # IDLE | SETUP | OPEN | PLAYING | STOPPED
-
-        # TODO: declare module-specific instance variables here, e.g.:
-        # self._pipeline: SomePipeline | None = None
-
-    # ------------------------------------------------------------------
-    # Readiness gate
-    # ------------------------------------------------------------------
+        self._state:      str = "IDLE"
 
     def _is_ready(self) -> bool:
-        """
-        Return True when the module's external resource is operational.
-
-        Default (no external resource):  return True
-        With a resource (like audio stream):
-            return self._pipeline is not None
-
-        BaseChannelModule will NOT publish channel_manager.module_ready
-        until this returns True.
-        """
-        return True  # TODO: replace with real resource check if needed
-
-    # ------------------------------------------------------------------
-    # _init / _cleanup hooks
-    # ------------------------------------------------------------------
+        return True
 
     def _init(self) -> None:
-        """
-        Called once during channel_manager.module_start, after cfg.get() is dispatched.
-
-        Read codec / format parameters from self.channel_config (populated
-        by base from the SDR hex passed via --sdr-bytes-hex).
-
-        NOTE: on_config_loaded() may arrive before OR after _init() completes
-        (async bus).  If your resource setup depends on both SDR params AND
-        persisted config, open the resource in both _init() and on_config_loaded()
-        (guarded by self._init_done), exactly as AudioModule does.
-        """
         cfg = self.channel_config
         if cfg is not None:
-            # TODO: read channel-specific params from cfg, e.g.:
-            # configs = cfg.get("av_channel", {}).get("audio_configs", [])
             self.log.info("_init: channel_config ok for ch=%d", self.CHANNEL_ID)
         else:
             self.log.warning("_init: channel_config is None — using defaults")
 
-        # TODO: allocate your resource here, e.g.:
-        # self._pipeline = _open_pipeline(...)
-
     def _cleanup(self) -> None:
-        """Called on channel_manager.module_stop — release all resources."""
-        # TODO: close your resource here, e.g.:
-        # _close_pipeline(self._pipeline)
-        # self._pipeline = None
         self._set_state("IDLE")
 
-    # ------------------------------------------------------------------
-    # Config callbacks — override only when needed
-    # ------------------------------------------------------------------
-    #
-    # BaseChannelModule already handles on_config_loaded() and on_config_changed()
-    # correctly for the common case (merge + _try_publish_ready).
-    # Override here ONLY if you need extra logic on top, e.g. reopening a resource:
-    #
-    #   def on_config_loaded(self, config: dict) -> None:
-    #       super().on_config_loaded(config)
-    #       if self._init_done:
-    #           self._reopen_resource()
-    #
-    #   def on_config_changed(self, key: str, value: Any) -> None:
-    #       super().on_config_changed(key, value)
-    #       if key == "my_key":
-    #           self.log.info("my_key changed to %r", value)
-
-    # ------------------------------------------------------------------
-    # Session lifecycle
-    # ------------------------------------------------------------------
-
     def on_aa_session_shutdown(self, topic: str, payload: dict) -> None:
-        """Reset state when the AA session ends (phone disconnected)."""
         self._session_id = 0
         self._set_state("IDLE")
         self.log.info("AA session shutdown — ch=%d reset", self.CHANNEL_ID)
 
-    # ------------------------------------------------------------------
-    # BaseChannelModule abstract interface
-    # ------------------------------------------------------------------
-
     def on_channel_open(self, channel_id: int, descriptor: dict) -> None:
-        """Called when aa.channel.open arrives for self.CHANNEL_ID."""
         self._session_id = 0
         self._set_state("IDLE")
         self.log.info("Channel %d open (descriptor: %s)", channel_id, descriptor)
 
     def on_channel_close(self, channel_id: int) -> None:
-        """Called when aa.channel.close arrives for self.CHANNEL_ID."""
         self._session_id = 0
         self._set_state("IDLE")
         self.log.info("Channel %d closed — session_id reset", channel_id)
 
     def on_frame(self, channel_id: int, data: bytes) -> None:
-        """
-        Entry point for every raw binary frame on this channel.
-
-        Decode the AA frame header, then dispatch by message_id.
-        Add a branch for every AA message_id your channel needs to handle.
-        """
         result = decode_aa_frame(data)
         if result is None:
             self.log.error("on_frame: malformed payload on ch=%d — dropping", channel_id)
             return
-
         message_id, body = result
-
         if message_id == _MSG_AV_CHANNEL_SETUP_REQUEST:
             self._handle_setup_request(body)
         elif message_id == _MSG_CHANNEL_OPEN_REQUEST:
@@ -328,23 +207,10 @@ class TemplateModule(BaseChannelModule):
             self._handle_media(body)
         elif message_id == _MSG_AV_CHANNEL_AV_MEDIA_WITH_TIMESTAMP_INDICATION:
             self._handle_media_with_timestamp(body)
-        # TODO: add channel-specific branches, e.g.:
-        # elif message_id == _MSG_INPUT_EVENT_INDICATION:
-        #     self._handle_input_event(body)
         else:
-            self.log.debug(
-                "Unhandled msg_id=0x%04x ch=%d len=%d",
-                message_id, channel_id, len(body),
-            )
-
-    # ------------------------------------------------------------------
-    # AA message handlers — standard AVChannel handshake
-    # (identical to audio / video — do NOT change unless the channel
-    #  type requires a different setup response format)
-    # ------------------------------------------------------------------
+            self.log.debug("Unhandled msg_id=0x%04x ch=%d len=%d", message_id, channel_id, len(body))
 
     def _handle_setup_request(self, body: bytes) -> None:
-        """Send AVChannelSetupResponse and transition to SETUP."""
         max_unacked = self._config.get("max_unacked", 1)
         resp = AVChannelSetupResponse()
         resp.media_status = AVChannelSetupStatus.Enum.OK
@@ -352,20 +218,10 @@ class TemplateModule(BaseChannelModule):
         resp.configs.append(0)
         self.send_frame(_MSG_AV_CHANNEL_SETUP_RESPONSE, resp.SerializeToString())
         self._set_state("SETUP")
-        self.log.info(
-            "AVChannelSetupRequest ch=%d → AVChannelSetupResponse sent (max_unacked=%d)",
-            self.CHANNEL_ID, max_unacked,
-        )
-        # TODO: some channel types (e.g. video) send an extra indication here.
+        self.log.info("AVChannelSetupRequest ch=%d → AVChannelSetupResponse sent (max_unacked=%d)",
+                      self.CHANNEL_ID, max_unacked)
 
     def _handle_open_request(self, body: bytes) -> None:
-        """Send ChannelOpenResponse and transition to OPEN.
-
-        ChannelOpenResponse uses ControlMessage.CHANNEL_OPEN_RESPONSE (0x0008),
-        which belongs to the ControlMessage namespace even on non-zero AV channels.
-        We pass control=True so the intent is explicit; on the wire the flags
-        byte is unchanged (0x0B).
-        """
         resp = ChannelOpenResponse()
         resp.status = Status.OK
         self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString(), control=True)
@@ -373,80 +229,34 @@ class TemplateModule(BaseChannelModule):
         self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)
 
     def _handle_start_indication(self, body: bytes) -> None:
-        """Extract session_id from AVChannelStartIndication and transition to PLAYING."""
         try:
             msg = AVChannelStartIndication()
             msg.ParseFromString(body)
             self._session_id = msg.session
-            self.log.info(
-                "AVChannelStartIndication ch=%d session_id=%d — state → PLAYING",
-                self.CHANNEL_ID, self._session_id,
-            )
+            self.log.info("AVChannelStartIndication ch=%d session_id=%d — state → PLAYING",
+                          self.CHANNEL_ID, self._session_id)
         except Exception as exc:
-            self.log.warning(
-                "AVChannelStartIndication parse error ch=%d — %s (session_id remains %d)",
-                self.CHANNEL_ID, exc, self._session_id,
-            )
+            self.log.warning("AVChannelStartIndication parse error ch=%d — %s",
+                             self.CHANNEL_ID, exc)
         self._set_state("PLAYING")
 
     def _handle_stop_indication(self, body: bytes) -> None:
-        """Reset session_id and transition to STOPPED."""
         self._session_id = 0
         self._set_state("STOPPED")
-        self.log.info(
-            "AVChannelStopIndication ch=%d — session_id reset, state → STOPPED",
-            self.CHANNEL_ID,
-        )
+        self.log.info("AVChannelStopIndication ch=%d — state → STOPPED", self.CHANNEL_ID)
 
     def _handle_media(self, body: bytes) -> None:
-        """
-        AV_MEDIA_INDICATION handler.
-
-        In audio: decode PCM/AAC.
-        In video: parse codec config message.
-        TODO: implement channel-specific media handling here.
-        """
-        # Always ACK immediately — do NOT wait for downstream processing.
         self._send_media_ack()
-        # TODO: process `body` (codec config bytes, raw media, etc.)
 
     def _handle_media_with_timestamp(self, body: bytes) -> None:
-        """
-        AV_MEDIA_WITH_TIMESTAMP_INDICATION handler.
-
-        Parse timestamp + payload, ACK immediately, then process/publish data.
-        Frames arriving before StartIndication (session_id == 0) MUST be dropped.
-        """
         if self._session_id == 0:
-            self.log.debug(
-                "MediaWithTimestamp ch=%d dropped — session_id not yet set",
-                self.CHANNEL_ID,
-            )
+            self.log.debug("MediaWithTimestamp ch=%d dropped — session_id not yet set", self.CHANNEL_ID)
             return
-
         if self._state not in ("OPEN", "PLAYING"):
             self._set_state("PLAYING")
-
         ts_us, payload = parse_media_with_timestamp(body)
-        self.log.debug(
-            "MediaWithTimestamp ch=%d ts_us=%d len=%d",
-            self.CHANNEL_ID, ts_us, len(payload),
-        )
-
-        # ACK immediately — fire-and-forget, do NOT wait for downstream.
+        self.log.debug("MediaWithTimestamp ch=%d ts_us=%d len=%d", self.CHANNEL_ID, ts_us, len(payload))
         self._send_media_ack()
-
-        # TODO: process / publish payload, e.g.:
-        # if payload:
-        #     self.bus.publish(f"{self.MODULE_NAME}.frame", {
-        #         "channel_id": self.CHANNEL_ID,
-        #         "ts_us":      ts_us,
-        #         "data":       payload,
-        #     })
-
-    # ------------------------------------------------------------------
-    # MediaAck helper — identical to audio / video, do not change
-    # ------------------------------------------------------------------
 
     def _send_media_ack(self) -> None:
         ack = AVMediaAckIndication()
@@ -455,31 +265,15 @@ class TemplateModule(BaseChannelModule):
         self.send_frame(_MSG_AV_CHANNEL_MEDIA_ACK, ack.SerializeToString())
         self.log.debug("MediaAck sent ch=%d session_id=%d", self.CHANNEL_ID, self._session_id)
 
-    # ------------------------------------------------------------------
-    # State helper — keep identical signature/behaviour to audio / video
-    # ------------------------------------------------------------------
-
     def _set_state(self, new_state: str) -> None:
         if self._state == new_state:
             return
         self._state = new_state
-        self.bus.publish(f"{self.MODULE_NAME}.state", {
-            "channel_id": self.CHANNEL_ID,
-            "state":      new_state,
-        })
+        self.bus.publish(f"{self.MODULE_NAME}.state", {"channel_id": self.CHANNEL_ID, "state": new_state})
         self.log.info("%s.state ch=%d → %s", self.MODULE_NAME, self.CHANNEL_ID, new_state)
 
-    # ------------------------------------------------------------------
-    # run() override — add extra bus subscriptions before calling super()
-    # ------------------------------------------------------------------
-
     def run(self) -> None:
-        # Subscribe to aa.session.shutdown exactly as audio / video do.
         self.bus.subscribe("aa.session.shutdown", self.on_aa_session_shutdown)
-
-        # TODO: add module-specific subscriptions here, e.g.:
-        # self.bus.subscribe("aa.session.active", self.on_aa_session_active)
-
         super().run()
 
 
