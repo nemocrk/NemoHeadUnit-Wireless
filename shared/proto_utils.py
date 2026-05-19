@@ -420,7 +420,7 @@ def schema_from_proto_message(
 
     Example::
 
-        from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (
+        from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (
             ServiceDiscoveryResponse,
         )
         from shared.proto_utils import schema_from_proto_message
@@ -541,16 +541,16 @@ def channels_from_sdr_bytes(sdr_bytes_hex: str) -> list[dict]:
     """
     # Lazy imports: proto classes only available when protos are compiled.
     try:
-        _repo_root = Path(__file__).parent.parent.parent
-        _proto_root = _repo_root / "v2" / "protos"
+        _repo_root = Path(__file__).parent.parent
+        _proto_root = _repo_root / "protos"
         for _p in (_repo_root, _proto_root):
             if str(_p) not in sys.path:
                 sys.path.insert(0, str(_p))
 
-        from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (  # noqa: PLC0415
+        from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (  # noqa: PLC0415
             ServiceDiscoveryResponse,
         )
-        from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType  # noqa: PLC0415
+        from protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType  # noqa: PLC0415
     except ImportError as exc:
         log.error("channels_from_sdr_bytes: proto import failed — %s", exc)
         return []
