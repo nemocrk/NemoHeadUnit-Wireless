@@ -51,12 +51,12 @@ import time
 from pathlib import Path
 import sys
 
-_HERE    = Path(__file__).parent        # v2/modules/channel_manager/
-_MODULES = _HERE.parent                 # v2/modules/
-_V2      = _MODULES.parent              # v2/
+_HERE      = Path(__file__).parent   # modules/channel_manager/
+_MODULES   = _HERE.parent            # modules/
+_REPO_ROOT = _MODULES.parent         # root
 
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
@@ -294,11 +294,6 @@ _session: ChannelManagerSession | None = None
 # ---------------------------------------------------------------------------
 
 def on_system_readytostart() -> None:
-    """
-    Orchestrator is ready to begin the multi-step boot.
-    Announce this module's name and priority so main.py can build
-    the startup plan before issuing system.start messages.
-    """
     log.info(f"system.readytostart received — announcing priority {PRIORITY}")
     bus.publish("system.module_ready", {
         "name":     MODULE_NAME,
@@ -307,15 +302,8 @@ def on_system_readytostart() -> None:
 
 
 def on_system_start(topic: str, payload: dict) -> None:
-    """
-    Orchestrator fires system.start for each priority level in order.
-    Only act when payload["priority"] matches this module's PRIORITY.
-    After completing init, publish system.ready so main.py can advance
-    to the next priority level.
-    """
     if payload.get("priority") != PRIORITY:
-        return  # not our turn yet (or already past)
-
+        return
     log.info(f"system.start priority={PRIORITY} received — initialising...")
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
@@ -325,7 +313,6 @@ def on_system_start(topic: str, payload: dict) -> None:
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
-    """Graceful shutdown — called for all modules simultaneously."""
     global _session
     log.info("system.stop — cleaning up...")
     if _session:
@@ -339,7 +326,6 @@ def on_system_stop(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def on_oaa_control_channel_open_channels(topic: str, payload: dict) -> None:
-    """Start a new AA session: resolve channels, spawn subprocesses."""
     global _session
 
     sdr_bytes_hex = payload.get("sdr_bytes_hex", "")
@@ -349,7 +335,6 @@ def on_oaa_control_channel_open_channels(topic: str, payload: dict) -> None:
         log.error("open_channels: missing sdr_bytes_hex or channels — ignored")
         return
 
-    # Kill any stale session
     if _session:
         log.warning("New open_channels while session active — shutting down old session")
         _session.shutdown()
@@ -368,7 +353,6 @@ def on_oaa_control_channel_open_channels(topic: str, payload: dict) -> None:
         _session = None
         return
 
-    # Wait for readiness in a dedicated thread to avoid blocking the bus loop
     def _wait() -> None:
         global _session
         ok = session.wait_all_ready(sdr_bytes_hex)
@@ -382,7 +366,6 @@ def on_oaa_control_channel_open_channels(topic: str, payload: dict) -> None:
 
 
 def on_channel_manager_module_ready_to_start(topic: str, payload: dict) -> None:
-    """Child announced it is ready to start — respond with module_start {priority}."""
     name     = payload.get("name", "")
     priority = payload.get("priority", 1)
     if _session:
@@ -390,21 +373,18 @@ def on_channel_manager_module_ready_to_start(topic: str, payload: dict) -> None:
 
 
 def on_channel_manager_module_ready(topic: str, payload: dict) -> None:
-    """Track readiness of a spawned channel module child."""
     name = payload.get("name", "")
     if _session:
         _session.on_module_ready(name)
 
 
 def on_channel_manager_module_stopped(topic: str, payload: dict) -> None:
-    """Track stop ACK from a spawned channel module child."""
     name = payload.get("name", "")
     if _session:
         _session.on_module_stopped(name)
 
 
 def on_aa_session_shutdown(topic: str, payload: dict) -> None:
-    """AA session ended cleanly — stop all channel modules."""
     global _session
     log.info("aa.session.shutdown received — initiating channel shutdown")
     if _session:
@@ -413,7 +393,6 @@ def on_aa_session_shutdown(topic: str, payload: dict) -> None:
 
 
 def on_aa_session_restart(topic: str, payload: dict) -> None:
-    """AA session restarting — stop all channel modules (new session will follow)."""
     global _session
     log.info("aa.session.restart received — initiating channel shutdown")
     if _session:
@@ -422,11 +401,10 @@ def on_aa_session_restart(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Crash monitor (runs in background thread)
+# Crash monitor
 # ---------------------------------------------------------------------------
 
 def _crash_monitor() -> None:
-    """Periodically check for unexpected child process exits."""
     while True:
         time.sleep(CRASH_POLL_INTERVAL)
         if _session:
@@ -440,12 +418,10 @@ def _crash_monitor() -> None:
 # ---------------------------------------------------------------------------
 
 def run() -> None:
-    # Boot protocol
     bus.subscribe("system.readytostart", on_system_readytostart)
     bus.subscribe("system.start",        on_system_start)
     bus.subscribe("system.stop",         on_system_stop)
 
-    # Topic subscriptions
     bus.subscribe("oaa_control_channel.open_channels",         on_oaa_control_channel_open_channels)
     bus.subscribe("channel_manager.module_ready_to_start",     on_channel_manager_module_ready_to_start)
     bus.subscribe("channel_manager.module_ready",              on_channel_manager_module_ready)
@@ -453,7 +429,6 @@ def run() -> None:
     bus.subscribe("aa.session.shutdown",                       on_aa_session_shutdown)
     bus.subscribe("aa.session.restart",                        on_aa_session_restart)
 
-    # Start crash monitor
     threading.Thread(target=_crash_monitor, daemon=True, name="cm_crash_monitor").start()
 
     log.info("Module started, waiting for messages...")
@@ -463,7 +438,7 @@ def run() -> None:
     try:
         bus_thread.join()
     except KeyboardInterrupt:
-        pass  # gestito dal main via system.stop
+        pass
 
 
 if __name__ == "__main__":
