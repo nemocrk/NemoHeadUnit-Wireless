@@ -2,7 +2,7 @@
 # compile_protos.sh
 # Recursively finds all .proto files under third_party/open-android-auto/oaa,
 # compiles them with grpc_tools.protoc, and mirrors the directory tree
-# into v2/protos/ as *_pb2.py files.
+# into protos/ as *_pb2.py files.
 #
 # Usage:
 #   bash scripts/compile_protos.sh
@@ -15,7 +15,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUBMODULE_ROOT="${REPO_ROOT}/third_party/open-android-auto"
 PROTO_SRC="${SUBMODULE_ROOT}/oaa"   # scan only oaa/
-PROTO_OUT="${REPO_ROOT}/v2/protos"
+PROTO_OUT="${REPO_ROOT}/protos"
 
 if [ ! -d "${PROTO_SRC}" ]; then
   echo "[ERROR] Proto source not found at ${PROTO_SRC}"
@@ -71,4 +71,4 @@ done
 
 echo "[INFO] __init__.py created in all output directories."
 echo "[INFO] Import example:"
-echo "         from v2.protos.oaa.wifi.WifiInfoResponse_pb2 import WifiInfoResponse"
+echo "         from protos.oaa.wifi.WifiInfoResponse_pb2 import WifiInfoResponse"
