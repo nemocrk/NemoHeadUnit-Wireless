@@ -5,7 +5,7 @@
 # Uses the Conda env Python if available, falls back to system python3.
 
 CONDA_PYTHON="/opt/nemo-headunit/env/bin/python"
-APP_MAIN="/opt/nemo-headunit/v2/main.py"
+APP_MAIN="/opt/nemo-headunit/main.py"
 
 if [ -x "${CONDA_PYTHON}" ]; then
     exec "${CONDA_PYTHON}" "${APP_MAIN}" "$@"
