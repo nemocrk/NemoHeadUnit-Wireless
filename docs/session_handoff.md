@@ -1,17 +1,71 @@
 # Session Handoff — NemoHeadUnit-Wireless
 
 > **Scopo**: documento di continuità per sessioni AI successive.
-> **Aggiornato**: 2026-05-19 — refactor/promote-v2-to-root, tutti gli step completati — pronto per PR
+> **Aggiornato**: 2026-05-19 15:00 — refactor/promote-v2-to-root, file critici fixati, channel_modules da completare
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**Branch `refactor/promote-v2-to-root`: tutti gli step 1-8 completati. Prossima azione: aprire PR verso `main`.**
+**Branch `refactor/promote-v2-to-root`: 8 file critici fixati. Rimangono 8 `main.py` in `modules/channel_modules/` con path `v2/` da fixare, poi PR.**
 
 ---
 
-## 2026-05-19 — refactor/promote-v2-to-root (completato)
+## 2026-05-19 — Fix import `v2/` nei file critici
+
+**Cosa cambiato:**
+
+Rimossi tutti i riferimenti `v2/protos` e `v2/modules` dai file core:
+
+| File | Commit | Note |
+|---|---|---|
+| `shared/proto_utils.py` | [`e200d81`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/e200d817f2e1791d4c78eda322186842d0771677) | `parents[2]`→`parents[1]`, path `protos/` |
+| `shared/proto_explorer.py` | [`e200d81`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/e200d817f2e1791d4c78eda322186842d0771677) | stesso commit |
+| `modules/oaa_control_channel/handshake.py` | [`a14fa32`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/a14fa3262f4ba4de3d1c27db09339de9db5cecd0) | depth 4→3, tutti `from protos...` |
+| `modules/oaa_control_channel/service_discovery.py` | [`036f668`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/036f6689020197a731dab25abe5774ade6eb937f) | depth 4→3, ~20 import proto |
+| `modules/oaa_control_channel/serializer.py` | [`c92269a`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/c92269ac4dac79c2d9d8db3c662f28c3d90dcf22) | solo `main()` example |
+| `modules/channel_manager/registry.py` | [`60c0a0f`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/60c0a0f3c72ef0adaf851772ad5a296219a926e1) | depth 4→3, docstring |
+| `scripts/run_channel_modules.py` | [`a2f699c`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/a2f699c565e4b252bbe6ab913d0ed1c309d90647) | rimosso `_V2`, fix `sdr_hex = sdr_bytes.hex()` |
+| `scripts/compile_protos.sh` | [`e6a9765`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/e6a9765e95ff98bf440b493f9b817f289e26bf25) | `PROTO_OUT` → `protos/` |
+
+**Residui rilevati (da fixare nella prossima sessione):**
+
+Tutti i `main.py` in `modules/channel_modules/` hanno ancora il blocco bootstrap:
+```python
+_V2    = _MODULES.parent   # v2/
+_PROTOS = _V2 / "protos"   # v2/protos/
+```
+Da sostituire con:
+```python
+_REPO_ROOT = _CHANNEL_MODS.parent.parent  # root
+_PROTOS    = _REPO_ROOT / "protos"
+```
+
+File interessati (tutti in `modules/channel_modules/`):
+- `_template/main.py`
+- `audio/main.py`
+- `video/main.py`
+- `input/main.py`
+- `sensor/main.py`
+- `bluetooth/main.py`
+- `wifi/main.py`
+- `av_input/main.py`
+
+> **Nota**: i file `v2/modules/channel_modules/*/main.py` risultano ancora presenti nel repo (dead code pre-promozione). Andrebbero eliminati con un commit separato.
+
+**Why:**
+Il refactor `promote-v2-to-root` ha mosso tutto da `v2/` a root. I path bootstrap nei file devono riflettere la nuova profondità albero.
+
+**Status:** In Progress — critici ✅, channel_modules ⏳
+
+**Prossimi 3 passi:**
+1. Fixare i bootstrap path in tutti gli 8 `main.py` di `modules/channel_modules/`
+2. Eliminare i vecchi `v2/modules/channel_modules/*/main.py` (dead code)
+3. Aprire PR `refactor/promote-v2-to-root` → `main`
+
+---
+
+## 2026-05-19 — refactor/promote-v2-to-root (step 1-8 completati)
 
 **Cosa cambiato:**
 
@@ -25,50 +79,7 @@
 - **Step 7** — `README.md`: rimossi `v2/` dall'albero, `pip install -e v2/` → `pip install ".[test]"`, `--cov=v2` → `--cov=.`, rimosso `requirements-test.txt` deprecato — commit [`46da636`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/46da636bc2d9f458930a3b42357fd25b1adf44a7)
 - **Step 8** — `.github/workflows/test-suite.yml`: in tutti e 5 i job rimossi `pip install "v2/[test]"` → `".[test]"`, `-c v2/pyproject.toml`, `v2/tests/` come argomento pytest esplicito — commit [`0d82c12`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/0d82c127ccd4182766c8fd7ab1d869ee9c4b76ff)
 
-**Struttura root finale (confermata):**
-```
-/
-├── main.py               ✅
-├── bus_broker.py         ✅
-├── pyproject.toml        ✅ (testpaths=["tests"], source=["."])
-├── environment.yml       ✅
-├── shared/               ✅
-├── modules/              ✅
-├── config/               ✅
-├── protos/               ✅
-├── services/             ✅ (solo ap_manager_service)
-├── tests/                ✅ (unit/, integration/, e2e/, fuzz/, performance/)
-├── docs/                 ✅
-├── packaging/            ✅ (non modificato, compatibile)
-├── scripts/              ✅ (non modificato, compatibile)
-└── .github/workflows/    ✅ (test-suite.yml aggiornato)
-```
-
-**Residui "v2" benigni (non richiedono azione):**
-- `version = "2.0.0"` in `pyproject.toml` — versione del progetto
-- Entry storiche in `docs/session_handoff.md` (questo file)
-- `docs/TEST_SUITE_ARCHITECTURE.md` — documento di riferimento, da aggiornare in follow-up non bloccante
-
-**Piano completo (stato finale):**
-
-| Step | Azione | Stato |
-|---|---|---|
-| 1 | Crea branch `refactor/promote-v2-to-root` | ✅ |
-| 2 | Tag `v2-pre-promotion` su `main` | ✅ |
-| 3 | Aggiorna `project-vision`, `roadmap-current`, `session-handoff` | ✅ |
-| 4 | Elimina `app/`, `services/` v1, `tests/` v1, `bus_broker.py` root v1 | ✅ |
-| 5 | Promuovi `v2/` → root | ✅ |
-| 6 | Fix import paths (`conftest.py`) e test paths (`pyproject.toml`) | ✅ |
-| 7 | Aggiorna `README.md` | ✅ |
-| 8 | Aggiorna `.github/` CI workflow | ✅ |
-| 9 | PR verso `main` | ⏳ prossimo |
-
-**Status:** Pronto per PR 🚀
-
-**Prossimi 3 passi:**
-1. **Apri PR** `refactor/promote-v2-to-root` → `main` con descrizione del refactor
-2. **Esegui CI** (`unit-integration`) sul branch per verifica finale prima del merge
-3. **Follow-up post-merge** (non bloccante): aggiornare `docs/TEST_SUITE_ARCHITECTURE.md` con path senza `v2/`
+**Status:** Completato ✅
 
 ---
 
