@@ -21,10 +21,10 @@ Module-type → subprocess mapping
 ---------------------------------
   module_type     script path
   ----------      ------------
-  video           v2/modules/channel_modules/channel_video/main.py
-  audio           v2/modules/channel_modules/channel_audio/main.py  (3 instances)
-  input           v2/modules/channel_modules/channel_input/main.py
-  sensor          v2/modules/channel_modules/channel_sensor/main.py
+  video           modules/channel_modules/channel_video/main.py
+  audio           modules/channel_modules/channel_audio/main.py  (3 instances)
+  input           modules/channel_modules/channel_input/main.py
+  sensor          modules/channel_modules/channel_sensor/main.py
 
 All other descriptor keys (av_input_channel, bluetooth_channel,
 navigation_channel, media_info_channel, wifi_channel, phone_status_channel)
@@ -46,8 +46,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_REPO_ROOT  = Path(__file__).parent.parent.parent.parent
-_PROTO_ROOT = _REPO_ROOT / "v2" / "protos"
+_REPO_ROOT  = Path(__file__).parent.parent.parent
+_PROTO_ROOT = _REPO_ROOT / "protos"
 
 for _p in (_REPO_ROOT, _PROTO_ROOT):
     if str(_p) not in sys.path:
