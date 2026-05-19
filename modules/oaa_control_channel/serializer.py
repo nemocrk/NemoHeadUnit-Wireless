@@ -409,9 +409,9 @@ def main():
     Example usage demonstrating end-to-end serialization
     
     Usage:
-        python -c "from v2.modules.oaa_control_channel.serializer import Messenger; m = Messenger(); frames = m.serialize_and_log(0, 0x0003, 'hello')"
+        python -c "from modules.oaa_control_channel.serializer import Messenger; m = Messenger(); frames = m.serialize_and_log(0, 0x0003, 'hello')"
     """
-    from v2.modules.oaa_control_channel.serializer import Messenger
+    from modules.oaa_control_channel.serializer import Messenger
     
     # Example: Serialize a control channel message (channel 0, message 0x0003)
     # Input: hex string payload
