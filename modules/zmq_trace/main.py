@@ -1,11 +1,11 @@
 """
-NemoHeadUnit-Wireless v2 — zmq_trace module
+NemoHeadUnit-Wireless — zmq_trace module
 
 A normal Nemo module that collects instrumentation events emitted by BusClient
 through shared.bus_trace.BusTracer.
 
 Place as:
-  v2/modules/zmq_trace/main.py
+  modules/zmq_trace/main.py
 
 It auto-starts like other modules via main.py autodiscovery.
 """
@@ -23,11 +23,15 @@ from typing import Any
 
 import zmq
 
-_HERE = Path(__file__).parent
-_MODULES = _HERE.parent
-_V2 = _MODULES.parent
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
+# ---------------------------------------------------------------------------
+# sys.path bootstrap
+# ---------------------------------------------------------------------------
+_HERE      = Path(__file__).parent   # modules/zmq_trace/
+_MODULES   = _HERE.parent            # modules/
+_REPO_ROOT = _MODULES.parent         # root
+
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
@@ -74,10 +78,10 @@ class Metrics:
         self.seq_gap = Counter()
         self.duplicates = Counter()
         self.callback_error = Counter()
-        self.subscriptions = defaultdict(set)  # module -> set(topic)
+        self.subscriptions = defaultdict(set)  # module → set(topic)
         self.lat_us = defaultdict(lambda: deque(maxlen=_config["max_samples_per_key"]))
         self.cb_us = defaultdict(lambda: deque(maxlen=_config["max_samples_per_key"]))
-        self.last_seq = {}  # (src_module, topic, dst_module) -> seq
+        self.last_seq = {}  # (src_module, topic, dst_module) → seq
         self.started = time.time()
 
     def add(self, ev: dict[str, Any]) -> None:
@@ -352,16 +356,8 @@ def _on_config_changed(key: str, value) -> None:
 # ---------------------------------------------------------------------------
 
 def on_system_readytostart() -> None:
-    """
-    Orchestrator is ready to begin the multi-step boot.
-    Announce this module's name and priority so main.py can build
-    the startup plan before issuing system.start messages.
-    """
     log.info(f"system.readytostart received — announcing priority {PRIORITY}")
-    bus.publish("system.module_ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
+    bus.publish("system.module_ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
 def on_system_start(topic: str, payload: dict) -> None:
@@ -399,7 +395,7 @@ def run() -> None:
     try:
         bus_thread.join()
     except KeyboardInterrupt:
-        pass  # gestito dal main via system.stop
+        pass
 
 
 if __name__ == "__main__":
