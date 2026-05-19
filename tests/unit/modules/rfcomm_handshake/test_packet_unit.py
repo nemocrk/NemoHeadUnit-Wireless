@@ -17,10 +17,11 @@ from unittest.mock import MagicMock, patch, call
 import sys
 from pathlib import Path
 
-# Ensure v2/ is on sys.path
-_V2 = Path(__file__).parents[4]
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
+# tests/unit/modules/rfcomm_handshake/test_packet_unit.py
+# parents: [0]=rfcomm_handshake, [1]=modules, [2]=unit, [3]=tests, [4]=root
+_REPO_ROOT = Path(__file__).parents[4]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 with patch("shared.logger.get_logger", return_value=MagicMock()):
     from rfcomm_handshake.packet import (
