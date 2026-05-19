@@ -26,6 +26,7 @@ Coverage sections:
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 import types
@@ -187,7 +188,6 @@ class TestPublish:
     def test_again_is_swallowed(self, main_module):
         mod, zmq_stub, _, fake_socket, _ = main_module
         fake_socket.send_multipart.side_effect = zmq_stub.Again()
-        # must not raise
         mod._publish(fake_socket, "t", {})
         fake_socket.send_multipart.side_effect = None
 
@@ -238,17 +238,17 @@ class TestTerminateAll:
         proc = MagicMock()
         proc.poll.return_value = None
         proc.returncode = None
-        proc.wait.side_effect = __import__("subprocess").TimeoutExpired("x", 1)
+        # First wait() raises TimeoutExpired; subsequent calls return normally
+        proc.wait.side_effect = [subprocess.TimeoutExpired("x", 1), None]
         mod._terminate_all([("mod_b", proc)])
         proc.terminate.assert_called()
 
     def test_timeout_triggers_kill(self, main_module):
-        import subprocess
         mod, *_ = main_module
         proc = MagicMock()
         proc.poll.return_value = None
         proc.returncode = None
-        proc.wait.side_effect = subprocess.TimeoutExpired("x", 1)
+        proc.wait.side_effect = [subprocess.TimeoutExpired("x", 1), None]
         mod._terminate_all([("mod_c", proc)])
         proc.kill.assert_called()
 
@@ -276,11 +276,11 @@ class TestTerminateBroker:
         proc.terminate.assert_called_once()
 
     def test_timeout_triggers_kill(self, main_module):
-        import subprocess
         mod, *_ = main_module
         proc = MagicMock()
         proc.poll.return_value = None
-        proc.wait.side_effect = subprocess.TimeoutExpired("x", 1)
+        # First wait(timeout=GRACE_PERIOD) raises; second wait() after kill() succeeds
+        proc.wait.side_effect = [subprocess.TimeoutExpired("x", 1), None]
         mod._terminate_broker(proc)
         proc.kill.assert_called_once()
 
@@ -295,7 +295,6 @@ class TestCollectModuleReady:
     def _make_sub_socket(self, zmq_stub, messages):
         """Build a fake SUB socket that yields `messages` then stops polling."""
         sub = MagicMock()
-        # poll returns True for each message, then False to end loop
         poll_returns = [True] * len(messages) + [False] * 10
         sub.poll.side_effect = poll_returns
         encoded = [
@@ -315,7 +314,7 @@ class TestCollectModuleReady:
         fake_ctx.socket.return_value = sub
 
         result = mod._collect_module_ready(
-            MagicMock(),  # pub
+            MagicMock(),
             ["alpha", "beta"],
             window=0.05,
         )
@@ -325,7 +324,7 @@ class TestCollectModuleReady:
     def test_unreplied_modules_get_priority_1(self, main_module):
         mod, zmq_stub, fake_ctx, _, _ = main_module
         sub = MagicMock()
-        sub.poll.return_value = False  # no messages
+        sub.poll.return_value = False
         fake_ctx.socket.return_value = sub
 
         result = mod._collect_module_ready(
@@ -360,12 +359,8 @@ class TestWaitForLevelReady:
 
     def test_empty_expected_returns_immediately(self, main_module):
         mod, zmq_stub, fake_ctx, _, _ = main_module
-        # No exception must be raised and no socket created
         fake_ctx.socket.reset_mock()
         mod._wait_for_level_ready(MagicMock(), priority=1, expected=[], timeout_per_module=0.05)
-        # No ZMQ SUB socket should be created for empty list
-        # (function returns early)
-        # Just assert no exception was raised
 
 
 # ============================================================================
