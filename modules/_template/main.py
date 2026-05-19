@@ -1,8 +1,8 @@
 """
-NemoHeadUnit-Wireless v2 — Module Template
+NemoHeadUnit-Wireless — Module Template
 
 Copy this folder to start a new module:
-    cp -r v2/modules/_template v2/modules/<your_module_name>
+    cp -r modules/_template modules/<your_module_name>
 
 Then follow these steps:
   1. Set MODULE_NAME to your module name (must match the folder name)
@@ -17,8 +17,8 @@ Then follow these steps:
   5. Implement on_system_start, on_system_stop and your topic handlers
   6. Add subscriptions in run()
   7. Keep ALL internal logic inside this folder
-  8. Verify standalone: python v2/modules/<your_module_name>/main.py
-  9. Verify autodiscovery: python v2/main.py
+  8. Verify standalone: python modules/<your_module_name>/main.py
+  9. Verify autodiscovery: python main.py
 
 ---
 Boot Protocol (multi-step priority):
@@ -63,29 +63,32 @@ Module contract (fill this in):
 ---
 
 Path layout (auto-configured below):
-  v2/
+  root/
   ├── shared/           ← BusClient, ConfigClient, logger, config_schema
   └── modules/
       └── <module>/     ← THIS file lives here
           └── main.py
 
 sys.path includes:
-  v2/          → from shared.bus_client import BusClient
-               → from shared.config_client import ConfigClient
-               → from shared.config_schema import field_int, field_enum, ...
-  v2/modules/  → from <module_name>.subfile import Foo
+  root/         → from shared.bus_client import BusClient
+                → from shared.config_client import ConfigClient
+                → from shared.config_schema import field_int, field_enum, ...
+  root/modules/ → from <module_name>.subfile import Foo
 """
 
 import sys
 from pathlib import Path
 import time
 
-_HERE    = Path(__file__).parent        # v2/modules/<module_name>/
-_MODULES = _HERE.parent                 # v2/modules/
-_V2      = _MODULES.parent              # v2/
+# ---------------------------------------------------------------------------
+# sys.path bootstrap
+# ---------------------------------------------------------------------------
+_HERE      = Path(__file__).parent   # modules/<module_name>/
+_MODULES   = _HERE.parent            # modules/
+_REPO_ROOT = _MODULES.parent         # root
 
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
@@ -101,10 +104,7 @@ from shared.config_schema import (             # noqa: E402
 # ---------------------------------------------------------------------------
 
 MODULE_NAME = "_template"  # ← STEP 1: change to your module name
-
-# Boot priority (see Boot Protocol in the docstring above).
-# 0 = infrastructure, 1 = services, 2 = UI
-PRIORITY: int = 1          # ← STEP 2: set your priority level
+PRIORITY: int = 1           # ← STEP 2: 0=infrastructure, 1=services, 2=UI
 
 bus = BusClient(module_name=MODULE_NAME)
 log = get_logger(MODULE_NAME, bus=bus)
@@ -113,20 +113,6 @@ cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 # ---------------------------------------------------------------------------
 # STEP 3: Config schema
 # ---------------------------------------------------------------------------
-# _SCHEMA describes type, default value and UI constraints for every config key.
-#
-# config_manager reads field.default to seed YAML on first boot.
-# config_ui reads _SCHEMA to render the correct widget (QSpinBox, QComboBox, …).
-# config_manager validates incoming config.set calls against _SCHEMA types.
-#
-# Remove _SCHEMA (and all cfg references) if the module has no configuration.
-#
-# Available helpers:
-#   field_string(default)                     → free-text QLineEdit
-#   field_int(default, min=None, max=None)    → QSpinBox
-#   field_float(default, min=None, max=None)  → QDoubleSpinBox
-#   field_enum(default, choices=[...])        → QComboBox
-#   field_bool(default)                       → QCheckBox
 
 _SCHEMA = {
     # "my_key":  field_string(default="default_value"),
@@ -135,8 +121,6 @@ _SCHEMA = {
     # "enabled": field_bool(default=True),
 }
 
-# In-RAM config: seed from schema defaults so code can read _config before
-# config.response arrives.
 _config: dict = {k: v.default for k, v in _SCHEMA.items()}
 
 # ---------------------------------------------------------------------------
@@ -148,12 +132,10 @@ def _on_config_loaded(config: dict) -> None:
     if not config:
         log.info("No persisted config found — defaults seeded by config_manager.")
         return
-    # Merge only scalar keys present in _SCHEMA; ignore unknown / structural keys.
     merged = {k: v.default for k, v in _SCHEMA.items()}
     merged.update({k: v for k, v in config.items() if k in _SCHEMA and not isinstance(v, (dict, list))})
     _config = merged
     log.info(f"Config loaded: {_config}")
-    # TODO: apply config to live state if needed
 
 
 def _on_config_changed(key: str, value) -> None:
@@ -165,7 +147,6 @@ def _on_config_changed(key: str, value) -> None:
         return
     _config[key] = value
     log.info(f"Config changed: {key} = {value!r}")
-    # TODO: react to the change (e.g. reconfigure a subsystem)
 
 
 # ---------------------------------------------------------------------------
@@ -173,59 +154,22 @@ def _on_config_changed(key: str, value) -> None:
 # ---------------------------------------------------------------------------
 
 def on_system_readytostart() -> None:
-    """
-    Orchestrator is ready to begin the multi-step boot.
-    Announce this module's name and priority so main.py can build
-    the startup plan before issuing system.start messages.
-    """
     log.info(f"system.readytostart received — announcing priority {PRIORITY}")
-    bus.publish("system.module_ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
+    bus.publish("system.module_ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
 def on_system_start(topic: str, payload: dict) -> None:
-    """
-    Orchestrator fires system.start for each priority level in order.
-    Only act when payload["priority"] matches this module's PRIORITY.
-    After completing init, publish system.ready so main.py can advance
-    to the next priority level.
-    """
     if payload.get("priority") != PRIORITY:
-        return  # not our turn yet (or already past)
-
+        return
     log.info(f"system.start priority={PRIORITY} received — initialising...")
-
-    # Request config from config_manager.
-    # schema= is sufficient: config_manager derives defaults from field.default.
     cfg.get(schema=_SCHEMA)
-
-    # Signal that this module is fully initialised.
-    bus.publish("system.ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
+    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info(f"system.ready published (priority={PRIORITY})")
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
-    """Graceful shutdown — called for all modules simultaneously."""
     log.info("system.stop — cleaning up...")
-    # TODO: flush state, close resources, stop background threads
     bus.stop()
-
-
-# ---------------------------------------------------------------------------
-# STEP 5 (continued): topic handlers
-# ---------------------------------------------------------------------------
-# One function per subscribed topic. Naming: on_<snake_case_topic>
-#
-# Example:
-#
-# def on_some_event(topic: str, payload: dict) -> None:
-#     value = payload.get("key")
-#     bus.publish("<module_name>.result", {"value": value})
 
 
 # ---------------------------------------------------------------------------
@@ -233,12 +177,10 @@ def on_system_stop(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def run() -> None:
-    # Config callbacks — remove if no configuration needed
     cfg.on_config_loaded  = _on_config_loaded
     cfg.on_config_changed = _on_config_changed
     cfg.register()
 
-    # Boot protocol
     bus.subscribe("system.readytostart", on_system_readytostart)
     bus.subscribe("system.start",        on_system_start)
     bus.subscribe("system.stop",         on_system_stop)
@@ -253,7 +195,7 @@ def run() -> None:
     try:
         bus_thread.join()
     except KeyboardInterrupt:
-        pass  # gestito dal main via system.stop
+        pass
 
 
 if __name__ == "__main__":
