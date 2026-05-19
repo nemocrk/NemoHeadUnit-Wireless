@@ -1,8 +1,8 @@
 """
-NemoHeadUnit-Wireless v2 — bluetooth module
+NemoHeadUnit-Wireless — bluetooth_manager
 
 Module contract:
-  Name        : bluetooth
+  Name        : bluetooth_manager
   Priority    : 1  (service level)
   Subscribes  : system.readytostart
                 system.start
@@ -17,8 +17,8 @@ Module contract:
                 bluetooth_manager.paired.remove         {device_address: str}
                 bluetooth_manager.paired.connect        {device_address: str}
                 bluetooth_manager.paired.disconnect     {device_address: str}
-                config.response                 (filtered by module=bluetooth)
-                config.changed                  (filtered by module=bluetooth)
+                config.response                 (filtered by module=bluetooth_manager)
+                config.changed                  (filtered by module=bluetooth_manager)
   Publishes   : system.module_ready             {name, priority}
                 system.ready                    {name, priority}
                 bluetooth_manager.device.found          {address, name, rssi}
@@ -33,7 +33,7 @@ Module contract:
                 bluetooth_manager.paired.failed         {device_address, error}
                 bluetooth_manager.error                 {error}
 
-Configuration keys (v2/config/bluetooth_manager.yaml):
+Configuration keys (config/bluetooth_manager.yaml):
   discoverable                  bool   default: true
   discoverable_timeout          int    default: 0  (seconds, 0 = permanent)
   discovery_duration_sec        int    default: 10
@@ -55,12 +55,15 @@ import threading
 from pathlib import Path
 import time
 
-_HERE    = Path(__file__).parent   # v2/modules/bluetooth/
-_MODULES = _HERE.parent            # v2/modules/
-_V2      = _MODULES.parent         # v2/
+# ---------------------------------------------------------------------------
+# sys.path bootstrap
+# ---------------------------------------------------------------------------
+_HERE      = Path(__file__).parent   # modules/bluetooth_manager/
+_MODULES   = _HERE.parent            # modules/
+_REPO_ROOT = _MODULES.parent         # root
 
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
@@ -79,7 +82,7 @@ import bluetooth_manager.paired_devices as paired_devices    # noqa: E402
 # ---------------------------------------------------------------------------
 
 MODULE_NAME = "bluetooth_manager"
-PRIORITY    = 1  # service level
+PRIORITY    = 1
 
 bus = BusClient(module_name=MODULE_NAME)
 log = get_logger(MODULE_NAME, bus=bus)
@@ -90,17 +93,16 @@ cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 # ---------------------------------------------------------------------------
 
 _SCHEMA = {
-    "discoverable":                 field_bool(default=True),
-    "discoverable_timeout":         field_int(default=0, min=0),
-    "discovery_duration_sec":       field_int(default=10, min=1, max=120),
-    "adapter_name":                 field_string(default="NemoHeadUnit"),
-    "autoconnect_enabled":          field_bool(default=True),
+    "discoverable":                  field_bool(default=True),
+    "discoverable_timeout":          field_int(default=0, min=0),
+    "discovery_duration_sec":        field_int(default=10, min=1, max=120),
+    "adapter_name":                  field_string(default="NemoHeadUnit"),
+    "autoconnect_enabled":           field_bool(default=True),
     "autoconnect_connect_timeout_s": field_int(default=8, min=2, max=30),
     "autoconnect_backoff_initial_s": field_int(default=5, min=1, max=30),
     "autoconnect_backoff_cap_s":     field_int(default=60, min=10, max=300),
 }
 
-# In-RAM config: seed from schema defaults.
 _config: dict = {k: v.default for k, v in _SCHEMA.items()}
 
 # ---------------------------------------------------------------------------
@@ -150,12 +152,6 @@ def _stop_glib_mainloop() -> None:
 # ---------------------------------------------------------------------------
 
 def _autoconnect_loop() -> None:
-    """
-    Daemon thread: iterates over all Paired/Trusted devices and attempts
-    Device1.Connect() on each. Uses exponential backoff between full rounds.
-    Stops when _autoconnect_stop is set (e.g. bluetooth_manager.rfcomm.connected or
-    system.stop).
-    """
     global _autoconnect_active
 
     backoff = int(_config["autoconnect_backoff_initial_s"])
@@ -187,7 +183,6 @@ def _autoconnect_loop() -> None:
 
                 log.info(f"Autoconnect: attempting connect to {address} ({dev.get('name', '?')})")
 
-                # Synchronous wrapper around the async connect()
                 done = threading.Event()
 
                 def _on_ok(addr, _ev=done):
@@ -205,7 +200,6 @@ def _autoconnect_loop() -> None:
                     on_connected=_on_ok,
                     on_failed=_on_err,
                 )
-                # Wait for watchdog/reply (timeout + 1s margin)
                 done.wait(timeout=timeout + 1)
 
             if _autoconnect_stop.is_set():
@@ -232,11 +226,7 @@ def _start_autoconnect() -> None:
             return
         _autoconnect_stop.clear()
         _autoconnect_active = True
-    threading.Thread(
-        target=_autoconnect_loop,
-        daemon=True,
-        name="bt-autoconnect",
-    ).start()
+    threading.Thread(target=_autoconnect_loop, daemon=True, name="bt-autoconnect").start()
     log.info("Autoconnect thread launched")
 
 
@@ -273,8 +263,6 @@ def _on_config_loaded(config: dict) -> None:
 
     log.info("Bluetooth subsystem ready")
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
-
-    # Start autoconnect after subsystem is fully ready
     _start_autoconnect()
 
 
@@ -306,35 +294,24 @@ def _apply_config() -> None:
 
 def on_system_readytostart() -> None:
     log.info(f"system.readytostart received — announcing priority {PRIORITY}")
-    bus.publish("system.module_ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
+    bus.publish("system.module_ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
 def on_system_start(topic: str, payload: dict) -> None:
     global _adapter
-
     if payload.get("priority") != PRIORITY:
         return
-
     log.info(f"system.start priority={PRIORITY} — initialising Bluetooth subsystem")
-
     _start_glib_mainloop()
-
     _adapter = BluezAdapter()
     if not _adapter.init():
         log.error("D-Bus init failed — Bluetooth unavailable")
         bus.publish("bluetooth_manager.error", {"error": "D-Bus init failed"})
         bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
-        #return
-
     if not _adapter.register_profiles():
         log.error("Profile registration failed")
         bus.publish("bluetooth_manager.error", {"error": "Profile registration failed"})
         bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
-        #return
-
     cfg.get(schema=_SCHEMA)
 
 
@@ -351,7 +328,7 @@ def on_system_stop(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# bluetooth_manager.discover
+# Topic handlers
 # ---------------------------------------------------------------------------
 
 def on_discover(topic: str, payload: dict) -> None:
@@ -359,11 +336,9 @@ def on_discover(topic: str, payload: dict) -> None:
     if _adapter is None:
         bus.publish("bluetooth_manager.error", {"error": "Adapter not ready"})
         return
-
     if _discovery is not None and _discovery.is_running:
         log.warning("Discovery already in progress — ignoring duplicate request")
         return
-
     duration = int(payload.get("duration_sec", _config["discovery_duration_sec"]))
     log.info(f"Discovery requested for {duration}s")
     _discovery = DiscoverySession(
@@ -373,10 +348,6 @@ def on_discover(topic: str, payload: dict) -> None:
     )
     _discovery.start(duration_sec=duration)
 
-
-# ---------------------------------------------------------------------------
-# bluetooth_manager.pair
-# ---------------------------------------------------------------------------
 
 def on_pair(topic: str, payload: dict) -> None:
     if _pairing is None:
@@ -389,10 +360,6 @@ def on_pair(topic: str, payload: dict) -> None:
     log.info(f"Pairing requested with {address}")
     _pairing.pair(address)
 
-
-# ---------------------------------------------------------------------------
-# bluetooth_manager.confirm_pairing / bluetooth_manager.reject_pairing
-# ---------------------------------------------------------------------------
 
 def on_confirm_pairing(topic: str, payload: dict) -> None:
     if _pairing is None:
@@ -416,28 +383,16 @@ def on_reject_pairing(topic: str, payload: dict) -> None:
         _pairing.reject(address)
 
 
-# ---------------------------------------------------------------------------
-# bluetooth_manager.rfcomm.connected → stop autoconnect
-# ---------------------------------------------------------------------------
-
 def on_rfcomm_connected(topic: str, payload: dict) -> None:
     address = payload.get("device_address", "unknown")
     log.info(f"RFCOMM connected ({address}) — stopping autoconnect loop")
     _stop_autoconnect(f"rfcomm.connected device={address}")
 
 
-# ---------------------------------------------------------------------------
-# bluetooth_manager.try_autoconnect
-# ---------------------------------------------------------------------------
-
 def on_try_autoconnect(topic: str, payload: dict) -> None:
     log.info("bluetooth_manager.try_autoconnect received")
     _start_autoconnect()
 
-
-# ---------------------------------------------------------------------------
-# bluetooth_manager.paired.*
-# ---------------------------------------------------------------------------
 
 def on_paired_list(topic: str, payload: dict) -> None:
     if _adapter is None:
@@ -472,9 +427,7 @@ def on_paired_connect(topic: str, payload: dict) -> None:
         return
     timeout = int(_config["autoconnect_connect_timeout_s"])
     paired_devices.connect(
-        _adapter.bus,
-        address,
-        timeout_s=timeout,
+        _adapter.bus, address, timeout_s=timeout,
         on_connected=lambda addr: bus.publish("bluetooth_manager.paired.connected", {"device_address": addr}),
         on_failed=lambda addr, err: bus.publish("bluetooth_manager.paired.failed", {"device_address": addr, "error": err}),
     )
@@ -489,8 +442,7 @@ def on_paired_disconnect(topic: str, payload: dict) -> None:
         bus.publish("bluetooth_manager.error", {"error": "Adapter not ready"})
         return
     paired_devices.disconnect(
-        _adapter.bus,
-        address,
+        _adapter.bus, address,
         on_disconnected=lambda addr: bus.publish("bluetooth_manager.paired.disconnected", {"device_address": addr}),
         on_failed=lambda addr, err: bus.publish("bluetooth_manager.paired.failed", {"device_address": addr, "error": err}),
     )
@@ -525,19 +477,19 @@ def run() -> None:
     cfg.on_config_changed = _on_config_changed
     cfg.register()
 
-    bus.subscribe("system.readytostart",        on_system_readytostart)
-    bus.subscribe("system.start",               on_system_start)
-    bus.subscribe("system.stop",                on_system_stop)
-    bus.subscribe("bluetooth_manager.discover",         on_discover)
-    bus.subscribe("bluetooth_manager.pair",             on_pair)
-    bus.subscribe("bluetooth_manager.confirm_pairing",  on_confirm_pairing)
-    bus.subscribe("bluetooth_manager.reject_pairing",   on_reject_pairing)
-    bus.subscribe("bluetooth_manager.rfcomm.connected", on_rfcomm_connected)
-    bus.subscribe("bluetooth_manager.try_autoconnect",  on_try_autoconnect)
-    bus.subscribe("bluetooth_manager.paired.list",      on_paired_list)
-    bus.subscribe("bluetooth_manager.paired.remove",    on_paired_remove)
-    bus.subscribe("bluetooth_manager.paired.connect",   on_paired_connect)
-    bus.subscribe("bluetooth_manager.paired.disconnect", on_paired_disconnect)
+    bus.subscribe("system.readytostart",                  on_system_readytostart)
+    bus.subscribe("system.start",                         on_system_start)
+    bus.subscribe("system.stop",                          on_system_stop)
+    bus.subscribe("bluetooth_manager.discover",           on_discover)
+    bus.subscribe("bluetooth_manager.pair",               on_pair)
+    bus.subscribe("bluetooth_manager.confirm_pairing",    on_confirm_pairing)
+    bus.subscribe("bluetooth_manager.reject_pairing",     on_reject_pairing)
+    bus.subscribe("bluetooth_manager.rfcomm.connected",   on_rfcomm_connected)
+    bus.subscribe("bluetooth_manager.try_autoconnect",    on_try_autoconnect)
+    bus.subscribe("bluetooth_manager.paired.list",        on_paired_list)
+    bus.subscribe("bluetooth_manager.paired.remove",      on_paired_remove)
+    bus.subscribe("bluetooth_manager.paired.connect",     on_paired_connect)
+    bus.subscribe("bluetooth_manager.paired.disconnect",  on_paired_disconnect)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
