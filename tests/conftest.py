@@ -1,7 +1,7 @@
 """
-NemoHeadUnit-Wireless v2 — Global Test Fixtures
-===============================================
-Fase 0: infrastruttura condivisa per tutta la test suite.
+NemoHeadUnit-Wireless — Global Test Fixtures
+============================================
+Infrastruttura condivisa per tutta la test suite.
 
 Fixture disponibili:
   in_process_broker  — broker ZMQ XPUB/XSUB reale su socket IPC univoci
@@ -34,14 +34,14 @@ import pytest
 import zmq
 
 # ---------------------------------------------------------------------------
-# sys.path setup — garantisce import di v2/shared e v2/modules da qualsiasi
-# directory di esecuzione.
+# sys.path setup — garantisce import di shared, modules e protos da qualsiasi
+# directory di esecuzione (root del repo dopo promozione da v2/).
 # ---------------------------------------------------------------------------
 
-_HERE = Path(__file__).parent          # v2/tests/
-_V2   = _HERE.parent                   # v2/
+_HERE = Path(__file__).parent          # tests/
+_ROOT = _HERE.parent                   # root del repo
 
-for _p in (_V2 / "modules", _V2 / "protos", _V2 / "shared", _V2 / "modules" / "channel_modules", _V2 / "tests"):
+for _p in (_ROOT / "modules", _ROOT / "protos", _ROOT / "shared", _ROOT / "modules" / "channel_modules", _ROOT / "tests"):
     _s = str(_p)
     if _s not in sys.path:
         sys.path.insert(0, _s)
@@ -54,7 +54,7 @@ for _p in (_V2 / "modules", _V2 / "protos", _V2 / "shared", _V2 / "modules" / "c
 def _preload_all_protos():
     """Pre-carica tutti i moduli proto per popolare il descriptor pool.
     Deve essere invocato prima che i moduli di test effettuino i propri import."""
-    _proto_root = _V2 / "protos"
+    _proto_root = _ROOT / "protos"
     if not _proto_root.exists():
         return
 
