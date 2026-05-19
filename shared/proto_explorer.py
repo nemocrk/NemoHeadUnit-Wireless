@@ -10,13 +10,13 @@ import inspect
 from pathlib import Path
 from google.protobuf import descriptor as _descriptor
 
-# 1. Aggiungi la root del repo (per eventuali import tipo v2.xxx)
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# 1. Aggiungi la root del repo
+REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # 2. Aggiungi anche la root dei proto (per import tipo oaa.xxx)
-PROTO_ROOT = REPO_ROOT / "v2" / "protos"
+PROTO_ROOT = REPO_ROOT / "protos"
 if str(PROTO_ROOT) not in sys.path:
     sys.path.insert(0, str(PROTO_ROOT))
 
@@ -156,7 +156,7 @@ def explore_proto_module(module_name: str):
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Utilizzo: python proto_explorer.py <nome_modulo_pb2>")
-        print("Esempio: python v2/shared/proto_explorer.py v2.protos.oaa.control.ControlMessageIdsEnum_pb2")
+        print("Esempio: python shared/proto_explorer.py protos.oaa.control.ControlMessageIdsEnum_pb2")
         sys.exit(1)
 
     target_module = sys.argv[1]
