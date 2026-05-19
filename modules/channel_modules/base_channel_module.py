@@ -1,14 +1,14 @@
 """
 base_channel_module.py — Abstract base class for AA channel modules.
 
-All modules under v2/modules/channel_modules/ (video, audio, input, sensor)
+All modules under modules/channel_modules/ (video, audio, input, sensor)
 must subclass BaseChannelModule and implement its abstract methods.
 
-This class enforces the v2 module contract (boot protocol + bus lifecycle)
+This class enforces the module contract (boot protocol + bus lifecycle)
 so that concrete channel modules only need to implement channel-specific logic.
 
 ---
-Boot protocol (mirrors v2/main.py pattern, prefix: channel_manager):
+Boot protocol (mirrors main.py pattern, prefix: channel_manager):
 
   channel_manager → channel_manager.module_readytostart   (broadcast)
   module          → channel_manager.module_ready_to_start  {name, priority}
@@ -81,14 +81,13 @@ from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# sys.path bootstrap — works wherever this file is called from
+# sys.path bootstrap
 # ---------------------------------------------------------------------------
-_HERE        = Path(__file__).parent          # v2/modules/channel_modules/
-_MODULES     = _HERE.parent                   # v2/modules/
-_V2          = _MODULES.parent                # v2/
-_REPO        = _V2.parent                     # repo root
+_HERE         = Path(__file__).parent   # modules/channel_modules/
+_MODULES      = _HERE.parent            # modules/
+_REPO_ROOT    = _MODULES.parent         # root
 
-for _p in (_V2, _MODULES, _REPO):
+for _p in (_REPO_ROOT, _MODULES):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
@@ -247,7 +246,6 @@ class BaseChannelModule(ABC):
         })
 
     def _on_channel_manager_module_start(self, topic: str, payload: dict) -> None:
-        # Filter by priority level — mirrors main.py system.start pattern.
         if payload.get("priority") != self.PRIORITY:
             return
         self.log.info(f"channel_manager.module_start priority={self.PRIORITY} — initialising {self.MODULE_NAME}...")
@@ -261,7 +259,6 @@ class BaseChannelModule(ABC):
     def _on_channel_manager_module_stop(self, topic: str, payload: dict) -> None:
         self.log.info("channel_manager.module_stop — cleaning up...")
         self._cleanup()
-        # ACK before stopping the bus so channel_manager can coordinate shutdown.
         self.bus.publish("channel_manager.module_stopped", {"name": self.MODULE_NAME})
         self.log.info(f"channel_manager.module_stopped published for {self.MODULE_NAME}")
         self.bus.stop()
@@ -285,13 +282,7 @@ class BaseChannelModule(ABC):
         self.on_channel_close(self.CHANNEL_ID)
 
     def _on_aa_frame(self, topic: str, payload: dict) -> None:
-        """Receive a fully assembled, decrypted frame from tcp_server.
-
-        tcp_server already extracts message_id and strips it from the payload,
-        so no struct.unpack is needed here.
-
-        Payload contract: {channel_id, message_id, encrypted, payload_hex}
-        """
+        """Receive a fully assembled, decrypted frame from tcp_server."""
         try:
             channel_id = int(payload["channel_id"])
             message_id = int(payload["message_id"])
@@ -315,19 +306,7 @@ class BaseChannelModule(ABC):
     # ------------------------------------------------------------------
 
     def send_frame(self, message_id: int, proto_body: bytes, encrypted: bool = True) -> None:
-        """Send an AA frame on this module's channel.
-
-        Publishes on aa.frame.send:
-            channel_id  : int   — this module's CHANNEL_ID
-            message_id  : int   — 2-byte AA message identifier
-            payload_hex : str   — proto body ONLY
-            encrypted   : bool  — echoed from the received frame, or True by default post-handshake
-
-        Args:
-            message_id:  2-byte big-endian AA message identifier.
-            proto_body:  serialised protobuf payload (may be empty bytes).
-            encrypted:   echo from received frame's encrypted flag (default True).
-        """
+        """Send an AA frame on this module's channel."""
         self.log.debug(
             "send_frame: ch=%d msg=0x%04x enc=%s body_len=%d",
             self.CHANNEL_ID, message_id, encrypted, len(proto_body),
@@ -353,14 +332,7 @@ class BaseChannelModule(ABC):
 
     @abstractmethod
     def on_frame(self, channel_id: int, message_id: int, encrypted: bool, data: bytes) -> None:
-        """Called for every fully assembled, decrypted frame on this channel.
-
-        Args:
-            channel_id:  AA channel number.
-            message_id:  2-byte AA message identifier.
-            encrypted:   True if the wire frame was encrypted (echo of original flag).
-            data:        decrypted proto body bytes.
-        """
+        """Called for every fully assembled, decrypted frame on this channel."""
 
     # ------------------------------------------------------------------
     # Optional hooks
