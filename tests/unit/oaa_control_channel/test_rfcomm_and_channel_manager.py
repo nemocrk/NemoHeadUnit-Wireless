@@ -11,8 +11,8 @@ All tests use mock_bus from conftest.py — no real ZMQ sockets needed.
 Proto-level helpers are skipped via pytest.importorskip.
 
 Run with:
-    cd v2/tests
-    pytest test_rfcomm_and_channel_manager.py -v
+    cd tests
+    pytest unit/oaa_control_channel/test_rfcomm_and_channel_manager.py -v
 """
 
 from __future__ import annotations
