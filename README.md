@@ -10,12 +10,13 @@ Implementa il protocollo OAA (Open Android Auto) su trasporto Wi-Fi/TCP, con ges
 ## Architettura
 
 ```
-v2/
-├── modules/                  # Moduli principali (channel_manager, tcp_server, audio_manager, ...)
+.
+├── modules/                   # Moduli principali (channel_manager, tcp_server, audio_manager, ...)
 ├── modules/channel_modules/   # Canali OAA (audio, video, input, sensor, bluetooth, wifi, av_input)
 ├── modules/oaa_control_channel/ # Handshake, service discovery, serializer
-├── shared/                   # Utility condivise (bus_client, logger, proto_utils, config_client, ...)
-└└── tests/                    # Suite di test (unit, integration, e2e, fuzz, performance)
+├── shared/                    # Utility condivise (bus_client, logger, proto_utils, config_client, ...)
+├── services/                  # Servizi di sistema (ap_manager_service, ...)
+└── tests/                     # Suite di test (unit, integration, e2e, fuzz, performance)
 ```
 
 Riferimento architetturale completo: [`docs/project-vision.md`](docs/project-vision.md)
@@ -49,11 +50,10 @@ ad ogni esecuzione di `unit-integration` o `all` e committato in `docs/badges/`.
 
 ```bash
 # Installa dipendenze
-pip install -r v2/tests/requirements-test.txt
-pip install -e v2/
+pip install -e ".[test]"
 
 # Unit + integration (gate 80%)
-pytest -m "unit or integration" --cov=v2 --cov-report=term-missing --cov-fail-under=80
+pytest -m "unit or integration" --cov=. --cov-report=term-missing --cov-fail-under=80
 
 # Solo unit
 pytest -m unit -v
@@ -68,7 +68,7 @@ pytest -m fuzz -v
 pytest -m performance -v
 
 # Tutto
-pytest -v --cov=v2
+pytest -v --cov=.
 ```
 
 ---
