@@ -1,13 +1,44 @@
 # Session Handoff — NemoHeadUnit-Wireless v2 Test Suite
 
 > **Scopo**: documento di continuità per sessioni AI successive.
-> **Aggiornato**: 2026-05-15 — **TUTTI I BUG DI PRODUZIONE FIXATI**
+> **Aggiornato**: 2026-05-19 — join-network mode in `ap_manager_service`
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**Test suite completa (57 file, ~3120 test) + tutti e 5 i bug di `KNOWN_PRODUCTION_BUGS.md` risolti.** Prossimo: coverage report + top-up moduli sotto 80%.
+**Test suite completa (57 file, ~3120 test) + tutti i bug di produzione fixati + `ap_manager_service` esteso con join-network mode (26 nuovi test).** Prossimo: coverage report + validazione su device reale.
+
+---
+
+## 2026-05-19 — ap_manager_service: join-network mode
+
+**Cosa cambiato:**
+
+- **`services/ap_manager_service/ap_manager_service.py`** — commit [`23ee37d`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/23ee37d7074e11d16bdbd5005455b5908f65e89a)
+  - Aggiunti 3 helper puri: `_detect_existing_wifi()`, `_get_iface_ip()`, `_get_wifi_psk()`
+  - `_APRunner` esteso con campo `_mode` (`"ap"` | `"join"` | `None`)
+  - `start()` ora sceglie automaticamente il percorso:
+    - **join-network**: HU già connessa con PSK disponibile → nessun daemon, nessun cambio interfaccia
+    - **ap-mode**: comportamento precedente invariato
+  - `stop()` in modalità `"join"`: solo reset stato, zero teardown (no `ip flush`, no NM restart)
+  - `is_running()` in modalità `"join"`: `True` finché `_cfg is not None`
+  - `get_mode()` esposto per log e test
+  - Fallback trasparente ad AP mode se: nessuna rete WiFi attiva, PSK non recuperabile, IP non assegnato, rete enterprise (802.1X)
+
+- **`services/ap_manager_service/tests/test_ap_manager_service.py`** — commit [`c7ac71f`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/c7ac71f11bc742d4c156476dc31b2defbc6418ba)
+  - 26 test case, copertura ≥ 80% del codice nuovo
+  - Import del modulo senza D-Bus reale (stub `dbus`, `gi`, `GLib` via `sys.modules`)
+  - Classi di test: `TestDetectExistingWifi` (10), `TestGetIfaceIp` (4), `TestGetWifiPsk` (5), `TestAPRunnerJoinNetworkMode` (8), `TestAPRunnerFallbackToAP` (3), `TestAPRunnerAPModeStop` (3), `TestAPRunnerIsRunning` (5)
+
+**Perché:** Evitare la creazione di un AP quando la HU è già connessa ad una rete WiFi con PSK — il telefono si connette alla stessa rete e raggiunge la HU tramite il suo IP locale.
+
+**Status:** Completato ✅
+
+**Prossimi 3 passi:**
+1. Aggiornare `docs/session_handoff.md` ✅ (questa entry)
+2. Validare su device reale: testare fallback con rete enterprise e rete senza PSK in NM
+3. Valutare segnale D-Bus dedicato `APMode(mode: s)` per permettere a `hostapd_helper` di distinguere i due percorsi senza polling
 
 ---
 
@@ -54,6 +85,7 @@
 
 | Data | Cosa | Status |
 |---|---|---|
+| 2026-05-19 | `ap_manager_service` join-network mode + 26 test | ✅ |
 | 2026-05-15 | Fix 5 bug produzione da KNOWN_PRODUCTION_BUGS.md | ✅ |
 | 2026-05-13 | Fase 5 §2/§3 (chiude test suite) | ✅ |
 | 2026-05-13 | Fase 4 §5/§6 + Fase 5 §1 | ✅ |
@@ -85,6 +117,9 @@ pytest -m "unit or integration" --cov=v2 --cov-fail-under=80
 
 # Tutto
 pytest -v --cov=v2
+
+# Test ap_manager_service (no D-Bus richiesto)
+python -m pytest services/ap_manager_service/tests/test_ap_manager_service.py -v
 ```
 
 ---
@@ -93,6 +128,8 @@ pytest -v --cov=v2
 
 | File | Commit | Test | Note |
 |---|---|---|---|
+| `services/ap_manager_service/ap_manager_service.py` | [`23ee37d`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/23ee37d7074e11d16bdbd5005455b5908f65e89a) | — | join-network mode |
+| `services/ap_manager_service/tests/test_ap_manager_service.py` | [`c7ac71f`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/c7ac71f11bc742d4c156476dc31b2defbc6418ba) | 26 | stub dbus, no D-Bus richiesto |
 | `v2/tests/conftest.py` | `0ff487e` | — | Fixture globali |
 | `v2/tests/pytest.ini` | `0ff487e` | — | |
 | `v2/tests/requirements-test.txt` | `0ff487e` | — | |
@@ -150,7 +187,7 @@ pytest -v --cov=v2
 | `fuzz/test_proto_utils_roundtrip.py` | — | ~10 | Fase 5 §2 |
 | `fuzz/test_bus_payload_malformed.py` | — | ~10 | Fase 5 §3 |
 
-**Totale: ~3120 test in 57 file + 3 helper + 3 infra.**
+**Totale: ~3146 test in 59 file + 3 helper + 3 infra.**
 
 ---
 
@@ -160,6 +197,12 @@ pytest -v --cov=v2
 - `publish()` inietta `_trace: {src_module, topic, seq, ts_ns}` nel payload wire
 - `publish()` ritorna `bool`; `BUS_HWM` = 5000
 - `BusTracer` va **sempre mockato** nei test unit
+
+### ap_manager_service — join-network mode (2026-05-19)
+- `_detect_existing_wifi()` usa `nmcli -t -f active,ssid,bssid,device,security,type device wifi`
+- Fallback automatico ad AP mode se: nessuna rete, enterprise (802.1X), no IP, no PSK in NM
+- In join mode: **zero teardown** su `stop()` — non toccare l'interfaccia né NM
+- Test: stub `dbus`/`gi`/`GLib` via `sys.modules` per eseguire senza D-Bus di sistema
 
 ### Performance — pattern consolidato (Fase 4)
 ```python
