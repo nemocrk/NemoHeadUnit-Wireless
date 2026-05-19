@@ -1,5 +1,5 @@
 """
-NemoHeadUnit-Wireless v2 — channel_modules/bluetooth
+NemoHeadUnit-Wireless — channel_modules/bluetooth
 
 Module contract:
   Name        : bluetooth
@@ -44,13 +44,12 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # sys.path bootstrap
 # ---------------------------------------------------------------------------
-_HERE         = Path(__file__).parent          # v2/modules/channel_modules/bluetooth/
-_CHANNEL_MODS = _HERE.parent                   # v2/modules/channel_modules/
-_MODULES      = _CHANNEL_MODS.parent           # v2/modules/
-_V2           = _MODULES.parent                # v2/
-_PROTOS       = _V2 / "protos"                 # v2/protos/
+_HERE         = Path(__file__).parent   # modules/channel_modules/bluetooth/
+_CHANNEL_MODS = _HERE.parent            # modules/channel_modules/
+_MODULES      = _CHANNEL_MODS.parent    # modules/
+_REPO_ROOT    = _MODULES.parent         # root
 
-for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
+for _p in (_REPO_ROOT, _MODULES, _CHANNEL_MODS, _REPO_ROOT / "protos"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
@@ -102,23 +101,11 @@ class BluetoothModule(BaseChannelModule):
     CHANNEL_ID:  int = -1   # always overridden by --channel-id
     PRIORITY:    int = 1
 
-    # ------------------------------------------------------------------
-    # Config schema — no configurable parameters for this module
-    # ------------------------------------------------------------------
-
     def get_schema(self) -> dict:
         return {}
 
-    # ------------------------------------------------------------------
-    # Construction
-    # ------------------------------------------------------------------
-
     def __init__(self) -> None:
         super().__init__()
-
-    # ------------------------------------------------------------------
-    # BaseChannelModule abstract interface
-    # ------------------------------------------------------------------
 
     def on_channel_open(self, channel_id: int, descriptor: dict) -> None:
         self.log.info("Bluetooth channel %d open (descriptor: %s)", channel_id, descriptor)
@@ -127,18 +114,9 @@ class BluetoothModule(BaseChannelModule):
         self.log.info("Bluetooth channel %d closed", channel_id)
 
     def on_frame(self, channel_id: int, data: bytes) -> None:
-        """
-        Entry point for every raw binary frame on the Bluetooth channel.
-
-        This is a NON-AV channel: no AVChannelSetupRequest, no session_id,
-        no media ACK.  Decode the frame header and dispatch by message_id
-        using BluetoothChannelMessage IDs directly.
-        """
         result = decode_aa_frame(data)
         if result is None:
-            self.log.error(
-                "on_frame: malformed payload on ch=%d — dropping", channel_id
-            )
+            self.log.error("on_frame: malformed payload on ch=%d — dropping", channel_id)
             return
 
         message_id, body = result
@@ -152,29 +130,15 @@ class BluetoothModule(BaseChannelModule):
         elif message_id == _MSG_AUTH_RESULT:
             self._handle_auth_result(body)
         else:
-            self.log.debug(
-                "Unhandled msg_id=0x%04x ch=%d len=%d",
-                message_id, channel_id, len(body),
-            )
-
-    # ------------------------------------------------------------------
-    # Message handlers
-    # ------------------------------------------------------------------
+            self.log.debug("Unhandled msg_id=0x%04x ch=%d len=%d", message_id, channel_id, len(body))
 
     def _handle_open_request(self, body: bytes) -> None:
-        """Send ChannelOpenResponse and transition to OPEN."""
         resp = ChannelOpenResponse()
         resp.status = Status.OK
         self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
         self.log.info("ChannelOpenRequest ch=%d → ChannelOpenResponse sent", self.CHANNEL_ID)
 
     def _handle_pairing_request(self, body: bytes) -> None:
-        """
-        Parse BluetoothPairingRequest, publish on the bus, then respond
-        with already_paired=True, status=0 (SUCCESS).
-
-        BT pairing is managed externally — this module never touches bluetoothctl.
-        """
         try:
             req = BluetoothPairingRequest()
             req.ParseFromString(body)
@@ -185,59 +149,37 @@ class BluetoothModule(BaseChannelModule):
             )
             req = None
 
-        phone_address = req.phone_address if req and req.HasField("phone_address") else "unknown"
-        phone_name    = req.phone_name    if req and req.HasField("phone_name")    else ""
+        phone_address  = req.phone_address  if req and req.HasField("phone_address")  else "unknown"
+        phone_name     = req.phone_name     if req and req.HasField("phone_name")     else ""
         pairing_method = int(req.pairing_method) if req and req.HasField("pairing_method") else 0
 
         self.log.info(
             "PAIRING_REQUEST ch=%d phone_address=%s phone_name=%r method=%d",
             self.CHANNEL_ID, phone_address, phone_name, pairing_method,
         )
-
-        # Forward to bus — other modules (e.g. rfcomm_handshake) may act on it
         self.bus.publish("bluetooth.pairing_request", {
             "phone_address":  phone_address,
             "phone_name":     phone_name,
             "pairing_method": pairing_method,
         })
 
-        # Respond: already paired — no local BT action needed
         resp = BluetoothPairingResponse()
         resp.already_paired = True
-        resp.status = 0  # SUCCESS
+        resp.status = 0
         self.send_frame(_MSG_PAIRING_RESPONSE, resp.SerializeToString())
-        self.log.info(
-            "PAIRING_RESPONSE sent ch=%d already_paired=True status=0",
-            self.CHANNEL_ID,
-        )
+        self.log.info("PAIRING_RESPONSE sent ch=%d already_paired=True status=0", self.CHANNEL_ID)
 
     def _handle_auth_data(self, body: bytes) -> None:
-        """Forward AUTH_DATA raw bytes on the bus. Not processed in this module."""
-        self.log.debug(
-            "AUTH_DATA ch=%d len=%d hex_prefix=%s",
-            self.CHANNEL_ID, len(body), body[:16].hex(),
-        )
+        self.log.debug("AUTH_DATA ch=%d len=%d hex_prefix=%s", self.CHANNEL_ID, len(body), body[:16].hex())
         self.bus.publish("bluetooth.auth_data", {"data_hex": body.hex()})
 
     def _handle_auth_result(self, body: bytes) -> None:
-        """Forward AUTH_RESULT raw bytes on the bus. Not processed in this module."""
-        self.log.debug(
-            "AUTH_RESULT ch=%d len=%d hex_prefix=%s",
-            self.CHANNEL_ID, len(body), body[:16].hex(),
-        )
+        self.log.debug("AUTH_RESULT ch=%d len=%d hex_prefix=%s", self.CHANNEL_ID, len(body), body[:16].hex())
         self.bus.publish("bluetooth.auth_result", {"data_hex": body.hex()})
-
-    # ------------------------------------------------------------------
-    # run() override — no extra subscriptions needed for this module
-    # ------------------------------------------------------------------
 
     def run(self) -> None:
         super().run()
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     BluetoothModule().run()
