@@ -69,8 +69,8 @@ The primary purpose of NemoHeadUnit-Wireless is to emulate an Android Auto head 
 - **Python-Only**: No C++ dependencies; pure Python implementation
 - **Multi-Process IPC**: Independent OS processes communicate exclusively through the ZeroMQ XPUB/XSUB broker (`bus_broker.py`)
 - **Message-Bus Centricity**: Every interaction between modules—from instantiation and initialization to runtime media frames—is strictly routed through the bus. No Python object references cross process boundaries.
-- **Qt Thread Safety**: The `QtBusBridge` (`app/gui/qt_bridge.py`) ensures ZMQ recv-thread callbacks are always delivered to the Qt main thread via `QueuedConnection`.
-- **Logging**: Per-module verbosity control implemented via the Logger module (`app/logger.py`)
+- **Qt Thread Safety**: The `QtBusBridge` (`modules/video_ui/`) ensures ZMQ recv-thread callbacks are always delivered to the Qt main thread via `QueuedConnection`.
+- **Logging**: Per-module verbosity control implemented via the Logger module (`shared/logger.py`)
 
 ---
 
@@ -83,13 +83,12 @@ The primary purpose of NemoHeadUnit-Wireless is to emulate an Android Auto head 
 │   (XPUB :sub)        │  ipc:///tmp/nemobus.sub
 └─────────────────────┘
          │ IPC (msgpack frames)
-    ────┴──────────────────────────
+    ────┼──────────────────────
     │                          │                     │
-┌───┴────────┐   ┌───────────────┐   ┌───────────────┐
-│  app/main.py  │   │wireless_daemon│   │media_renderer │
-│  GUI Process  │   │   (services/) │   │  (services/)  │
-│  PyQt6 +      │   │  Bluetooth +  │   │ GStreamer /   │
-│  QtBusBridge  │   │  TCP Server   │   │ ffplay fallbk │
+┌───┼──────┐   ┌───────────────┐   ┌───────────────┐
+│  main.py       │   │bluetooth_manager  │   │ audio_manager  │
+│  Orchestrator  │   │  + tcp_server     │   │ + video_ui     │
+│  subprocesses  │   │  (modules/)       │   │ (modules/)     │
 └──────────────┘   └───────────────┘   └───────────────┘
 ```
 
@@ -98,15 +97,16 @@ The primary purpose of NemoHeadUnit-Wireless is to emulate an Android Auto head 
 | File | Role |
 |------|------|
 | `bus_broker.py` | Central ZMQ XPUB/XSUB broker — must start first |
-| `app/bus_client.py` | `BusClient` — drop-in replacement for `MessageBus` |
-| `app/message_bus.py` | Compatibility shim: `MessageBus = BusClient` |
-| `app/gui/qt_bridge.py` | `QtBusBridge` — ZMQ→Qt main thread dispatch |
-| `app/main.py` | Starts broker + daemons as subprocesses, runs Qt loop |
-| `app/gui/modern_main_window.py` | Main window, all bus callbacks use `thread="main"` |
-| `app/connection.py` | `ConnectionManager` — serialisable payloads only |
-| `app/component_registry.py` | Abstract base for bus-registered components |
-| `services/wireless_daemon.py` | Bluetooth/TCP standalone process |
-| `services/media_renderer.py` | AAC/H.264 playback via GStreamer or ffplay |
+| `shared/bus_client.py` | `BusClient` — shared IPC client for all modules |
+| `shared/logger.py` | Per-module verbosity control |
+| `main.py` | Orchestrator: starts broker + modules as subprocesses |
+| `modules/video_ui/` | Video rendering + Qt main thread dispatch via `QtBusBridge` |
+| `modules/channel_manager/` | Android Auto channel lifecycle management |
+| `modules/audio_manager/` | AAC audio playback |
+| `modules/bluetooth_manager/` | Bluetooth pairing and connection |
+| `modules/tcp_server/` | TCP server for Android Auto wireless protocol |
+| `modules/oaa_control_channel/` | OAA control channel + handshake |
+| `services/ap_manager_service/` | WiFi AP / join-network mode (standalone service) |
 
 ### 4.4 Message Frame Format
 
@@ -170,9 +170,10 @@ Audio/video frames carry raw AAC or H.264 bytes in Frame 2 for zero-copy deliver
 
 ### 6.3 Startup Order
 1. `bus_broker.py` — bind IPC sockets
-2. `services/wireless_daemon.py` — Bluetooth + TCP
-3. `services/media_renderer.py` — audio/video playback
-4. `app/main.py` — GUI process (starts 1–2 as subprocesses automatically)
+2. `modules/bluetooth_manager/` — Bluetooth + RFCOMM
+3. `modules/tcp_server/` — TCP server for AA wireless
+4. `modules/audio_manager/` + `modules/video_ui/` — media pipeline
+5. `main.py` — orchestrator (avvia tutto automaticamente come subprocess)
 
 ---
 
@@ -250,7 +251,7 @@ Audio/video frames carry raw AAC or H.264 bytes in Frame 2 for zero-copy deliver
 | GUI Framework | PyQt6 |
 | Qt Thread Bridge | `QtBusBridge` (pyqtSignal QueuedConnection) |
 | Media Playback | GStreamer (primary) / ffplay (fallback) |
-| Logging | Per-module verbosity control (`app/logger.py`) |
+| Logging | Per-module verbosity control (`shared/logger.py`) |
 
 ---
 
@@ -299,46 +300,51 @@ Audio/video frames carry raw AAC or H.264 bytes in Frame 2 for zero-copy deliver
 
 ---
 
-## 15. v2 Modular Implementation Guidelines
+## 15. Modular Implementation Guidelines
 
-### 15.1 Purpose of v2
+### 15.1 Purpose
 
-The `v2/` folder contains the next-generation implementation of NemoHeadUnit-Wireless. Its purpose is to preserve the same product goal of Android Auto head unit emulation while enforcing a stricter modular architecture based entirely on isolated standalone processes.
+NemoHeadUnit-Wireless enforces a strict modular architecture based entirely on isolated standalone processes. The system is designed to be easy to extend, easy to reason about, and safe to evolve over time without creating monolithic code paths.
 
-The v2 architecture exists to make the system easier to extend, easier to reason about, and safer to evolve over time without creating new monolithic code paths.
+### 15.2 Technology Direction
 
-### 15.2 Technology Direction for v2
-
-- **Python-Only**: All code in `v2/` must remain pure Python
-- **ZeroMQ IPC**: All inter-module communication must go through the dedicated v2 bus broker
+- **Python-Only**: All code must remain pure Python
+- **ZeroMQ IPC**: All inter-module communication must go through the bus broker
 - **Standalone Processes**: Every module runs as its own OS process
 - **No Direct Coupling**: Modules must not import, instantiate, or call each other directly
 - **Autodiscovery**: The main orchestrator discovers modules dynamically from the filesystem
 - **Graceful Lifecycle**: The main orchestrator is responsible for start and stop coordination
 
-### 15.3 v2 Folder Structure
-
-The expected structure of `v2/` is:
+### 15.3 Repository Structure
 
 ```
-v2/
-├── main.py
-├── bus_broker.py
+/
+├── main.py                  ← orchestratore
+├── bus_broker.py            ← ZMQ XPUB/XSUB broker
+├── pyproject.toml
+├── environment.yml
 ├── shared/
 │   └── bus_client.py
-└── modules/
-    ├── _template/          ← canonical starting point for new modules
-    │   └── main.py
-    └── <module_name>/
-        └── main.py
+├── modules/
+│   ├── _template/          ← punto di partenza per nuovi moduli
+│   │   └── main.py
+│   └── <module_name>/
+│       └── main.py
+├── config/
+├── protos/
+├── services/
+│   └── ap_manager_service/  ← WiFi AP / join-network (servizio standalone)
+├── tests/
+├── docs/
+└── third_party/
 ```
 
-### 15.4 Responsibilities of `v2/main.py`
+### 15.4 Responsibilities of `main.py`
 
-The `v2/main.py` file is the orchestrator of the whole v2 runtime. It must:
+The `main.py` file is the orchestrator of the whole runtime. It must:
 
-- Start the v2 bus broker before any module
-- Discover modules dynamically by scanning `v2/modules/*/main.py`
+- Start the bus broker before any module
+- Discover modules dynamically by scanning `modules/*/main.py`
 - Launch every discovered module as an independent subprocess
 - Publish `system.start` once the runtime is ready
 - Publish `system.stop` when the application is shutting down
@@ -346,15 +352,15 @@ The `v2/main.py` file is the orchestrator of the whole v2 runtime. It must:
 
 The orchestrator must not contain business logic belonging to individual modules.
 
-> **Note**: The `_template` module folder is excluded from autodiscovery by convention—its name starts with `_`. The glob pattern `modules/*/main.py` will still pick it up, so if needed the orchestrator may be updated to skip folders starting with `_`.
+> **Note**: The `_template` module folder is excluded from autodiscovery by convention—its name starts with `_`. The glob pattern `modules/*/main.py` will still pick it up; the orchestrator skips folders starting with `_`.
 
 ### 15.5 Responsibilities of each module
 
-Every folder under `v2/modules/` is a standalone module. Each module must:
+Every folder under `modules/` is a standalone module. Each module must:
 
 - Have its own dedicated `main.py`
 - Be executable on its own as an independent process
-- Connect to the v2 communication bus using the shared bus client
+- Connect to the communication bus using the shared bus client
 - Receive events from the bus
 - Publish events and data back onto the bus
 - Keep its business logic internal to the module boundary
@@ -363,7 +369,7 @@ A module must be understandable and maintainable in isolation.
 
 ### 15.6 Hard rules for module development
 
-The following rules are mandatory for all code under `v2/modules/`:
+The following rules are mandatory for all code under `modules/`:
 
 - No direct imports between sibling modules
 - No shared runtime state between modules except through the bus
@@ -374,9 +380,9 @@ The following rules are mandatory for all code under `v2/modules/`:
 
 If one module needs information from another, it must subscribe to a topic on the bus and react to the published message.
 
-### 15.7 Shared code in v2
+### 15.7 Shared code
 
-Shared code is allowed only inside `v2/shared/` and must stay generic.
+Shared code is allowed only inside `shared/` and must stay generic.
 
 Allowed examples:
 - Bus client helpers
@@ -400,23 +406,23 @@ Each module should be designed around a clear contract:
 
 This contract should be documented in the module's `main.py` docstring header.
 
-### 15.9 Development workflow for v2 modules
+### 15.9 Development workflow for new modules
 
-When implementing a new module in `v2/`, developers should follow this order:
+When implementing a new module:
 
 1. Copy the template folder as starting point:
    ```bash
-   cp -r v2/modules/_template v2/modules/<your_module_name>
+   cp -r modules/_template modules/<your_module_name>
    ```
 2. Set `MODULE_NAME` in the new `main.py`
 3. Fill in the module contract docstring (subscribes / publishes)
 4. Implement `on_system_start`, `on_system_stop` and any topic handlers
 5. Add any additional subscriptions in `run()`
 6. Keep all internal logic inside the module folder
-7. Verify it runs standalone: `python v2/modules/<your_module_name>/main.py`
-8. Verify it is auto-discovered when launching `python v2/main.py`
+7. Verify it runs standalone: `python modules/<your_module_name>/main.py`
+8. Verify it is auto-discovered when launching `python main.py`
 
-The template is located at [`v2/modules/_template/main.py`](../v2/modules/_template/main.py) and contains inline comments guiding each step.
+The template is located at [`modules/_template/main.py`](../modules/_template/main.py) and contains inline comments guiding each step.
 
 ### 15.10 Naming and modularity goals
 
@@ -426,7 +432,7 @@ The template is located at [`v2/modules/_template/main.py`](../v2/modules/_templ
 - Modules should prefer explicit message contracts over implicit coupling
 - The system should be able to grow by adding folders, not by expanding central orchestration code
 
-The main architectural success criterion for `v2/` is simple: adding a new capability should usually mean adding a new module, not making the core runtime more entangled.
+The main architectural success criterion is simple: adding a new capability should usually mean adding a new module, not making the core runtime more entangled.
 
 ---
 
@@ -438,6 +444,6 @@ NemoHeadUnit-Wireless represents a significant advancement in Android Auto emula
 
 ---
 
-*Document Version: 3.3*
-*Last Updated: 2026-05-13*
+*Document Version: 3.4*
+*Last Updated: 2026-05-19*
 *Author: Nemo Development Team*
