@@ -1,13 +1,59 @@
 # Session Handoff — NemoHeadUnit-Wireless
 
 > **Scopo**: documento di continuità per sessioni AI successive.
-> **Aggiornato**: 2026-05-19 14:30 — lista completa residui `v2/` rilevati con grep sul branch
+> **Aggiornato**: 2026-05-19 15:08 — fix 🟡 MEDIA commenti/docstring v2/ completato
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**Branch `refactor/promote-v2-to-root`: file critici fixati ✅. Rimane una lista precisa di file con `v2/` da aggiornare, suddivisi per priorità.**
+**Branch `refactor/promote-v2-to-root`: tutti i fix 🔴 ALTA e 🟡 MEDIA completati ✅. Rimangono 🟠 BASSA (packaging/deploy) e docs di architettura.**
+
+---
+
+## 2026-05-19 — Fix 🟡 MEDIA: commenti/docstring v2/ in moduli e test
+
+**Cosa cambiato:**
+
+| File | Commit | Fix |
+|---|---|---|
+| `main.py` | [`5598fbb`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/5598fbb048349967351b28df7bd721620e33506e) | Docstring: remove `v2` dal titolo, `v2/modules/` → `modules/` |
+| `modules/zmq_trace/main.py` | [`e1c55ec`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/e1c55ecc35e08afcac222022d7af8d06753dd14f) | `_V2`→`_REPO_ROOT`, docstring path aggiornato |
+| `tests/unit/modules/rfcomm_handshake/test_packet_unit.py` | [`96e9e6b`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/96e9e6b1d1f4a9a011f54e12fedc2279268615f4) | Bootstrap `_V2`→`_REPO_ROOT`, commento aggiornato |
+| `tests/unit/oaa_control_channel/test_rfcomm_and_channel_manager.py` | [`3e11f32`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/3e11f3212775b65d6133cc584ea3a06f107804a7) | Docstring `cd v2/tests`→`cd tests` |
+| `tests/e2e/helpers/frame_sequences.py` | [`820499f`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/820499f6e358f5d7088e49589643d7efcc404876) | URL GitHub `/main/v2/modules/`→`/main/modules/` |
+| `tests/unit/oaa_control_channel/test_service_discovery.py` | [`9eb5fe5`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/9eb5fe525832817420c53b1a9b071805ce762616) | Commento + 8 import `from v2.protos.oaa…`→`from protos.oaa…` |
+
+**Status:** Completato ✅
+
+**Note:** `tests/conftest.py` riga 38 mantenuta invariata — il commento `# root del repo dopo promozione da v2/` è storia esplicativa corretta, non un path rotto.
+
+---
+
+## Residui `v2/` rimanenti dopo questa sessione
+
+### 🟠 Priorità BASSA — script infrastruttura (non usati in dev corrente)
+
+| File | Righe | Note |
+|---|---|---|
+| `packaging/build_deb.sh` | 15, 154, 186 | Copia `v2/` nel deb, path `APP_OPT/v2/` |
+| `packaging/nemo-headunit.sh` | 8 | `APP_MAIN="/opt/nemo-headunit/v2/main.py"` |
+| `scripts/deploy_remote.sh` | 167-175 | Rsync `v2/` su remote |
+
+### 🟡 Docs da aggiornare (non bloccanti)
+
+| File | Note |
+|---|---|
+| `docs/KNOWN_PRODUCTION_BUGS.md` | Path `v2/modules/...` e `v2/shared/...` in 5 righe |
+| `docs/TEST_SUITE_ARCHITECTURE.md` | Intero documento scritto per `v2/` — aggiornamento non bloccante |
+
+---
+
+## Prossimi 3 passi
+
+1. **Aprire PR** `refactor/promote-v2-to-root` → `main` — tutti i fix runtime e docstring sono completati
+2. **Fix 🟠 BASSA** — `packaging/build_deb.sh`, `packaging/nemo-headunit.sh`, `scripts/deploy_remote.sh`
+3. **Aggiornare docs** — `docs/KNOWN_PRODUCTION_BUGS.md` e `docs/TEST_SUITE_ARCHITECTURE.md` post-merge
 
 ---
 
@@ -52,8 +98,6 @@ Pattern da sostituire: `_V2 = _MODULES.parent` + `_PROTOS = _V2 / "protos"` o `_
 | `modules/config_manager/main.py` | 68-70 | idem |
 | `modules/hostapd_helper/main.py` | 51-53 | idem |
 
-> Nota: `modules/channel_modules/audio/`, `video/`, `input/`, `sensor/`, `av_input/` non compaiono nell'output grep — probabilmente usano già il pattern corretto o non hanno `_V2`. Verificare.
-
 ### 🟡 Priorità MEDIA — commenti/docstring in file Python (non bloccano runtime)
 
 | File | Righe | Contenuto |
@@ -86,14 +130,6 @@ Pattern da sostituire: `_V2 = _MODULES.parent` + `_PROTOS = _V2 / "protos"` o `_
 | `packaging/build_deb.sh` | 15, 154, 186 | Copia `v2/` nel deb, path `APP_OPT/v2/` |
 | `packaging/nemo-headunit.sh` | 8 | `APP_MAIN="/opt/nemo-headunit/v2/main.py"` |
 | `scripts/deploy_remote.sh` | 167-175 | Rsync `v2/` su remote |
-
----
-
-## Prossimi 3 passi
-
-1. **Fix 🔴 ALTA** — bootstrap path negli 11 file `modules/*/main.py` + `base_channel_module.py` + `launcher.py`
-2. **Fix 🟡 MEDIA** — commenti/docstring + docs (non bloccanti, ma da fare prima della PR)
-3. **Fix 🟠 BASSA** — `packaging/` e `scripts/deploy_remote.sh` (separati, post-merge)
 
 ---
 
