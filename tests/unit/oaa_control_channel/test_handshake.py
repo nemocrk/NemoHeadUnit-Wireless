@@ -130,30 +130,30 @@ def _build_sys_modules_patch() -> dict:
     aft_mod = types.ModuleType("oaa.audio.AudioFocusTypeEnum_pb2")
     aft_mod.AudioFocusType = _AFT
 
-    afs_mod = types.ModuleType("v2.protos.oaa.audio.AudioFocusStateEnum_pb2")
+    afs_mod = types.ModuleType("protos.oaa.audio.AudioFocusStateEnum_pb2")
     afs_mod.AudioFocusState = _AFS
 
-    nft_mod = types.ModuleType("v2.protos.oaa.navigation.NavigationFocusRequestMessage_pb2")
+    nft_mod = types.ModuleType("protos.oaa.navigation.NavigationFocusRequestMessage_pb2")
     nft_mod.NavigationFocusRequest = MagicMock()
     nft_mod.NavigationFocusType = _NFT
 
     return {
-        "v2.protos.oaa.control.ControlMessageIdsEnum_pb2":          types.SimpleNamespace(ControlMessage=cm_stub),
-        "v2.protos.oaa.control.AuthCompleteIndicationMessage_pb2":   types.SimpleNamespace(AuthCompleteIndication=MagicMock(return_value=_make_proto_stub("AuthComplete"))),
-        "v2.protos.oaa.control.ServiceDiscoveryRequestMessage_pb2":  types.SimpleNamespace(ServiceDiscoveryRequest=MagicMock()),
-        "v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2": types.SimpleNamespace(ServiceDiscoveryResponse=MagicMock()),
-        "v2.protos.oaa.control.ChannelOpenRequestMessage_pb2":       types.SimpleNamespace(ChannelOpenRequest=MagicMock()),
-        "v2.protos.oaa.control.ChannelOpenResponseMessage_pb2":      types.SimpleNamespace(ChannelOpenResponse=MagicMock(return_value=_make_proto_stub("COR", status=0))),
-        "v2.protos.oaa.control.PingRequestMessage_pb2":              types.SimpleNamespace(PingRequest=MagicMock()),
-        "v2.protos.oaa.control.PingResponseMessage_pb2":             types.SimpleNamespace(PingResponse=MagicMock(return_value=_make_proto_stub("PingResp"))),
-        "v2.protos.oaa.control.VoiceSessionRequestMessage_pb2":      types.SimpleNamespace(VoiceSessionRequest=MagicMock()),
-        "v2.protos.oaa.control.BatteryStatusMessage_pb2":            types.SimpleNamespace(BatteryStatusNotification=MagicMock()),
-        "v2.protos.oaa.audio.AudioFocusRequestMessage_pb2":          types.SimpleNamespace(AudioFocusRequest=MagicMock()),
-        "oaa.audio.AudioFocusTypeEnum_pb2":                          aft_mod,
-        "v2.protos.oaa.audio.AudioFocusResponseMessage_pb2":         types.SimpleNamespace(AudioFocusResponse=afr_stub_cls),
-        "v2.protos.oaa.audio.AudioFocusStateEnum_pb2":               afs_mod,
-        "v2.protos.oaa.navigation.NavigationFocusRequestMessage_pb2": nft_mod,
-        "v2.protos.oaa.navigation.NavigationFocusResponseMessage_pb2": types.SimpleNamespace(NavigationFocusResponse=MagicMock(return_value=_make_proto_stub("NFR"))),
+        "protos.oaa.control.ControlMessageIdsEnum_pb2":          types.SimpleNamespace(ControlMessage=cm_stub),
+        "protos.oaa.control.AuthCompleteIndicationMessage_pb2":   types.SimpleNamespace(AuthCompleteIndication=MagicMock(return_value=_make_proto_stub("AuthComplete"))),
+        "protos.oaa.control.ServiceDiscoveryRequestMessage_pb2":  types.SimpleNamespace(ServiceDiscoveryRequest=MagicMock()),
+        "protos.oaa.control.ServiceDiscoveryResponseMessage_pb2": types.SimpleNamespace(ServiceDiscoveryResponse=MagicMock()),
+        "protos.oaa.control.ChannelOpenRequestMessage_pb2":       types.SimpleNamespace(ChannelOpenRequest=MagicMock()),
+        "protos.oaa.control.ChannelOpenResponseMessage_pb2":      types.SimpleNamespace(ChannelOpenResponse=MagicMock(return_value=_make_proto_stub("COR", status=0))),
+        "protos.oaa.control.PingRequestMessage_pb2":              types.SimpleNamespace(PingRequest=MagicMock()),
+        "protos.oaa.control.PingResponseMessage_pb2":             types.SimpleNamespace(PingResponse=MagicMock(return_value=_make_proto_stub("PingResp"))),
+        "protos.oaa.control.VoiceSessionRequestMessage_pb2":      types.SimpleNamespace(VoiceSessionRequest=MagicMock()),
+        "protos.oaa.control.BatteryStatusMessage_pb2":            types.SimpleNamespace(BatteryStatusNotification=MagicMock()),
+        "protos.oaa.audio.AudioFocusRequestMessage_pb2":          types.SimpleNamespace(AudioFocusRequest=MagicMock()),
+        "oaa.audio.AudioFocusTypeEnum_pb2":                       aft_mod,
+        "protos.oaa.audio.AudioFocusResponseMessage_pb2":         types.SimpleNamespace(AudioFocusResponse=afr_stub_cls),
+        "protos.oaa.audio.AudioFocusStateEnum_pb2":               afs_mod,
+        "protos.oaa.navigation.NavigationFocusRequestMessage_pb2": nft_mod,
+        "protos.oaa.navigation.NavigationFocusResponseMessage_pb2": types.SimpleNamespace(NavigationFocusResponse=MagicMock(return_value=_make_proto_stub("NFR"))),
     }
 
 
