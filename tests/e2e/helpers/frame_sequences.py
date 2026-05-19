@@ -19,7 +19,7 @@ Module layout:
     ShutdownSequence       — SHUTDOWN_REQUEST / RESPONSE
 
 Constants (message IDs) mirror oaa_control_channel/serializer.py:
-    https://github.com/nemocrk/NemoHeadUnit-Wireless/blob/main/v2/modules/oaa_control_channel/serializer.py
+    https://github.com/nemocrk/NemoHeadUnit-Wireless/blob/main/modules/oaa_control_channel/serializer.py
 """
 
 import struct
