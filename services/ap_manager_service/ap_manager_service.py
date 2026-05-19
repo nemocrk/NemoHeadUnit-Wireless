@@ -25,9 +25,16 @@ Errors:
   org.nemo.APManager.Error.InvalidConfig
 
 Access control: callers must belong to group 'ap_manager' (enforced by PolicyKit).
+
+Modes:
+  "ap"   — hostapd + dnsmasq created by this service (full teardown on Stop).
+  "join" — HU already connected to a WiFi network with PSK; phone joins the same
+           network. No hostapd/dnsmasq started; no interface teardown on Stop.
+           The caller (hostapd_helper) is unaware of the distinction.
 """
 
 import os
+import re
 import sys
 import signal
 import logging
@@ -73,6 +80,10 @@ AP_TYPE_DYNAMIC    = 1
 DHCP_LEASE_TIME    = "12h"
 
 DNSMASQ_LEASES_FILE = "/var/lib/misc/dnsmasq.leases"
+
+# Security types reported by nmcli that are enterprise (802.1X) — not usable
+# for join-network mode because we cannot retrieve a PSK for them.
+_ENTERPRISE_SECURITY_TYPES = {"WPA2 802.1X", "WPA3 802.1X", "802.1X"}
 
 # ---------------------------------------------------------------------------
 # APConfig
@@ -237,15 +248,145 @@ def _count_dhcp_clients(leases_file: str = DNSMASQ_LEASES_FILE) -> int:
         return 0
 
 # ---------------------------------------------------------------------------
+# WiFi join-network detection helpers
+# ---------------------------------------------------------------------------
+
+def _detect_existing_wifi() -> Optional[dict]:
+    """
+    Check whether the HU is already connected to a WiFi network that can be
+    used in join-network mode (i.e. PSK-secured, non-enterprise).
+
+    Returns a dict with keys {ssid, bssid, interface, security} if a usable
+    network is found, or None otherwise.
+
+    Uses:
+      nmcli -t -f active,ssid,bssid,device,security,type device wifi
+    Output format (terse, colon-separated):
+      yes:MySSID:AA\\:BB\\:CC\\:DD\\:EE\\:FF:wlan0:WPA2:wifi
+    """
+    try:
+        result = _run(
+            ["nmcli", "-t", "-f", "active,ssid,bssid,device,security,type",
+             "device", "wifi"],
+            timeout=5,
+        )
+    except Exception as e:
+        log.warning(f"nmcli wifi scan failed: {e}")
+        return None
+
+    if result.returncode != 0:
+        log.warning(f"nmcli returned {result.returncode}: {result.stderr.strip()}")
+        return None
+
+    for line in result.stdout.splitlines():
+        # nmcli terse output escapes colons in values as \:
+        # Split on unescaped colons only.
+        parts = re.split(r"(?<!\\):", line)
+        if len(parts) < 6:
+            continue
+        active, ssid, bssid, device, security, net_type = parts[:6]
+        # Unescape nmcli-escaped colons in field values
+        ssid     = ssid.replace("\\:", ":")
+        bssid    = bssid.replace("\\:", ":")
+        security = security.replace("\\:", ":")
+
+        if active.lower() != "yes":
+            continue
+        if net_type.strip().lower() != "wifi":
+            continue
+        if not ssid:
+            continue
+        if not security or security.strip() == "--":
+            log.info(f"WiFi '{ssid}' has no security — skipping join-network mode")
+            continue
+        if any(ent in security for ent in _ENTERPRISE_SECURITY_TYPES):
+            log.info(f"WiFi '{ssid}' uses enterprise security ({security}) — skipping join-network mode")
+            continue
+
+        log.info(f"Detected usable WiFi network: ssid='{ssid}' bssid={bssid} iface={device} security={security}")
+        return {
+            "ssid":      ssid,
+            "bssid":     bssid.upper(),
+            "interface": device.strip(),
+            "security":  security.strip(),
+        }
+
+    log.info("No active WiFi network suitable for join-network mode found")
+    return None
+
+
+def _get_iface_ip(iface: str) -> Optional[str]:
+    """
+    Return the first IPv4 address assigned to `iface`, or None.
+    Uses: ip -4 addr show dev <iface>
+    """
+    try:
+        result = _run(["ip", "-4", "addr", "show", "dev", iface], timeout=5)
+    except Exception as e:
+        log.warning(f"ip addr show failed for {iface}: {e}")
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("inet "):
+            # e.g. "inet 192.168.1.50/24 brd 192.168.1.255 scope global wlan0"
+            parts = line.split()
+            if len(parts) >= 2:
+                return parts[1].split("/")[0]
+    return None
+
+
+def _get_wifi_psk(ssid: str) -> Optional[str]:
+    """
+    Retrieve the PSK for `ssid` from NetworkManager's keyring.
+    Requires root. Returns None if not found or on error.
+    Uses: nmcli -s -t -f 802-11-wireless-security.psk connection show <ssid>
+    """
+    try:
+        result = _run(
+            ["nmcli", "-s", "-t", "-f", "802-11-wireless-security.psk",
+             "connection", "show", ssid],
+            timeout=5,
+        )
+    except Exception as e:
+        log.warning(f"nmcli PSK retrieval failed for '{ssid}': {e}")
+        return None
+
+    if result.returncode != 0:
+        log.warning(f"nmcli PSK lookup for '{ssid}' returned {result.returncode}: {result.stderr.strip()}")
+        return None
+
+    for line in result.stdout.splitlines():
+        if "802-11-wireless-security.psk:" in line:
+            psk = line.split(":", 1)[1].strip()
+            if psk and psk != "--":
+                return psk
+
+    log.info(f"No PSK found in NM keyring for '{ssid}'")
+    return None
+
+# ---------------------------------------------------------------------------
 # AP lifecycle (runs as root — no sudo prefix)
 # ---------------------------------------------------------------------------
 
 class _APRunner:
-    """Internal: manages hostapd + dnsmasq subprocesses."""
+    """
+    Internal: manages hostapd + dnsmasq subprocesses (mode="ap") or tracks
+    an existing WiFi network the phone should join (mode="join").
+
+    _mode values:
+      None   — not started
+      "ap"   — hostapd + dnsmasq running; full teardown on stop()
+      "join" — HU on existing WiFi; no daemons; no teardown on stop()
+    """
 
     def __init__(self):
         self._cfg: Optional[APConfig] = None
         self._bssid: str = ""
+        self._mode: Optional[str] = None          # "ap" | "join" | None
         self._hostapd_proc: Optional[subprocess.Popen] = None
         self._dnsmasq_proc: Optional[subprocess.Popen] = None
         self._hostapd_conf: Optional[str] = None
@@ -254,7 +395,121 @@ class _APRunner:
     # -- public ---------------------------------------------------------------
 
     def start(self, cfg: APConfig) -> None:
-        """Start AP. Raises RuntimeError on failure."""
+        """
+        Start connectivity for Android Auto.
+
+        1. If the HU is already on a WiFi network with PSK → join-network mode:
+           populate internal state from the existing network, set _mode="join",
+           return without touching hostapd/dnsmasq/NM.
+        2. Otherwise → AP mode: full hostapd + dnsmasq startup as before.
+
+        Raises RuntimeError on failure.
+        """
+        wifi = _detect_existing_wifi()
+        if wifi is not None:
+            self._start_join_network(cfg, wifi)
+        else:
+            self._start_ap(cfg)
+
+    def stop(self) -> None:
+        """
+        Stop connectivity.
+
+        In "ap" mode: kill daemons, restore interface, restart NM (existing behaviour).
+        In "join" mode: only reset internal state — do not touch the interface or NM.
+        """
+        if self._mode == "join":
+            log.info("join-network mode — resetting internal state only (no interface teardown)")
+            self._reset_state()
+            return
+
+        # AP mode — full teardown
+        _kill_proc(self._hostapd_proc, "hostapd")
+        _kill_proc(self._dnsmasq_proc, "dnsmasq")
+        self._hostapd_proc = None
+        self._dnsmasq_proc = None
+        _cleanup_file(self._hostapd_conf)
+        _cleanup_file(self._dnsmasq_conf)
+        self._restore_interface()
+        self._set_nm_managed(True)
+        self._nm_reconnect()
+        self._reset_state()
+        log.info("AP stopped")
+
+    def is_running(self) -> bool:
+        if self._mode == "join":
+            # Running as long as join-network state is populated
+            return self._cfg is not None
+        # AP mode: both daemons must be alive
+        hp = self._hostapd_proc and self._hostapd_proc.poll() is None
+        dp = self._dnsmasq_proc and self._dnsmasq_proc.poll() is None
+        return bool(hp and dp)
+
+    def get_params(self) -> dict:
+        """Returns connectivity params WITHOUT key."""
+        if not self._cfg:
+            return {}
+        return {
+            "ssid":          self._cfg.ssid,
+            "bssid":         self._bssid,
+            "interface":     self._cfg.interface,
+            "gateway_ip":    self._cfg.gateway_ip,
+            "security_mode": WPA2_SECURITY_MODE,
+            "ap_type":       AP_TYPE_DYNAMIC,
+        }
+
+    def get_key(self) -> str:
+        return self._cfg.key if self._cfg else ""
+
+    def get_mode(self) -> Optional[str]:
+        """Return the current mode: 'ap', 'join', or None."""
+        return self._mode
+
+    # -- join-network startup -------------------------------------------------
+
+    def _start_join_network(self, cfg: APConfig, wifi: dict) -> None:
+        """
+        Populate internal state from an existing WiFi network.
+        No daemons are started; no interface is modified.
+        """
+        iface = wifi["interface"]
+        hu_ip = _get_iface_ip(iface)
+        if not hu_ip:
+            log.warning(
+                f"Could not determine HU IP on {iface} — falling back to AP mode"
+            )
+            self._start_ap(cfg)
+            return
+
+        psk = _get_wifi_psk(wifi["ssid"])
+        if not psk:
+            log.warning(
+                f"Could not retrieve PSK for '{wifi['ssid']}' — falling back to AP mode"
+            )
+            self._start_ap(cfg)
+            return
+
+        # Build a synthetic APConfig mirroring the existing network
+        join_cfg          = APConfig()
+        join_cfg.interface = iface
+        join_cfg.ssid      = wifi["ssid"]
+        join_cfg.key       = psk
+        # gateway_ip in join-network = HU's own IP on the existing network
+        join_cfg.gateway_ip = hu_ip
+
+        self._cfg   = join_cfg
+        self._bssid = wifi["bssid"]
+        self._mode  = "join"
+
+        log.info(
+            f"join-network mode: ssid='{join_cfg.ssid}' iface={iface} "
+            f"hu_ip={hu_ip} bssid={self._bssid}"
+        )
+
+    # -- AP startup (existing behaviour) --------------------------------------
+
+    def _start_ap(self, cfg: APConfig) -> None:
+        """Full hostapd + dnsmasq startup. Raises RuntimeError on failure."""
         if not cfg.key:
             cfg.key = _generate_key()
         self._cfg = cfg
@@ -276,39 +531,16 @@ class _APRunner:
 
         self._start_hostapd()
         self._start_dnsmasq()
+        self._mode = "ap"
 
-    def stop(self) -> None:
-        _kill_proc(self._hostapd_proc, "hostapd")
-        _kill_proc(self._dnsmasq_proc, "dnsmasq")
-        self._hostapd_proc = None
-        self._dnsmasq_proc = None
-        _cleanup_file(self._hostapd_conf)
-        _cleanup_file(self._dnsmasq_conf)
-        self._restore_interface()
-        self._set_nm_managed(True)
-        self._nm_reconnect()
-        log.info("AP stopped")
+    # -- state reset ----------------------------------------------------------
 
-    def is_running(self) -> bool:
-        hp = self._hostapd_proc and self._hostapd_proc.poll() is None
-        dp = self._dnsmasq_proc and self._dnsmasq_proc.poll() is None
-        return bool(hp and dp)
-
-    def get_params(self) -> dict:
-        """Returns AP params WITHOUT key."""
-        if not self._cfg:
-            return {}
-        return {
-            "ssid":          self._cfg.ssid,
-            "bssid":         self._bssid,
-            "interface":     self._cfg.interface,
-            "gateway_ip":    self._cfg.gateway_ip,
-            "security_mode": WPA2_SECURITY_MODE,
-            "ap_type":       AP_TYPE_DYNAMIC,
-        }
-
-    def get_key(self) -> str:
-        return self._cfg.key if self._cfg else ""
+    def _reset_state(self) -> None:
+        self._cfg   = None
+        self._bssid = ""
+        self._mode  = None
+        self._hostapd_conf = None
+        self._dnsmasq_conf = None
 
     # -- interface helpers ----------------------------------------------------
 
@@ -494,7 +726,8 @@ class APManagerService(dbus.service.Object):
             raise dbus.DBusException(error_msg, name="org.nemo.APManager.Error.StartFailed")
 
         params = self._runner.get_params()
-        log.info(f"AP started: {params}")
+        mode   = self._runner.get_mode()
+        log.info(f"Started ({mode} mode): {params}")
         self.APStarted({k: dbus.String(str(v)) for k, v in params.items()})
         return (True, "")
 
@@ -568,7 +801,7 @@ class APManagerService(dbus.service.Object):
 
 def main():
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-    
+
     try:
         system_bus = dbus.SystemBus()
     except dbus.exceptions.DBusException as e:
@@ -576,7 +809,7 @@ def main():
         log.error("Ensure D-Bus daemon is running and accessible.")
         log.error(f"DBUS_SYSTEM_BUS_ADDRESS: {os.environ.get('DBUS_SYSTEM_BUS_ADDRESS', '(not set)')}")
         raise SystemExit(1)
-    
+
     service    = APManagerService(system_bus)  # noqa: F841
 
     loop = GLib.MainLoop()
