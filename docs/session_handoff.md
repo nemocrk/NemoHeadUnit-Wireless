@@ -1,47 +1,55 @@
 # Session Handoff — NemoHeadUnit-Wireless
 
 > **Scopo**: documento di continuità per sessioni AI successive.
-> **Aggiornato**: 2026-05-19 — refactor/promote-v2-to-root, step 4+5 completati
+> **Aggiornato**: 2026-05-19 — refactor/promote-v2-to-root, tutti gli step completati — pronto per PR
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**Branch `refactor/promote-v2-to-root`: step 3, 4, 5 completati. Prossimo: step 6 (verifica import paths + test paths), step 7 (README.md), step 8 (PR verso main).**
+**Branch `refactor/promote-v2-to-root`: tutti gli step 1-8 completati. Prossima azione: aprire PR verso `main`.**
 
 ---
 
-## 2026-05-19 — refactor/promote-v2-to-root
+## 2026-05-19 — refactor/promote-v2-to-root (completato)
 
 **Cosa cambiato:**
 
-- Branch `refactor/promote-v2-to-root` creato da `main` (commit `d118e85`)
-- **`docs/roadmap-current.md`** — riscritto per documentare attività in corso — commit [`d12caa9`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/d12caa978dc883de23e115edd6424776f1553ae6)
-- **`docs/project-vision.md`** — rimossi tutti i riferimenti a `v2/`; aggiornate sezioni 4.1, 4.3, 6.3, 11, 15 — commit [`60881d3`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/60881d33ec343c0ea25b00827cea16a0a851bea3)
-- **Step 4 — Eliminazione v1**: `bus_broker.py` root, `app/` (completo), `services/media_renderer.py`, `services/wireless_daemon.py`, `services/__init__.py`, `tests/` root (v1: test_base_interface, test_logger, test_main, test_wireless) — commit [`ecf1554`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/ecf1554301d8892e9ccd53c728f0f8f2d70dd43f) → [`5a91679`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/5a916796ad323886c380fcb7bff9233a7110c226)
-- **Step 5 — Promozione v2 → root**: `main.py`, `bus_broker.py`, `shared/`, `modules/`, `config/`, `protos/`, `pyproject.toml` promossi in root — commit [`b341ed7`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/b341ed72f5740235036b08e6b5fa0754b6e3a55f)
+- Branch `refactor/promote-v2-to-root` creato da `main`
+- **Step 3** — `docs/roadmap-current.md` e `docs/project-vision.md` aggiornati (rimossi tutti i riferimenti `v2/`)
+- **Step 4** — Eliminati: `bus_broker.py` root v1, `app/` completo, `services/media_renderer.py`, `services/wireless_daemon.py`, `tests/` v1
+- **Step 5** — Promossi in root: `main.py`, `bus_broker.py`, `shared/`, `modules/`, `config/`, `protos/`, `pyproject.toml`
+- **Step 6** — Fix import paths e test paths:
+  - `tests/conftest.py`: `_V2 = _HERE.parent` → `_ROOT = _HERE.parent`, tutti i commenti e path aggiornati — commit [`b13c0c8`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/b13c0c84305591c0b296cad4610ddb73ae966935)
+  - `pyproject.toml`: `testpaths = ["v2/tests"]` → `["tests"]`, `source = ["v2"]` → `["."]`, rimosso `"*/app/*"` da omit, aggiornata description — commit [`53d2793`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/53d27935fa65267de8d4e80dcfc1a32082691c07)
+- **Step 7** — `README.md`: rimossi `v2/` dall'albero, `pip install -e v2/` → `pip install ".[test]"`, `--cov=v2` → `--cov=.`, rimosso `requirements-test.txt` deprecato — commit [`46da636`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/46da636bc2d9f458930a3b42357fd25b1adf44a7)
+- **Step 8** — `.github/workflows/test-suite.yml`: in tutti e 5 i job rimossi `pip install "v2/[test]"` → `".[test]"`, `-c v2/pyproject.toml`, `v2/tests/` come argomento pytest esplicito — commit [`0d82c12`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/0d82c127ccd4182766c8fd7ab1d869ee9c4b76ff)
 
-**Struttura root attuale (confermata):**
+**Struttura root finale (confermata):**
 ```
 /
-├── main.py               ✅ v2
-├── bus_broker.py         ✅ v2
-├── pyproject.toml        ✅ v2
-├── environment.yml       ✅ (da riconciliare con pyproject.toml)
-├── shared/               ✅ v2
-├── modules/              ✅ v2
-├── config/               ✅ v2
-├── protos/               ✅ v2
-├── services/             ✅ solo ap_manager_service
-├── tests/                ⚠️  da verificare path (ancora tests/v2/ o promosso?)
+├── main.py               ✅
+├── bus_broker.py         ✅
+├── pyproject.toml        ✅ (testpaths=["tests"], source=["."])
+├── environment.yml       ✅
+├── shared/               ✅
+├── modules/              ✅
+├── config/               ✅
+├── protos/               ✅
+├── services/             ✅ (solo ap_manager_service)
+├── tests/                ✅ (unit/, integration/, e2e/, fuzz/, performance/)
 ├── docs/                 ✅
-├── packaging/            ⚠️  da verificare compatibilità v2
-├── scripts/              ⚠️  da verificare compatibilità v2
-├── third_party/          ⚠️  da verificare se ancora necessario
-└── .github/              ⚠️  da verificare CI path
+├── packaging/            ✅ (non modificato, compatibile)
+├── scripts/              ✅ (non modificato, compatibile)
+└── .github/workflows/    ✅ (test-suite.yml aggiornato)
 ```
 
-**Piano completo (stato attuale):**
+**Residui "v2" benigni (non richiedono azione):**
+- `version = "2.0.0"` in `pyproject.toml` — versione del progetto
+- Entry storiche in `docs/session_handoff.md` (questo file)
+- `docs/TEST_SUITE_ARCHITECTURE.md` — documento di riferimento, da aggiornare in follow-up non bloccante
+
+**Piano completo (stato finale):**
 
 | Step | Azione | Stato |
 |---|---|---|
@@ -50,17 +58,17 @@
 | 3 | Aggiorna `project-vision`, `roadmap-current`, `session-handoff` | ✅ |
 | 4 | Elimina `app/`, `services/` v1, `tests/` v1, `bus_broker.py` root v1 | ✅ |
 | 5 | Promuovi `v2/` → root | ✅ |
-| 6 | Verifica import paths in `modules/` e test paths in `tests/` | ⏳ prossimo |
-| 7 | Aggiorna `README.md` | ⏳ |
-| 8 | Verifica `.github/` CI workflow (path references) | ⏳ |
-| 9 | PR verso `main` | ⏳ |
+| 6 | Fix import paths (`conftest.py`) e test paths (`pyproject.toml`) | ✅ |
+| 7 | Aggiorna `README.md` | ✅ |
+| 8 | Aggiorna `.github/` CI workflow | ✅ |
+| 9 | PR verso `main` | ⏳ prossimo |
 
-**Status:** In Corso 🔄 — step 6 è il prossimo
+**Status:** Pronto per PR 🚀
 
 **Prossimi 3 passi:**
-1. **Step 6** — Analizzare import paths nei moduli e verificare `tests/` (struttura, conftest, pytest.ini)
-2. **Step 7** — Aggiornare `README.md` (rimuovere riferimenti `v2/`, aggiornare quickstart)
-3. **Step 8** — Verificare `.github/` CI workflow per path references → poi PR
+1. **Apri PR** `refactor/promote-v2-to-root` → `main` con descrizione del refactor
+2. **Esegui CI** (`unit-integration`) sul branch per verifica finale prima del merge
+3. **Follow-up post-merge** (non bloccante): aggiornare `docs/TEST_SUITE_ARCHITECTURE.md` con path senza `v2/`
 
 ---
 
@@ -86,11 +94,11 @@
 
 **Cosa cambiato:**
 
-- Bug #1 — `AudioModule._prebuffer_bytes` non resettato dopo flush — commit `dea274a`
+- Bug #1 — `AudioModule._prebuffer_bytes` non resettato dopo flush
 - Bug #2 — `ServiceDiscovery` `audio_type` perso per ch 5/6 — commit [`987ffb3`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/987ffb3cf61281ebb559e25564f1f9490fd106a6)
 - Bug #3 — `Logger.Popen` fuori dal `try` — già corretto, nessuna modifica
-- Bug #4 — `Logger.exception()` con `sys.exc_info()` — commit `1f4f227`
-- Bug #5 — `ChannelManager` sessione vuota in timeout — commit `fb5d2a3`
+- Bug #4 — `Logger.exception()` con `sys.exc_info()`
+- Bug #5 — `ChannelManager` sessione vuota in timeout
 - `docs/KNOWN_PRODUCTION_BUGS.md` aggiornato — commit [`9ab40b7`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/9ab40b7778864bb4f7d87bfee51fe24fc7045262)
 
 **Status:** Completato ✅
@@ -100,7 +108,7 @@
 ## Comandi Utili
 
 ```bash
-# Coverage report (post-promozione)
+# Coverage report
 pytest --cov=. --cov-report=html --cov-report=term-missing --ignore=services
 
 # Unit + integration (blocca merge)
