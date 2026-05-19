@@ -1,5 +1,5 @@
 """
-NemoHeadUnit-Wireless v2 — config_manager module
+NemoHeadUnit-Wireless — config_manager module
 
 Centralised configuration service. Persists per-module settings to YAML files
 and notifies subscribers when a value changes.
@@ -65,12 +65,15 @@ import sys
 from pathlib import Path
 import time
 
-_HERE    = Path(__file__).parent    # v2/modules/config_manager/
-_MODULES = _HERE.parent             # v2/modules/
-_V2      = _MODULES.parent          # v2/
+# ---------------------------------------------------------------------------
+# sys.path bootstrap
+# ---------------------------------------------------------------------------
+_HERE      = Path(__file__).parent   # modules/config_manager/
+_MODULES   = _HERE.parent            # modules/
+_REPO_ROOT = _MODULES.parent         # root
 
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
@@ -96,7 +99,7 @@ PRIORITY    = 0  # infrastructure — first to initialise
 bus = BusClient(module_name=MODULE_NAME)
 log = get_logger(MODULE_NAME, bus=bus)
 
-CONFIG_DIR = _V2 / "config"
+CONFIG_DIR = _REPO_ROOT / "config"
 
 # In-RAM schema registry: module_name → {key → AnyFieldSchema}
 _schemas: dict[str, dict] = {}
@@ -136,12 +139,6 @@ def _save_config(module: str, data: dict) -> bool:
 
 
 def _schema_dict_for_response(module: str) -> dict | None:
-    """Return the serialised schema for *module*, or None if not registered.
-
-    Uses schema_to_dict() so that structured nodes (ConfigFieldMessage /
-    ConfigFieldList / ConfigFieldOneof) are serialised correctly alongside
-    plain ConfigFieldSchema scalars.
-    """
     schema = _schemas.get(module)
     if not schema:
         return None
@@ -149,16 +146,6 @@ def _schema_dict_for_response(module: str) -> dict | None:
 
 
 def _defaults_from_schema(module: str) -> dict:
-    """Derive a defaults dict from the registered schema for *module*.
-
-    Includes:
-      - ConfigFieldSchema entries with a non-None .default (scalar leaves)
-      - ConfigFieldList entries with a non-empty list .default
-        (e.g. the 'channels' field in service_discovery)
-
-    Structured nodes without defaults (ConfigFieldMessage, ConfigFieldOneof,
-    empty-default ConfigFieldList) are skipped.
-    """
     schema = _schemas.get(module, {})
     result: dict = {}
     for k, v in schema.items():
@@ -177,13 +164,12 @@ def on_config_get(topic: str, payload: dict):
     module    = payload.get("module")
     requester = payload.get("requester", "")
     defaults  = payload.get("defaults")
-    raw_schema = payload.get("schema")  # plain dict from bus payload
+    raw_schema = payload.get("schema")
 
     if not module:
         log.warning("config.get received without 'module' field — ignoring.")
         return
 
-    # Store/update schema in RAM if provided
     if isinstance(raw_schema, dict) and raw_schema:
         try:
             _schemas[module] = schema_from_dict(raw_schema)
@@ -194,10 +180,6 @@ def on_config_get(topic: str, payload: dict):
     config = _load_config(module)
 
     if not config:
-        # --- Determine seeding source ---
-        # Priority 1: explicit defaults= payload (legacy / mixed pattern)
-        # Priority 2: scalar + list defaults derived from the registered schema
-        #             (schema-first pattern — no defaults= needed)
         if isinstance(defaults, dict) and defaults:
             seed = defaults
             seed_source = f"explicit defaults= ({len(seed)} keys)"
@@ -218,13 +200,9 @@ def on_config_get(topic: str, payload: dict):
                     "returning empty config."
                 )
         else:
-            log.info(
-                f"config.get for '{module}' (requester='{requester}') → 0 keys (no defaults)"
-            )
+            log.info(f"config.get for '{module}' (requester='{requester}') → 0 keys (no defaults)")
     else:
-        log.info(
-            f"config.get for '{module}' (requester='{requester}') → {len(config)} keys"
-        )
+        log.info(f"config.get for '{module}' (requester='{requester}') → {len(config)} keys")
 
     response: dict = {
         "module":    module,
@@ -247,10 +225,6 @@ def on_config_set(topic: str, payload: dict):
         log.warning(f"config.set missing 'module' or 'key': {payload} — ignoring.")
         return
 
-    # Validate against schema if registered.
-    # Structured nodes (ConfigFieldMessage / ConfigFieldList / ConfigFieldOneof)
-    # are stored as-is — scalar validate_value() is only invoked for plain
-    # ConfigFieldSchema entries.
     schema = _schemas.get(module)
     if schema and key in schema:
         field_schema = schema[key]
@@ -270,9 +244,7 @@ def on_config_set(topic: str, payload: dict):
                 })
                 return
         else:
-            log.debug(
-                f"config.set '{module}'.{key}: structured field — skipping scalar validation."
-            )
+            log.debug(f"config.set '{module}'.{key}: structured field — skipping scalar validation.")
 
     data = _load_config(module)
     data[key] = value
@@ -281,12 +253,7 @@ def on_config_set(topic: str, payload: dict):
         return
 
     log.info(f"config.set '{module}'.{key} = {value!r}")
-
-    bus.publish("config.changed", {
-        "module": module,
-        "key":    key,
-        "value":  value,
-    })
+    bus.publish("config.changed", {"module": module, "key": key, "value": value})
 
 
 # ---------------------------------------------------------------------------
@@ -295,24 +262,16 @@ def on_config_set(topic: str, payload: dict):
 
 def on_system_readytostart() -> None:
     log.info(f"system.readytostart received — announcing priority {PRIORITY}")
-    bus.publish("system.module_ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
+    bus.publish("system.module_ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
 def on_system_start(topic: str, payload: dict) -> None:
     if payload.get("priority") != PRIORITY:
         return
-
     log.info(f"system.start priority={PRIORITY} — initialising config_manager")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     log.info(f"Config dir ready: {CONFIG_DIR}")
-
-    bus.publish("system.ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
+    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info("system.ready published — config_manager online")
 
 
@@ -324,7 +283,6 @@ def on_system_stop(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-
 
 def run() -> None:
     bus.subscribe("system.readytostart", on_system_readytostart)
