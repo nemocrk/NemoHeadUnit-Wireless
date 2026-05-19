@@ -64,8 +64,8 @@ from enum import IntEnum, auto
 from typing import Callable
 
 
-_REPO_ROOT  = Path(__file__).parent.parent.parent.parent
-_PROTO_ROOT = _REPO_ROOT / "v2" / "protos"
+_REPO_ROOT  = Path(__file__).parent.parent.parent
+_PROTO_ROOT = _REPO_ROOT / "protos"
 
 for _p in (_REPO_ROOT, _PROTO_ROOT):
     if str(_p) not in sys.path:
@@ -76,26 +76,26 @@ from shared.logger import get_logger                                            
 from shared.proto_utils import decode_proto, encode_proto, proto_to_dict                               # noqa: E402
 
 # Control proto imports
-from v2.protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage             # noqa: E402
-from v2.protos.oaa.control.AuthCompleteIndicationMessage_pb2 import AuthCompleteIndication  # noqa: E402
-from v2.protos.oaa.control.ServiceDiscoveryRequestMessage_pb2 import ServiceDiscoveryRequest  # noqa: E402
-from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse  # noqa: E402
-from v2.protos.oaa.control.ChannelOpenRequestMessage_pb2 import ChannelOpenRequest     # noqa: E402
-from v2.protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
-from v2.protos.oaa.control.PingRequestMessage_pb2 import PingRequest                   # noqa: E402
-from v2.protos.oaa.control.PingResponseMessage_pb2 import PingResponse                 # noqa: E402
-from v2.protos.oaa.control.VoiceSessionRequestMessage_pb2 import VoiceSessionRequest   # noqa: E402
-from v2.protos.oaa.control.BatteryStatusMessage_pb2 import BatteryStatusNotification   # noqa: E402
+from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage             # noqa: E402
+from protos.oaa.control.AuthCompleteIndicationMessage_pb2 import AuthCompleteIndication  # noqa: E402
+from protos.oaa.control.ServiceDiscoveryRequestMessage_pb2 import ServiceDiscoveryRequest  # noqa: E402
+from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse  # noqa: E402
+from protos.oaa.control.ChannelOpenRequestMessage_pb2 import ChannelOpenRequest     # noqa: E402
+from protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
+from protos.oaa.control.PingRequestMessage_pb2 import PingRequest                   # noqa: E402
+from protos.oaa.control.PingResponseMessage_pb2 import PingResponse                 # noqa: E402
+from protos.oaa.control.VoiceSessionRequestMessage_pb2 import VoiceSessionRequest   # noqa: E402
+from protos.oaa.control.BatteryStatusMessage_pb2 import BatteryStatusNotification   # noqa: E402
 
 # Audio focus proto imports
-from v2.protos.oaa.audio.AudioFocusRequestMessage_pb2 import AudioFocusRequest         # noqa: E402
+from protos.oaa.audio.AudioFocusRequestMessage_pb2 import AudioFocusRequest         # noqa: E402
 from oaa.audio.AudioFocusTypeEnum_pb2 import AudioFocusType                            # noqa: E402
-from v2.protos.oaa.audio.AudioFocusResponseMessage_pb2 import AudioFocusResponse       # noqa: E402
-from v2.protos.oaa.audio.AudioFocusStateEnum_pb2 import AudioFocusState                # noqa: E402
+from protos.oaa.audio.AudioFocusResponseMessage_pb2 import AudioFocusResponse       # noqa: E402
+from protos.oaa.audio.AudioFocusStateEnum_pb2 import AudioFocusState                # noqa: E402
 
 # Navigation focus proto imports
-from v2.protos.oaa.navigation.NavigationFocusRequestMessage_pb2 import NavigationFocusRequest, NavigationFocusType  # noqa: E402
-from v2.protos.oaa.navigation.NavigationFocusResponseMessage_pb2 import NavigationFocusResponse  # noqa: E402
+from protos.oaa.navigation.NavigationFocusRequestMessage_pb2 import NavigationFocusRequest, NavigationFocusType  # noqa: E402
+from protos.oaa.navigation.NavigationFocusResponseMessage_pb2 import NavigationFocusResponse  # noqa: E402
 
 from oaa_control_channel.service_discovery import build_from_schema_cfg, channels_from_sdr_bytes, message_from_sdr_bytes  # noqa: E402
 
