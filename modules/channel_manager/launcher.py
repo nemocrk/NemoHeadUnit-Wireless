@@ -2,12 +2,12 @@
 launcher.py — spawn / wait / kill channel_module subprocesses.
 
 Each channel module lives at:
-    v2/modules/channel_modules/channel_{module_type}/main.py
+    modules/channel_modules/{module_type}/main.py
 
 It is launched with CLI args so that no runtime config needs to
 circulate on the message bus:
 
-    python channel_{module_type}/main.py \\
+    python {module_type}/main.py \\
         --module-name   channel_video_3 \\
         --channel-id    3 \\
         --sdr-bytes-hex <hex>
@@ -23,12 +23,12 @@ import sys
 import time
 from pathlib import Path
 
-_HERE    = Path(__file__).parent        # v2/modules/channel_manager/
-_MODULES = _HERE.parent                 # v2/modules/
-_V2      = _MODULES.parent              # v2/
+_HERE      = Path(__file__).parent   # modules/channel_manager/
+_MODULES   = _HERE.parent            # modules/
+_REPO_ROOT = _MODULES.parent         # root
 
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 
@@ -36,8 +36,7 @@ from shared.logger import get_logger    # noqa: E402
 
 log = get_logger("channel_manager.launcher")
 
-# Root of the v2 tree: three parents up from this file
-CHANNEL_MODULES = _V2 / "modules" / "channel_modules"
+CHANNEL_MODULES = _REPO_ROOT / "modules" / "channel_modules"
 
 # How long to wait for a module to self-exit before SIGTERM
 GRACE_PERIOD = 5.0  # seconds
@@ -97,7 +96,6 @@ class ChannelProcess:
         if self._proc is None or self._proc.poll() is not None:
             return
 
-        # Give the module a chance to handle channel_manager.shutdown on its own
         deadline = time.monotonic() + GRACE_PERIOD
         while time.monotonic() < deadline:
             if self._proc.poll() is not None:
@@ -120,7 +118,6 @@ class ChannelProcess:
         return self._proc.pid if self._proc else None
 
     def poll(self) -> int | None:
-        """Return exit code if process has ended, else None."""
         return self._proc.poll() if self._proc else None
 
 
@@ -129,10 +126,6 @@ class Launcher:
 
     def __init__(self) -> None:
         self._procs: dict[str, ChannelProcess] = {}  # module_name → ChannelProcess
-
-    # ------------------------------------------------------------------
-    # Session management
-    # ------------------------------------------------------------------
 
     def start_all(self, channels: list[dict]) -> list[str]:
         """
@@ -151,7 +144,6 @@ class Launcher:
         Raises:
             FileNotFoundError: if any channel module script is missing.
         """
-        # Kill any stale processes from a previous session
         if self._procs:
             log.warning("Stale channel processes found — killing before new session")
             self.stop_all()
@@ -164,20 +156,18 @@ class Launcher:
                 channel_id=ch["channel_id"],
                 sdr_bytes_hex=ch["sdr_bytes_hex"],
             )
-            cp.start()  # raises FileNotFoundError if script missing
+            cp.start()
             self._procs[cp.module_name] = cp
             started.append(cp.module_name)
 
         return started
 
     def stop_all(self) -> None:
-        """Stop all channel subprocesses in reverse start order."""
         for cp in reversed(list(self._procs.values())):
             cp.stop()
         self._procs.clear()
 
     def check_crashes(self) -> list[str]:
-        """Return module_names of processes that have exited unexpectedly."""
         return [
             name
             for name, cp in self._procs.items()
