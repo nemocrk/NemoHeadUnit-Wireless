@@ -1,7 +1,7 @@
 """
 Unit tests for oaa_control_channel/service_discovery.py
 
-Strategy: proto _pb2.py files ARE present in v2/protos/oaa/ — import real module.
+Strategy: proto _pb2.py files ARE present in protos/oaa/ — import real module.
 No protobuf stubbing needed.  Tests use real ServiceDiscoveryResponse round-trips.
 
 Covers:
@@ -248,7 +248,7 @@ class TestBuildFromSchemaCfg:
         bt_mac = "AA:BB:CC:DD:EE:FF"
         sdr_bytes = sd.build_from_schema_cfg(cfg, bt_mac=bt_mac)
         # Parse back and verify
-        from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
+        from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
         resp = ServiceDiscoveryResponse()
         resp.ParseFromString(sdr_bytes)
         bt_channels = [ch for ch in resp.channels if ch.HasField("bluetooth_channel")]
@@ -264,7 +264,7 @@ class TestBuildFromSchemaCfg:
         })
         bssid = "11:22:33:44:55:66"
         sdr_bytes = sd.build_from_schema_cfg(cfg, wifi_bssid=bssid)
-        from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
+        from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
         resp = ServiceDiscoveryResponse()
         resp.ParseFromString(sdr_bytes)
         wifi_channels = [ch for ch in resp.channels if ch.HasField("wifi_channel")]
@@ -290,7 +290,7 @@ class TestBuildFromSchemaCfg:
         cfg = _minimal_cfg(sd)
         cfg["head_unit_name"] = "TestUnit"
         sdr_bytes = sd.build_from_schema_cfg(cfg)
-        from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
+        from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
         resp = ServiceDiscoveryResponse()
         resp.ParseFromString(sdr_bytes)
         assert resp.head_unit_name == "TestUnit"
@@ -334,14 +334,14 @@ class TestChannelsFromSdrBytes:
 
     @pytest.mark.unit
     def test_video_channel_av_type_is_video(self, sd, sdr_bytes):
-        from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType
+        from protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType
         result = sd.channels_from_sdr_bytes(sdr_bytes)
         ch3 = next(c for c in result if c["channel_id"] == 3)
         assert ch3["av_channel"]["av_type"] == MediaCodecType.MEDIA_CODEC_VIDEO_H264_BP
 
     @pytest.mark.unit
     def test_audio_channel_av_type_is_audio(self, sd, sdr_bytes):
-        from v2.protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType
+        from protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType
         result = sd.channels_from_sdr_bytes(sdr_bytes)
         ch4 = next(c for c in result if c["channel_id"] == 4)
         assert ch4["av_channel"]["av_type"] == MediaCodecType.MEDIA_CODEC_AUDIO_AAC_LC_ADTS
@@ -389,7 +389,7 @@ class TestChannelsFromSdrBytes:
 
     @pytest.mark.unit
     def test_media_audio_audio_type_is_media(self, sd, sdr_bytes):
-        from v2.protos.oaa.audio.AudioTypeEnum_pb2 import AudioType
+        from protos.oaa.audio.AudioTypeEnum_pb2 import AudioType
         result = sd.channels_from_sdr_bytes(sdr_bytes)
         ch4 = next(c for c in result if c["channel_id"] == 4)
         assert ch4["av_channel"]["audio_type"] == AudioType.MEDIA
@@ -415,7 +415,7 @@ class TestMessageFromSdrBytes:
 
     @pytest.mark.unit
     def test_returns_proto_object(self, sd):
-        from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
+        from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
         cfg = _minimal_cfg(sd)
         sdr_bytes = sd.build_from_schema_cfg(cfg)
         result = sd.message_from_sdr_bytes(sdr_bytes)
@@ -435,7 +435,7 @@ class TestMessageFromSdrBytes:
 
     @pytest.mark.unit
     def test_head_unit_name_accessible(self, sd):
-        from v2.protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
+        from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
         cfg = _minimal_cfg(sd)
         cfg["head_unit_name"] = "NemoTest"
         sdr_bytes = sd.build_from_schema_cfg(cfg)
