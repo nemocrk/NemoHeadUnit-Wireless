@@ -44,19 +44,21 @@
 | 2 | Definire design system — `docs/UI_DESIGN_SYSTEM.md` | ✅ |
 | 3 | Implementare `modules/ui_shell/` — layout engine + `input_trap` | ✅ |
 | 4 | Implementare `modules/navbar_ui/` — primo widget concreto (proof-of-concept) | ✅ |
-| 5 | Implementare `modules/video_ui/` — `QtBusBridge` + rendering H.264 (`VideoScreen`) | ⬜ |
-| 6 | Implementare `modules/bt_ui/` — pannello floating Bluetooth | ⬜ |
-| 7 | Implementare `modules/config_ui/` — pannello impostazioni | ⬜ |
-| 8 | Test di integrazione UI — copertura ≥80% per ogni modulo UI | ⬜ |
+| 5 | Implementare `modules/floating_menu_ui/` — arc-shaped on_request launcher | ✅ |
+| 6 | Implementare `modules/video_ui/` — `QtBusBridge` + rendering H.264 (`VideoScreen`) | ⬜ |
+| 7 | Implementare `modules/bt_ui/` — pannello floating Bluetooth | ⬜ |
+| 8 | Implementare `modules/config_ui/` — pannello impostazioni | ⬜ |
+| 9 | Test di integrazione UI — copertura ≥80% per ogni modulo UI | ⬜ |
 
-**Widget priority convention** (aggiornato dopo implementazione `navbar_ui`):
+**Widget priority convention:**
 
 | Priority | Moduli | Motivo |
 |---|---|---|
 | 0 | `config_manager` | Prima di tutto: config disponibile per tutti |
 | 1 | `bluetooth_manager`, `tcp_server`, `audio_manager` | Servizi di sistema |
 | 2 | `ui_shell` | Layout engine + input_trap; deve essere operativo e aver pubblicato `ui.shell.ready` prima dei widget |
-| 4 | `navbar_ui`, `video_ui`, `bt_ui`, `config_ui` | Widget UI: priority 4 garantisce che `ui_shell` abbia completato `system.ready` prima del loro avvio |
+| 3 | `floating_menu_ui` | Deve registrarsi dopo `ui_shell` ma prima dei widget `on_request` (priority 4) per poterli scoprire all'avvio |
+| 4 | `navbar_ui`, `video_ui`, `bt_ui`, `config_ui` | Widget UI: priority 4 garantisce che `ui_shell` e `floating_menu_ui` abbiano già completato `system.ready` |
 
 **Design tokens chiave** (estratto da `UI_DESIGN_SYSTEM.md`):
 
@@ -69,6 +71,8 @@
 | `--font-display` | DM Sans 300 | Clock, titoli panel |
 | Navbar height | 60px | Fisso |
 | Touch target min | 44×44px | Obbligatorio |
+| Arc radius base | 120px | floating_menu_ui |
+| Arc icon size | 52px | floating_menu_ui |
 
 ---
 
@@ -102,5 +106,5 @@ Il codice v2 è pronto per essere la struttura principale del repository.
 
 ---
 
-*Roadmap Version: 5.1*
+*Roadmap Version: 5.2*
 *Aggiornato: 2026-05-26*
