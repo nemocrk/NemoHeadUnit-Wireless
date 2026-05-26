@@ -22,6 +22,7 @@ This document defines the target multi-process UI architecture for NemoHeadUnit-
 |---|---|---|---|---|
 | `ui_shell` | 1 | ✅ opaque black | ✅ yes (manages fullscreen) | ❌ no |
 | `widget_*` | 2 … N | ❌ transparent, no border | ❌ no | ❌ no |
+| `floating_menu_ui` | 3 | ❌ transparent, no border | dynamic (0×0 when hidden) | ❌ no |
 | `input_trap` | ∞ | ❌ transparent, no border | follows `ui_shell` | ✅ captures everything |
 
 `input_trap` runs inside the same process as `ui_shell`, sharing the same Qt event loop and window coordinate space.
@@ -102,6 +103,9 @@ Every widget process publishes `ui.widget.register` once it is ready:
 | `min_height` | int \| null | — | Minimum height constraint |
 | `max_height` | int \| null | — | Maximum height constraint |
 | `aspect_ratio` | float \| null | — | width/height ratio; overrides free dimension if set |
+| `on_request` | bool | — | `true` = widget is hidden by default and launched via `floating_menu_ui`; default `false` |
+| `menu_order` | int | — | Sort order in the arc menu (only relevant when `on_request: true`) |
+| `icon` | string | — | Unicode glyph or Lucide name used by `floating_menu_ui` to render the arc button |
 
 ### Runtime geometry update
 
@@ -250,20 +254,26 @@ def on_input_event(payload: dict) -> None:
 
 | Topic | Publisher | Subscriber | Payload |
 |---|---|---|---|
-| `ui.widget.register` | `widget_*` | `ui_shell` | Registration constraints (see above) |
+| `ui.widget.register` | `widget_*` | `ui_shell`, `floating_menu_ui` | Registration constraints (see above) |
 | `ui.widget.update` | `widget_*` | `ui_shell` | `{name, [height], [width], …}` |
-| `ui.widget.unregister` | `widget_*` | `ui_shell` | `{name}` |
-| `ui.widget.geometry` | `ui_shell` | `widget_*` | `{name, x, y, w, h}` |
+| `ui.widget.unregister` | `widget_*` | `ui_shell`, `floating_menu_ui` | `{name}` |
+| `ui.widget.geometry` | `ui_shell` | `widget_*` | `{name, x, y, w, h, dpi_factor}` |
 | `ui.focus.changed` | `ui_shell` | `widget_*` | `{name}` — frontmost visible widget |
 | `ui.shell.ready` | `ui_shell` | all | `{}` |
 | `input.raw` | `input_trap` | `ui_shell` | Raw pointer/key event |
 | `input.event.<name>` | `ui_shell` | `widget_<name>` | Routed event (see above) |
+| `ui.settings.toggle` | `navbar_ui` | `floating_menu_ui` | `{}` — show/hide arc menu |
+| `ui.home.pressed` | `navbar_ui` | `floating_menu_ui` | `{}` — close all + hide arc |
+| `ui.module.open` | `floating_menu_ui` | `widget_<name>` | `{name}` — request widget to become visible |
+| `ui.module.close` | `floating_menu_ui` | `widget_<name>` | `{name}` — request widget to hide |
 
 ---
 
 ## Boot Sequence
 
 Widget processes run at **priority 4**, not priority 2. This guarantees that `ui_shell` (priority 2) has completed its `system.ready` handshake and published `ui.shell.ready` before any widget process starts, eliminating the race between `ui_shell` startup and the widget `on_ui_shell_ready` handler.
+
+`floating_menu_ui` runs at **priority 3** — it must start after `ui_shell` but before the `on_request` widgets (priority 4) so that it is already subscribed to `ui.widget.register` when those widgets announce themselves.
 
 ```
 Priority 0  config_manager
@@ -272,17 +282,37 @@ Priority 1  bluetooth_manager
             tcp_server
             audio_manager
 
-Priority 2  ui_shell          → spawns input_trap co-process
-                              → publishes ui.shell.ready
-                              → completes system.ready handshake
+Priority 2  ui_shell              → spawns input_trap co-process
+                                  → publishes ui.shell.ready
+                                  → completes system.ready handshake
 
-Priority 4  video_ui          → publishes ui.widget.register
-            navbar_ui         → publishes ui.widget.register
-            bt_ui             → publishes ui.widget.register (hidden until needed)
-            config_ui         → publishes ui.widget.register (hidden until needed)
+Priority 3  floating_menu_ui      → subscribes to ui.widget.register
+                                  → registers as hidden bottom-right widget
+
+Priority 4  video_ui              → publishes ui.widget.register
+            navbar_ui             → publishes ui.widget.register
+            bt_ui                 → publishes ui.widget.register {on_request: true}
+            config_ui             → publishes ui.widget.register {on_request: true}
 ```
 
 Each widget at priority 4 publishes `ui.widget.register` immediately on start (no waiting required — `ui.shell.ready` is guaranteed to have been published already). `ui_shell` responds with `ui.widget.geometry` and the widget calls `setGeometry()` + `show()`.
+
+---
+
+## floating_menu_ui — Arc Geometry
+
+`floating_menu_ui` renders an arc-shaped icon launcher anchored at the bottom-right corner of the screen. It is always hidden (width=0, height=0) until the user triggers `ui.settings.toggle`.
+
+```
+Arc shape:    quarter-circle, 270° → 0° (bottom-right corner)
+Radius base:  120px × dpi_factor  (config: radius_base)
+Icon size:    52px  × dpi_factor  (config: icon_size)
+Icon gap:     8px   × dpi_factor  (config: icon_gap)
+Max visible:  8 icons; tangential drag to scroll when N > 8
+Z-order:      3  (above navbar=2, above on_request widgets=2)
+```
+
+`floating_menu_ui` intercepts every `ui.widget.register` message where `on_request == true` and adds the widget to its arc. When the user taps an arc icon, `floating_menu_ui` publishes `ui.module.open {name}` and `ui.module.close` to the previously active on_request widget (mutual exclusivity).
 
 ---
 
@@ -291,10 +321,11 @@ Each widget at priority 4 publishes `ui.widget.register` immediately on start (n
 | Module folder | Role | Priority |
 |---|---|---|
 | `modules/ui_shell/` | Orchestrator, layout engine, input_trap host | 2 |
+| `modules/floating_menu_ui/` | Arc-shaped on_request module launcher | 3 |
 | `modules/video_ui/` | GStreamer H.264 decode + GL render | 4 |
 | `modules/navbar_ui/` | Navigation bar, always visible | 4 |
-| `modules/bt_ui/` | Bluetooth status panel | 4 |
-| `modules/config_ui/` | Settings panel | 4 |
+| `modules/bt_ui/` | Bluetooth status panel (on_request) | 4 |
+| `modules/config_ui/` | Settings panel (on_request) | 4 |
 
 All modules follow the standard boot protocol defined in `modules/_template/main.py`.
 
@@ -306,3 +337,4 @@ All modules follow the standard boot protocol defined in `modules/_template/main
 - Widget processes must **never** set `WindowStaysOnTopHint` — z-order is managed exclusively by the compositor and `ui_shell` window stacking.
 - All touch and keyboard input must flow through `input_trap` → `ui_shell` → `input.event.<name>`. Widgets must not install native event filters for raw input.
 - `input_trap` must be recreated (or re-raised) whenever `ui_shell` gains focus, to guarantee it remains at `z=∞`.
+- `on_request` widgets must register with `{"on_request": true, "menu_order": N, "icon": "<glyph>"}` so that `floating_menu_ui` can discover and display them automatically.
