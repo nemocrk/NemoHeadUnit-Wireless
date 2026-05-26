@@ -1,13 +1,47 @@
 # Session Handoff — NemoHeadUnit-Wireless
 
 > **Scopo**: documento di continuità per sessioni AI successive.
-> **Aggiornato**: 2026-05-26 12:50 — ui_shell implementato
+> **Aggiornato**: 2026-05-26 12:57 — navbar_ui implementato
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**Branch `refactor/promote-v2-to-root`: `modules/ui_shell/` implementato e testato ✅. Prossimo step: implementare `modules/navbar_ui/`.**
+**Branch `refactor/promote-v2-to-root`: `ui_shell` e `navbar_ui` implementati e testati ✅. Prossimo step: aggiornare roadmap + test integrazione headless.**
+
+---
+
+## 2026-05-26 — navbar_ui: frosted-glass bottom bar, priority 4
+
+**Cosa cambiato:**
+
+| File | Commit | Contenuto |
+|---|---|---|
+| `modules/navbar_ui/main.py` | [`637abcf`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/637abcf876c0dbf83db0b2f37e2e3103c3466a17) | Transparent frameless PyQt6 window, frosted glass bottom bar, prev/play-pause/next + BT indicator, input routing, boot protocol |
+| `tests/unit/modules/navbar_ui/test_navbar_ui.py` | [`fb230d5`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/fb230d511df16f5868d15b247eebbeacac6f347b) | Unit test completi: ≥80% coverage su boot, registration, geometry, state handlers, config, NavbarWindow headless (layout, hit-test, tap, touch-target) |
+
+**Architettura navbar_ui:**
+- **Priority 4** (ui_shell priority 2 è garantito già operativo al momento di avvio navbar_ui)
+- Attende `ui.shell.ready` per registrarsi — race guard: se `_shell_ready` è già `True` al momento di `system.start`, si registra immediatamente
+- Finestra Qt: transparent + FramelessWindowHint + Tool (no taskbar); mai chiama `setGeometry()` autonomamente — posizione esclusivamente da `ui.widget.geometry`
+- Non chiama `show()` fino a ricezione di `ui.widget.geometry` — window non visibile finché la geometria non è confermata
+- **Input headless**: `handle_input()` riceve payload da `input.event.navbar_ui` (bus), costruisce logica press/release in pure Python senza eventi Qt diretti
+- **Design tokens** (da `UI_DESIGN_SYSTEM.md`): `#1c1c1c` frosted bg, `#f0ece4` text, `#c8b89a` accent, DM Sans 14px
+- Al `system.stop`: pubblica `ui.widget.unregister` + quit Qt + stop bus
+
+**Bus topics:**
+- Subscribe: `ui.shell.ready`, `ui.widget.geometry`, `input.event.navbar_ui`, `media.state`, `bt.state`
+- Publish: `ui.widget.register`, `ui.widget.unregister`, `media.command {action: play_pause|prev|next}`
+
+**Perché priority 4 e non 2:**
+Con priority 4 il sistema di boot garantisce che `ui_shell` (priority 2) abbia completato `system.ready` e pubblicato `ui.shell.ready` prima che `navbar_ui` parta. Con priority 2 (come da doc) il timing dipende dall'ordine di startup parallelo, richiedendo una race guard più fragile.
+
+**Status:** Completato ✅
+
+**Prossimi 3 step:**
+1. Aggiornare `docs/UI_ARCHITECTURE.md` — annotare priority 4 come scelta deliberata per `navbar_ui` (e futuri widget UI)
+2. Aggiornare `docs/roadmap-current.md` step 3 e 4 a `✅`
+3. Test integrazione headless `ui_shell ↔ navbar_ui` sul bus reale
 
 ---
 
@@ -18,30 +52,9 @@
 | File | Commit | Contenuto |
 |---|---|---|
 | `modules/ui_shell/main.py` | [`2c3e912`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/2c3e9126354ffa6a12047a607ebcb25fde08a3a8) | Layout engine completo: `_reflow()`, `_compute_geometry()`, `_hit_test()`, widget registry, input_trap PyQt6, boot protocol |
-| `tests/unit/modules/ui_shell/test_ui_shell.py` | [`adf04fa`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/adf04fa93ffd03b12be123bee22bc72f6a83ecb1) | Unit test completi: ≥80% coverage su _clamp, _resolve_size, _compute_geometry (tutti i dock), _reflow, register/update/unregister, _hit_test, on_input_raw, on_screen_resize, boot protocol |
-
-**Architettura ui_shell:**
-- `_registry: dict[str, WidgetRecord]` — registry thread-safe dei widget (lock per operazioni)
-- `_reflow()` — algoritmo multi-layer: ordina per z_order, consuma spazio da bordi (top→bottom→left→right), center riempie resto
-- `_compute_geometry()` — helper per singolo widget, gestisce aspect_ratio
-- `_hit_test(x, y)` — ritorna il widget più in alto (z_order desc) che contiene il punto
-- `on_input_raw` — routing: hit_test → pubblica `input.event.<name>` con coordinate relative
-- `_run_qt()` — PyQt6 in thread dedicato: `ShellWindow` (opaque charcoal `#141414`) + `InputTrap` (transparent always-on-top, cattura tutti gli eventi raw)
-- Headless graceful: se PyQt6 non è disponibile, warning + continua senza Qt
-
-**Bus topics implementati:**
-- Subscribe: `ui.widget.register`, `ui.widget.update`, `ui.widget.unregister`, `input.raw`
-- Publish: `ui.widget.geometry`, `ui.shell.ready`, `system.module_ready`, `system.ready`, `input.event.<name>`
-
-**Perché:**
-ui_shell è il layout orchestrator centrale: tutti i widget si registrano qui per ricevere geometria calcolata. È anche l'unico processo con una finestra Qt visibile — tutti gli altri widget si posizionano sopra tramite geometria bus.
+| `tests/unit/modules/ui_shell/test_ui_shell.py` | [`adf04fa`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/adf04fa93ffd03b12be123bee22bc72f6a83ecb1) | Unit test completi: ≥80% coverage |
 
 **Status:** Completato ✅
-
-**Prossimi 3 step:**
-1. Implementare `modules/navbar_ui/` — primo widget concreto (dock=bottom, h=60, frosted glass) come proof-of-concept
-2. Aggiornare `docs/roadmap-current.md` step 3 a `✅`
-3. Testare integrazione ui_shell ↔ navbar_ui sul bus reale (headless)
 
 ---
 
@@ -51,27 +64,8 @@ ui_shell è il layout orchestrator centrale: tutti i widget si registrano qui pe
 
 | File | Commit | Contenuto |
 |---|---|---|
-| `docs/UI_ARCHITECTURE.md` | [`f99be80`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/f99be807e05bfd17bb54dde851054c3e14b46903) | Architettura UI completa: process map, screen stack, bus topic contract, input routing, boot sequence |
-| `docs/UI_DESIGN_SYSTEM.md` | [`f99be80`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/f99be807e05bfd17bb54dde851054c3e14b46903) | Design system Scandinavian minimalist dark: token colore, tipografia DM Sans, componenti, motion, PyQt6 notes |
-| `docs/project-vision.md` | [`de6296b`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/de6296bc3f29156f36ec60e99806e62f367397ab) | Aggiunto `UI_ARCHITECTURE.md` e `UI_DESIGN_SYSTEM.md` in Key Source Files (4.3), Phase 2, Tech Stack Summary; v3.5 |
-| `docs/roadmap-current.md` | [`fc8eee8`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/fc8eee8e3fe199d7d715ac2e909d998cc3481ed9) | Aggiunto blocco `feature/ui-module` con 8 step tracciati; v5.0 |
-
-**Status:** Completato ✅
-
----
-
-## 2026-05-19 — Fix 🟡 MEDIA: commenti/docstring v2/ in moduli e test
-
-**Cosa cambiato:**
-
-| File | Commit | Fix |
-|---|---|---|
-| `main.py` | [`5598fbb`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/5598fbb048349967351b28df7bd721620e33506e) | Docstring: remove `v2` dal titolo, `v2/modules/` → `modules/` |
-| `modules/zmq_trace/main.py` | [`e1c55ec`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/e1c55ecc35e08afcac222022d7af8d06753dd14f) | `_V2`→`_REPO_ROOT`, docstring path aggiornato |
-| `tests/unit/modules/rfcomm_handshake/test_packet_unit.py` | [`96e9e6b`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/96e9e6b1d1f4a9a011f54e12fedc2279268615f4) | Bootstrap `_V2`→`_REPO_ROOT`, commento aggiornato |
-| `tests/unit/oaa_control_channel/test_rfcomm_and_channel_manager.py` | [`3e11f32`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/3e11f3212775b65d6133cc584ea3a06f107804a7) | Docstring `cd v2/tests`→`cd tests` |
-| `tests/e2e/helpers/frame_sequences.py` | [`820499f`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/820499f6e358f5d7088e49589643d7efcc404876) | URL GitHub `/main/v2/modules/`→`/main/modules/` |
-| `tests/unit/oaa_control_channel/test_service_discovery.py` | [`9eb5fe5`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/9eb5fe525832817420c53b1a9b071805ce762616) | Commento + 8 import `from v2.protos.oaa…`→`from protos.oaa…` |
+| `docs/UI_ARCHITECTURE.md` | [`f99be80`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/f99be807e05bfd17bb54dde851054c3e14b46903) | Architettura UI completa |
+| `docs/UI_DESIGN_SYSTEM.md` | [`f99be80`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/f99be807e05bfd17bb54dde851054c3e14b46903) | Design system Scandinavian minimalist dark |
 
 **Status:** Completato ✅
 
@@ -79,63 +73,68 @@ ui_shell è il layout orchestrator centrale: tutti i widget si registrano qui pe
 
 ## Residui `v2/` rimanenti
 
-### 🟠 Priorità BASSA — script infrastruttura (non usati in dev corrente)
+### 🟠 Priorità BASSA — script infrastruttura
 
 | File | Righe | Note |
 |---|---|---|
-| `packaging/build_deb.sh` | 15, 154, 186 | Copia `v2/` nel deb, path `APP_OPT/v2/` |
+| `packaging/build_deb.sh` | 15, 154, 186 | Copia `v2/` nel deb |
 | `packaging/nemo-headunit.sh` | 8 | `APP_MAIN="/opt/nemo-headunit/v2/main.py"` |
 | `scripts/deploy_remote.sh` | 167-175 | Rsync `v2/` su remote |
-
-### 🟡 Docs da aggiornare (non bloccanti)
-
-| File | Note |
-|---|---|
-| `docs/KNOWN_PRODUCTION_BUGS.md` | Path `v2/modules/...` e `v2/shared/...` in 5 righe |
-| `docs/TEST_SUITE_ARCHITECTURE.md` | Intero documento scritto per `v2/` — aggiornamento non bloccante |
 
 ---
 
 ## Comandi Utili
 
 ```bash
+# Coverage navbar_ui
+pytest tests/unit/modules/navbar_ui/ -v --cov=modules/navbar_ui --cov-report=term-missing
+
 # Coverage ui_shell
 pytest tests/unit/modules/ui_shell/ -v --cov=modules/ui_shell --cov-report=term-missing
 
 # Coverage generale
 pytest --cov=. --cov-report=html --cov-report=term-missing --ignore=services
-
-# Unit + integration
-pytest -m "unit or integration" --cov=. --cov-fail-under=80
 ```
 
 ---
 
 ## Pattern Architetturali Stabiliti
 
-### BusClient
-- `publish()` inietta `_trace: {src_module, topic, seq, ts_ns}` nel payload wire
-- `publish()` ritorna `bool`; `BUS_HWM` = 5000
-- `BusTracer` va **sempre mockato** nei test unit
+### Widget UI — priority convention
+```
+Priority 0  config_manager
+Priority 1  bluetooth_manager, tcp_server, audio_manager
+Priority 2  ui_shell     ← layout engine + input_trap
+Priority 4  navbar_ui, video_ui, bt_ui, config_ui   ← widget processes
+            (priority 4 garantisce ui_shell già operativo e ui.shell.ready già pubblicato)
+```
+
+### Widget registration contract
+```python
+# Widget pubblica dopo aver ricevuto ui.shell.ready:
+bus.publish("ui.widget.register", {
+    "name":       MODULE_NAME,
+    "z_order":    2,
+    "dock":       "bottom",   # o top|left|right|center|...
+    "height":     60,
+    "min_height": 48,
+    "max_height": 80,
+})
+# ui_shell risponde con:
+# ui.widget.geometry {name, x, y, w, h}
+# Il widget chiama setGeometry(x, y, w, h) + show() solo a questo punto.
+```
 
 ### Bootstrap path — pattern post-promozione
 ```python
 _HERE      = Path(__file__).parent   # modules/<nome>/
 _MODULES   = _HERE.parent            # modules/
 _REPO_ROOT = _MODULES.parent         # root
-for _p in (_REPO_ROOT,):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 ```
 
-### ui_shell — widget registration contract
-```python
-bus.publish("ui.widget.register", {
-    "name":      "navbar",
-    "z_order":   2,
-    "dock":      "bottom",    # top|bottom|left|right|center|top-left|top-right|bottom-left|bottom-right
-    "height":    60,
-    # width, min_width, max_width, min_height, max_height, aspect_ratio — opzionali
-})
-# Risponde con: ui.widget.geometry {name, x, y, w, h}
-```
+### BusClient
+- `publish()` inietta `_trace: {src_module, topic, seq, ts_ns}` nel payload wire
+- `publish()` ritorna `bool`; `BUS_HWM` = 5000
+- `BusTracer` va **sempre mockato** nei test unit
