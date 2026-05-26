@@ -1,7 +1,7 @@
 # Roadmap Attuale — NemoHeadUnit-Wireless
 
 > Documento di pianificazione attività corrente.
-> **Ultimo aggiornamento: 2026-05-19**
+> **Ultimo aggiornamento: 2026-05-26**
 
 ---
 
@@ -25,6 +25,41 @@
 | 6 | Aggiorna `docs/` — tutti i riferimenti `v2/` → root | ⬜ |
 | 7 | Aggiorna `README.md` | ⬜ |
 | 8 | Verifica import paths e test paths | ⬜ |
+
+---
+
+### feature/ui-module — Implementazione UI PyQt6
+
+**Obiettivo**: Realizzare il layer UI completo secondo l’architettura e il design system definiti.
+
+**Documenti di riferimento**:
+- [`docs/UI_ARCHITECTURE.md`](UI_ARCHITECTURE.md) — struttura moduli, screen stack, bus topic contract
+- [`docs/UI_DESIGN_SYSTEM.md`](UI_DESIGN_SYSTEM.md) — token colore, tipografia, componenti, motion, note PyQt6
+
+**Piano di esecuzione:**
+
+| Step | Azione | Stato |
+|---|---|---|
+| 1 | Definire architettura UI — `docs/UI_ARCHITECTURE.md` | ✅ |
+| 2 | Definire design system — `docs/UI_DESIGN_SYSTEM.md` | ✅ |
+| 3 | Implementare `modules/ui_shell/` — layout engine + `input_trap` | ⬜ |
+| 4 | Implementare `modules/navbar_ui/` — primo widget concreto (proof-of-concept) | ⬜ |
+| 5 | Implementare `modules/video_ui/` — `QtBusBridge` + rendering H.264 (`VideoScreen`) | ⬜ |
+| 6 | Implementare `modules/bt_ui/` — pannello floating Bluetooth | ⬜ |
+| 7 | Implementare `modules/config_ui/` — pannello impostazioni | ⬜ |
+| 8 | Test di integrazione UI — copertura ≥80% per ogni modulo UI | ⬜ |
+
+**Design tokens chiave** (estratto da `UI_DESIGN_SYSTEM.md`):
+
+| Token | Valore | Ruolo |
+|---|---|---|
+| `--color-bg` | `#141414` | Sfondo principale |
+| `--color-surface` | `#1c1c1c` | Background widget |
+| `--color-text` | `#f0ece4` | Testo primario warm-white |
+| `--color-accent` | `#c8b89a` | Icone attive, clock |
+| `--font-display` | DM Sans 300 | Clock, titoli panel |
+| Navbar height | 60px | Fisso |
+| Touch target min | 44×44px | Obbligatorio |
 
 ---
 
@@ -58,5 +93,5 @@ Il codice v2 è pronto per essere la struttura principale del repository.
 
 ---
 
-*Roadmap Version: 4.0*
-*Aggiornato: 2026-05-19*
+*Roadmap Version: 5.0*
+*Aggiornato: 2026-05-26*
