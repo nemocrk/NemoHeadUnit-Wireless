@@ -1,13 +1,44 @@
 # Session Handoff — NemoHeadUnit-Wireless
 
 > **Scopo**: documento di continuità per sessioni AI successive.
-> **Aggiornato**: 2026-05-19 15:08 — fix 🟡 MEDIA commenti/docstring v2/ completato
+> **Aggiornato**: 2026-05-26 12:41 — UI architecture + design system completati
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**Branch `refactor/promote-v2-to-root`: tutti i fix 🔴 ALTA e 🟡 MEDIA completati ✅. Rimangono 🟠 BASSA (packaging/deploy) e docs di architettura.**
+**Branch `refactor/promote-v2-to-root`: architettura UI e design system definiti e documentati ✅. Prossimo step: implementare `modules/ui_shell/` e `modules/navbar_ui/`.**
+
+---
+
+## 2026-05-26 — UI Architecture & Design System
+
+**Cosa cambiato:**
+
+| File | Commit | Contenuto |
+|---|---|---|
+| `docs/UI_ARCHITECTURE.md` | [`f99be80`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/f99be807e05bfd17bb54dde851054c3e14b46903) | Architettura UI completa: process map, screen stack, bus topic contract, input routing, boot sequence |
+| `docs/UI_DESIGN_SYSTEM.md` | [`f99be80`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/f99be807e05bfd17bb54dde851054c3e14b46903) | Design system Scandinavian minimalist dark: token colore, tipografia DM Sans, componenti, motion, PyQt6 notes |
+| `docs/project-vision.md` | [`de6296b`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/de6296bc3f29156f36ec60e99806e62f367397ab) | Aggiunto `UI_ARCHITECTURE.md` e `UI_DESIGN_SYSTEM.md` in Key Source Files (4.3), Phase 2, Tech Stack Summary; v3.5 |
+| `docs/roadmap-current.md` | [`fc8eee8`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/fc8eee8e3fe199d7d715ac2e909d998cc3481ed9) | Aggiunto blocco `feature/ui-module` con 8 step tracciati; v5.0 |
+
+**Perché:**
+Prima di scrivere codice UI era necessario formalizzare l’architettura (processo, screen stack, bus contract) e il design system (token, tipografia, componenti) come riferimenti stabili per tutta la fase di sviluppo UI.
+
+**Decisioni chiave prese:**
+- Style: Minimalist Scandinavian dark 2026 — charcoal `#141414`, warm-white `#f0ece4`, accent sand `#c8b89a`
+- Font: DM Sans 300/400 (unico font, peso come gerarchia)
+- Icone: Lucide thin stroke `stroke-width: 1.5`, niente filled eccetto Home circle
+- Navbar: 60px height, frosted glass `rgba(28,28,28,0.96)` + `backdrop-filter: blur(12px)`
+- Animazioni: solo su state transitions, mai su content updates; durate 120–200ms
+- UI = modulo passivo: riceve tutto dal bus, non chiama mai altri moduli direttamente
+
+**Status:** Completato ✅
+
+**Prossimi 3 step:**
+1. Implementare `modules/ui_shell/` — layout engine, gestione `ui.widget.register/update/unregister`, `input_trap` co-process
+2. Implementare `modules/navbar_ui/` — primo widget concreto come proof-of-concept dell’architettura
+3. Aggiornare `docs/roadmap-current.md` step 3 e 4 a `✅` dopo implementazione
 
 ---
 
@@ -46,14 +77,6 @@
 |---|---|
 | `docs/KNOWN_PRODUCTION_BUGS.md` | Path `v2/modules/...` e `v2/shared/...` in 5 righe |
 | `docs/TEST_SUITE_ARCHITECTURE.md` | Intero documento scritto per `v2/` — aggiornamento non bloccante |
-
----
-
-## Prossimi 3 passi
-
-1. **Aprire PR** `refactor/promote-v2-to-root` → `main` — tutti i fix runtime e docstring sono completati
-2. **Fix 🟠 BASSA** — `packaging/build_deb.sh`, `packaging/nemo-headunit.sh`, `scripts/deploy_remote.sh`
-3. **Aggiornare docs** — `docs/KNOWN_PRODUCTION_BUGS.md` e `docs/TEST_SUITE_ARCHITECTURE.md` post-merge
 
 ---
 
