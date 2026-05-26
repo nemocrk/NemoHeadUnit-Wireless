@@ -263,6 +263,8 @@ def on_input_event(payload: dict) -> None:
 
 ## Boot Sequence
 
+Widget processes run at **priority 4**, not priority 2. This guarantees that `ui_shell` (priority 2) has completed its `system.ready` handshake and published `ui.shell.ready` before any widget process starts, eliminating the race between `ui_shell` startup and the widget `on_ui_shell_ready` handler.
+
 ```
 Priority 0  config_manager
 
@@ -272,13 +274,15 @@ Priority 1  bluetooth_manager
 
 Priority 2  ui_shell          → spawns input_trap co-process
                               → publishes ui.shell.ready
-            video_ui          → registers ui.widget.register
-            navbar_ui         → registers ui.widget.register
-            bt_ui             → registers ui.widget.register (hidden until needed)
-            config_ui         → registers ui.widget.register (hidden until needed)
+                              → completes system.ready handshake
+
+Priority 4  video_ui          → publishes ui.widget.register
+            navbar_ui         → publishes ui.widget.register
+            bt_ui             → publishes ui.widget.register (hidden until needed)
+            config_ui         → publishes ui.widget.register (hidden until needed)
 ```
 
-Widget processes at priority 2 may start in parallel. Each waits for `ui.shell.ready` before publishing `ui.widget.register`. `ui_shell` responds with `ui.widget.geometry` and the widget calls `show()`.
+Each widget at priority 4 publishes `ui.widget.register` immediately on start (no waiting required — `ui.shell.ready` is guaranteed to have been published already). `ui_shell` responds with `ui.widget.geometry` and the widget calls `setGeometry()` + `show()`.
 
 ---
 
@@ -287,10 +291,10 @@ Widget processes at priority 2 may start in parallel. Each waits for `ui.shell.r
 | Module folder | Role | Priority |
 |---|---|---|
 | `modules/ui_shell/` | Orchestrator, layout engine, input_trap host | 2 |
-| `modules/video_ui/` | GStreamer H.264 decode + GL render | 2 |
-| `modules/navbar_ui/` | Navigation bar, always visible | 2 |
-| `modules/bt_ui/` | Bluetooth status panel | 2 |
-| `modules/config_ui/` | Settings panel | 2 |
+| `modules/video_ui/` | GStreamer H.264 decode + GL render | 4 |
+| `modules/navbar_ui/` | Navigation bar, always visible | 4 |
+| `modules/bt_ui/` | Bluetooth status panel | 4 |
+| `modules/config_ui/` | Settings panel | 4 |
 
 All modules follow the standard boot protocol defined in `modules/_template/main.py`.
 
