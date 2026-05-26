@@ -141,7 +141,49 @@ State active:  --color-accent
 State press:   scale(0.92), transition 120ms ease-out
 ```
 
-### Floating panel (bt_ui, config_ui)
+### Floating arc menu (`floating_menu_ui`)
+
+```
+Shape:         Quarter-circle arc, bottom-right corner
+Sweep:         270° → 0° (counter-clockwise, right edge to bottom edge)
+Radius base:   120px × dpi_factor  (config: radius_base, range 60–300)
+Icon diameter: 52px  × dpi_factor  (config: icon_size,   range 32–96)
+Icon gap:      8px   × dpi_factor  (config: icon_gap,    range 0–32)
+Max visible:   8 icons per arc (tangential drag scrolls when N > 8)
+Z-order:       3  (above navbar, above on_request widgets)
+```
+
+Icon button states:
+```
+Background rest:   rgba(50,50,50,0.78)    circle
+Background active: rgba(240,236,228,0.94) circle  — inverted (same as --color-text)
+Icon rest:         --color-text  (#f0ece4)
+Icon active:       --color-bg    (#141414)  — inverted
+Transition:        220ms ease-out (slide-in from bottom-right on menu open)
+                   180ms ease-in  (slide-out on menu close / ui.home.pressed)
+```
+
+Scroll hint (visible only when total on_request modules > 8):
+```
+Small dots, right edge of bounding box
+Max 5 dots representing position in scroll range
+Color active dot:   rgba(240,236,228,0.78)
+Color inactive dot: rgba(240,236,228,0.31)
+Dot radius:         3px
+```
+
+PyQt6 paint pattern:
+```python
+# Arc pivot is at local (radius, bounding_h) = screen bottom-right corner
+# cx, cy computed by _icon_center(index, total_visible)
+# Draw filled circle, then draw Unicode glyph centred
+COLOR_ICON_BG    = QColor(50,  50,  50,  200)
+COLOR_ACTIVE_BG  = QColor(240, 236, 228, 240)
+COLOR_ICON       = QColor(240, 236, 228)      # --color-text
+COLOR_ACTIVE_ICON= QColor(28,  28,  28)       # --color-bg
+```
+
+### Floating panel (`bt_ui`, `config_ui`)
 
 ```
 Background:    --color-surface  rgba(28,28,28,0.97)
@@ -177,6 +219,8 @@ Pulse anim:    opacity 0.4→1.0, 2s ease-in-out infinite (connected state only)
 | Active icon colour | 180ms | `ease` | `color` |
 | Status dot pulse | 2000ms | `ease-in-out` | `opacity` (infinite, connected only) |
 | Volume/brightness slider reveal | 150ms | `ease-out` | `height` + `opacity` |
+| Arc menu open | 220ms | `ease-out` | `windowOpacity` (0 → 1) |
+| Arc menu close | 180ms | `ease-in` | `windowOpacity` (1 → 0) |
 
 **No animations on**: background colour, border changes, text content updates.  
 **Respect** `prefers-reduced-motion`: all transitions → `0.01ms`.
@@ -222,6 +266,23 @@ p.setPen(QColor(0xc8, 0xb8, 0x9a))  # --color-accent
 p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "10:24")
 ```
 
+### Arc icon rendering (floating_menu_ui)
+
+```python
+# In ArcMenuWindow.paintEvent
+for i, entry in enumerate(visible_entries):
+    cx, cy  = _icon_center(i, len(visible_entries))
+    r       = icon_sz // 2
+    is_active = (entry.name == _active_module)
+    bg = COLOR_ACTIVE_BG if is_active else COLOR_ICON_BG
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(bg)
+    p.drawEllipse(int(cx) - r, int(cy) - r, icon_sz, icon_sz)
+    p.setPen(COLOR_ACTIVE_ICON if is_active else COLOR_ICON)
+    p.drawText(int(cx)-r, int(cy)-r, icon_sz, icon_sz,
+               Qt.AlignmentFlag.AlignCenter, entry.icon or "?")
+```
+
 ---
 
 ## Anti-Patterns (Never Do)
@@ -236,3 +297,5 @@ p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "10:24")
 - ❌ Blue, purple, or green accent colours
 - ❌ Animations on content updates (only on state transitions)
 - ❌ Rounded corners larger than `--radius-xl` (20px)
+- ❌ Rectangular backgrounds behind arc icons (always use `drawEllipse`)
+- ❌ More than one arc menu instance visible at the same time
