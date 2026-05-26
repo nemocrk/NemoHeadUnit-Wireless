@@ -107,6 +107,8 @@ The primary purpose of NemoHeadUnit-Wireless is to emulate an Android Auto head 
 | `modules/tcp_server/` | TCP server for Android Auto wireless protocol |
 | `modules/oaa_control_channel/` | OAA control channel + handshake |
 | `services/ap_manager_service/` | WiFi AP / join-network mode (standalone service) |
+| `docs/UI_ARCHITECTURE.md` | UI module architecture: process map, screen stack, bus topic contract, boot sequence |
+| `docs/UI_DESIGN_SYSTEM.md` | UI design system: colour tokens, typography, components, motion, PyQt6 implementation notes |
 
 ### 4.4 Message Frame Format
 
@@ -189,6 +191,7 @@ Audio/video frames carry raw AAC or H.264 bytes in Frame 2 for zero-copy deliver
 - **Remote Access**: Seamless remote connection
 - **Configuration**: Easy-to-use configuration system
 - **Technology**: PyQt6
+- **Design System**: Minimalist Scandinavian dark UI — see [`docs/UI_DESIGN_SYSTEM.md`](UI_DESIGN_SYSTEM.md)
 
 ---
 
@@ -252,6 +255,7 @@ Audio/video frames carry raw AAC or H.264 bytes in Frame 2 for zero-copy deliver
 | Qt Thread Bridge | `QtBusBridge` (pyqtSignal QueuedConnection) |
 | Media Playback | GStreamer (primary) / ffplay (fallback) |
 | Logging | Per-module verbosity control (`shared/logger.py`) |
+| UI Design System | Minimalist Scandinavian dark — `docs/UI_DESIGN_SYSTEM.md` |
 
 ---
 
@@ -265,7 +269,7 @@ Audio/video frames carry raw AAC or H.264 bytes in Frame 2 for zero-copy deliver
 **Phase 2: Core Features**
 - Video/audio streaming (H.264 + AAC via IPC binary frames)
 - Remote configuration
-- Touch UI development
+- Touch UI development — architecture in [`docs/UI_ARCHITECTURE.md`](UI_ARCHITECTURE.md), design system in [`docs/UI_DESIGN_SYSTEM.md`](UI_DESIGN_SYSTEM.md)
 
 **Phase 3: Optimisation**
 - Performance optimisation for Atom processors
@@ -287,6 +291,7 @@ Audio/video frames carry raw AAC or H.264 bytes in Frame 2 for zero-copy deliver
 4. **Qt Thread Safety**: `QtBusBridge` guarantees all widget operations run on the Qt main thread
 5. **Edge Optimisation**: Optimised for older Atom processors
 6. **Modular Logging**: Per-module verbosity control for debugging and troubleshooting
+7. **Premium UI**: Minimalist Scandinavian dark design system (warm-white on charcoal) optimised for in-car touch interaction
 
 ---
 
@@ -444,6 +449,6 @@ NemoHeadUnit-Wireless represents a significant advancement in Android Auto emula
 
 ---
 
-*Document Version: 3.4*
-*Last Updated: 2026-05-19*
+*Document Version: 3.5*
+*Last Updated: 2026-05-26*
 *Author: Nemo Development Team*
