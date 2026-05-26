@@ -110,10 +110,10 @@ class OnRequestEntry:
 _on_request_modules: dict[str, OnRequestEntry] = {}  # name → entry
 _on_request_lock = threading.Lock()
 
-_active_module: Optional[str] = None   # currently open on_request module
+_active_module: Optional[str] = None
 _dpi_factor: float = 1.0
 _screen_h: int = 600
-_navbar_h: int = 60                     # updated from ui.widget.geometry of navbar_ui
+_navbar_h: int = 60
 
 # ---------------------------------------------------------------------------
 # Menu visibility state
@@ -128,6 +128,11 @@ _menu_visible: bool = False
 _qt_app    = None
 _qt_window = None
 _qt_thread: Optional[threading.Thread] = None
+
+# Geometry received before Qt window is ready is stored here and applied
+# via QTimer.singleShot(0) inside _run_qt.
+_pending_geometry: Optional[tuple[int, int, int, int]] = None  # (x, y, w, h)
+_pending_geometry_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Shell readiness gate
@@ -164,22 +169,14 @@ def _update_geometry(width: int, height: int) -> None:
 # ---------------------------------------------------------------------------
 
 def _arc_params() -> tuple[float, float, float, float]:
-    """
-    Returns (radius, icon_sz, gap, arc_len) all in logical pixels (pre-dpi).
-    arc_len is the available arc length in pixels (quarter circle).
-    """
     radius   = float(_config.get("radius_base", 120)) * _dpi_factor
     icon_sz  = float(_config.get("icon_size",   52))  * _dpi_factor
     gap      = float(_config.get("icon_gap",    8))   * _dpi_factor
-    arc_len  = (math.pi / 2) * radius          # 90° = π/2 radians
+    arc_len  = (math.pi / 2) * radius
     return radius, icon_sz, gap, arc_len
 
 
 def _visible_count() -> int:
-    """
-    Number of icons that fit on the arc, capped at min(8, registered).
-    arc_len / (icon_sz + gap) gives theoretical max slots.
-    """
     radius, icon_sz, gap, arc_len = _arc_params()
     slots = int(arc_len / (icon_sz + gap))
     with _on_request_lock:
@@ -188,34 +185,10 @@ def _visible_count() -> int:
 
 
 def _icon_center(index: int, total_visible: int) -> tuple[float, float]:
-    """
-    (cx, cy) in window-local coordinates for icon at position `index`
-    within the arc.
-
-    The arc is a quarter-circle from angle 270° (bottom) to 0° (right)
-    in standard math convention, i.e. from
-      start_angle = -math.pi / 2  (pointing down from right-edge anchor)
-    to
-      end_angle   = 0             (pointing right, i.e. top of visible arc)
-
-    The window is positioned at the screen’s bottom-right corner.
-    Its local origin (0,0) is the top-left of the bounding box.
-    The arc pivot is at local (radius, window_h), i.e. bottom-right of the
-    bounding-box, which corresponds to the screen corner.
-    """
     radius, icon_sz, gap, arc_len = _arc_params()
-    if total_visible <= 1:
-        step = 0.0
-    else:
-        step = (math.pi / 2) / (total_visible - 1)
-
-    # angle 0 = bottom-right corner direction; we sweep counter-clockwise
-    angle = (math.pi / 2) * (index / max(total_visible - 1, 1))
-
-    # pivot is at bottom-right of our bounding box
+    angle  = (math.pi / 2) * (index / max(total_visible - 1, 1))
     pivot_x = radius
     pivot_y = _bounding_h()
-
     cx = pivot_x - radius * math.cos(angle)
     cy = pivot_y - radius * math.sin(angle)
     return cx, cy
@@ -227,7 +200,6 @@ def _bounding_w() -> int:
 
 
 def _bounding_h() -> int:
-    """Arc can extend up to screen height minus navbar."""
     radius, _, _, _ = _arc_params()
     available = _screen_h - _navbar_h
     return int(min(radius, available))
@@ -255,7 +227,6 @@ def on_ui_shell_ready(topic: str, payload: dict) -> None:
 
 
 def on_widget_register(topic: str, payload: dict) -> None:
-    """Intercept registrations from on_request modules."""
     if not payload.get("on_request", False):
         return
     name = payload.get("name")
@@ -272,10 +243,7 @@ def on_widget_register(topic: str, payload: dict) -> None:
     log.info(f"on_request module discovered: '{name}' icon='{entry.icon}' order={entry.menu_order}")
 
     if _qt_window is not None:
-        try:
-            _qt_window.refresh()
-        except Exception:
-            pass
+        _qt_invoke_refresh()
 
 
 def on_widget_unregister(topic: str, payload: dict) -> None:
@@ -287,13 +255,11 @@ def on_widget_unregister(topic: str, payload: dict) -> None:
     if removed:
         log.info(f"on_request module removed: '{name}'")
         if _qt_window is not None:
-            try:
-                _qt_window.refresh()
-            except Exception:
-                pass
+            _qt_invoke_refresh()
 
 
 def on_widget_geometry(topic: str, payload: dict) -> None:
+    """Called from the bus thread — must NOT touch Qt objects directly."""
     global _geometry_set, _dpi_factor, _screen_h, _navbar_h
     name = payload.get("name", "")
     _dpi_factor = float(payload.get("dpi_factor", 1.0))
@@ -303,15 +269,50 @@ def on_widget_geometry(topic: str, payload: dict) -> None:
 
     if name == MODULE_NAME:
         _geometry_set = True
+        x = int(payload["x"])
+        y = int(payload["y"])
+        w = int(payload["w"])
+        h = int(payload["h"])
         if _qt_window is not None:
-            try:
-                x = int(payload["x"])
-                y = int(payload["y"])
-                w = int(payload["w"])
-                h = int(payload["h"])
-                _qt_window.apply_geometry(x, y, w, h)
-            except Exception as exc:
-                log.warning(f"apply_geometry failed: {exc}")
+            _qt_invoke_geometry(x, y, w, h)
+        else:
+            with _pending_geometry_lock:
+                global _pending_geometry  # noqa: PLW0603
+                _pending_geometry = (x, y, w, h)
+                log.debug("Geometry queued (Qt not ready yet)")
+
+
+def _qt_invoke_geometry(x: int, y: int, w: int, h: int) -> None:
+    """Schedule apply_geometry on the Qt thread via QMetaObject.invokeMethod."""
+    try:
+        from PyQt6.QtCore import QMetaObject, Qt
+        QMetaObject.invokeMethod(
+            _qt_window,
+            "apply_geometry_slot",
+            Qt.ConnectionType.QueuedConnection,
+            x, y, w, h,
+        )
+    except Exception:
+        try:
+            _qt_window.apply_geometry(x, y, w, h)
+        except Exception as exc:
+            log.warning(f"apply_geometry fallback failed: {exc}")
+
+
+def _qt_invoke_refresh() -> None:
+    """Schedule a repaint on the Qt thread."""
+    try:
+        from PyQt6.QtCore import QMetaObject, Qt
+        QMetaObject.invokeMethod(
+            _qt_window,
+            "refresh",
+            Qt.ConnectionType.QueuedConnection,
+        )
+    except Exception:
+        try:
+            _qt_window.refresh()
+        except Exception:
+            pass
 
 
 def on_input_event(topic: str, payload: dict) -> None:
@@ -324,25 +325,26 @@ def on_input_event(topic: str, payload: dict) -> None:
 
 
 def on_settings_toggle(topic: str, payload: dict) -> None:
-    """Show or hide the arc menu."""
     global _menu_visible
     _menu_visible = not _menu_visible
     log.info(f"settings.toggle — menu_visible={_menu_visible}")
     if _qt_window is not None:
         try:
-            _qt_window.set_visible(_menu_visible)
-        except Exception as exc:
-            log.warning(f"set_visible failed: {exc}")
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(
+                _qt_window, "set_visible_slot",
+                Qt.ConnectionType.QueuedConnection,
+                _menu_visible,
+            )
+        except Exception:
+            pass
     if _menu_visible:
-        w = _bounding_w()
-        h = _bounding_h()
-        _update_geometry(w, h)
+        _update_geometry(_bounding_w(), _bounding_h())
     else:
         _update_geometry(0, 0)
 
 
 def on_home_pressed(topic: str, payload: dict) -> None:
-    """Close all on_request modules and hide the menu."""
     global _menu_visible, _active_module
     log.info("ui.home.pressed — closing all modules and hiding menu")
     _close_active_module()
@@ -350,7 +352,12 @@ def on_home_pressed(topic: str, payload: dict) -> None:
     _menu_visible  = False
     if _qt_window is not None:
         try:
-            _qt_window.set_visible(False)
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(
+                _qt_window, "set_visible_slot",
+                Qt.ConnectionType.QueuedConnection,
+                False,
+            )
         except Exception:
             pass
     _update_geometry(0, 0)
@@ -361,7 +368,6 @@ def on_home_pressed(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _close_active_module() -> None:
-    """Send ui.module.close to the currently active module (if any)."""
     global _active_module
     if _active_module:
         bus.publish("ui.module.close", {"name": _active_module})
@@ -370,10 +376,8 @@ def _close_active_module() -> None:
 
 
 def _open_module(name: str) -> None:
-    """Close active module (if different), then open the requested one."""
     global _active_module
     if _active_module == name:
-        # already open — no-op (toggle-off not in spec)
         return
     _close_active_module()
     _active_module = name
@@ -386,22 +390,12 @@ def _open_module(name: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _run_qt() -> None:
-    """
-    Build and run the floating_menu_ui PyQt6 window.
-
-    The window is initially hidden (0×0). When visible:
-      - Draws a quarter-circle arc of circular icon buttons
-      - Handles tangential drag gestures for scrolling when N > 8
-      - Animates open/close via QPropertyAnimation on the window opacity
-        and geometry (slide from bottom-right corner)
-    """
     try:
         from PyQt6.QtWidgets import QApplication, QWidget
         from PyQt6.QtCore import (
-            Qt, QPropertyAnimation, QEasingCurve,
-            QRect, QPoint, pyqtProperty,
+            Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtSlot,
         )
-        from PyQt6.QtGui import QColor, QPainter, QFont, QPen, QBrush
+        from PyQt6.QtGui import QColor, QPainter, QFont
     except ImportError:
         log.warning("PyQt6 not available — floating_menu_ui running in headless mode")
         return
@@ -410,10 +404,8 @@ def _run_qt() -> None:
 
     _qt_app = QApplication.instance() or QApplication(sys.argv)
 
-    # Design tokens
-    COLOR_BG      = QColor(28, 28, 28, 220)
-    COLOR_ICON    = QColor(240, 236, 228)
-    COLOR_ICON_BG = QColor(50, 50, 50, 200)
+    COLOR_ICON        = QColor(240, 236, 228)
+    COLOR_ICON_BG     = QColor(50, 50, 50, 200)
     COLOR_ACTIVE_BG   = QColor(240, 236, 228, 240)
     COLOR_ACTIVE_ICON = QColor(28, 28, 28)
 
@@ -425,24 +417,37 @@ def _run_qt() -> None:
             super().__init__()
             self.setWindowFlags(
                 Qt.WindowType.FramelessWindowHint |
-                Qt.WindowType.Tool
+                Qt.WindowType.Tool |
+                Qt.WindowType.WindowStaysOnTopHint
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self.hide()
 
-            self._is_visible   = False
-            self._scroll_offset = 0     # icon index of first visible icon
+            self._is_visible    = False
+            self._scroll_offset = 0
             self._drag_start_y: Optional[int] = None
             self._drag_start_offset: int = 0
             self._anim: Optional[QPropertyAnimation] = None
-            self._opacity_val: float = 0.0
 
-        # ---- public API ----
+        # ---- thread-safe public API ----
+
+        @pyqtSlot(int, int, int, int)
+        def apply_geometry_slot(self, x: int, y: int, w: int, h: int) -> None:
+            self.apply_geometry(x, y, w, h)
+
+        @pyqtSlot(bool)
+        def set_visible_slot(self, visible: bool) -> None:
+            self.set_visible(visible)
+
+        @pyqtSlot()
+        def refresh(self) -> None:
+            self.update()
 
         def apply_geometry(self, x: int, y: int, w: int, h: int) -> None:
             if w > 0 and h > 0:
                 self.setGeometry(x, y, w, h)
                 self.show()
+                self.raise_()
             else:
                 self.hide()
 
@@ -453,35 +458,28 @@ def _run_qt() -> None:
             else:
                 self._animate_out()
 
-        def refresh(self) -> None:
-            self.update()
-
         def handle_input(self, payload: dict) -> None:
-            ev   = payload.get("type")
-            x    = int(payload.get("x", 0))
-            y    = int(payload.get("y", 0))
+            ev = payload.get("type")
+            x  = int(payload.get("x", 0))
+            y  = int(payload.get("y", 0))
 
             if ev == "press":
                 self._drag_start_y      = y
                 self._drag_start_offset = self._scroll_offset
-
             elif ev == "move":
                 if self._drag_start_y is not None:
-                    delta = y - self._drag_start_y
+                    delta   = y - self._drag_start_y
                     icon_sz = float(_config.get("icon_size", 52)) * _dpi_factor
                     gap     = float(_config.get("icon_gap", 8))   * _dpi_factor
                     step    = icon_sz + gap
-                    entries = _sorted_entries()
-                    total   = len(entries)
+                    total   = len(_on_request_modules)
                     vis     = _visible_count()
                     new_off = self._drag_start_offset - int(delta / step)
                     self._scroll_offset = max(0, min(new_off, total - vis))
                     self.update()
-
             elif ev == "release":
                 if self._drag_start_y is not None:
-                    delta = abs(y - self._drag_start_y)
-                    if delta < 8:   # tap, not drag
+                    if abs(y - self._drag_start_y) < 8:
                         hit = self._hit_icon(x, y)
                         if hit is not None:
                             _open_module(hit)
@@ -491,7 +489,6 @@ def _run_qt() -> None:
         # ---- animation ----
 
         def _animate_in(self) -> None:
-            from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
             if self._anim:
                 self._anim.stop()
             self._anim = QPropertyAnimation(self, b"windowOpacity")
@@ -504,7 +501,6 @@ def _run_qt() -> None:
             self._anim.start()
 
         def _animate_out(self) -> None:
-            from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
             if self._anim:
                 self._anim.stop()
             self._anim = QPropertyAnimation(self, b"windowOpacity")
@@ -518,16 +514,12 @@ def _run_qt() -> None:
         # ---- hit testing ----
 
         def _icon_rects(self) -> list[tuple[str, int, int, int, int]]:
-            """
-            Returns [(name, cx-r, cy-r, 2r, 2r), ...] for visible icons.
-            All coordinates are window-local.
-            """
-            entries  = _sorted_entries()
-            vis      = _visible_count()
-            start    = self._scroll_offset
-            visible  = entries[start:start + vis]
-            icon_sz  = int(float(_config.get("icon_size", 52)) * _dpi_factor)
-            rects    = []
+            entries = _sorted_entries()
+            vis     = _visible_count()
+            start   = self._scroll_offset
+            visible = entries[start:start + vis]
+            icon_sz = int(float(_config.get("icon_size", 52)) * _dpi_factor)
+            rects   = []
             for i, entry in enumerate(visible):
                 cx, cy = _icon_center(i, vis)
                 r = icon_sz // 2
@@ -545,7 +537,6 @@ def _run_qt() -> None:
         def paintEvent(self, _event) -> None:
             if not self._is_visible:
                 return
-
             p = QPainter(self)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.setFont(FONT_ICON)
@@ -556,50 +547,53 @@ def _run_qt() -> None:
             visible = entries[start:start + vis]
 
             for i, entry in enumerate(visible):
-                cx, cy   = _icon_center(i, vis)
-                icon_sz  = int(float(_config.get("icon_size", 52)) * _dpi_factor)
-                r        = icon_sz // 2
+                cx, cy  = _icon_center(i, vis)
+                icon_sz = int(float(_config.get("icon_size", 52)) * _dpi_factor)
+                r       = icon_sz // 2
                 is_active = (entry.name == _active_module)
 
-                # Background circle
-                bg = COLOR_ACTIVE_BG if is_active else COLOR_ICON_BG
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(bg)
+                p.setBrush(COLOR_ACTIVE_BG if is_active else COLOR_ICON_BG)
                 p.drawEllipse(int(cx) - r, int(cy) - r, icon_sz, icon_sz)
 
-                # Icon label (Unicode glyph; Lucide SVG rendering TBD)
-                icon_color = COLOR_ACTIVE_ICON if is_active else COLOR_ICON
-                p.setPen(icon_color)
+                p.setPen(COLOR_ACTIVE_ICON if is_active else COLOR_ICON)
                 p.drawText(
                     int(cx) - r, int(cy) - r, icon_sz, icon_sz,
                     Qt.AlignmentFlag.AlignCenter,
                     entry.icon or "?",
                 )
 
-            # Scroll hint dots when there are more icons than visible
-            total = len(entries)
-            if total > vis:
-                self._draw_scroll_hint(p, total, vis)
+            if len(entries) > vis:
+                self._draw_scroll_hint(p, len(entries), vis)
 
         def _draw_scroll_hint(self, p: "QPainter", total: int, vis: int) -> None:
-            """Draw small indicator dots near the arc edge."""
-            from PyQt6.QtGui import QColor as QC
-            dot_r    = 3
-            dot_gap  = 8
-            dots     = min(total, 5)
-            start_x  = self.width() - 12
-            start_y  = self.height() // 2 - (dots * (dot_r * 2 + dot_gap)) // 2
-
+            dot_r   = 3
+            dot_gap = 8
+            dots    = min(total, 5)
+            start_x = self.width() - 12
+            start_y = self.height() // 2 - (dots * (dot_r * 2 + dot_gap)) // 2
             for i in range(dots):
                 frac   = (self._scroll_offset + vis / 2) / max(total - vis, 1)
                 active = abs(i / (dots - 1) - frac) < 0.3 if dots > 1 else True
-                clr    = QC(240, 236, 228, 200 if active else 80)
+                clr    = QColor(240, 236, 228, 200 if active else 80)
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(clr)
                 iy = start_y + i * (dot_r * 2 + dot_gap)
                 p.drawEllipse(start_x - dot_r, iy, dot_r * 2, dot_r * 2)
 
+    # Instantiate BEFORE exec() so bus thread can invokeMethod immediately.
     _qt_window = ArcMenuWindow()
+
+    # Apply any geometry that arrived before this thread was ready.
+    def _apply_pending() -> None:
+        with _pending_geometry_lock:
+            pending = _pending_geometry
+        if pending is not None:
+            log.debug(f"Applying pending geometry: {pending}")
+            _qt_window.apply_geometry(*pending)
+
+    QTimer.singleShot(0, _apply_pending)
+
     _qt_app.exec()
 
 
