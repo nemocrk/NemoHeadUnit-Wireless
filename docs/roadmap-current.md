@@ -30,7 +30,7 @@
 
 ### feature/ui-module — Implementazione UI PyQt6
 
-**Obiettivo**: Realizzare il layer UI completo secondo l’architettura e il design system definiti.
+**Obiettivo**: Realizzare il layer UI completo secondo l'architettura e il design system definiti.
 
 **Documenti di riferimento**:
 - [`docs/UI_ARCHITECTURE.md`](UI_ARCHITECTURE.md) — struttura moduli, screen stack, bus topic contract
@@ -42,12 +42,21 @@
 |---|---|---|
 | 1 | Definire architettura UI — `docs/UI_ARCHITECTURE.md` | ✅ |
 | 2 | Definire design system — `docs/UI_DESIGN_SYSTEM.md` | ✅ |
-| 3 | Implementare `modules/ui_shell/` — layout engine + `input_trap` | ⬜ |
-| 4 | Implementare `modules/navbar_ui/` — primo widget concreto (proof-of-concept) | ⬜ |
+| 3 | Implementare `modules/ui_shell/` — layout engine + `input_trap` | ✅ |
+| 4 | Implementare `modules/navbar_ui/` — primo widget concreto (proof-of-concept) | ✅ |
 | 5 | Implementare `modules/video_ui/` — `QtBusBridge` + rendering H.264 (`VideoScreen`) | ⬜ |
 | 6 | Implementare `modules/bt_ui/` — pannello floating Bluetooth | ⬜ |
 | 7 | Implementare `modules/config_ui/` — pannello impostazioni | ⬜ |
 | 8 | Test di integrazione UI — copertura ≥80% per ogni modulo UI | ⬜ |
+
+**Widget priority convention** (aggiornato dopo implementazione `navbar_ui`):
+
+| Priority | Moduli | Motivo |
+|---|---|---|
+| 0 | `config_manager` | Prima di tutto: config disponibile per tutti |
+| 1 | `bluetooth_manager`, `tcp_server`, `audio_manager` | Servizi di sistema |
+| 2 | `ui_shell` | Layout engine + input_trap; deve essere operativo e aver pubblicato `ui.shell.ready` prima dei widget |
+| 4 | `navbar_ui`, `video_ui`, `bt_ui`, `config_ui` | Widget UI: priority 4 garantisce che `ui_shell` abbia completato `system.ready` prima del loro avvio |
 
 **Design tokens chiave** (estratto da `UI_DESIGN_SYSTEM.md`):
 
@@ -93,5 +102,5 @@ Il codice v2 è pronto per essere la struttura principale del repository.
 
 ---
 
-*Roadmap Version: 5.0*
+*Roadmap Version: 5.1*
 *Aggiornato: 2026-05-26*
