@@ -8,6 +8,8 @@ Covers:
   - on_widget_register / on_widget_update / on_widget_unregister
   - _hit_test and on_input_raw routing
   - on_screen_resize reflow
+  - dpi_factor included in ui.widget.geometry payload
+  - on_request / menu_order / icon fields in WidgetConstraints
 """
 
 import sys
@@ -21,26 +23,22 @@ import pytest
 # Bootstrap: stub heavy dependencies before importing the module under test
 # ---------------------------------------------------------------------------
 
-# Stub shared.bus_client
 _bus_mod = types.ModuleType("shared.bus_client")
 _bus_mock = MagicMock()
 _bus_mod.BusClient = MagicMock(return_value=_bus_mock)
 sys.modules.setdefault("shared", types.ModuleType("shared"))
 sys.modules["shared.bus_client"] = _bus_mod
 
-# Stub shared.config_client
 _cfg_mod = types.ModuleType("shared.config_client")
 _cfg_mock = MagicMock()
 _cfg_mod.ConfigClient = MagicMock(return_value=_cfg_mock)
 sys.modules["shared.config_client"] = _cfg_mod
 
-# Stub shared.logger
 _log_mod = types.ModuleType("shared.logger")
 _log_mock = MagicMock()
 _log_mod.get_logger = MagicMock(return_value=_log_mock)
 sys.modules["shared.logger"] = _log_mod
 
-# Stub shared.config_schema
 _schema_mod = types.ModuleType("shared.config_schema")
 
 
@@ -49,16 +47,15 @@ class _FakeField:
         self.default = default
 
 
-_schema_mod.field_bool = lambda default=True, **kw: _FakeField(default)
-_schema_mod.field_int  = lambda default=0, **kw: _FakeField(default)
+_schema_mod.field_bool  = lambda default=True,  **kw: _FakeField(default)
+_schema_mod.field_int   = lambda default=0,     **kw: _FakeField(default)
+_schema_mod.field_float = lambda default=1.0,   **kw: _FakeField(default)
 sys.modules["shared.config_schema"] = _schema_mod
 
-# Add repo root to sys.path so the relative import works
 _REPO_ROOT = Path(__file__).parents[4]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-# Now import the module under test
 import importlib
 uis = importlib.import_module("modules.ui_shell.main")
 
@@ -69,10 +66,10 @@ uis = importlib.import_module("modules.ui_shell.main")
 
 @pytest.fixture(autouse=True)
 def reset_state():
-    """Clear registry and screen dims before each test."""
     uis._registry.clear()
     uis._screen_w = 1024
     uis._screen_h = 600
+    uis._config   = {k: v.default for k, v in uis._SCHEMA.items()}
     _bus_mock.reset_mock()
     yield
     uis._registry.clear()
@@ -138,7 +135,7 @@ class TestComputeGeometry:
         rec = self._make_record("bottom", h=60)
         g = uis._compute_geometry(rec, 1024, 600)
         assert g.x == 0
-        assert g.y == 540   # 600 - 60
+        assert g.y == 540
         assert g.w == 1024
         assert g.h == 60
 
@@ -207,20 +204,17 @@ class TestReflow:
         assert g.w == 1024
 
     def test_two_bottom_widgets_stack(self):
-        self._register("navbar", "bottom", z=2, h=60)
-        self._register("statusbar", "bottom", z=2, h=30)
+        self._register("navbar",     "bottom", z=2, h=60)
+        self._register("statusbar",  "bottom", z=2, h=30)
         geoms = uis._reflow()
-        # Both at same z_order: processed in iteration order
         assert geoms["navbar"].h == 60
         assert geoms["statusbar"].h == 30
-        # Second bottom widget should be above first
         assert geoms["statusbar"].y < geoms["navbar"].y
 
     def test_center_fills_remaining(self):
         self._register("navbar", "bottom", h=60)
-        self._register("video", "center")
+        self._register("video",  "center")
         geoms = uis._reflow()
-        # center widget fills space above navbar
         assert geoms["video"].h == 600 - 60
         assert geoms["video"].w == 1024
 
@@ -249,9 +243,55 @@ class TestOnWidgetRegister:
 
     def test_registration_triggers_geometry_publish(self):
         uis.on_widget_register("", {"name": "navbar", "z_order": 2, "dock": "bottom", "height": 60})
-        _bus_mock.publish.assert_called()
         calls_topics = [c.args[0] for c in _bus_mock.publish.call_args_list]
         assert "ui.widget.geometry" in calls_topics
+
+    def test_on_request_field_stored(self):
+        uis.on_widget_register("", {
+            "name": "bt_ui", "z_order": 2, "dock": "center",
+            "on_request": True, "menu_order": 1, "icon": "bluetooth",
+        })
+        c = uis._registry["bt_ui"].constraints
+        assert c.on_request is True
+        assert c.menu_order == 1
+        assert c.icon == "bluetooth"
+
+    def test_on_request_defaults_to_false(self):
+        uis.on_widget_register("", {"name": "navbar", "z_order": 2, "dock": "bottom", "height": 60})
+        assert uis._registry["navbar"].constraints.on_request is False
+
+    def test_menu_order_default_99(self):
+        uis.on_widget_register("", {"name": "widget_x", "z_order": 2, "dock": "center"})
+        assert uis._registry["widget_x"].constraints.menu_order == 99
+
+
+# ---------------------------------------------------------------------------
+# dpi_factor in ui.widget.geometry payload
+# ---------------------------------------------------------------------------
+
+class TestDpiFactorInGeometry:
+    def test_default_dpi_factor_in_payload(self):
+        """ui.widget.geometry must include dpi_factor=1.0 by default."""
+        uis.on_widget_register("", {"name": "navbar", "z_order": 2, "dock": "bottom", "height": 60})
+        geom_calls = [
+            c for c in _bus_mock.publish.call_args_list
+            if c.args[0] == "ui.widget.geometry" and c.args[1].get("name") == "navbar"
+        ]
+        assert len(geom_calls) >= 1
+        payload = geom_calls[-1].args[1]
+        assert "dpi_factor" in payload
+        assert payload["dpi_factor"] == 1.0
+
+    def test_custom_dpi_factor_in_payload(self):
+        """dpi_factor from config must appear in geometry payload."""
+        uis._config["dpi_factor"] = 2.0
+        uis.on_widget_register("", {"name": "navbar", "z_order": 2, "dock": "bottom", "height": 60})
+        geom_calls = [
+            c for c in _bus_mock.publish.call_args_list
+            if c.args[0] == "ui.widget.geometry" and c.args[1].get("name") == "navbar"
+        ]
+        payload = geom_calls[-1].args[1]
+        assert payload["dpi_factor"] == 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -319,9 +359,8 @@ class TestHitTest:
         assert uis._hit_test(100, 100) is None
 
     def test_higher_z_order_wins(self):
-        self._add_widget("bottom", 0, 540, 1024, 60, z=2)
+        self._add_widget("bottom",  0, 540, 1024, 60, z=2)
         self._add_widget("overlay", 0, 530, 1024, 80, z=3)
-        # overlay has higher z_order, should be hit first
         assert uis._hit_test(100, 550) == "overlay"
 
     def test_empty_registry_returns_none(self):
@@ -360,8 +399,8 @@ class TestOnInputRaw:
         ]
         assert len(geometry_calls) == 1
         payload = geometry_calls[0].args[1]
-        assert payload["x"] == 100   # 100 - 0
-        assert payload["y"] == 10    # 550 - 540
+        assert payload["x"] == 100
+        assert payload["y"] == 10
 
 
 # ---------------------------------------------------------------------------
