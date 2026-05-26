@@ -101,6 +101,11 @@ _qt_app    = None
 _qt_window = None
 _qt_thread: Optional[threading.Thread] = None
 
+# Geometry received before Qt window is ready is stored here and applied
+# once the window is initialised (via QTimer inside _run_qt).
+_pending_geometry: Optional[tuple[int, int, int, int]] = None  # (x, y, w, h)
+_pending_geometry_lock = threading.Lock()
+
 # ---------------------------------------------------------------------------
 # Registration helpers
 # ---------------------------------------------------------------------------
@@ -134,17 +139,41 @@ def on_ui_shell_ready(topic: str, payload: dict) -> None:
 
 
 def on_widget_geometry(topic: str, payload: dict) -> None:
+    """Called from the bus thread — must NOT touch Qt objects directly."""
     global _geometry_set
     if payload.get("name") != MODULE_NAME:
         return
-    x, y, w, h = payload["x"], payload["y"], payload["w"], payload["h"]
+    x, y, w, h = int(payload["x"]), int(payload["y"]), int(payload["w"]), int(payload["h"])
     log.info(f"Geometry received: x={x} y={y} w={w} h={h}")
+    _geometry_set = True
+
     if _qt_window is not None:
+        # Qt window exists: schedule apply_geometry on the Qt thread.
+        _qt_invoke_geometry(x, y, w, h)
+    else:
+        # Qt thread not ready yet: store for pickup by QTimer in _run_qt.
+        with _pending_geometry_lock:
+            global _pending_geometry  # noqa: PLW0603
+            _pending_geometry = (x, y, w, h)
+            log.debug("Geometry queued (Qt not ready yet)")
+
+
+def _qt_invoke_geometry(x: int, y: int, w: int, h: int) -> None:
+    """Schedule apply_geometry on the Qt thread via QMetaObject.invokeMethod."""
+    try:
+        from PyQt6.QtCore import QMetaObject, Qt
+        QMetaObject.invokeMethod(
+            _qt_window,
+            "apply_geometry_slot",
+            Qt.ConnectionType.QueuedConnection,
+            x, y, w, h,
+        )
+    except Exception:
+        # Fallback: direct call (safe only if already on Qt thread, e.g. in tests)
         try:
             _qt_window.apply_geometry(x, y, w, h)
         except Exception as exc:
-            log.warning(f"apply_geometry failed: {exc}")
-    _geometry_set = True
+            log.warning(f"apply_geometry fallback failed: {exc}")
 
 
 def on_input_event(topic: str, payload: dict) -> None:
@@ -194,7 +223,7 @@ def _run_qt() -> None:
     """
     try:
         from PyQt6.QtWidgets import QApplication, QWidget
-        from PyQt6.QtCore import Qt
+        from PyQt6.QtCore import Qt, QTimer, pyqtSlot
         from PyQt6.QtGui import QColor, QPainter, QFont
     except ImportError:
         log.warning("PyQt6 not available — navbar_ui running in headless mode")
@@ -220,7 +249,6 @@ def _run_qt() -> None:
     FONT_ICON.setPixelSize(16)
     FONT_ICON.setWeight(QFont.Weight.Normal)
 
-    # Unicode glyphs used as icon stand-ins until Phosphor/Lucide fonts land
     ICON_HOME     = "⌂"
     ICON_PREV     = "◄◄"
     ICON_PLAY     = "►"
@@ -234,7 +262,8 @@ def _run_qt() -> None:
             super().__init__()
             self.setWindowFlags(
                 Qt.WindowType.FramelessWindowHint |
-                Qt.WindowType.Tool
+                Qt.WindowType.Tool |
+                Qt.WindowType.WindowStaysOnTopHint
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self.setFont(FONT_BODY)
@@ -247,13 +276,19 @@ def _run_qt() -> None:
             self._bar_w = 1024
             self._bar_h = 60
 
-        # ------ public API (called from bus thread) ------
+        # ------ thread-safe public API ------
+
+        @pyqtSlot(int, int, int, int)
+        def apply_geometry_slot(self, x: int, y: int, w: int, h: int) -> None:
+            """Called on the Qt thread via invokeMethod."""
+            self.apply_geometry(x, y, w, h)
 
         def apply_geometry(self, x: int, y: int, w: int, h: int) -> None:
             self._bar_w = w
             self._bar_h = h
             self.setGeometry(x, y, w, h)
             self.show()
+            self.raise_()
             self.update()
 
         def set_media_state(self, state: str) -> None:
@@ -282,30 +317,19 @@ def _run_qt() -> None:
         # ------ layout ------
 
         def _layout_buttons(self) -> dict[str, tuple]:
-            """
-            Returns {name: (x, y, w, h)} for every tappable button.
-
-            Left cluster  : home | prev | play_pause | next
-            Right cluster : settings
-            Passive dot   : bt_dot (not in returned dict — drawn separately)
-            """
             w, h  = self._bar_w, self._bar_h
-            bsize = min(h - 8, 44)          # square touch target
+            bsize = min(h - 8, 44)
             pad   = 16
             gap   = 8
             yo    = (h - bsize) // 2
 
             buttons: dict[str, tuple] = {}
-
-            # Left cluster
             x = pad
             for name in ("home", "prev", "play_pause", "next"):
                 buttons[name] = (x, yo, bsize, bsize)
                 x += bsize + gap
 
-            # Right cluster — settings right-aligned
             buttons["settings"] = (w - pad - bsize, yo, bsize, bsize)
-
             return buttons
 
         def _hit_button(self, x: int, y: int) -> Optional[str]:
@@ -338,17 +362,12 @@ def _run_qt() -> None:
             self._bar_h = h
             self._buttons = self._layout_buttons()
 
-            # Background
             p.fillRect(0, 0, w, h, BG_COLOR)
-
-            # Top separator
             p.setPen(QColor(255, 255, 255, 18))
             p.drawLine(0, 0, w, 0)
 
-            # BT passive dot (right side, left of settings)
             self._draw_bt_dot(p)
 
-            # Buttons
             icons = {
                 "home":      ICON_HOME,
                 "prev":      ICON_PREV,
@@ -369,7 +388,6 @@ def _run_qt() -> None:
                            Qt.AlignmentFlag.AlignCenter, icon)
 
         def _draw_bt_dot(self, p: "QPainter") -> None:
-            """Passive 8px circle BT indicator, left of settings button."""
             settings_x = self._buttons.get("settings", (0, 0, 0, 0))[0]
             dot_r  = 4
             dot_x  = settings_x - 16 - dot_r
@@ -379,10 +397,24 @@ def _run_qt() -> None:
             p.setBrush(color)
             p.drawEllipse(dot_x - dot_r, dot_y - dot_r, dot_r * 2, dot_r * 2)
 
+    # ------------------------------------------------------------------
+    # Instantiate window and expose globally BEFORE exec() so that the
+    # bus thread can call invokeMethod on it immediately.
+    # ------------------------------------------------------------------
     _qt_window = NavbarWindow()
     _qt_window._media_state  = _media_state
     _qt_window._bt_connected = _bt_connected
     _qt_window._bt_device    = _bt_device
+
+    # Apply any geometry that arrived before this thread was ready.
+    def _apply_pending() -> None:
+        with _pending_geometry_lock:
+            pending = _pending_geometry
+        if pending is not None:
+            log.debug(f"Applying pending geometry: {pending}")
+            _qt_window.apply_geometry(*pending)
+
+    QTimer.singleShot(0, _apply_pending)
 
     _qt_app.exec()
 
