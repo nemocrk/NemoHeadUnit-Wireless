@@ -20,6 +20,12 @@ positioned exclusively via ui.widget.geometry from ui_shell.
                 ui.widget.register     → registration constraints
                 ui.widget.unregister   → {name}
                 media.command          → {action}   (play_pause, next, prev)
+                ui.home.pressed        → {}
+                ui.settings.toggle     → {}
+
+  Button layout (left → right):
+    [home]  [prev]  [play_pause]  [next]  ···  [settings]
+
   Config keys : height      int   60   bar height in px
                 min_height  int   48
                 max_height  int   80
@@ -42,9 +48,9 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 # sys.path bootstrap
 # ---------------------------------------------------------------------------
-_HERE      = Path(__file__).parent   # modules/navbar_ui/
-_MODULES   = _HERE.parent            # modules/
-_REPO_ROOT = _MODULES.parent         # root
+_HERE      = Path(__file__).parent
+_MODULES   = _HERE.parent
+_REPO_ROOT = _MODULES.parent
 
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -121,7 +127,6 @@ def _register() -> None:
 # ---------------------------------------------------------------------------
 
 def on_ui_shell_ready(topic: str, payload: dict) -> None:
-    """ui_shell is up: publish our registration."""
     global _shell_ready
     _shell_ready = True
     log.info("ui.shell.ready received — registering widget")
@@ -129,13 +134,11 @@ def on_ui_shell_ready(topic: str, payload: dict) -> None:
 
 
 def on_widget_geometry(topic: str, payload: dict) -> None:
-    """Apply geometry when ui_shell responds with our coordinates."""
     global _geometry_set
     if payload.get("name") != MODULE_NAME:
         return
     x, y, w, h = payload["x"], payload["y"], payload["w"], payload["h"]
     log.info(f"Geometry received: x={x} y={y} w={w} h={h}")
-
     if _qt_window is not None:
         try:
             _qt_window.apply_geometry(x, y, w, h)
@@ -145,7 +148,6 @@ def on_widget_geometry(topic: str, payload: dict) -> None:
 
 
 def on_input_event(topic: str, payload: dict) -> None:
-    """Route bus input events into the Qt window."""
     if _qt_window is None:
         return
     try:
@@ -180,16 +182,20 @@ def on_bt_state(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _run_qt() -> None:
-    """Build and run the navbar_ui PyQt6 window.
+    """
+    Build and run the navbar_ui PyQt6 window.
 
-    Window is transparent, frameless, Tool-type (hidden from taskbar).
-    It never positions itself — geometry is applied exclusively via
-    apply_geometry() which is called from on_widget_geometry().
+    Button layout (left → right):
+      [home]  [prev]  [play_pause]  [next]  ···(flex gap)···  [bt_dot]  [settings]
+
+    home     → publishes ui.home.pressed {}
+    settings → publishes ui.settings.toggle {}
+    bt_dot   → passive indicator (no tap action), 8px circle
     """
     try:
-        from PyQt6.QtWidgets import QApplication, QWidget, QHBoxLayout, QPushButton, QLabel
-        from PyQt6.QtCore import Qt, QTimer, QPointF
-        from PyQt6.QtGui import QColor, QPainter, QPainterPath, QFont, QMouseEvent, QCursor
+        from PyQt6.QtWidgets import QApplication, QWidget
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QColor, QPainter, QFont
     except ImportError:
         log.warning("PyQt6 not available — navbar_ui running in headless mode")
         return
@@ -199,26 +205,29 @@ def _run_qt() -> None:
     _qt_app = QApplication.instance() or QApplication(sys.argv)
 
     # ------------------------------------------------------------------
-    # Design tokens (Scandinavian dark, from UI_DESIGN_SYSTEM.md)
+    # Design tokens
     # ------------------------------------------------------------------
-    BG_COLOR   = QColor(28, 28, 28, 245)   # rgba(28,28,28,0.96) frosted glass base
-    TEXT_COLOR = QColor(240, 236, 228)       # warm-white #f0ece4
-    ACCENT     = QColor(200, 184, 154)       # sand #c8b89a
-    RADIUS     = 0                           # full-width bar, no rounding at bottom
+    BG_COLOR    = QColor(28, 28, 28, 245)
+    TEXT_COLOR  = QColor(240, 236, 228)
+    ACCENT      = QColor(200, 184, 154)
+    BT_OFF_CLR  = QColor(255, 255, 255, 60)
 
     FONT_BODY = QFont("DM Sans", -1)
     FONT_BODY.setPixelSize(14)
     FONT_BODY.setWeight(QFont.Weight.Normal)
 
-    ICON_PREV  = "◄◄"   # U+25C4 x2  — prev track
-    ICON_PLAY  = "►"     # U+25BA     — play
-    ICON_PAUSE = "▌▌"   # U+258C x2  — pause (thin bars)
-    ICON_NEXT  = "►►"   # U+25BA x2  — next track
-    ICON_BT_ON = "BT•"   # connected
-    ICON_BT_OFF= "BT◦"   # disconnected
+    FONT_ICON = QFont("DM Sans", -1)
+    FONT_ICON.setPixelSize(16)
+    FONT_ICON.setWeight(QFont.Weight.Normal)
 
-    # ------------------------------------------------------------------
-    # Navbar window
+    # Unicode glyphs used as icon stand-ins until Phosphor/Lucide fonts land
+    ICON_HOME     = "⌂"
+    ICON_PREV     = "◄◄"
+    ICON_PLAY     = "►"
+    ICON_PAUSE    = "▌▌"
+    ICON_NEXT     = "►►"
+    ICON_SETTINGS = "⚙"
+
     # ------------------------------------------------------------------
     class NavbarWindow(QWidget):
         def __init__(self):
@@ -230,25 +239,17 @@ def _run_qt() -> None:
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self.setFont(FONT_BODY)
 
-            # Internal state mirrors
-            self._media_state = "stopped"
+            self._media_state  = "stopped"
             self._bt_connected = False
-            self._bt_device = ""
-
-            # Track pressed button for visual feedback
+            self._bt_device    = ""
             self._pressed_btn: Optional[str] = None
-
-            # Button hit areas: {name: (x, y, w, h)} — computed in _layout_buttons
-            self._buttons: dict[str, tuple] = {}
-
-            # Will be set to actual dimensions after apply_geometry
+            self._buttons: dict[str, tuple]  = {}
             self._bar_w = 1024
             self._bar_h = 60
 
-        # ------ public API called from bus thread ------
+        # ------ public API (called from bus thread) ------
 
         def apply_geometry(self, x: int, y: int, w: int, h: int) -> None:
-            """Apply absolute geometry and show the window."""
             self._bar_w = w
             self._bar_h = h
             self.setGeometry(x, y, w, h)
@@ -261,15 +262,13 @@ def _run_qt() -> None:
 
         def set_bt_state(self, connected: bool, device: str) -> None:
             self._bt_connected = connected
-            self._bt_device = device
+            self._bt_device    = device
             self.update()
 
         def handle_input(self, payload: dict) -> None:
-            """Process routed input from ui_shell."""
             ev_type = payload.get("type")
             x = int(payload.get("x", 0))
             y = int(payload.get("y", 0))
-
             if ev_type == "press":
                 self._pressed_btn = self._hit_button(x, y)
                 self.update()
@@ -280,32 +279,32 @@ def _run_qt() -> None:
                 self._pressed_btn = None
                 self.update()
 
-        # ------ private helpers ------
+        # ------ layout ------
 
         def _layout_buttons(self) -> dict[str, tuple]:
-            """Compute button hit areas based on current bar dimensions.
-
-            Layout (left-to-right, centered vertically):
-              [prev]  [play/pause]  [next]     ...(center gap)...  [bt_status]
-
-            Returns dict: name → (x, y, w, h)
             """
-            w, h = self._bar_w, self._bar_h
-            btn_size = min(h - 8, 44)   # square, min touch target 44px
-            pad_x    = 16
-            gap      = 8
-            y_offset = (h - btn_size) // 2
+            Returns {name: (x, y, w, h)} for every tappable button.
 
-            x = pad_x
-            buttons = {}
+            Left cluster  : home | prev | play_pause | next
+            Right cluster : settings
+            Passive dot   : bt_dot (not in returned dict — drawn separately)
+            """
+            w, h  = self._bar_w, self._bar_h
+            bsize = min(h - 8, 44)          # square touch target
+            pad   = 16
+            gap   = 8
+            yo    = (h - bsize) // 2
 
-            for name in ("prev", "play_pause", "next"):
-                buttons[name] = (x, y_offset, btn_size, btn_size)
-                x += btn_size + gap
+            buttons: dict[str, tuple] = {}
 
-            # BT status — right-aligned
-            bt_w = 48
-            buttons["bt"] = (w - pad_x - bt_w, y_offset, bt_w, btn_size)
+            # Left cluster
+            x = pad
+            for name in ("home", "prev", "play_pause", "next"):
+                buttons[name] = (x, yo, bsize, bsize)
+                x += bsize + gap
+
+            # Right cluster — settings right-aligned
+            buttons["settings"] = (w - pad - bsize, yo, bsize, bsize)
 
             return buttons
 
@@ -317,86 +316,74 @@ def _run_qt() -> None:
 
         def _on_button_tap(self, btn: str) -> None:
             log.debug(f"Button tapped: {btn}")
-            if btn == "play_pause":
+            if btn == "home":
+                bus.publish("ui.home.pressed", {})
+            elif btn == "settings":
+                bus.publish("ui.settings.toggle", {})
+            elif btn == "play_pause":
                 bus.publish("media.command", {"action": "play_pause"})
             elif btn == "prev":
                 bus.publish("media.command", {"action": "prev"})
             elif btn == "next":
                 bus.publish("media.command", {"action": "next"})
-            # bt: no action for now (reserved for future bt_ui toggle)
 
         # ------ painting ------
 
-        def paintEvent(self, event) -> None:
+        def paintEvent(self, _event) -> None:
             p = QPainter(self)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
             w, h = self.width(), self.height()
             self._bar_w = w
             self._bar_h = h
-
-            # Recompute button layout every frame (cheap)
             self._buttons = self._layout_buttons()
 
-            # Background — frosted glass simulation (opaque for now,
-            # blur requires compositor support unavailable in all targets)
+            # Background
             p.fillRect(0, 0, w, h, BG_COLOR)
 
-            # Subtle top separator line
+            # Top separator
             p.setPen(QColor(255, 255, 255, 18))
             p.drawLine(0, 0, w, 0)
 
-            # Draw buttons
-            self._draw_media_buttons(p)
-            self._draw_bt_indicator(p)
+            # BT passive dot (right side, left of settings)
+            self._draw_bt_dot(p)
 
-        def _draw_media_buttons(self, p: "QPainter") -> None:
-            """Draw prev / play-pause / next buttons."""
-            from PyQt6.QtCore import Qt
-            p.setFont(FONT_BODY)
-
-            play_icon = ICON_PAUSE if self._media_state == "playing" else ICON_PLAY
-
+            # Buttons
             icons = {
+                "home":      ICON_HOME,
                 "prev":      ICON_PREV,
-                "play_pause": play_icon,
+                "play_pause": ICON_PAUSE if self._media_state == "playing" else ICON_PLAY,
                 "next":      ICON_NEXT,
+                "settings":  ICON_SETTINGS,
             }
-
+            p.setFont(FONT_ICON)
             for name, icon in icons.items():
                 bx, by, bw, bh = self._buttons.get(name, (0, 0, 0, 0))
                 if bw == 0:
                     continue
-
                 is_pressed = self._pressed_btn == name
                 bg = QColor(255, 255, 255, 30 if is_pressed else 12)
                 p.fillRect(bx, by, bw, bh, bg)
+                p.setPen(ACCENT if is_pressed else TEXT_COLOR)
+                p.drawText(bx, by, bw, bh,
+                           Qt.AlignmentFlag.AlignCenter, icon)
 
-                color = ACCENT if is_pressed else TEXT_COLOR
-                p.setPen(color)
-                p.drawText(bx, by, bw, bh, Qt.AlignmentFlag.AlignCenter, icon)
+        def _draw_bt_dot(self, p: "QPainter") -> None:
+            """Passive 8px circle BT indicator, left of settings button."""
+            settings_x = self._buttons.get("settings", (0, 0, 0, 0))[0]
+            dot_r  = 4
+            dot_x  = settings_x - 16 - dot_r
+            dot_y  = self._bar_h // 2
+            color  = ACCENT if self._bt_connected else BT_OFF_CLR
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            p.drawEllipse(dot_x - dot_r, dot_y - dot_r, dot_r * 2, dot_r * 2)
 
-        def _draw_bt_indicator(self, p: "QPainter") -> None:
-            """Draw Bluetooth status indicator (right side)."""
-            from PyQt6.QtCore import Qt
-            bx, by, bw, bh = self._buttons.get("bt", (0, 0, 0, 0))
-            if bw == 0:
-                return
-
-            icon  = ICON_BT_ON if self._bt_connected else ICON_BT_OFF
-            color = ACCENT if self._bt_connected else QColor(255, 255, 255, 80)
-            p.setPen(color)
-            p.drawText(bx, by, bw, bh, Qt.AlignmentFlag.AlignCenter, icon)
-
-    # Instantiate and keep global reference so bus handlers can call methods
     _qt_window = NavbarWindow()
-
-    # Apply initial state from bus if already received before Qt started
     _qt_window._media_state  = _media_state
     _qt_window._bt_connected = _bt_connected
     _qt_window._bt_device    = _bt_device
 
-    # Do NOT call show() yet — wait for ui.widget.geometry
     _qt_app.exec()
 
 
@@ -409,19 +396,19 @@ def _on_config_loaded(config: dict) -> None:
     if not config:
         return
     merged = {k: v.default for k, v in _SCHEMA.items()}
-    merged.update({k: v for k, v in config.items() if k in _SCHEMA and not isinstance(v, (dict, list))})
+    merged.update({
+        k: v for k, v in config.items()
+        if k in _SCHEMA and not isinstance(v, (dict, list))
+    })
     _config = merged
     log.info(f"Config loaded: {_config}")
 
 
 def _on_config_changed(key: str, value) -> None:
-    if key not in _SCHEMA:
-        return
-    if isinstance(value, (dict, list)):
+    if key not in _SCHEMA or isinstance(value, (dict, list)):
         return
     _config[key] = value
     log.info(f"Config changed: {key} = {value!r}")
-    # Re-register with updated height constraints
     if _shell_ready:
         _register()
 
@@ -441,7 +428,6 @@ def on_system_start(topic: str, payload: dict) -> None:
     log.info(f"system.start priority={PRIORITY} — launching navbar_ui")
     cfg.get(schema=_SCHEMA)
 
-    # Start Qt in a background thread
     global _qt_thread
     _qt_thread = threading.Thread(target=_run_qt, name="navbar_ui-qt", daemon=True)
     _qt_thread.start()
@@ -449,9 +435,6 @@ def on_system_start(topic: str, payload: dict) -> None:
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info(f"system.ready published (priority={PRIORITY})")
 
-    # If ui_shell was already ready before we subscribed, register immediately.
-    # (Race guard: ui.shell.ready might have fired between priority 2 and 4.)
-    # In practice the orchestrator guarantees ordering, but defensive is better.
     if _shell_ready:
         log.info("ui.shell.ready already received — registering immediately")
         _register()
@@ -481,11 +464,11 @@ def run() -> None:
     bus.subscribe("system.start",        on_system_start)
     bus.subscribe("system.stop",         on_system_stop)
 
-    bus.subscribe("ui.shell.ready",               on_ui_shell_ready)
-    bus.subscribe("ui.widget.geometry",           on_widget_geometry)
-    bus.subscribe(f"input.event.{MODULE_NAME}",   on_input_event)
-    bus.subscribe("media.state",                  on_media_state)
-    bus.subscribe("bt.state",                     on_bt_state)
+    bus.subscribe("ui.shell.ready",             on_ui_shell_ready)
+    bus.subscribe("ui.widget.geometry",         on_widget_geometry)
+    bus.subscribe(f"input.event.{MODULE_NAME}", on_input_event)
+    bus.subscribe("media.state",                on_media_state)
+    bus.subscribe("bt.state",                   on_bt_state)
 
     log.info("navbar_ui started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
