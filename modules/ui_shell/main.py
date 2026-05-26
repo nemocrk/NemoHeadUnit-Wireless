@@ -10,19 +10,20 @@ Layout engine, widget geometry orchestrator and input_trap co-process.
                 system.stop
                 ui.widget.register  → {name, z_order, dock, width, min_width,
                                         max_width, height, min_height, max_height,
-                                        aspect_ratio}
+                                        aspect_ratio, on_request, menu_order, icon}
                 ui.widget.update    → {name, [height], [width], ...}
                 ui.widget.unregister→ {name}
                 input.raw           → {type, x_global, y_global, timestamp}
   Publishes   : system.module_ready → {name, priority}
                 system.ready       → {name, priority}
                 ui.shell.ready     → {}
-                ui.widget.geometry → {name, x, y, w, h}
+                ui.widget.geometry → {name, x, y, w, h, dpi_factor}
                 ui.focus.changed   → {name}
                 input.event.<name> → {type, x, y, x_global, y_global, ...}
   Config keys : fullscreen  bool    True      start in fullscreen mode
                 screen_w    int     1024      logical screen width  (ignored in fullscreen)
                 screen_h    int     600       logical screen height (ignored in fullscreen)
+                dpi_factor  float   1.0       DPI scaling factor (1.0 = 160dpi base)
   State       : private
 
 Path layout:
@@ -55,7 +56,7 @@ if str(_MODULES) not in sys.path:
 from shared.bus_client import BusClient        # noqa: E402
 from shared.config_client import ConfigClient  # noqa: E402
 from shared.logger import get_logger           # noqa: E402
-from shared.config_schema import field_bool, field_int  # noqa: E402
+from shared.config_schema import field_bool, field_int, field_float  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Module identity
@@ -76,6 +77,7 @@ _SCHEMA = {
     "fullscreen": field_bool(default=True),
     "screen_w":   field_int(default=1024, min=320, max=7680),
     "screen_h":   field_int(default=600,  min=240, max=4320),
+    "dpi_factor": field_float(default=1.0, min=0.5, max=4.0),
 }
 
 _config: dict = {k: v.default for k, v in _SCHEMA.items()}
@@ -105,6 +107,9 @@ class WidgetConstraints:
     min_height: Optional[int] = None
     max_height: Optional[int] = None
     aspect_ratio: Optional[float] = None
+    on_request: bool = False
+    menu_order: int = 99
+    icon: str = ""
 
 
 @dataclass
@@ -155,17 +160,11 @@ def _resolve_size(
 
 
 def _compute_geometry(record: WidgetRecord, sw: int, sh: int) -> WidgetGeometry:
-    """Compute absolute geometry for a widget given screen dimensions.
-
-    This is a simplified single-widget resolver.  The full layer model (multiple
-    widgets sharing the same z_order on the same dock) is handled in _reflow()
-    which calls this helper per widget after partitioning by dock/z_order.
-    """
+    """Compute absolute geometry for a widget given screen dimensions."""
     c = record.constraints
     w = _resolve_size(sw, c.width, c.min_width, c.max_width)
     h = _resolve_size(sh, c.height, c.min_height, c.max_height)
 
-    # Apply aspect ratio after resolving free dimension
     if c.aspect_ratio is not None:
         if c.width is None and c.height is not None:
             w = int(h * c.aspect_ratio)
@@ -182,7 +181,7 @@ def _compute_geometry(record: WidgetRecord, sw: int, sh: int) -> WidgetGeometry:
     if dock == "bottom":
         x = 0
         y = sh - h
-        w = sw  # bottom widgets always fill full width
+        w = sw
     elif dock == "top":
         x = 0
         y = 0
@@ -215,20 +214,10 @@ def _compute_geometry(record: WidgetRecord, sw: int, sh: int) -> WidgetGeometry:
 
 
 def _reflow() -> dict[str, WidgetGeometry]:
-    """Recompute geometry for ALL registered widgets.
-
-    Layer model:
-      - Widgets grouped by z_order then dock.
-      - Edge-docked widgets (top/bottom/left/right) at the same z_order
-        share available space arranged by registration order.
-      - center dock fills remaining space after edge widgets are placed.
-
-    Returns a dict name→WidgetGeometry of changed geometries.
-    """
+    """Recompute geometry for ALL registered widgets."""
     sw = _screen_w
     sh = _screen_h
 
-    # Group by z_order (ascending), then by dock within each layer
     layers: dict[int, list[WidgetRecord]] = {}
     for rec in _registry.values():
         z = rec.constraints.z_order
@@ -236,7 +225,6 @@ def _reflow() -> dict[str, WidgetGeometry]:
 
     new_geometries: dict[str, WidgetGeometry] = {}
 
-    # Track space consumed by edge-docked widgets per layer
     top_offset    = 0
     bottom_offset = 0
     left_offset   = 0
@@ -245,12 +233,10 @@ def _reflow() -> dict[str, WidgetGeometry]:
     for z in sorted(layers):
         layer_records = layers[z]
 
-        # Partition by dock for ordered placement
         by_dock: dict[str, list[WidgetRecord]] = {}
         for rec in layer_records:
             by_dock.setdefault(rec.constraints.dock, []).append(rec)
 
-        # --- top ---
         for rec in by_dock.get("top", []):
             c = rec.constraints
             h = _resolve_size(sh, c.height, c.min_height, c.max_height)
@@ -259,7 +245,6 @@ def _reflow() -> dict[str, WidgetGeometry]:
             new_geometries[c.name] = g
             top_offset += h
 
-        # --- bottom ---
         for rec in by_dock.get("bottom", []):
             c = rec.constraints
             h = _resolve_size(sh, c.height, c.min_height, c.max_height)
@@ -269,7 +254,6 @@ def _reflow() -> dict[str, WidgetGeometry]:
             new_geometries[c.name] = g
             bottom_offset += h
 
-        # --- left ---
         for rec in by_dock.get("left", []):
             c = rec.constraints
             w = _resolve_size(sw, c.width, c.min_width, c.max_width)
@@ -278,7 +262,6 @@ def _reflow() -> dict[str, WidgetGeometry]:
             new_geometries[c.name] = g
             left_offset += w
 
-        # --- right ---
         for rec in by_dock.get("right", []):
             c = rec.constraints
             w = _resolve_size(sw, c.width, c.min_width, c.max_width)
@@ -288,13 +271,11 @@ def _reflow() -> dict[str, WidgetGeometry]:
             new_geometries[c.name] = g
             right_offset += w
 
-        # --- corner docks ---
         for dock in ("top-left", "top-right", "bottom-left", "bottom-right"):
             for rec in by_dock.get(dock, []):
                 g = _compute_geometry(rec, sw, sh)
                 new_geometries[rec.constraints.name] = g
 
-        # --- center (fills remaining space) ---
         for rec in by_dock.get("center", []):
             c = rec.constraints
             avail_w = sw - left_offset - right_offset
@@ -310,6 +291,7 @@ def _reflow() -> dict[str, WidgetGeometry]:
 
 def _publish_geometries(new_geometries: dict[str, WidgetGeometry]) -> None:
     """Publish ui.widget.geometry for every changed widget and update registry."""
+    dpi_factor = float(_config.get("dpi_factor", 1.0))
     with _registry_lock:
         for name, geom in new_geometries.items():
             if name not in _registry:
@@ -319,11 +301,18 @@ def _publish_geometries(new_geometries: dict[str, WidgetGeometry]) -> None:
                 _registry[name].geometry = geom
                 bus.publish(
                     "ui.widget.geometry",
-                    {"name": name, "x": geom.x, "y": geom.y, "w": geom.w, "h": geom.h},
+                    {
+                        "name": name,
+                        "x": geom.x,
+                        "y": geom.y,
+                        "w": geom.w,
+                        "h": geom.h,
+                        "dpi_factor": dpi_factor,
+                    },
                 )
                 log.debug(
                     f"ui.widget.geometry → {name}: "
-                    f"x={geom.x} y={geom.y} w={geom.w} h={geom.h}"
+                    f"x={geom.x} y={geom.y} w={geom.w} h={geom.h} dpi={dpi_factor}"
                 )
 
 
@@ -332,11 +321,6 @@ def _publish_geometries(new_geometries: dict[str, WidgetGeometry]) -> None:
 # ---------------------------------------------------------------------------
 
 def _hit_test(x_global: int, y_global: int) -> Optional[str]:
-    """Return the name of the topmost widget hit by (x_global, y_global).
-
-    Iterates layers from highest z_order downward; within a layer, iterates
-    in reverse registration order (last registered = topmost).
-    """
     with _registry_lock:
         sorted_names = sorted(
             _registry.keys(),
@@ -351,7 +335,6 @@ def _hit_test(x_global: int, y_global: int) -> Optional[str]:
 
 
 def on_input_raw(topic: str, payload: dict) -> None:
-    """Route raw input events to the correct widget via input.event.<name>."""
     x_global = payload.get("x_global", 0)
     y_global = payload.get("y_global", 0)
     target = _hit_test(x_global, y_global)
@@ -395,12 +378,15 @@ def on_widget_register(topic: str, payload: dict) -> None:
         min_height   = payload.get("min_height"),
         max_height   = payload.get("max_height"),
         aspect_ratio = payload.get("aspect_ratio"),
+        on_request   = bool(payload.get("on_request", False)),
+        menu_order   = int(payload.get("menu_order", 99)),
+        icon         = str(payload.get("icon", "")),
     )
 
     with _registry_lock:
         _registry[name] = WidgetRecord(constraints=constraints)
 
-    log.info(f"Widget registered: '{name}' dock={dock} z={constraints.z_order}")
+    log.info(f"Widget registered: '{name}' dock={dock} z={constraints.z_order} on_request={constraints.on_request}")
     new_geometries = _reflow()
     _publish_geometries(new_geometries)
 
@@ -443,11 +429,10 @@ def on_widget_unregister(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Screen resize (called when Qt window reports new geometry)
+# Screen resize
 # ---------------------------------------------------------------------------
 
 def on_screen_resize(new_w: int, new_h: int) -> None:
-    """Update screen dimensions and trigger full reflow."""
     global _screen_w, _screen_h
     _screen_w = new_w
     _screen_h = new_h
@@ -465,16 +450,10 @@ _qt_thread: Optional[threading.Thread] = None
 
 
 def _run_qt() -> None:
-    """Run the PyQt6 event loop in a dedicated thread.
-
-    ui_shell owns the only opaque QWindow (charcoal #141414 background).
-    input_trap is a transparent always-on-top sibling window that forwards
-    all raw input events onto the bus.
-    """
     try:
         from PyQt6.QtWidgets import QApplication, QWidget
-        from PyQt6.QtCore import Qt, QRect, QTimer
-        from PyQt6.QtGui import QPainter, QColor, QPen
+        from PyQt6.QtCore import Qt, QTimer
+        from PyQt6.QtGui import QPainter, QColor
     except ImportError:
         log.warning("PyQt6 not available — ui_shell running in headless mode")
         return
@@ -483,9 +462,6 @@ def _run_qt() -> None:
 
     _qt_app = QApplication.instance() or QApplication(sys.argv)
 
-    # ------------------------------------------------------------------
-    # Shell window — opaque, full-screen, charcoal background
-    # ------------------------------------------------------------------
     class ShellWindow(QWidget):
         def __init__(self):
             super().__init__()
@@ -509,9 +485,6 @@ def _run_qt() -> None:
             p = QPainter(self)
             p.fillRect(self.rect(), QColor(0x14, 0x14, 0x14))
 
-    # ------------------------------------------------------------------
-    # input_trap — transparent, always-on-top, captures all input
-    # ------------------------------------------------------------------
     class InputTrap(QWidget):
         def __init__(self, shell: ShellWindow):
             super().__init__()
@@ -544,20 +517,19 @@ def _run_qt() -> None:
 
         def keyPressEvent(self, ev):
             bus.publish("input.raw", {
-                "type":          "key",
-                "key":           ev.key(),
-                "text":          ev.text(),
+                "type":           "key",
+                "key":            ev.key(),
+                "text":           ev.text(),
                 "is_auto_repeat": ev.isAutoRepeat(),
-                "x_global":      0,
-                "y_global":      0,
-                "timestamp":     int(time.time() * 1000),
+                "x_global":       0,
+                "y_global":       0,
+                "timestamp":      int(time.time() * 1000),
             })
 
     shell = ShellWindow()
     trap  = InputTrap(shell)
     shell._trap = trap
 
-    # Notify other modules that the shell is ready
     bus.publish("ui.shell.ready", {})
     log.info("ui.shell.ready published — shell window active")
 
@@ -611,7 +583,6 @@ def on_system_start(topic: str, payload: dict) -> None:
     _screen_w = _config.get("screen_w", 1024)
     _screen_h = _config.get("screen_h", 600)
 
-    # Start Qt in a background thread so bus loop remains responsive
     global _qt_thread
     _qt_thread = threading.Thread(target=_run_qt, name="ui_shell-qt", daemon=True)
     _qt_thread.start()
