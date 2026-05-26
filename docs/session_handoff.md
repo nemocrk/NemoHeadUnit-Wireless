@@ -1,13 +1,45 @@
 # Session Handoff — NemoHeadUnit-Wireless
 
 > **Scopo**: documento di continuità per sessioni AI successive.
-> **Aggiornato**: 2026-05-26 12:57 — navbar_ui implementato
+> **Aggiornato**: 2026-05-26 15:40 — floating_menu_ui testato + docs aggiornati
 
 ---
 
 ## Stato Corrente in Una Frase
 
-**Branch `refactor/promote-v2-to-root`: `ui_shell` e `navbar_ui` implementati e testati ✅. Prossimo step: aggiornare roadmap + test integrazione headless.**
+**Branch `refactor/promote-v2-to-root`: `ui_shell`, `navbar_ui`, `floating_menu_ui` implementati e testati ✅. Prossimo step: `video_ui` oppure test integrazione headless.**
+
+---
+
+## 2026-05-26 — floating_menu_ui: test + docs aggiornati
+
+**Cosa cambiato:**
+
+| File | Commit | Contenuto |
+|---|---|---|
+| `tests/unit/modules/floating_menu_ui/test_floating_menu_ui.py` | [`f31fc7b`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/f31fc7b3af94c15df8af795002ef86e12057eea1) | 35 test: on_request discovery, unregister, mutual exclusivity, home close, settings toggle, dpi_factor, arc geometry, visible count, sorted entries, boot protocol |
+| `docs/roadmap-current.md` | [`a5ed35e`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/a5ed35e320b01ce11c3ed759c60c82abb38df755) | Step 5 floating_menu_ui ✅, priority 3 aggiunto alla convention table, bump v5.2 |
+| `docs/UI_ARCHITECTURE.md` | [`02c98d1`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/02c98d1dd7fb7a8d67834a4813f0d196c8b2650e) | floating_menu_ui: process map, boot sequence (priority 3), bus topics (ui.settings.toggle, ui.home.pressed, ui.module.open/close), Arc Geometry section, module naming table |
+| `docs/UI_DESIGN_SYSTEM.md` | [`bb30324`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/bb3032448532740ede9e2b9a5bedd1aedca07588) | Arc component spec (geometry, icon states, scroll hint, motion rows, PyQt6 paint pattern), anti-patterns aggiornati |
+
+**Architettura floating_menu_ui:**
+- **Priority 3** — dopo `ui_shell` (priority 2), prima dei widget `on_request` (priority 4) per garantire che sia già in ascolto su `ui.widget.register` quando `bt_ui`/`config_ui` si annunciano
+- **Arc geometry**: quarter-circle 90° ancorato al bottom-right. Radius base 120px × dpi_factor. Max 8 icone visibili; drag tangenziale per scrollare oltre 8
+- **Mutual exclusivity**: apertura di un modulo chiude automaticamente quello precedentemente aperto via `ui.module.close`
+- **Visibility driven by `ui.settings.toggle`**: la finestra è `0×0` (hidden) fino al toggle; `ui.home.pressed` chiude tutto e azzera lo stato
+- **Scroll hint**: 5 dot indicator sul bordo destro del bounding box quando N > 8
+- **Headless safe**: PyQt6 opzionale — se non disponibile il modulo gira senza finestra
+
+**Bus topics:**
+- Subscribe: `ui.shell.ready`, `ui.widget.register`, `ui.widget.unregister`, `ui.widget.geometry`, `input.event.floating_menu_ui`, `ui.settings.toggle`, `ui.home.pressed`
+- Publish: `ui.widget.register`, `ui.widget.update`, `ui.widget.unregister`, `ui.module.open`, `ui.module.close`, `system.module_ready`, `system.ready`
+
+**Status:** Completato ✅
+
+**Prossimi 3 step:**
+1. Implementare `modules/video_ui/` — step 6 della roadmap
+2. Test di integrazione headless `ui_shell ⇔ navbar_ui ⇔ floating_menu_ui` sul bus reale
+3. Implementare `modules/bt_ui/` (on_request, menu_order=1)
 
 ---
 
@@ -20,28 +52,7 @@
 | `modules/navbar_ui/main.py` | [`637abcf`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/637abcf876c0dbf83db0b2f37e2e3103c3466a17) | Transparent frameless PyQt6 window, frosted glass bottom bar, prev/play-pause/next + BT indicator, input routing, boot protocol |
 | `tests/unit/modules/navbar_ui/test_navbar_ui.py` | [`fb230d5`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/fb230d511df16f5868d15b247eebbeacac6f347b) | Unit test completi: ≥80% coverage su boot, registration, geometry, state handlers, config, NavbarWindow headless (layout, hit-test, tap, touch-target) |
 
-**Architettura navbar_ui:**
-- **Priority 4** (ui_shell priority 2 è garantito già operativo al momento di avvio navbar_ui)
-- Attende `ui.shell.ready` per registrarsi — race guard: se `_shell_ready` è già `True` al momento di `system.start`, si registra immediatamente
-- Finestra Qt: transparent + FramelessWindowHint + Tool (no taskbar); mai chiama `setGeometry()` autonomamente — posizione esclusivamente da `ui.widget.geometry`
-- Non chiama `show()` fino a ricezione di `ui.widget.geometry` — window non visibile finché la geometria non è confermata
-- **Input headless**: `handle_input()` riceve payload da `input.event.navbar_ui` (bus), costruisce logica press/release in pure Python senza eventi Qt diretti
-- **Design tokens** (da `UI_DESIGN_SYSTEM.md`): `#1c1c1c` frosted bg, `#f0ece4` text, `#c8b89a` accent, DM Sans 14px
-- Al `system.stop`: pubblica `ui.widget.unregister` + quit Qt + stop bus
-
-**Bus topics:**
-- Subscribe: `ui.shell.ready`, `ui.widget.geometry`, `input.event.navbar_ui`, `media.state`, `bt.state`
-- Publish: `ui.widget.register`, `ui.widget.unregister`, `media.command {action: play_pause|prev|next}`
-
-**Perché priority 4 e non 2:**
-Con priority 4 il sistema di boot garantisce che `ui_shell` (priority 2) abbia completato `system.ready` e pubblicato `ui.shell.ready` prima che `navbar_ui` parta. Con priority 2 (come da doc) il timing dipende dall'ordine di startup parallelo, richiedendo una race guard più fragile.
-
 **Status:** Completato ✅
-
-**Prossimi 3 step:**
-1. Aggiornare `docs/UI_ARCHITECTURE.md` — annotare priority 4 come scelta deliberata per `navbar_ui` (e futuri widget UI)
-2. Aggiornare `docs/roadmap-current.md` step 3 e 4 a `✅`
-3. Test integrazione headless `ui_shell ↔ navbar_ui` sul bus reale
 
 ---
 
@@ -86,6 +97,9 @@ Con priority 4 il sistema di boot garantisce che `ui_shell` (priority 2) abbia c
 ## Comandi Utili
 
 ```bash
+# Coverage floating_menu_ui
+pytest tests/unit/modules/floating_menu_ui/ -v --cov=modules/floating_menu_ui --cov-report=term-missing
+
 # Coverage navbar_ui
 pytest tests/unit/modules/navbar_ui/ -v --cov=modules/navbar_ui --cov-report=term-missing
 
@@ -104,14 +118,15 @@ pytest --cov=. --cov-report=html --cov-report=term-missing --ignore=services
 ```
 Priority 0  config_manager
 Priority 1  bluetooth_manager, tcp_server, audio_manager
-Priority 2  ui_shell     ← layout engine + input_trap
+Priority 2  ui_shell            ← layout engine + input_trap
+Priority 3  floating_menu_ui    ← on_request launcher (deve scoprire i widget priority 4)
 Priority 4  navbar_ui, video_ui, bt_ui, config_ui   ← widget processes
-            (priority 4 garantisce ui_shell già operativo e ui.shell.ready già pubblicato)
+            (priority 4 garantisce ui_shell + floating_menu_ui già operativi)
 ```
 
 ### Widget registration contract
 ```python
-# Widget pubblica dopo aver ricevuto ui.shell.ready:
+# Widget always-visible (navbar, video) — pubblica dopo aver ricevuto ui.shell.ready:
 bus.publish("ui.widget.register", {
     "name":       MODULE_NAME,
     "z_order":    2,
@@ -120,9 +135,18 @@ bus.publish("ui.widget.register", {
     "min_height": 48,
     "max_height": 80,
 })
-# ui_shell risponde con:
-# ui.widget.geometry {name, x, y, w, h}
-# Il widget chiama setGeometry(x, y, w, h) + show() solo a questo punto.
+
+# Widget on_request (bt_ui, config_ui) — stessi campi + campi menu:
+bus.publish("ui.widget.register", {
+    "name":       MODULE_NAME,
+    "z_order":    2,
+    "dock":       "center",
+    "width":      400,
+    "height":     500,
+    "on_request": True,
+    "menu_order": 1,           # posizione nell'arco
+    "icon":       "🦷",         # glyph Unicode o nome Lucide
+})
 ```
 
 ### Bootstrap path — pattern post-promozione
