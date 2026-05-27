@@ -171,7 +171,8 @@ def _qt_invoke_geometry(x: int, y: int, w: int, h: int) -> None:
     except Exception:
         # Fallback: direct call (safe only if already on Qt thread, e.g. in tests)
         try:
-            _qt_window.apply_geometry(x, y, w, h)
+            if _qt_window is not None:
+                _qt_window.apply_geometry(x, y, w, h)
         except Exception as exc:
             log.warning(f"apply_geometry fallback failed: {exc}")
 
@@ -412,7 +413,8 @@ def _run_qt() -> None:
             pending = _pending_geometry
         if pending is not None:
             log.debug(f"Applying pending geometry: {pending}")
-            _qt_window.apply_geometry(*pending)
+            if _qt_window is not None:
+                _qt_window.apply_geometry(*pending)
 
     QTimer.singleShot(0, _apply_pending)
 
@@ -514,7 +516,8 @@ def run() -> None:
     on_widget_geometry(topic="",payload={"name":MODULE_NAME, "x":100, "y":250, "w":320, "h":90})
     time.sleep(0.1)
     try:
-        bus_thread.join()
+        if bus_thread is not None:
+            bus_thread.join()
     except KeyboardInterrupt:
         pass
 
