@@ -51,7 +51,7 @@ BUS_HWM = 1000
 BROKER_STARTUP_DELAY  = 0.5   # s — wait for broker to bind
 MODULE_STARTUP_DELAY  = 0.2   # s — between module launches
 GRACE_PERIOD          = 10.0   # s — wait for self-exit before SIGTERM
-READYTOSTART_WINDOW   = 10.0  # s — collect system.module_ready replies
+READYTOSTART_WINDOW   = 20.0  # s — collect system.module_ready replies
 MODULE_READY_TIMEOUT  = 5.0   # s — per-module timeout for system.ready
 CHANNEL_MANAGER_STOP_TIMEOUT = 10.0  # s — wait for channel_manager.stopped before force-kill
 

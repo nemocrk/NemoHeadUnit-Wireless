@@ -506,6 +506,13 @@ def run() -> None:
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)
     on_system_readytostart()
+    time.sleep(0.1)
+    on_system_start(topic="",payload={"priority":PRIORITY})
+    time.sleep(0.1)
+    on_ui_shell_ready(topic="", payload={})
+    time.sleep(0.1)
+    on_widget_geometry(topic="",payload={"name":MODULE_NAME, "x":100, "y":250, "w":320, "h":90})
+    time.sleep(0.1)
     try:
         bus_thread.join()
     except KeyboardInterrupt:
