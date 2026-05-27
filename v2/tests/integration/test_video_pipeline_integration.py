@@ -462,14 +462,14 @@ class TestVideoModuleBoot:
 
     @pytest.mark.integration
     def test_module_ready_to_start_publishes_on_readytostart(self, in_process_broker):
-        """_on_channel_manager_module_readytostart() pubblica channel_manager.module_ready_to_start."""
+        """_module_ready_to_start() pubblica channel_manager.module_ready_to_start."""
         received = []
         spy = _make_client(in_process_broker, "spy")
         spy.subscribe("channel_manager.module_ready_to_start", lambda t, p: received.append(p))
         _start_client(spy)
 
         mod = _make_video_module(in_process_broker)
-        mod._on_channel_manager_module_readytostart()
+        mod._module_ready_to_start()
 
         ok = _wait(received, 1)
         spy.stop()

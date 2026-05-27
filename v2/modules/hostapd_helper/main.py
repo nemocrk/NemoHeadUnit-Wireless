@@ -300,6 +300,19 @@ def _on_config_loaded(config: dict) -> None:
     _config = merged
     log.info(f"Config loaded: {_config}")
 
+    # Initialise D-Bus connection and subscribe to AP signals
+    _ensure_dbus()
+    _subscribe_dbus_signals()
+    log.info("D-Bus connection to ap_manager_service established")
+
+    bus.subscribe("bluetooth_manager.rfcomm.connected", on_rfcomm_connected)
+
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info("system.ready published — hostapd_helper online")
+
 
 def _on_config_changed(key: str, value) -> None:
     if key not in _SCHEMA:
@@ -345,17 +358,6 @@ def on_system_start(topic: str, payload: dict) -> None:
 
     log.info(f"system.start priority={PRIORITY} — initialising hostapd_helper")
     cfg.get(schema=_SCHEMA)
-
-    # Initialise D-Bus connection and subscribe to AP signals
-    _ensure_dbus()
-    _subscribe_dbus_signals()
-    log.info("D-Bus connection to ap_manager_service established")
-
-    bus.publish("system.ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
-    log.info("system.ready published — hostapd_helper online")
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
@@ -451,7 +453,6 @@ def run() -> None:
     bus.subscribe("system.readytostart",        on_system_readytostart)
     bus.subscribe("system.start",               on_system_start)
     bus.subscribe("system.stop",                on_system_stop)
-    bus.subscribe("bluetooth_manager.rfcomm.connected", on_rfcomm_connected)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)

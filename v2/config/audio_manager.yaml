@@ -1,0 +1,7 @@
+poll_interval_s: 30
+sink: default
+source: default
+volume: 80
+volume_ch10: 100
+volume_ch4: 100
+volume_ch6: 100

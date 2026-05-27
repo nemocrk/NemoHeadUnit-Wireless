@@ -153,6 +153,16 @@ def _on_config_loaded(config: dict) -> None:
     merged.update({k: v for k, v in config.items() if k in _SCHEMA and not isinstance(v, (dict, list))})
     _config = merged
     log.info(f"Config loaded: {_config}")
+    
+    # STEP 7: add your other topic subscriptions here
+    # bus.subscribe("other.topic", on_some_event)
+
+    # Signal that this module is fully initialised.
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info(f"system.ready published (priority={PRIORITY})")
     # TODO: apply config to live state if needed
 
 
@@ -201,13 +211,6 @@ def on_system_start(topic: str, payload: dict) -> None:
     # schema= is sufficient: config_manager derives defaults from field.default.
     cfg.get(schema=_SCHEMA)
 
-    # Signal that this module is fully initialised.
-    bus.publish("system.ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
-    log.info(f"system.ready published (priority={PRIORITY})")
-
 
 def on_system_stop(topic: str, payload: dict) -> None:
     """Graceful shutdown — called for all modules simultaneously."""
@@ -238,13 +241,13 @@ def run() -> None:
     cfg.on_config_changed = _on_config_changed
     cfg.register()
 
+    # STEP 6: add your system topic subscriptions here
+    # bus.subscribe("system.topic", on_some_event)
+
     # Boot protocol
     bus.subscribe("system.readytostart", on_system_readytostart)
     bus.subscribe("system.start",        on_system_start)
     bus.subscribe("system.stop",         on_system_stop)
-
-    # STEP 6: add your topic subscriptions here
-    # bus.subscribe("some.topic", on_some_event)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)

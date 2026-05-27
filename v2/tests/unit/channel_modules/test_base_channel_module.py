@@ -3,7 +3,7 @@ test_base_channel_module.py — Unit tests for BaseChannelModule.
 
 Coverage targets (§1.3 TEST_SUITE_ARCHITECTURE):
   1.  Boot protocol
-        a. _on_channel_manager_module_readytostart publishes module_ready_to_start
+        a. _module_ready_to_start publishes module_ready_to_start
         b. _on_channel_manager_module_start (matching priority) calls _init() and _try_publish_ready
         c. _on_channel_manager_module_start (wrong priority) is a no-op
         d. _on_channel_manager_module_stop calls _cleanup(), publishes module_stopped, calls bus.stop
@@ -147,7 +147,7 @@ class TestBootProtocol:
     @pytest.mark.unit
     def test_readytostart_publishes_ready_to_start(self):
         module, bus = _build_module()
-        module._on_channel_manager_module_readytostart()
+        module._module_ready_to_start()
         payloads = _published(bus, "channel_manager.module_ready_to_start")
         assert payloads
         assert payloads[0]["name"]     == "test_channel"

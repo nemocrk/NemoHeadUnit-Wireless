@@ -272,6 +272,18 @@ def _on_config_loaded(config: dict) -> None:
         _pairing.register()
 
     log.info("Bluetooth subsystem ready")
+    
+    bus.subscribe("bluetooth_manager.discover",         on_discover)
+    bus.subscribe("bluetooth_manager.pair",             on_pair)
+    bus.subscribe("bluetooth_manager.confirm_pairing",  on_confirm_pairing)
+    bus.subscribe("bluetooth_manager.reject_pairing",   on_reject_pairing)
+    bus.subscribe("bluetooth_manager.rfcomm.connected", on_rfcomm_connected)
+    bus.subscribe("bluetooth_manager.try_autoconnect",  on_try_autoconnect)
+    bus.subscribe("bluetooth_manager.paired.list",      on_paired_list)
+    bus.subscribe("bluetooth_manager.paired.remove",    on_paired_remove)
+    bus.subscribe("bluetooth_manager.paired.connect",   on_paired_connect)
+    bus.subscribe("bluetooth_manager.paired.disconnect", on_paired_disconnect)
+    
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
     # Start autoconnect after subsystem is fully ready
@@ -323,16 +335,16 @@ def on_system_start(topic: str, payload: dict) -> None:
     _start_glib_mainloop()
 
     _adapter = BluezAdapter()
+
+
     if not _adapter.init():
         log.error("D-Bus init failed — Bluetooth unavailable")
         bus.publish("bluetooth_manager.error", {"error": "D-Bus init failed"})
-        bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
         #return
 
     if not _adapter.register_profiles():
         log.error("Profile registration failed")
         bus.publish("bluetooth_manager.error", {"error": "Profile registration failed"})
-        bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
         #return
 
     cfg.get(schema=_SCHEMA)
@@ -528,17 +540,7 @@ def run() -> None:
     bus.subscribe("system.readytostart",        on_system_readytostart)
     bus.subscribe("system.start",               on_system_start)
     bus.subscribe("system.stop",                on_system_stop)
-    bus.subscribe("bluetooth_manager.discover",         on_discover)
-    bus.subscribe("bluetooth_manager.pair",             on_pair)
-    bus.subscribe("bluetooth_manager.confirm_pairing",  on_confirm_pairing)
-    bus.subscribe("bluetooth_manager.reject_pairing",   on_reject_pairing)
-    bus.subscribe("bluetooth_manager.rfcomm.connected", on_rfcomm_connected)
-    bus.subscribe("bluetooth_manager.try_autoconnect",  on_try_autoconnect)
-    bus.subscribe("bluetooth_manager.paired.list",      on_paired_list)
-    bus.subscribe("bluetooth_manager.paired.remove",    on_paired_remove)
-    bus.subscribe("bluetooth_manager.paired.connect",   on_paired_connect)
-    bus.subscribe("bluetooth_manager.paired.disconnect", on_paired_disconnect)
-
+    
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)

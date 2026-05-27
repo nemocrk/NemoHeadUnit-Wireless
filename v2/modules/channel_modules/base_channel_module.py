@@ -10,7 +10,6 @@ so that concrete channel modules only need to implement channel-specific logic.
 ---
 Boot protocol (mirrors v2/main.py pattern, prefix: channel_manager):
 
-  channel_manager → channel_manager.module_readytostart   (broadcast)
   module          → channel_manager.module_ready_to_start  {name, priority}
   channel_manager → channel_manager.module_start           {priority: N}
   module          → channel_manager.module_ready           {name, priority}  ← emitted lazily
@@ -229,20 +228,23 @@ class BaseChannelModule(ABC):
         if not (self._init_done and config_ok and self._is_ready()):
             return
         self._ready_published = True
-        self.bus.publish("channel_manager.module_ready", {
-            "name":     self.MODULE_NAME,
-            "priority": self.PRIORITY,
-        })
-        self.log.info(f"channel_manager.module_ready published (priority={self.PRIORITY})")
+        self._module_ready()
 
     # ------------------------------------------------------------------
     # Boot protocol handlers
     # ------------------------------------------------------------------
 
-    def _on_channel_manager_module_readytostart(self) -> None:
-        self.log.info(f"channel_manager.module_readytostart — announcing priority {self.PRIORITY}")
+    def _module_ready_to_start(self) -> None:
+        self.log.info(f"channel_manager.module_ready_to_start — announcing priority {self.PRIORITY}")
         self.bus.publish("channel_manager.module_ready_to_start", {
-            "name":     self.MODULE_NAME,
+            "module_name":     self.MODULE_NAME,
+            "priority": self.PRIORITY,
+        })
+        
+    def _module_ready(self) -> None:
+        self.log.info(f"channel_manager.module_ready — announcing priority {self.PRIORITY}")
+        self.bus.publish("channel_manager.module_ready", {
+            "module_name":     self.MODULE_NAME,
             "priority": self.PRIORITY,
         })
 
@@ -399,7 +401,7 @@ class BaseChannelModule(ABC):
         )
         bus_thread = self.bus.start(blocking=False)
         time.sleep(0.05)
-        self._on_channel_manager_module_readytostart()
+        self._module_ready_to_start()
         try:
             bus_thread.join()
         except KeyboardInterrupt:

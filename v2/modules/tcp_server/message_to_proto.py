@@ -301,13 +301,14 @@ def frame_data_to_dict(frame_data: dict) -> dict:
     message_id = frame_data.get("message_id")
     payload_hex = frame_data.get("payload_hex")  # Assuming payload is in hex format and needs to be parsed
     channel_id = frame_data.get("channel_id")
+    input_size = frame_data.get("input_size", 0)  # Optional, for logging purposes
     message_name = None
     parsed_payload = None
     try:
         message_name = message_id_to_proto_name(message_id)
         proto_class = proto_name_to_class(message_name)
         parsed_message = proto_class()
-        if not isinstance(parsed_message, bytes):
+        if not isinstance(parsed_message, bytes) or channel_id == 4:
             parsed_message.ParseFromString(bytes.fromhex(payload_hex))
             parsed_payload = MessageToDict(parsed_message)
         else:
@@ -322,6 +323,7 @@ def frame_data_to_dict(frame_data: dict) -> dict:
         "message_id": message_id,
         "message_name": message_name,
         "payload_as_dict": parsed_payload,
+        "input_size": input_size,
     }
 
 

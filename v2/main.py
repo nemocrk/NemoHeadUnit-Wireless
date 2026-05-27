@@ -51,7 +51,7 @@ BUS_HWM = 1000
 BROKER_STARTUP_DELAY  = 0.5   # s — wait for broker to bind
 MODULE_STARTUP_DELAY  = 0.2   # s — between module launches
 GRACE_PERIOD          = 10.0   # s — wait for self-exit before SIGTERM
-READYTOSTART_WINDOW   = 10.0  # s — collect system.module_ready replies
+READYTOSTART_WINDOW   = 20.0  # s — collect system.module_ready replies
 MODULE_READY_TIMEOUT  = 5.0   # s — per-module timeout for system.ready
 CHANNEL_MANAGER_STOP_TIMEOUT = 10.0  # s — wait for channel_manager.stopped before force-kill
 
@@ -276,7 +276,7 @@ def _start_get_modules_responder(
 # system.shutdown listener
 # ---------------------------------------------------------------------------
 
-def _wait_channel_manager_stopped(timeout: float) -> bool:
+def _wait_channel_manager_stopped(timeout: float, channel_manager_process: subprocess.Popen) -> bool:
     """
     Subscribe to channel_manager.stopped and block until it arrives or timeout.
     Returns True if the ACK was received, False on timeout.
@@ -295,6 +295,10 @@ def _wait_channel_manager_stopped(timeout: float) -> bool:
         if remaining_ms <= 0:
             break
         if not sub.poll(timeout=min(remaining_ms, 200)):
+            if channel_manager_process.poll() is not None:
+                log.warning("channel_manager process exited before sending channel_manager.stopped")
+                received = True  # treat as ACK to avoid waiting for the full timeout
+                break
             continue
         try:
             frames = sub.recv_multipart(flags=zmq.NOBLOCK)
@@ -313,6 +317,7 @@ def _start_shutdown_listener(
     processes: list[tuple[str, subprocess.Popen]],
     pub: zmq.Socket,
     stop_event: threading.Event,
+    shutdown_in_progress: threading.Event,
     zmq_ctx: zmq.Context,
     broker_proc: subprocess.Popen,
 ) -> threading.Thread:
@@ -352,6 +357,7 @@ def _start_shutdown_listener(
             # 1. Publish system.stop so all modules begin cleanup
             try:
                 _publish(pub, "system.stop", {"reason": "system.shutdown"})
+                shutdown_in_progress.set()
             except Exception as e:
                 log.warning(f"Could not publish system.stop: {e}")
 
@@ -360,7 +366,8 @@ def _start_shutdown_listener(
                 f"Waiting for channel_manager.stopped "
                 f"(timeout={CHANNEL_MANAGER_STOP_TIMEOUT}s)..."
             )
-            ack = _wait_channel_manager_stopped(CHANNEL_MANAGER_STOP_TIMEOUT)
+            channel_manager_process = next((proc for label, proc in processes if label == "channel_manager"), None)
+            ack = _wait_channel_manager_stopped(CHANNEL_MANAGER_STOP_TIMEOUT, channel_manager_process)
             if ack:
                 log.info("channel_manager.stopped received — proceeding to _terminate_all")
             else:
@@ -467,6 +474,7 @@ def run() -> None:
     ctx = None
     pub = None
     _stop_responder = threading.Event()
+    _shutdown_in_progress = threading.Event()
 
     def _shutdown(signum, frame):
         log.info("Ctrl+C received — shutting down...")
@@ -474,6 +482,7 @@ def run() -> None:
         if pub is not None:
             try:
                 _publish(pub, "system.stop", {"reason": "user_interrupt"})
+                _shutdown_in_progress.set()
                 time.sleep(0.2)
             except Exception:
                 pass
@@ -532,15 +541,20 @@ def run() -> None:
     # 8. Start system.shutdown listener
     #    The listener sets _stop_responder when shutdown is complete so the
     #    main thread can proceed to broker teardown.
-    _start_shutdown_listener(module_processes, pub, _stop_responder, ctx, broker_proc)
+    _start_shutdown_listener(module_processes, pub, _stop_responder, _shutdown_in_progress, ctx, broker_proc)
 
     log.info("All processes started. Press Ctrl+C to stop.")
+
+    labels_exited_unexpectedly = set()
 
     # 9. Keep main alive — log unexpected exits
     while not _stop_responder.is_set():
         time.sleep(1)
         for label, proc in module_processes:
-            if proc.poll() is not None:
+            if proc.poll() is not None and not _shutdown_in_progress.is_set():
+                if label not in labels_exited_unexpectedly:
+                    log.warning(f"{label} exited unexpectedly (code {proc.returncode}) [sysout: {proc.stdout}, syserr: {proc.stderr}]")
+                    labels_exited_unexpectedly.add(label)
                 log.warning(f"{label} exited unexpectedly (code {proc.returncode})")
 
     # 10. Main thread teardown: terminate broker (modules already stopped by

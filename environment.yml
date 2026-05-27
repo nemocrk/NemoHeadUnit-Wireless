@@ -27,6 +27,7 @@ dependencies:
   # -----------------------------------------------------------------------
   - pyqt6>=6.7           # Qt6 bindings + QtBusBridge
   - pyopengl              # OpenGL bindings per _NV12GLWidget (GLSL renderer)
+  - libxcb
 
   # -----------------------------------------------------------------------
   # Bluetooth / DBus (system packages preferred; pip fallback below)

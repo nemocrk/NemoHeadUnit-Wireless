@@ -7,8 +7,7 @@ Module contract:
   Channel ID  : supplied via --channel-id CLI arg (parsed by BaseChannelModule)
   SDR bytes   : supplied via --sdr-bytes-hex CLI arg, parsed by base into
                 self.channel_config (codec negotiation).
-  Subscribes  : channel_manager.module_readytostart
-                channel_manager.module_start
+  Subscribes  : channel_manager.module_start
                 channel_manager.module_stop
                 aa.channel.open         {channel_id, av_type?, ...}  ← from BaseChannelModule
                 aa.channel.close        {channel_id}                 ← from BaseChannelModule

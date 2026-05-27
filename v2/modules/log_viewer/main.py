@@ -112,6 +112,14 @@ def _on_config_loaded(config: dict) -> None:
     merged.update({k: v for k, v in config.items() if k in _SCHEMA and not isinstance(v, (dict, list))})
     _config = merged
     log.info(f"Config loaded: {_config}")
+    
+    bus.subscribe("log.entry",           on_log_entry)
+
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info("system.ready published — log_viewer online")
 
 
 def _on_config_changed(key: str, value) -> None:
@@ -286,11 +294,6 @@ def on_system_start(topic: str, payload: dict) -> None:
     if _window is not None:
         _window.set_status("Sistema pronto. In ascolto log…")
 
-    bus.publish("system.ready", {
-        "name":     MODULE_NAME,
-        "priority": PRIORITY,
-    })
-    log.info("system.ready published — log_viewer online")
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
@@ -334,7 +337,6 @@ def run() -> None:
     bus.subscribe("system.readytostart", on_system_readytostart)
     bus.subscribe("system.start",        on_system_start)
     bus.subscribe("system.stop",         on_system_stop)
-    bus.subscribe("log.entry",           on_log_entry)
 
     bus.start(blocking=False)
     time.sleep(0.05)

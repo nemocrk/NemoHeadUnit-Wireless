@@ -308,6 +308,9 @@ def on_system_start(topic: str, payload: dict) -> None:
     log.info(f"system.start priority={PRIORITY} — initialising config_manager")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     log.info(f"Config dir ready: {CONFIG_DIR}")
+    
+    bus.subscribe("config.get",          on_config_get)
+    bus.subscribe("config.set",          on_config_set)
 
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
@@ -327,12 +330,11 @@ def on_system_stop(topic: str, payload: dict) -> None:
 
 
 def run() -> None:
+
     bus.subscribe("system.readytostart", on_system_readytostart)
     bus.subscribe("system.start",        on_system_start)
     bus.subscribe("system.stop",         on_system_stop)
-    bus.subscribe("config.get",          on_config_get)
-    bus.subscribe("config.set",          on_config_set)
-
+    
     log.info("config_manager ready — waiting for messages...")
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)
