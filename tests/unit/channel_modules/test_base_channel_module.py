@@ -147,10 +147,10 @@ class TestBootProtocol:
     @pytest.mark.unit
     def test_readytostart_publishes_ready_to_start(self):
         module, bus = _build_module()
-        module._on_channel_manager_module_readytostart()
+        module._module_ready_to_start()
         payloads = _published(bus, "channel_manager.module_ready_to_start")
         assert payloads
-        assert payloads[0]["name"]     == "test_channel"
+        assert payloads[0]["module_name"] == "test_channel"
         assert payloads[0]["priority"] == 1
 
     @pytest.mark.unit
@@ -185,7 +185,7 @@ class TestBootProtocol:
         module._on_channel_manager_module_stop("", {})
         payloads = _published(bus, "channel_manager.module_stopped")
         assert payloads
-        assert payloads[0]["name"] == "test_channel"
+        assert payloads[0]["module_name"] == "test_channel"
 
     @pytest.mark.unit
     def test_module_stop_calls_bus_stop(self):
@@ -205,7 +205,7 @@ class TestReadinessGate:
         module._try_publish_ready()
         payloads = _published(bus, "channel_manager.module_ready")
         assert payloads
-        assert payloads[0]["name"] == "test_channel"
+        assert payloads[0]["module_name"] == "test_channel"
 
     @pytest.mark.unit
     def test_ready_not_published_twice(self):

@@ -48,6 +48,19 @@ def _wait(lst: list, count: int, timeout: float = 3.0) -> bool:
     return False
 
 
+@pytest.fixture(autouse=True)
+def cleanup_audio_manager_threads():
+    yield
+    try:
+        import audio_manager.main as am
+        if hasattr(am, "_poll_stop"):
+            am._poll_stop.set()
+        if hasattr(am, "_poll_thread") and am._poll_thread and am._poll_thread.is_alive():
+            am._poll_thread.join(timeout=1.0)
+    except Exception:
+        pass
+
+
 def _make_bus_client(in_process_broker, name: str | None = None):
     import shared.bus_client as _bc
     _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
@@ -153,6 +166,8 @@ class TestBootProtocol:
             # cfg.get richiede config_manager — patch il ConfigClient
             am.cfg = MagicMock()
             am.on_system_start("system.start", {"priority": am.PRIORITY})
+            # Trigger config loaded callback to announce system.ready
+            am._on_config_loaded({"volume": 80})
 
         ok = _wait(received, 1)
         spy.stop()

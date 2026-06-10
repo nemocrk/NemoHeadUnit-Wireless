@@ -35,6 +35,7 @@ Usage (client role):
 from __future__ import annotations
 
 import ssl
+import threading
 from typing import Optional
 
 from shared.logger import get_logger
@@ -213,29 +214,32 @@ class AACryptor:
     # ------------------------------------------------------------------
     # Encrypt / Decrypt (post-handshake)
     # ------------------------------------------------------------------
+    _ssl_lock:   threading.Lock  = threading.Lock()
 
     def encrypt(self, plaintext: bytes) -> bytes:
         """Encrypt plaintext, return TLS record bytes (= Cryptor::encrypt)."""
         if not self._active or self._ssl_obj is None:
             raise RuntimeError("AACryptor.encrypt called before handshake complete")
-        self._ssl_obj.write(plaintext)
-        return self._read_out_bio()
+        with self._ssl_lock:  # SSLObject is not thread-safe for concurrent encrypt+decrypt
+            self._ssl_obj.write(plaintext)
+            return self._read_out_bio()
 
     def decrypt(self, ciphertext: bytes) -> bytes:
         """Decrypt a TLS record, return plaintext (= Cryptor::decrypt)."""
         if not self._active or self._ssl_obj is None:
             raise RuntimeError("AACryptor.decrypt called before handshake complete")
-        self._in_bio.write(ciphertext)
-        buf = bytearray()
-        try:
-            while True:
-                chunk = self._ssl_obj.read(4096)
-                if not chunk:
-                    break
-                buf.extend(chunk)
-        except ssl.SSLWantReadError:
-            pass
-        return bytes(buf)
+        with self._ssl_lock:  # SSLObject is not thread-safe for concurrent encrypt+decrypt
+            self._in_bio.write(ciphertext)
+            buf = bytearray()
+            try:
+                while True:
+                    chunk = self._ssl_obj.read(4096)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+            except ssl.SSLWantReadError:
+                pass
+            return bytes(buf)
 
     # ------------------------------------------------------------------
     # Internal

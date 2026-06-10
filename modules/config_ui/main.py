@@ -209,6 +209,11 @@ def on_system_start(topic: str, payload: dict) -> None:
         return
     log.info(f"system.start priority={PRIORITY} - requesting module list")
     _invoke("set_status", "Sistema pronto. Recupero lista moduli...")
+
+    bus.subscribe("system.modules_response", on_modules_response)
+    bus.subscribe("config.response",         on_config_response)
+    bus.subscribe("config.error",            on_config_error)
+
     bus.publish("system.get_modules", {})
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info("system.ready published - config_ui online")
@@ -269,9 +274,6 @@ def run() -> None:
     bus.subscribe("system.readytostart",     on_system_readytostart)
     bus.subscribe("system.start",            on_system_start)
     bus.subscribe("system.stop",             on_system_stop)
-    bus.subscribe("system.modules_response", on_modules_response)
-    bus.subscribe("config.response",         on_config_response)
-    bus.subscribe("config.error",            on_config_error)
 
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)

@@ -74,6 +74,7 @@ from oaa.av.AVChannelStartIndicationMessage_pb2 import AVChannelStartIndication 
 from oaa.av.AVMediaAckIndicationMessage_pb2 import AVMediaAckIndication          # noqa: E402
 from oaa.common.StatusEnum_pb2 import Status                                     # noqa: E402
 from oaa.audio.AudioTypeEnum_pb2 import AudioType                                # noqa: E402
+from oaa.av.AVChannelSetupRequestMessage_pb2 import AVChannelSetupRequest        # noqa: E402
 
 # ---------------------------------------------------------------------------
 # AA message ID constants
@@ -125,7 +126,8 @@ class AudioModule(BaseChannelModule):
         self._sample_rate:   int = 48000
         self._bit_depth:     int = 16
         self._channel_count: int = 2
-        self._codec:         int = _CODEC_AAC_LC
+        self._codec          = _CODEC_AAC_LC
+        self._audio_type:    int | None = None
         self._state:      str = "IDLE"
         self._session_id: int = 0
         self._proc:      subprocess.Popen | None = None
@@ -156,15 +158,15 @@ class AudioModule(BaseChannelModule):
             configs = cfg.get("av_channel", {}).get("audio_configs", [])
             if configs:
                 c = configs[0]
-                audio_type = cfg.get("av_channel", {}).get("audio_type")
+                self._audio_type = cfg.get("av_channel", {}).get("audio_type")
                 self._sample_rate   = c.get("sample_rate",   self._sample_rate)
                 self._bit_depth     = c.get("bit_depth",     self._bit_depth)
                 self._channel_count = c.get("channel_count", self._channel_count)
-                self._codec         = _normalise_audio_codec(c.get("codec"), audio_type)
+                self._codec         = _normalise_audio_codec(c.get("codec"), self._audio_type)
                 self.log.info(
                     "Audio config ch=%d: rate=%d depth=%d channels=%d codec=%s raw_config=%r audio_type=%r",
                     self.CHANNEL_ID, self._sample_rate, self._bit_depth,
-                    self._channel_count, _codec_name(self._codec), c, audio_type,
+                    self._channel_count, _codec_name(self._codec), c, self._audio_type,
                 )
             else:
                 self.log.warning(
@@ -271,6 +273,14 @@ class AudioModule(BaseChannelModule):
 
     def _handle_setup_request(self, body: bytes) -> None:
         max_unacked = self._config.get("max_unacked", 1)
+        req = AVChannelSetupRequest()
+        req.ParseFromString(body)
+        self._codec         = _normalise_audio_codec(req.media_codec_type, self._audio_type)
+        self.log.info(
+            "Audio config after AVChannelSetupRequest ch=%d: rate=%d depth=%d channels=%d codec=%s audio_type=%r",
+            self.CHANNEL_ID, self._sample_rate, self._bit_depth,
+            self._channel_count, _codec_name(self._codec), self._audio_type,
+        )
         resp = AVChannelSetupResponse()
         resp.media_status = AVChannelSetupStatus.OK
         resp.max_unacked  = max_unacked

@@ -712,6 +712,7 @@ class TestBootHandlers:
              patch.object(mod, "_start_udev_thread"):
             mock_bus.publish.reset_mock()
             mod.on_system_start("system.start", {"priority": 1})
+            mod._on_config_loaded({"volume": 80})
         assert "system.ready" in _topics(mock_bus)
 
     @pytest.mark.unit

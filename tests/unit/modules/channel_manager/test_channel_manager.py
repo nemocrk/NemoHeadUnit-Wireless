@@ -314,15 +314,16 @@ class TestSessionReadiness:
         session = _make_session(mod, mock_launcher)
         mock_launcher.start_all.return_value = set(names)
         channels = []
-        for i, name in enumerate(names, start=1):
+        for name in names:
+            ch_id = int(name.split("_")[-1])
             if "_sensor_" in name:
-                channels.append({"channel_id": i, "sensor_channel": {}})
+                channels.append({"channel_id": ch_id, "sensor_channel": {}})
             elif "_video_" in name:
-                channels.append({"channel_id": i, "av_channel": {"av_type": 3}})
+                channels.append({"channel_id": ch_id, "av_channel": {"av_type": 3}})
             elif "_audio_" in name:
-                channels.append({"channel_id": i, "av_channel": {"av_type": 1, "audio_type": 3}})
+                channels.append({"channel_id": ch_id, "av_channel": {"av_type": 1, "audio_type": 3}})
             else:
-                channels.append({"channel_id": i, "input_channel": {}})
+                channels.append({"channel_id": ch_id, "input_channel": {}})
         session.start("aa", channels)
         return session
 
@@ -344,6 +345,8 @@ class TestSessionReadiness:
     def test_all_ready_event_set_when_all_modules_ready(self, cm):
         mod, mock_bus, _, ml = cm
         session = self._started_session(mod, ml, ["channel_input_1", "channel_sensor_2"])
+        session.on_module_ready_to_start("channel_input_1", priority=1)
+        session.on_module_ready_to_start("channel_sensor_2", priority=1)
         session.on_module_ready("channel_input_1")
         assert not session._all_ready.is_set()
         session.on_module_ready("channel_sensor_2")
@@ -354,7 +357,8 @@ class TestSessionReadiness:
         mod, mock_bus, _, ml = cm
         session = self._started_session(mod, ml, ["channel_video_3"])
         session.on_module_ready_to_start("channel_video_3", priority=5)
-        mock_bus.publish.assert_called_with("channel_manager.module_start", {"priority": 5})
+        assert "channel_video_3" in session._ready_to_start
+        assert session._all_ready_channels[0]["priority"] == 5
 
     @pytest.mark.unit
     def test_on_module_ready_to_start_unknown_name_ignored(self, cm):
@@ -391,30 +395,33 @@ class TestSessionReadiness:
     def test_wait_all_ready_publishes_channels_ready(self, cm):
         mod, mock_bus, _, ml = cm
         session = self._started_session(mod, ml, ["channel_input_1"])
+        session.on_module_ready_to_start("channel_input_1", priority=1)
         session.on_module_ready("channel_input_1")
         mock_bus.publish.reset_mock()
-        result = session.wait_all_ready("hex123")
+        result = session.wait_all_ready("hex123", priority=1)
         assert result is True
         topics = [c.args[0] for c in mock_bus.publish.call_args_list]
-        assert "channel_manager.channels_ready" in topics
+        assert "aa.channel.open" in topics
 
     @pytest.mark.unit
     def test_wait_all_ready_channels_ready_payload(self, cm):
         mod, mock_bus, _, ml = cm
         session = self._started_session(mod, ml, ["channel_input_1"])
+        session.on_module_ready_to_start("channel_input_1", priority=1)
         session.on_module_ready("channel_input_1")
         mock_bus.publish.reset_mock()
-        session.wait_all_ready("myhex")
+        session.wait_all_ready("myhex", priority=1)
         payload_calls = {c.args[0]: c.args[1] for c in mock_bus.publish.call_args_list}
-        assert payload_calls["channel_manager.channels_ready"]["sdr_bytes_hex"] == "myhex"
+        assert payload_calls["aa.channel.open"]["module_name"] == "channel_input_1"
 
     @pytest.mark.unit
     def test_wait_all_ready_timeout_returns_false(self, cm):
         mod, mock_bus, _, ml = cm
         session = self._started_session(mod, ml, ["channel_video_3"])
+        session.on_module_ready_to_start("channel_video_3", priority=1)
         # Don't fire on_module_ready — let it timeout
         mod.CHILDREN_READY_TIMEOUT = 0.05
-        result = session.wait_all_ready("hex")
+        result = session.wait_all_ready("hex", priority=1)
         mod.CHILDREN_READY_TIMEOUT = 10.0  # restore
         assert result is False
 
@@ -593,21 +600,21 @@ class TestModuleLevelHandlers:
         mod, mock_bus, _, _ = cm
         mock_session = MagicMock()
         mod._session = mock_session
-        mod.on_channel_manager_module_ready("t", {"name": "channel_video_3"})
+        mod.on_channel_manager_module_ready("t", {"module_name": "channel_video_3"})
         mock_session.on_module_ready.assert_called_once_with("channel_video_3")
 
     @pytest.mark.unit
     def test_on_module_ready_no_session_no_crash(self, cm):
         mod, mock_bus, _, _ = cm
         mod._session = None
-        mod.on_channel_manager_module_ready("t", {"name": "x"})  # must not raise
+        mod.on_channel_manager_module_ready("t", {"module_name": "x"})  # must not raise
 
     @pytest.mark.unit
     def test_on_module_stopped_delegated_to_session(self, cm):
         mod, mock_bus, _, _ = cm
         mock_session = MagicMock()
         mod._session = mock_session
-        mod.on_channel_manager_module_stopped("t", {"name": "channel_audio_4"})
+        mod.on_channel_manager_module_stopped("t", {"module_name": "channel_audio_4"})
         mock_session.on_module_stopped.assert_called_once_with("channel_audio_4")
 
     @pytest.mark.unit

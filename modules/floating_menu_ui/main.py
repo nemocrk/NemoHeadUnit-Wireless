@@ -262,7 +262,9 @@ def on_widget_geometry(topic: str, payload: dict) -> None:
     """Called from the bus thread — must NOT touch Qt objects directly."""
     global _geometry_set, _dpi_factor, _screen_h, _navbar_h
     name = payload.get("name", "")
-    _dpi_factor = float(payload.get("dpi_factor", 1.0))
+    df = float(payload.get("dpi_factor", 1.0))
+    if df > 0:
+        _dpi_factor = df
 
     if name == "navbar_ui":
         _navbar_h = int(payload.get("h", 60))

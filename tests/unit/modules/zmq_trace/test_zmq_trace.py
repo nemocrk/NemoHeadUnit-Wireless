@@ -311,6 +311,8 @@ class TestBusLifecycleHandlers:
     def test_on_system_start_matching_priority_publishes_ready(self):
         self.mod._mock_bus.publish.reset_mock()
         self.mod.on_system_start("system.start", {"priority": self.mod.PRIORITY})
+        with patch("threading.Thread") as mock_thread:
+            self.mod._on_config_loaded({"report_interval_sec": 5.0})
         self.mod._mock_bus.publish.assert_called_once_with(
             "system.ready",
             {"name": self.mod.MODULE_NAME, "priority": self.mod.PRIORITY},

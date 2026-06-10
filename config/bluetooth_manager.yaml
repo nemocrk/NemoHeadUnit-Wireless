@@ -1,0 +1,8 @@
+adapter_name: NemoHeadUnit
+autoconnect_backoff_cap_s: 60
+autoconnect_backoff_initial_s: 5
+autoconnect_connect_timeout_s: 8
+autoconnect_enabled: true
+discoverable: true
+discoverable_timeout: 0
+discovery_duration_sec: 10

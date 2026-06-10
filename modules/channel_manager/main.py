@@ -96,13 +96,17 @@ class ChannelManagerSession:
         self._is_active = False  # True between start() and shutdown()
         self._launcher = Launcher()
         self._expected: set[str] = set()
+        self._ready_to_start:    set[str] = set()
         self._ready:    set[str] = set()
         self._stopped:  set[str] = set()  # tracks channel_manager.module_stopped ACKs
         self._lock      = threading.Lock()
         self._all_ready = threading.Event()
+        self._all_ready_to_start = threading.Event()
         self._all_stopped = threading.Event()
         self._all_started_channels: list[dict] = []
+        self._all_ready_channels: list[dict] = []
         self._all_active_channels: list[dict] = []
+        self._priorities: list[int] = []
 
     # ------------------------------------------------------------------
     # Start
@@ -157,13 +161,16 @@ class ChannelManagerSession:
         started = self._launcher.start_all(launch_list)
         with self._lock:
             self._expected = set(started)
+            self._ready_to_start.clear()
             self._ready.clear()
             self._stopped.clear()
             self._all_ready.clear()
+            self._all_ready_to_start.clear()
             self._all_stopped.clear()
             # If no children were started, the session is immediately ready.
             if not self._expected:
                 self._all_ready.set()
+                self._all_ready_to_start.set()
 
         log.info(
             "Waiting for %d channel module(s) to become ready: %s",
@@ -175,17 +182,48 @@ class ChannelManagerSession:
     # ------------------------------------------------------------------
 
     def on_module_ready_to_start(self, name: str, priority: int) -> None:
-        """Called when channel_manager.module_ready_to_start {name, priority} arrives.
-
-        Responds immediately with channel_manager.module_start {priority} so the
-        child begins initialisation — mirrors the main.py system.start pattern.
-        """
+        """Called when channel_manager.module_ready_to_start {name, priority} arrives."""
         with self._lock:
             if name not in self._expected:
                 log.debug("on_module_ready_to_start: unexpected name=%r — ignored", name)
                 return
-            log.info("module_ready_to_start: %s (priority=%d) — sending module_start", name, priority)
-        bus.publish("channel_manager.module_start", {"priority": priority})
+            self._ready_to_start.add(name)
+            self._all_ready_channels.append(
+                {**next(ch for ch in self._all_started_channels if ch["module_name"] == name), "priority": priority}
+            )
+            pending = self._expected - self._ready_to_start
+            log.info("module_ready_to_start: %s (%d/%d)", name, len(self._ready_to_start), len(self._expected))
+            if not pending:
+                self._all_ready_to_start.set()
+
+    def wait_all_ready_to_start(self, sdr_bytes_hex: str) -> bool:
+        """
+        Block until all children are ready to start or timeout.
+        An empty session (zero expected children) is considered immediately ready.
+        On success publishes channel_manager.channels_ready.
+        Returns True on success, False on timeout.
+        """
+        n = len(self._expected)
+        if self._all_ready_to_start.wait(timeout=CHILDREN_READY_TIMEOUT):
+            log.info("All %d channel module(s) ready to start — publishing module_start", n)
+
+            self._priorities = list({channel["priority"] for channel in self._all_ready_channels})
+
+            for ready_channel in self._all_ready_channels:
+                log.info(
+                    "Ready to Start channel: name=%s priority=%s",
+                    ready_channel["module_name"],
+                    ready_channel["priority"],
+                )
+            return True
+
+        with self._lock:
+            missing = sorted(self._expected - self._ready_to_start)
+        log.error(
+            "Timeout waiting for channel modules: missing=%s — session startup failed",
+            missing,
+        )
+        return False
 
     def on_module_ready(self, name: str) -> None:
         """Called when channel_manager.module_ready {name} arrives on the bus."""
@@ -197,7 +235,24 @@ class ChannelManagerSession:
             self._all_active_channels.append(
                 next(ch for ch in self._all_started_channels if ch["module_name"] == name)
             )
-            pending = self._expected - self._ready
+            # 1. Trova la priorità del modulo target
+            target_priority = next(
+                (ch["priority"] for ch in self._all_ready_channels if ch["module_name"] == name),
+                None
+            )
+
+            # 2. Crea un SET di identificativi (es. i nomi dei moduli) con la stessa priorità
+            if target_priority is not None:
+                same_priority_channels = {
+                    ch["module_name"] for ch in self._all_ready_channels
+                    if ch["priority"] == target_priority
+                }
+            else:
+                same_priority_channels = set()
+
+            # 3. Ora la sottrazione tra SET funziona correttamente
+            pending = same_priority_channels - self._ready
+
             log.info("module_ready: %s (%d/%d)", name, len(self._ready), len(self._expected))
             if not pending:
                 self._all_ready.set()
@@ -214,14 +269,15 @@ class ChannelManagerSession:
             if not pending:
                 self._all_stopped.set()
 
-    def wait_all_ready(self, sdr_bytes_hex: str) -> bool:
+    def wait_all_ready(self, sdr_bytes_hex: str, priority: int) -> bool:
         """
         Block until all children are ready or timeout.
         An empty session (zero expected children) is considered immediately ready.
         On success publishes channel_manager.channels_ready.
         Returns True on success, False on timeout.
         """
-        n = len(self._expected)
+        this_priority_channels = [ch for ch in self._all_ready_channels if ch["priority"] == priority]
+        n = len(this_priority_channels)
         if self._all_ready.wait(timeout=CHILDREN_READY_TIMEOUT):
             log.info("All %d channel module(s) ready — publishing channels_ready", n)
             for active_channel in self._all_active_channels:
@@ -232,7 +288,6 @@ class ChannelManagerSession:
                     active_channel["module_type"],
                 )
                 bus.publish("aa.channel.open", active_channel)
-            bus.publish("channel_manager.channels_ready", {"sdr_bytes_hex": sdr_bytes_hex})
             return True
 
         with self._lock:
@@ -305,6 +360,15 @@ def on_system_start(topic: str, payload: dict) -> None:
     if payload.get("priority") != PRIORITY:
         return
     log.info(f"system.start priority={PRIORITY} received — initialising...")
+
+    # Topic subscriptions
+    bus.subscribe("oaa_control_channel.open_channels",         on_oaa_control_channel_open_channels)
+    bus.subscribe("channel_manager.module_ready_to_start",     on_channel_manager_module_ready_to_start)
+    bus.subscribe("channel_manager.module_ready",              on_channel_manager_module_ready)
+    bus.subscribe("channel_manager.module_stopped",            on_channel_manager_module_stopped)
+    bus.subscribe("aa.session.shutdown",                       on_aa_session_shutdown)
+    bus.subscribe("aa.session.restart",                        on_aa_session_restart)
+
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
         "priority": PRIORITY,
@@ -355,31 +419,44 @@ def on_oaa_control_channel_open_channels(topic: str, payload: dict) -> None:
 
     def _wait() -> None:
         global _session
-        ok = session.wait_all_ready(sdr_bytes_hex)
+        ok = session.wait_all_ready_to_start(sdr_bytes_hex)
+        for priority in session._priorities:
+            log.info(f"Publishing module_start for priority {priority}")
+            bus.publish("channel_manager.module_start", {"priority": priority})
+            ok = session.wait_all_ready(sdr_bytes_hex, priority=priority)
+            session._all_ready.clear()  # reset for next priority level
+        log.info(f"Startup wait thread finished with ok={ok} — session is {'ready' if ok else 'not ready'}")
         if not ok:
             log.error("Session startup timed out — shutting down partial session")
             session.shutdown()
             if _session is session:
                 _session = None
+        else:
+            log.info("All channel modules ready — session startup complete publishing channel_manager.channels_ready")
+            bus.publish("channel_manager.channels_ready", {"sdr_bytes_hex": sdr_bytes_hex})
 
     threading.Thread(target=_wait, daemon=True, name="cm_wait_ready").start()
 
 
 def on_channel_manager_module_ready_to_start(topic: str, payload: dict) -> None:
-    name     = payload.get("name", "")
+    """Child announced it is ready to start — respond with module_start {priority}."""
+    name     = payload.get("module_name", "")
     priority = payload.get("priority", 1)
     if _session:
+        log.info(f"module_ready_to_start received from {name} (priority={priority})")
         _session.on_module_ready_to_start(name, priority)
 
 
 def on_channel_manager_module_ready(topic: str, payload: dict) -> None:
-    name = payload.get("name", "")
+    """Track readiness of a spawned channel module child."""
+    name = payload.get("module_name", "")
     if _session:
         _session.on_module_ready(name)
 
 
 def on_channel_manager_module_stopped(topic: str, payload: dict) -> None:
-    name = payload.get("name", "")
+    """Track stop ACK from a spawned channel module child."""
+    name = payload.get("module_name", "")
     if _session:
         _session.on_module_stopped(name)
 
@@ -418,16 +495,10 @@ def _crash_monitor() -> None:
 # ---------------------------------------------------------------------------
 
 def run() -> None:
+    # Boot protocol
     bus.subscribe("system.readytostart", on_system_readytostart)
     bus.subscribe("system.start",        on_system_start)
     bus.subscribe("system.stop",         on_system_stop)
-
-    bus.subscribe("oaa_control_channel.open_channels",         on_oaa_control_channel_open_channels)
-    bus.subscribe("channel_manager.module_ready_to_start",     on_channel_manager_module_ready_to_start)
-    bus.subscribe("channel_manager.module_ready",              on_channel_manager_module_ready)
-    bus.subscribe("channel_manager.module_stopped",            on_channel_manager_module_stopped)
-    bus.subscribe("aa.session.shutdown",                       on_aa_session_shutdown)
-    bus.subscribe("aa.session.restart",                        on_aa_session_restart)
 
     threading.Thread(target=_crash_monitor, daemon=True, name="cm_crash_monitor").start()
 

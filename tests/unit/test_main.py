@@ -248,7 +248,8 @@ class TestTerminateAll:
         proc = MagicMock()
         proc.poll.return_value = None
         proc.returncode = None
-        proc.wait.side_effect = [subprocess.TimeoutExpired("x", 1), None]
+        # First wait() in the check loop raises TimeoutExpired, and the second wait() in the kill loop also raises it.
+        proc.wait.side_effect = [subprocess.TimeoutExpired("x", 1), subprocess.TimeoutExpired("x", 1)]
         mod._terminate_all([("mod_c", proc)])
         proc.kill.assert_called()
 
@@ -377,7 +378,7 @@ class TestWaitChannelManagerStopped:
         sub.recv_multipart.return_value = [b"channel_manager.stopped"]
         fake_ctx.socket.return_value = sub
 
-        result = mod._wait_channel_manager_stopped(timeout=0.1)
+        result = mod._wait_channel_manager_stopped(timeout=0.1, channel_manager_process=MagicMock())
         assert result is True
 
     def test_returns_false_on_timeout(self, main_module):
@@ -386,5 +387,7 @@ class TestWaitChannelManagerStopped:
         sub.poll.return_value = False
         fake_ctx.socket.return_value = sub
 
-        result = mod._wait_channel_manager_stopped(timeout=0.05)
+        proc = MagicMock()
+        proc.poll.return_value = None
+        result = mod._wait_channel_manager_stopped(timeout=0.05, channel_manager_process=proc)
         assert result is False

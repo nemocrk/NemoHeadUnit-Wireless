@@ -62,6 +62,12 @@ if str(_REPO_ROOT) not in sys.path:
 import importlib
 nav = importlib.import_module("modules.navbar_ui.main")
 
+sys.modules.pop("shared.bus_client", None)
+sys.modules.pop("shared.config_client", None)
+sys.modules.pop("shared.logger", None)
+sys.modules.pop("shared.config_schema", None)
+sys.modules.pop("shared", None)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -187,8 +193,9 @@ class TestWidgetGeometry:
     def test_geometry_calls_apply(self):
         mock_win = MagicMock()
         nav._qt_window = mock_win
-        nav.on_widget_geometry("", {"name": nav.MODULE_NAME, "x": 0, "y": 540, "w": 1024, "h": 60})
-        mock_win.apply_geometry.assert_called_once_with(0, 540, 1024, 60)
+        with patch("modules.navbar_ui.main._qt_invoke_geometry") as mock_invoke:
+            nav.on_widget_geometry("", {"name": nav.MODULE_NAME, "x": 0, "y": 540, "w": 1024, "h": 60})
+            mock_invoke.assert_called_once_with(0, 540, 1024, 60)
 
     def test_geometry_sets_flag(self):
         nav._qt_window = MagicMock()

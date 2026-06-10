@@ -103,6 +103,8 @@ def on_system_start(topic: str, payload: dict) -> None:
             "error": "RFCOMM D-Bus listener failed to start",
         })
 
+    bus.subscribe("hostapd.ready",              on_hostapd_ready)
+
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
         "priority": PRIORITY,
@@ -258,7 +260,6 @@ def run() -> None:
     bus.subscribe("system.readytostart",        on_system_readytostart)
     bus.subscribe("system.start",               on_system_start)
     bus.subscribe("system.stop",                on_system_stop)
-    bus.subscribe("hostapd.ready",              on_hostapd_ready)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)

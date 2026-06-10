@@ -59,6 +59,12 @@ if str(_REPO_ROOT) not in sys.path:
 import importlib
 uis = importlib.import_module("modules.ui_shell.main")
 
+sys.modules.pop("shared.bus_client", None)
+sys.modules.pop("shared.config_client", None)
+sys.modules.pop("shared.logger", None)
+sys.modules.pop("shared.config_schema", None)
+sys.modules.pop("shared", None)
+
 
 # ---------------------------------------------------------------------------
 # Helpers to reset module state between tests

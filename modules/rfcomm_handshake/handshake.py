@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 _REPO_ROOT  = Path(__file__).parent.parent.parent.parent
-_PROTO_ROOT = _REPO_ROOT / "v2" / "protos"
+_PROTO_ROOT = _REPO_ROOT / "protos"
 
 for _p in (_REPO_ROOT, _PROTO_ROOT):
     if str(_p) not in sys.path:
@@ -39,10 +39,10 @@ from rfcomm_handshake.packet import (
     recv_packet,
     send_packet,
 )
-from v2.protos.oaa.wifi.WifiSecurityResponseMessage_pb2 import WifiSecurityResponse
-from v2.protos.oaa.wifi.WifiStartRequestMessage_pb2  import WifiStartRequest
-from v2.protos.oaa.wifi.WifiStartResponseMessage_pb2 import WifiStartResponse
-from v2.protos.oaa.wifi.WifiConnectStatusMessage_pb2 import WifiConnectStatus
+from protos.oaa.wifi.WifiSecurityResponseMessage_pb2 import WifiSecurityResponse
+from protos.oaa.wifi.WifiStartRequestMessage_pb2  import WifiStartRequest
+from protos.oaa.wifi.WifiStartResponseMessage_pb2 import WifiStartResponse
+from protos.oaa.wifi.WifiConnectStatusMessage_pb2 import WifiConnectStatus
 
 log = get_logger("rfcomm_handshake.handshake")
 

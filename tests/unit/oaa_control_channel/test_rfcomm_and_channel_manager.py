@@ -417,6 +417,10 @@ class TestChannelManagerSession:
             {"module_name": "video_ch1", "module_type": "video", "channel_id": 1},
             {"module_name": "audio_ch4", "module_type": "audio", "channel_id": 4},
         ]
+        session._all_ready_channels = [
+            {"module_name": "video_ch1", "priority": 1},
+            {"module_name": "audio_ch4", "priority": 1},
+        ]
 
         session.on_module_ready("video_ch1")
         assert "video_ch1" in session._ready
@@ -439,17 +443,19 @@ class TestChannelManagerSession:
 
         session._expected = {"video_ch1"}
         session._all_started_channels = [
-            {"module_name": "video_ch1", "module_type": "video", "channel_id": 1},
+            {"module_name": "video_ch1", "module_type": "video", "channel_id": 1, "priority": 0},
+        ]
+        session._all_ready_channels = [
+            {"module_name": "video_ch1", "priority": 0},
         ]
         # Simulate immediate readiness
         session._all_ready.set()
         session._all_active_channels = session._all_started_channels.copy()
 
-        result = session.wait_all_ready("aabbcc")
+        result = session.wait_all_ready("aabbcc", priority=0)
 
         assert result is True
         published_topics = [c.args[0] for c in mock_bus.publish.call_args_list]
-        assert "channel_manager.channels_ready" in published_topics
         assert "aa.channel.open" in published_topics
 
     def test_wait_all_ready_returns_false_on_timeout(self):
@@ -457,9 +463,12 @@ class TestChannelManagerSession:
         session = mod.ChannelManagerSession()
 
         session._expected = {"video_ch1"}
+        session._all_started_channels = [
+            {"module_name": "video_ch1", "module_type": "video", "channel_id": 1, "priority": 0},
+        ]
         # _all_ready never set → timeout immediately with a tiny value
         with patch.object(session._all_ready, "wait", return_value=False):
-            result = session.wait_all_ready("aabbcc")
+            result = session.wait_all_ready("aabbcc", priority=0)
 
         assert result is False
 
@@ -496,13 +505,17 @@ class TestChannelManagerSession:
         mod, mock_bus = self._make_session()
         session = mod.ChannelManagerSession()
         session._expected = {"video_ch1"}
+        session._all_started_channels = [
+            {"module_name": "video_ch1", "module_type": "video", "channel_id": 1},
+        ]
 
         session.on_module_ready_to_start("video_ch1", priority=5)
 
-        mock_bus.publish.assert_called_once_with(
-            "channel_manager.module_start",
-            {"priority": 5},
-        )
+        assert session._ready_to_start == {"video_ch1"}
+        assert session._all_ready_to_start.is_set() is True
+        assert session._all_ready_channels == [
+            {"module_name": "video_ch1", "module_type": "video", "channel_id": 1, "priority": 5}
+        ]
 
     def test_on_module_ready_to_start_ignores_unknown(self):
         mod, mock_bus = self._make_session()
@@ -592,7 +605,7 @@ class TestChannelManagerBootProtocol:
 
         mod.on_channel_manager_module_ready(
             "channel_manager.module_ready",
-            {"name": "video_ch1"},
+            {"module_name": "video_ch1"},
         )
 
         mock_session.on_module_ready.assert_called_once_with("video_ch1")
@@ -604,7 +617,7 @@ class TestChannelManagerBootProtocol:
 
         mod.on_channel_manager_module_stopped(
             "channel_manager.module_stopped",
-            {"name": "audio_ch4"},
+            {"module_name": "audio_ch4"},
         )
 
         mock_session.on_module_stopped.assert_called_once_with("audio_ch4")

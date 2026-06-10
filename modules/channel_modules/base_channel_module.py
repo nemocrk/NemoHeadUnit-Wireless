@@ -228,20 +228,23 @@ class BaseChannelModule(ABC):
         if not (self._init_done and config_ok and self._is_ready()):
             return
         self._ready_published = True
-        self.bus.publish("channel_manager.module_ready", {
-            "name":     self.MODULE_NAME,
-            "priority": self.PRIORITY,
-        })
-        self.log.info(f"channel_manager.module_ready published (priority={self.PRIORITY})")
+        self._module_ready()
 
     # ------------------------------------------------------------------
     # Boot protocol handlers
     # ------------------------------------------------------------------
 
-    def _on_channel_manager_module_readytostart(self) -> None:
-        self.log.info(f"channel_manager.module_readytostart — announcing priority {self.PRIORITY}")
+    def _module_ready_to_start(self) -> None:
+        self.log.info(f"channel_manager.module_ready_to_start — announcing priority {self.PRIORITY}")
         self.bus.publish("channel_manager.module_ready_to_start", {
-            "name":     self.MODULE_NAME,
+            "module_name":     self.MODULE_NAME,
+            "priority": self.PRIORITY,
+        })
+
+    def _module_ready(self) -> None:
+        self.log.info(f"channel_manager.module_ready — announcing priority {self.PRIORITY}")
+        self.bus.publish("channel_manager.module_ready", {
+            "module_name":     self.MODULE_NAME,
             "priority": self.PRIORITY,
         })
 
@@ -259,7 +262,7 @@ class BaseChannelModule(ABC):
     def _on_channel_manager_module_stop(self, topic: str, payload: dict) -> None:
         self.log.info("channel_manager.module_stop — cleaning up...")
         self._cleanup()
-        self.bus.publish("channel_manager.module_stopped", {"name": self.MODULE_NAME})
+        self.bus.publish("channel_manager.module_stopped", {"module_name": self.MODULE_NAME})
         self.log.info(f"channel_manager.module_stopped published for {self.MODULE_NAME}")
         self.bus.stop()
 
@@ -371,7 +374,7 @@ class BaseChannelModule(ABC):
         )
         bus_thread = self.bus.start(blocking=False)
         time.sleep(0.05)
-        self._on_channel_manager_module_readytostart()
+        self._module_ready_to_start()
         try:
             bus_thread.join()
         except KeyboardInterrupt:

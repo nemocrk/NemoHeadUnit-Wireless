@@ -151,6 +151,8 @@ class TestSessionStart:
             {"channel_id": 2, "type": "sensor"},
         ])
 
+        session.on_module_ready_to_start("audio_1", priority=1)
+        session.on_module_ready_to_start("sensor_2", priority=1)
         session.on_module_ready("audio_1")
         assert not session._all_ready.is_set()
         session.on_module_ready("sensor_2")
@@ -171,13 +173,7 @@ class TestSessionStart:
 
     @pytest.mark.integration
     def test_on_module_ready_to_start_sends_module_start(self, in_process_broker):
-        """on_module_ready_to_start() pubblica channel_manager.module_start sul bus."""
-        received = []
-        spy = _make_bus_client(in_process_broker, "spy")
-        spy.subscribe("channel_manager.module_start", lambda t, p: received.append(p))
-        spy.start(blocking=False)
-        time.sleep(0.1)
-
+        """on_module_ready_to_start() aggiorna lo stato interno della sessione."""
         session = _make_session(in_process_broker)
         mock_launcher = MagicMock()
         mock_launcher.start_all.return_value = ["audio_1"]
@@ -185,11 +181,8 @@ class TestSessionStart:
         session.start(_sdr_hex(), [{"channel_id": 1, "type": "audio"}])
 
         session.on_module_ready_to_start("audio_1", priority=1)
-        ok = _wait(received, 1)
-        spy.stop()
-
-        assert ok, "channel_manager.module_start non ricevuto"
-        assert received[0].get("priority") == 1
+        assert "audio_1" in session._ready_to_start
+        assert session._all_ready_channels[0]["priority"] == 1
 
     @pytest.mark.integration
     def test_on_module_ready_to_start_unknown_name_no_publish(self, in_process_broker):
@@ -239,12 +232,12 @@ class TestWaitAllReady:
 
     @pytest.mark.integration
     def test_channels_ready_published_after_all_ready(self, in_process_broker):
-        """Quando tutti i moduli sono ready, viene pubblicato channel_manager.channels_ready."""
+        """Quando tutti i moduli sono ready, viene pubblicato aa.channel.open."""
         received = []
         sdr = _sdr_hex()
 
         spy = _make_bus_client(in_process_broker, "spy")
-        spy.subscribe("channel_manager.channels_ready", lambda t, p: received.append(p))
+        spy.subscribe("aa.channel.open", lambda t, p: received.append(p))
         spy.start(blocking=False)
         time.sleep(0.1)
 
@@ -254,25 +247,24 @@ class TestWaitAllReady:
         session._launcher = mock_launcher
         session.start(sdr, [{"channel_id": 1, "type": "audio"}])
 
-        # Simula il modulo che diventa ready PRIMA del wait
+        session.on_module_ready_to_start("audio_1", priority=1)
         session.on_module_ready("audio_1")
 
-        result = session.wait_all_ready(sdr)
+        result = session.wait_all_ready(sdr, priority=1)
         ok = _wait(received, 1)
         spy.stop()
 
         assert result is True
-        assert ok, "channel_manager.channels_ready non ricevuto"
-        assert received[0].get("sdr_bytes_hex") == sdr
+        assert ok, "aa.channel.open non ricevuto"
 
     @pytest.mark.integration
     def test_channels_ready_contains_correct_sdr(self, in_process_broker):
-        """Il payload di channels_ready contiene esattamente lo sdr_bytes_hex passato."""
+        """Il payload di aa.channel.open contiene il nome del modulo corretto."""
         received = []
         sdr = "deadbeef1234"
 
         spy = _make_bus_client(in_process_broker, "spy")
-        spy.subscribe("channel_manager.channels_ready", lambda t, p: received.append(p))
+        spy.subscribe("aa.channel.open", lambda t, p: received.append(p))
         spy.start(blocking=False)
         time.sleep(0.1)
 
@@ -281,14 +273,15 @@ class TestWaitAllReady:
         mock_launcher.start_all.return_value = ["audio_1"]
         session._launcher = mock_launcher
         session.start(sdr, [{"channel_id": 1, "type": "audio"}])
+        session.on_module_ready_to_start("audio_1", priority=1)
         session.on_module_ready("audio_1")
-        session.wait_all_ready(sdr)
+        session.wait_all_ready(sdr, priority=1)
 
         ok = _wait(received, 1)
         spy.stop()
 
         assert ok
-        assert received[0]["sdr_bytes_hex"] == "deadbeef1234"
+        assert received[0]["module_name"] == "audio_1"
 
     @pytest.mark.integration
     def test_aa_channel_open_published_per_active_module(self, in_process_broker):
@@ -309,9 +302,11 @@ class TestWaitAllReady:
             {"channel_id": 1, "type": "audio"},
             {"channel_id": 2, "type": "video"},
         ])
+        session.on_module_ready_to_start("audio_1", priority=1)
+        session.on_module_ready_to_start("video_2", priority=1)
         session.on_module_ready("audio_1")
         session.on_module_ready("video_2")
-        session.wait_all_ready(sdr)
+        session.wait_all_ready(sdr, priority=1)
 
         ok = _wait(received, 2)
         spy.stop()
@@ -333,9 +328,9 @@ class TestWaitAllReady:
         mock_launcher.start_all.return_value = ["audio_1"]
         session._launcher = mock_launcher
         session.start(_sdr_hex(), [{"channel_id": 1, "type": "audio"}])
-        # NON chiamiamo on_module_ready — timeout deve scattare
+        session.on_module_ready_to_start("audio_1", priority=1)
 
-        result = session.wait_all_ready(_sdr_hex())
+        result = session.wait_all_ready(_sdr_hex(), priority=1)
         cm_main.CHILDREN_READY_TIMEOUT = original_timeout
 
         assert result is False
@@ -343,12 +338,7 @@ class TestWaitAllReady:
     @pytest.mark.integration
     def test_wait_all_ready_no_channels_returns_true(self, in_process_broker):
         """Con lista vuota, documenta il comportamento corrente di timeout."""
-        received = []
         sdr = _sdr_hex()
-        spy = _make_bus_client(in_process_broker, "spy")
-        spy.subscribe("channel_manager.channels_ready", lambda t, p: received.append(p))
-        spy.start(blocking=False)
-        time.sleep(0.1)
 
         session = _make_session(in_process_broker)
         mock_launcher = MagicMock()
@@ -356,12 +346,8 @@ class TestWaitAllReady:
         session._launcher = mock_launcher
         session.start(sdr, [])  # lista vuota
 
-        result = session.wait_all_ready(sdr)
-        time.sleep(0.1)
-        spy.stop()
-
+        result = session.wait_all_ready(sdr, priority=1)
         assert result is True
-        assert received == [{"sdr_bytes_hex": sdr}], "channels_ready dovrebbe essere pubblicato anche senza canali"
 
     @pytest.mark.integration
     def test_wait_all_ready_in_background_thread(self, in_process_broker):
@@ -370,7 +356,7 @@ class TestWaitAllReady:
         sdr = _sdr_hex()
 
         spy = _make_bus_client(in_process_broker, "spy")
-        spy.subscribe("channel_manager.channels_ready", lambda t, p: received.append(p))
+        spy.subscribe("aa.channel.open", lambda t, p: received.append(p))
         spy.start(blocking=False)
         time.sleep(0.1)
 
@@ -379,9 +365,10 @@ class TestWaitAllReady:
         mock_launcher.start_all.return_value = ["audio_1"]
         session._launcher = mock_launcher
         session.start(sdr, [{"channel_id": 1, "type": "audio"}])
+        session.on_module_ready_to_start("audio_1", priority=1)
 
         results: list[bool] = []
-        t = threading.Thread(target=lambda: results.append(session.wait_all_ready(sdr)))
+        t = threading.Thread(target=lambda: results.append(session.wait_all_ready(sdr, priority=1)))
         t.start()
 
         # Simula modulo che diventa ready dopo 200ms
@@ -465,9 +452,11 @@ class TestSessionShutdown:
             {"channel_id": 1, "type": "audio"},
             {"channel_id": 2, "type": "sensor"},
         ])
+        session.on_module_ready_to_start("audio_1", priority=1)
+        session.on_module_ready_to_start("sensor_2", priority=1)
         session.on_module_ready("audio_1")
         session.on_module_ready("sensor_2")
-        session.wait_all_ready(sdr)  # popola _all_active_channels
+        session.wait_all_ready(sdr, priority=1)  # popola _all_active_channels
         time.sleep(0.1)
 
         session.shutdown()
@@ -510,8 +499,9 @@ class TestSessionShutdown:
         mock_launcher.start_all.return_value = ["audio_1"]
         session._launcher = mock_launcher
         session.start(sdr, [{"channel_id": 1, "type": "audio"}])
+        session.on_module_ready_to_start("audio_1", priority=1)
         session.on_module_ready("audio_1")
-        session.wait_all_ready(sdr)
+        session.wait_all_ready(sdr, priority=1)
 
         session.shutdown()
         assert session._all_active_channels == []
@@ -772,7 +762,7 @@ class TestBusEventHandlers:
 
         cm.on_channel_manager_module_ready_to_start(
             "channel_manager.module_ready_to_start",
-            {"name": "audio_1", "priority": 1}
+            {"module_name": "audio_1", "priority": 1}
         )
 
         mock_session.on_module_ready_to_start.assert_called_once_with("audio_1", 1)
@@ -792,7 +782,7 @@ class TestBusEventHandlers:
 
         cm.on_channel_manager_module_ready(
             "channel_manager.module_ready",
-            {"name": "sensor_3", "priority": 1}
+            {"module_name": "sensor_3", "priority": 1}
         )
 
         mock_session.on_module_ready.assert_called_once_with("sensor_3")
@@ -812,7 +802,7 @@ class TestBusEventHandlers:
 
         cm.on_channel_manager_module_stopped(
             "channel_manager.module_stopped",
-            {"name": "video_2"}
+            {"module_name": "video_2"}
         )
 
         mock_session.on_module_stopped.assert_called_once_with("video_2")
@@ -829,10 +819,10 @@ class TestFullLifecycle:
     def test_full_open_then_shutdown_sequence_on_bus(self, in_process_broker):
         """
         Scenario:
-          1. Spy si iscrive a channels_ready e module_stop
+          1. Spy si iscrive a aa.channel.open e module_stop
           2. Sessione parte con Launcher mockato
           3. Tutti i moduli diventano ready
-          4. channels_ready viene ricevuto
+          4. aa.channel.open viene ricevuto
           5. Sessione viene fermata
           6. module_stop e stopped vengono ricevuti
         """
@@ -842,7 +832,7 @@ class TestFullLifecycle:
         stopped_received = []
 
         spy = _make_bus_client(in_process_broker, "spy")
-        spy.subscribe("channel_manager.channels_ready", lambda t, p: ready_received.append(p))
+        spy.subscribe("aa.channel.open", lambda t, p: ready_received.append(p))
         spy.subscribe("channel_manager.module_stop", lambda t, p: stop_received.append(p))
         spy.subscribe("channel_manager.stopped", lambda t, p: stopped_received.append(p))
         spy.start(blocking=False)
@@ -857,12 +847,14 @@ class TestFullLifecycle:
             {"channel_id": 2, "type": "sensor"},
         ])
 
+        session.on_module_ready_to_start("audio_1", priority=1)
+        session.on_module_ready_to_start("sensor_2", priority=1)
         session.on_module_ready("audio_1")
         session.on_module_ready("sensor_2")
-        session.wait_all_ready(sdr)
+        session.wait_all_ready(sdr, priority=1)
 
-        ok_ready = _wait(ready_received, 1)
-        assert ok_ready, "channels_ready non ricevuto"
+        ok_ready = _wait(ready_received, 2)
+        assert ok_ready, "aa.channel.open non ricevuto"
 
         session.shutdown()
 
@@ -881,7 +873,7 @@ class TestFullLifecycle:
         ready_received = []
 
         spy = _make_bus_client(in_process_broker, "spy")
-        spy.subscribe("channel_manager.channels_ready", lambda t, p: ready_received.append(p))
+        spy.subscribe("aa.channel.open", lambda t, p: ready_received.append(p))
         spy.start(blocking=False)
         time.sleep(0.1)
 
@@ -891,13 +883,14 @@ class TestFullLifecycle:
         m1.start_all.return_value = ["audio_1"]
         s1._launcher = m1
         s1.start(sdr1, [{"channel_id": 1, "type": "audio"}])
+        s1.on_module_ready_to_start("audio_1", priority=1)
         s1.on_module_ready("audio_1")
-        s1.wait_all_ready(sdr1)
+        s1.wait_all_ready(sdr1, priority=1)
         s1.shutdown()
 
         ok1 = _wait(ready_received, 1)
         assert ok1
-        assert ready_received[0]["sdr_bytes_hex"] == sdr1
+        assert ready_received[0]["module_name"] == "audio_1"
 
         # Sessione 2
         s2 = _make_session(in_process_broker)
@@ -905,15 +898,16 @@ class TestFullLifecycle:
         m2.start_all.return_value = ["audio_1"]
         s2._launcher = m2
         s2.start(sdr2, [{"channel_id": 1, "type": "audio"}])
+        s2.on_module_ready_to_start("audio_1", priority=1)
         s2.on_module_ready("audio_1")
-        s2.wait_all_ready(sdr2)
+        s2.wait_all_ready(sdr2, priority=1)
         s2.shutdown()
 
         ok2 = _wait(ready_received, 2)
         spy.stop()
 
         assert ok2
-        assert ready_received[1]["sdr_bytes_hex"] == sdr2
+        assert ready_received[1]["module_name"] == "audio_1"
 
     @pytest.mark.integration
     def test_channels_ready_followed_by_aa_session_shutdown_on_bus(self, in_process_broker):
@@ -956,10 +950,18 @@ class TestFullLifecycle:
           module_stop → module_stopped
         Tutto mediato dal bus ZMQ in-process reale.
         """
+        import shared.bus_client as _bc
+        _bc.BROKER_PUB_ADDR = in_process_broker["pub_addr"]
+        _bc.BROKER_SUB_ADDR = in_process_broker["sub_addr"]
         sdr = _sdr_hex()
         module_start_received = []
         channels_ready_received = []
         module_stop_received = []
+        import importlib
+        import channel_manager.main as cm
+        importlib.reload(cm)
+        cm.resolve_module_type = lambda channel_id, ch: ch.get("type", "audio")
+        cm.module_name = lambda module_type, channel_id: f"{module_type}_{channel_id}"
 
         # Spy su tutti i topic critici
         spy = _make_bus_client(in_process_broker, "spy")
@@ -969,29 +971,36 @@ class TestFullLifecycle:
         spy.start(blocking=False)
         time.sleep(0.1)
 
-        session = _make_session(in_process_broker)
         mock_launcher = MagicMock()
-        mock_launcher.start_all.return_value = ["audio_1"]
-        session._launcher = mock_launcher
-        session.start(sdr, [{"channel_id": 1, "type": "audio"}])
+        mock_launcher.start_all.return_value = {"audio_1"}
 
-        # Step 1: module_ready_to_start
-        session.on_module_ready_to_start("audio_1", priority=1)
-        ok_start = _wait(module_start_received, 1)
-        assert ok_start, "module_start non ricevuto"
+        with patch("channel_manager.main.Launcher", return_value=mock_launcher):
+            cm.on_oaa_control_channel_open_channels(
+                "oaa_control_channel.open_channels",
+                {"sdr_bytes_hex": sdr, "channels": [{"channel_id": 1, "type": "audio"}]}
+            )
 
-        # Step 2: module_ready
-        session.on_module_ready("audio_1")
-        session.wait_all_ready(sdr)
-        ok_ready = _wait(channels_ready_received, 1)
-        assert ok_ready, "channels_ready non ricevuto"
+            # Aspetta che parta e crei la sessione
+            time.sleep(0.1)
+            session = cm._session
+            assert session is not None
 
-        # Step 3: shutdown
-        session.shutdown()
-        ok_stop = _wait(module_stop_received, 1)
-        spy.stop()
+            # Step 1: module_ready_to_start
+            session.on_module_ready_to_start("audio_1", priority=1)
+            ok_start = _wait(module_start_received, 1)
+            assert ok_start, "module_start non ricevuto"
 
-        assert ok_stop, "module_stop non ricevuto"
+            # Step 2: module_ready
+            session.on_module_ready("audio_1")
+            ok_ready = _wait(channels_ready_received, 1)
+            assert ok_ready, "channels_ready non ricevuto"
+
+            # Step 3: shutdown
+            cm.on_aa_session_shutdown("aa.session.shutdown", {})
+            ok_stop = _wait(module_stop_received, 1)
+            spy.stop()
+
+            assert ok_stop, "module_stop non ricevuto"
 
     @pytest.mark.integration
     def test_crash_check_false_when_not_active(self, in_process_broker):

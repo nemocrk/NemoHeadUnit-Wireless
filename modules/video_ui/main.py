@@ -814,6 +814,13 @@ def on_system_start(topic: str, payload: dict) -> None:
         winid = int(_window.video.winId())
         bus.publish("video.ui.winid", {"winid": winid})
         log.info("video.ui.winid published: %d", winid)
+
+    bus.subscribe("video.frame",                  on_video_frame)
+    bus.subscribe("video.state",                  on_video_state)
+    bus.subscribe("aa.session.active",            on_aa_session_active)
+    bus.subscribe("aa.session.shutdown",          on_aa_session_shutdown)
+    bus.subscribe("bluetooth_manager.pairing.completed",  on_bluetooth_pairing_completed)
+
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
@@ -866,6 +873,7 @@ def on_bluetooth_pairing_completed(topic: str, payload: dict) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+import base64  # noqa: E402
 import time  # noqa: E402
 
 
@@ -875,11 +883,6 @@ def run() -> None:
     bus.subscribe("system.readytostart",          on_system_readytostart)
     bus.subscribe("system.start",                 on_system_start)
     bus.subscribe("system.stop",                  on_system_stop)
-    bus.subscribe("video.frame",                  on_video_frame)
-    bus.subscribe("video.state",                  on_video_state)
-    bus.subscribe("aa.session.active",            on_aa_session_active)
-    bus.subscribe("aa.session.shutdown",          on_aa_session_shutdown)
-    bus.subscribe("bluetooth_manager.pairing.completed",  on_bluetooth_pairing_completed)
 
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)

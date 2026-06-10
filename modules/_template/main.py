@@ -137,6 +137,16 @@ def _on_config_loaded(config: dict) -> None:
     _config = merged
     log.info(f"Config loaded: {_config}")
 
+    # STEP 7: add your other topic subscriptions here
+    # bus.subscribe("other.topic", on_some_event)
+
+    # Signal that this module is fully initialised.
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info(f"system.ready published (priority={PRIORITY})")
+
 
 def _on_config_changed(key: str, value) -> None:
     if key not in _SCHEMA:
@@ -163,8 +173,6 @@ def on_system_start(topic: str, payload: dict) -> None:
         return
     log.info(f"system.start priority={PRIORITY} received — initialising...")
     cfg.get(schema=_SCHEMA)
-    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
-    log.info(f"system.ready published (priority={PRIORITY})")
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
@@ -181,12 +189,12 @@ def run() -> None:
     cfg.on_config_changed = _on_config_changed
     cfg.register()
 
+    # STEP 6: add your system topic subscriptions here
+    # bus.subscribe("system.topic", on_some_event)
+
     bus.subscribe("system.readytostart", on_system_readytostart)
     bus.subscribe("system.start",        on_system_start)
     bus.subscribe("system.stop",         on_system_stop)
-
-    # STEP 6: add your topic subscriptions here
-    # bus.subscribe("some.topic", on_some_event)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)

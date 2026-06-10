@@ -148,6 +148,15 @@ def _on_config_loaded(config: dict) -> None:
         )
     else:
         log.warning("config.response returned empty config — using SEMANTIC_DEFAULTS")
+
+    bus.subscribe("tcp.session.connected",              on_tcp_session_connected)
+    bus.subscribe("tcp.session.closed",                 on_tcp_session_closed)
+    bus.subscribe("aa.frame.ch0",                       on_frame_ch0)
+    bus.subscribe("tcp.server.tls_handshake",           on_tls_handshake)
+    bus.subscribe("tcp.server.tls_handshake_completed", on_tls_handshake_completed)
+    bus.subscribe("aa.session.restarting",              on_aa_session_restarting)
+    bus.subscribe("channel_manager.channels_ready",     on_channel_ready)
+
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info("system.ready published — oaa_control_channel online")
 
@@ -298,13 +307,6 @@ def run() -> None:
     bus.subscribe("system.readytostart",                on_system_readytostart)
     bus.subscribe("system.start",                       on_system_start)
     bus.subscribe("system.stop",                        on_system_stop)
-    bus.subscribe("tcp.session.connected",              on_tcp_session_connected)
-    bus.subscribe("tcp.session.closed",                 on_tcp_session_closed)
-    bus.subscribe("aa.frame.ch0",                       on_frame_ch0)
-    bus.subscribe("tcp.server.tls_handshake",           on_tls_handshake)
-    bus.subscribe("tcp.server.tls_handshake_completed", on_tls_handshake_completed)
-    bus.subscribe("aa.session.restarting",              on_aa_session_restarting)
-    bus.subscribe("channel_manager.channels_ready",     on_channel_ready)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)

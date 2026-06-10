@@ -41,7 +41,7 @@ from shared.config_schema import field_bool, field_float, field_int, field_strin
 from shared.logger import get_logger           # noqa: E402
 
 MODULE_NAME = "zmq_trace"
-PRIORITY = 0
+PRIORITY = 1
 TRACE_ADDR = os.getenv("BUS_TRACE_ADDR", "ipc:///tmp/nemobus_v2.trace")
 
 bus = BusClient(module_name=MODULE_NAME)
@@ -50,14 +50,14 @@ cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
 
 _SCHEMA = {
     "enabled": field_bool(default=True),
-    "console_enabled": field_bool(default=True),
+    "console_enabled": field_bool(default=False),
     "jsonl_enabled": field_bool(default=True),
     "jsonl_path": field_string(default="/tmp/nemobus_trace.jsonl"),
     "report_interval_sec": field_float(default=1.0, min=0.1, max=60.0),
     "top_n": field_int(default=12, min=3, max=100),
     "max_samples_per_key": field_int(default=2000, min=100, max=10000),
     "publish_summary_on_bus": field_bool(default=False),
-    "blacklist_prefixes": field_string(default=""),  # comma-separated, e.g. "log.,debug."
+    "blacklist_prefixes": field_string(default="."),  # comma-separated, e.g. "log.,debug."
 }
 _config = {k: v.default for k, v in _SCHEMA.items()}
 
@@ -339,6 +339,13 @@ def _on_config_loaded(config: dict) -> None:
     _config = merged
     log.info(f"Config loaded: {_config}")
 
+    metrics = Metrics()
+    threading.Thread(target=collector_loop, args=(metrics,), daemon=True, name="trace-collector").start()
+    threading.Thread(target=reporter_loop, args=(metrics,), daemon=True, name="trace-reporter").start()
+
+    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
+    log.info(f"system.ready published (priority={PRIORITY})")
+
 
 def _on_config_changed(key: str, value) -> None:
     if key not in _SCHEMA:
@@ -365,8 +372,6 @@ def on_system_start(topic: str, payload: dict) -> None:
         return
     log.info(f"system.start priority={PRIORITY} received — initialising...")
     cfg.get(schema=_SCHEMA)
-    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
-    log.info(f"system.ready published (priority={PRIORITY})")
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
@@ -383,10 +388,6 @@ def run() -> None:
     bus.subscribe("system.readytostart", on_system_readytostart)
     bus.subscribe("system.start",        on_system_start)
     bus.subscribe("system.stop",         on_system_stop)
-
-    metrics = Metrics()
-    threading.Thread(target=collector_loop, args=(metrics,), daemon=True, name="trace-collector").start()
-    threading.Thread(target=reporter_loop, args=(metrics,), daemon=True, name="trace-reporter").start()
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)

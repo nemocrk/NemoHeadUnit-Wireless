@@ -61,6 +61,12 @@ if str(_REPO_ROOT) not in sys.path:
 import importlib
 fmu = importlib.import_module("modules.floating_menu_ui.main")
 
+sys.modules.pop("shared.bus_client", None)
+sys.modules.pop("shared.config_client", None)
+sys.modules.pop("shared.logger", None)
+sys.modules.pop("shared.config_schema", None)
+sys.modules.pop("shared", None)
+
 
 # ---------------------------------------------------------------------------
 # Fixture: reset module state before every test

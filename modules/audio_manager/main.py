@@ -421,6 +421,19 @@ def _on_config_loaded(config: dict) -> None:
     if _set_global_volume(vol):
         bus.publish("audio.volume.changed", {"volume": vol})
 
+    # Start background threads.
+    _start_poll_thread()
+    _start_udev_thread()
+
+    bus.subscribe("audio.volume.set",            on_audio_volume_set)
+    bus.subscribe("audio.channel_volume.set",    on_audio_channel_volume_set)
+
+    bus.publish("system.ready", {
+        "name":     MODULE_NAME,
+        "priority": PRIORITY,
+    })
+    log.info("system.ready published (priority=%d)", PRIORITY)
+
 
 def _on_config_changed(key: str, value: Any) -> None:
     if key not in _schema:
@@ -496,15 +509,13 @@ def on_system_start(topic: str, payload: dict) -> None:
     cfg.on_config_loaded  = _on_config_loaded
     cfg.on_config_changed = _on_config_changed
     cfg.get(schema=_schema)
-    _start_poll_thread()
-    _start_udev_thread()
-    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
-    log.info("system.ready published (priority=%d)", PRIORITY)
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
     log.info("system.stop — shutting down audio_manager")
     _poll_stop.set()
+    if _poll_thread and _poll_thread.is_alive():
+        _poll_thread.join(timeout=1.0)
     bus.stop()
 
 
@@ -517,8 +528,6 @@ def run() -> None:
     bus.subscribe("system.readytostart",      on_system_readytostart)
     bus.subscribe("system.start",             on_system_start)
     bus.subscribe("system.stop",              on_system_stop)
-    bus.subscribe("audio.volume.set",         on_audio_volume_set)
-    bus.subscribe("audio.channel_volume.set", on_audio_channel_volume_set)
     log.info("audio_manager started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)

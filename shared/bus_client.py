@@ -147,13 +147,21 @@ class BusClient:
         size = self._payload_size(topic_b, payload_b)
 
         if trace_enabled:
-            self._tracer.emit(
-                "publish_attempt",
-                topic=topic,
-                seq=seq,
-                bytes=size,
-                sndhwm=self._pub.getsockopt(zmq.SNDHWM),
-            )
+            get_sock_opt_ok = False
+            try:
+                self._pub.getsockopt(zmq.SNDHWM)
+                get_sock_opt_ok = True
+            except Exception:
+                # Avoid tracing errors interfering with normal message processing.
+                pass
+            if get_sock_opt_ok:
+                self._tracer.emit(
+                    "publish_attempt",
+                    topic=topic,
+                    seq=seq,
+                    bytes=size,
+                    sndhwm=self._pub.getsockopt(zmq.SNDHWM),
+                )
 
         send_start_ns = time.monotonic_ns()
         try:
@@ -246,15 +254,15 @@ class BusClient:
             self._drop_by_topic.items(), key=lambda x: x[1], reverse=True
         )[:3]
         top_str = ", ".join(f"{t}:{n}" for t, n in top_drops) if top_drops else "none"
-        self.log.debug(
-            "BUS STATS | recv=%d  pub_ok=%d  pub_drop=%d (%.1f%%)  "
-            "top_drop_topics=[%s]",
-            self._stat_recv,
-            self._stat_pub_ok,
-            self._stat_pub_drop,
-            drop_pct,
-            top_str,
-        )
+        # self.log.debug(
+        #     "BUS STATS | recv=%d  pub_ok=%d  pub_drop=%d (%.1f%%)  "
+        #     "top_drop_topics=[%s]",
+        #     self._stat_recv,
+        #     self._stat_pub_ok,
+        #     self._stat_pub_drop,
+        #     drop_pct,
+        #     top_str,
+        # )
         self._tracer.emit(
             "bus_stats",
             recv=self._stat_recv,

@@ -407,6 +407,17 @@ def on_system_start(topic: str, payload: dict) -> None:
     log.info(f"system.start priority={PRIORITY} — bluetooth_ui ready")
     _invoke("set_status", "Sistema pronto. Avvia una ricerca Bluetooth.")
 
+    bus.subscribe("bluetooth_manager.device.found",        on_device_found)
+    bus.subscribe("bluetooth_manager.discovery.completed", on_discovery_completed)
+    bus.subscribe("bluetooth_manager.pairing.pin",         on_pairing_pin)
+    bus.subscribe("bluetooth_manager.pairing.completed",   on_pairing_completed)
+    bus.subscribe("bluetooth_manager.pairing.failed",      on_pairing_failed)
+    bus.subscribe("bluetooth_manager.paired.devices",      on_paired_devices)
+    bus.subscribe("bluetooth_manager.paired.connected",    on_paired_connected)
+    bus.subscribe("bluetooth_manager.paired.disconnected", on_paired_disconnected)
+    bus.subscribe("bluetooth_manager.paired.removed",      on_paired_removed)
+    bus.subscribe("bluetooth_manager.paired.failed",       on_paired_failed)
+
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
         "priority": PRIORITY,
@@ -502,16 +513,6 @@ def run() -> None:
     bus.subscribe("system.readytostart",           on_system_readytostart)
     bus.subscribe("system.start",                  on_system_start)
     bus.subscribe("system.stop",                   on_system_stop)
-    bus.subscribe("bluetooth_manager.device.found",        on_device_found)
-    bus.subscribe("bluetooth_manager.discovery.completed", on_discovery_completed)
-    bus.subscribe("bluetooth_manager.pairing.pin",         on_pairing_pin)
-    bus.subscribe("bluetooth_manager.pairing.completed",   on_pairing_completed)
-    bus.subscribe("bluetooth_manager.pairing.failed",      on_pairing_failed)
-    bus.subscribe("bluetooth_manager.paired.devices",      on_paired_devices)
-    bus.subscribe("bluetooth_manager.paired.connected",    on_paired_connected)
-    bus.subscribe("bluetooth_manager.paired.disconnected", on_paired_disconnected)
-    bus.subscribe("bluetooth_manager.paired.removed",      on_paired_removed)
-    bus.subscribe("bluetooth_manager.paired.failed",       on_paired_failed)
 
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)

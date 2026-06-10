@@ -148,6 +148,14 @@ def on_system_start(topic: str, payload: dict) -> None:
     if payload.get("priority") != PRIORITY:
         return
     log.info(f"system.start priority={PRIORITY} — tcp_server ready")
+
+    bus.subscribe("rfcomm.handshake.completed", on_handshake_completed)
+    bus.subscribe("aa.frame.send",              on_frame_send)
+    bus.subscribe("aa.handshake.start_tls",     on_handshake_start_tls)
+    bus.subscribe("aa.handshake.feed_input",    on_handshake_feed_input)
+    bus.subscribe("aa.session.restart",         on_aa_session_restart)
+    bus.subscribe("aa.frame.ch0",               on_ch0_frame)
+
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info("system.ready published — tcp_server online")
 
@@ -428,6 +436,9 @@ def _on_raw_frame(channel_id: int, flags: int, payload: bytes, total_size: int) 
     # Save original encrypted flag — echoed to subscribers
     encrypted = bool(flags & _FLAG_ENCRYPTED)
 
+    # Save input size for logging, as assembled may differ due to decryption (e.g. padding)
+    input_size = len(assembled)
+
     # Decrypt if needed
     if encrypted:
         try:
@@ -444,7 +455,10 @@ def _on_raw_frame(channel_id: int, flags: int, payload: bytes, total_size: int) 
                     channel_id, cipher_len, len(assembled),
                 )
         except Exception as exc:
-            log.error("_on_raw_frame: decrypt failed ch=%d — %s", channel_id, exc)
+            if _JSONL_LOG:
+                with open(_JSONL_LOG, "a") as f:
+                    f.write(f"{{'error': 'decrypt failed', 'channel_id': {channel_id}, 'exc': '{exc}', 'total_size': {total_size}, 'input_size': {input_size}, 'assembled_len': {len(assembled)}}}\n")
+            log.error(f"_on_raw_frame: decrypt failed ch={channel_id} — {exc}, total_size={total_size}, input_size={input_size}, assembled_len={len(assembled)}")
             return
 
     # Extract message_id from the assembled payload (always first 2 bytes)
@@ -480,7 +494,7 @@ def _on_raw_frame(channel_id: int, flags: int, payload: bytes, total_size: int) 
     # append to jsonl log for offline analysis (e.g. frame size vs message_id patterns)
     if _JSONL_LOG:
         with open(_JSONL_LOG, "a") as f:
-            f.write(f"{frame_data_to_dict({**frame_data, 'type': 'Phone->HU'})}\n")
+            f.write(f"{frame_data_to_dict({**frame_data, 'type': 'Phone->HU', 'input_size': input_size})}\n")
     log.debug(
         "_on_raw_frame: ch=%d msg=0x%04x enc=%s body_len=%d",
         channel_id, message_id, encrypted, len(body),
@@ -504,12 +518,6 @@ def run() -> None:
     bus.subscribe("system.readytostart",        on_system_readytostart)
     bus.subscribe("system.start",               on_system_start)
     bus.subscribe("system.stop",                on_system_stop)
-    bus.subscribe("rfcomm.handshake.completed", on_handshake_completed)
-    bus.subscribe("aa.frame.send",              on_frame_send)
-    bus.subscribe("aa.handshake.start_tls",     on_handshake_start_tls)
-    bus.subscribe("aa.handshake.feed_input",    on_handshake_feed_input)
-    bus.subscribe("aa.session.restart",         on_aa_session_restart)
-    bus.subscribe("aa.frame.ch0",               on_ch0_frame)
 
     log.info("Module started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
