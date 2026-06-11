@@ -1,17 +1,3 @@
-
-import sys
-from pathlib import Path
-
-
-_HERE         = Path(__file__).parent
-_MODULES      = _HERE.parent
-_V2           = _MODULES.parent
-_PROTOS       = _V2 / "protos"
-
-for _p in (_V2, _MODULES, _PROTOS):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
 from oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessage
 from oaa.bluetooth.BluetoothChannelMessageIdsEnum_pb2 import BluetoothChannelMessage
 from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage

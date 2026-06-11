@@ -55,8 +55,9 @@ _HERE         = Path(__file__).parent   # modules/channel_modules/wifi/
 _CHANNEL_MODS = _HERE.parent            # modules/channel_modules/
 _MODULES      = _CHANNEL_MODS.parent    # modules/
 _REPO_ROOT    = _MODULES.parent         # root
+_PROTO_ROOT   = _REPO_ROOT / "protos"  # root/protos
 
-for _p in (_REPO_ROOT, _MODULES, _CHANNEL_MODS, _REPO_ROOT / "protos"):
+for _p in (_REPO_ROOT, _MODULES, _CHANNEL_MODS, _PROTO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 

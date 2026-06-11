@@ -21,8 +21,9 @@ from pathlib import Path
 # Add paths
 _REPO_ROOT = Path(__file__).parent.parent
 _MODULES = _REPO_ROOT / "modules"
+_PROTO_ROOT   = _REPO_ROOT / "protos"  # root/protos
 
-for p in (_REPO_ROOT, _MODULES):
+for p in (_REPO_ROOT, _PROTO_ROOT, _MODULES):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 

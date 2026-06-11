@@ -109,9 +109,10 @@ from pathlib import Path
 
 _HERE    = Path(__file__).parent
 _MODULES = _HERE.parent
-_V2      = _MODULES.parent
+_REPO_ROOT    = _MODULES.parent         # root
+_PROTO_ROOT   = _REPO_ROOT / "protos"  # root/protos
 
-for _p in (_V2, _MODULES):
+for _p in (_REPO_ROOT, _PROTO_ROOT, _MODULES):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 

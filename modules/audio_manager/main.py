@@ -62,8 +62,9 @@ from typing import Any
 _HERE      = Path(__file__).parent   # modules/audio_manager/
 _MODULES   = _HERE.parent            # modules/
 _REPO_ROOT = _MODULES.parent         # root
+_PROTO_ROOT = _REPO_ROOT / "protos"  # root/protos
 
-for _p in (_REPO_ROOT, _MODULES):
+for _p in (_REPO_ROOT, _MODULES, _PROTO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 

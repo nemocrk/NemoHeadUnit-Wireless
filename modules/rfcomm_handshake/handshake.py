@@ -20,13 +20,6 @@ import socket
 from pathlib import Path
 from typing import Callable, Optional
 
-_REPO_ROOT  = Path(__file__).parent.parent.parent.parent
-_PROTO_ROOT = _REPO_ROOT / "protos"
-
-for _p in (_REPO_ROOT, _PROTO_ROOT):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
 from rfcomm_handshake.packet import (
     Packet,
     MSG_WIFI_START_REQUEST,

@@ -8,17 +8,12 @@ through NewConnection(), avoiding PyBluez and AF_BLUETOOTH client sockets.
 
 import os
 import socket
-import sys
 import threading
-from pathlib import Path
 from typing import Callable, Optional
 
 import dbus
 import dbus.service
 
-_V2 = Path(__file__).parent.parent.parent
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
 
 from shared.logger import get_logger  # noqa: E402
 

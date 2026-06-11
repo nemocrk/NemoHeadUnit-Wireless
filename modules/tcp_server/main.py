@@ -82,10 +82,13 @@ from typing import Optional
 
 _HERE    = Path(__file__).parent
 _MODULES = _HERE.parent
-_V2      = _MODULES.parent
+_REPO_ROOT    = _MODULES.parent         # root
+_PROTO_ROOT   = _REPO_ROOT / "protos"  # root/protos
 
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+if str(_PROTO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROTO_ROOT))
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
 

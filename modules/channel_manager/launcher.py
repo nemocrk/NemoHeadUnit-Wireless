@@ -26,11 +26,14 @@ from pathlib import Path
 _HERE      = Path(__file__).parent   # modules/channel_manager/
 _MODULES   = _HERE.parent            # modules/
 _REPO_ROOT = _MODULES.parent         # root
+_PROTO_ROOT = _REPO_ROOT / "protos"  # root/protos
 
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 if str(_MODULES) not in sys.path:
     sys.path.insert(0, str(_MODULES))
+if str(_PROTO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROTO_ROOT))
 
 from shared.logger import get_logger    # noqa: E402
 

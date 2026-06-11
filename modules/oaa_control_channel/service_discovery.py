@@ -54,16 +54,8 @@ channels_from_sdr_bytes(sdr_bytes)
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 
-_REPO_ROOT  = Path(__file__).parent.parent.parent
-_PROTO_ROOT = _REPO_ROOT / "protos"
-
-for _p in (_REPO_ROOT, _PROTO_ROOT):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from shared.logger import get_logger                                                    # noqa: E402
 from shared.proto_utils import encode_proto, proto_to_dict, schema_from_proto_message, dict_to_proto  # noqa: E402

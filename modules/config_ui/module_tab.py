@@ -18,18 +18,6 @@ Depends on:
 
 from __future__ import annotations
 
-import copy
-import sys
-from pathlib import Path
-
-_HERE    = Path(__file__).parent
-_MODULES = _HERE.parent
-_V2      = _MODULES.parent
-
-for _p in (str(_V2), str(_MODULES)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QFormLayout,

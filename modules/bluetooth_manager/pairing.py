@@ -36,10 +36,6 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-_V2 = Path(__file__).parent.parent.parent
-if str(_V2) not in sys.path:
-    sys.path.insert(0, str(_V2))
-
 from shared.logger import get_logger  # noqa: E402
 
 log = get_logger("bluetooth_manager.pairing")

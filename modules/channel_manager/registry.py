@@ -43,16 +43,6 @@ Public API
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-_REPO_ROOT  = Path(__file__).parent.parent.parent
-_PROTO_ROOT = _REPO_ROOT / "protos"
-
-for _p in (_REPO_ROOT, _PROTO_ROOT):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
-
 # ---------------------------------------------------------------------------
 # Sentinel exception — "known but not yet implemented"
 # ---------------------------------------------------------------------------

@@ -541,12 +541,6 @@ def channels_from_sdr_bytes(sdr_bytes_hex: str) -> list[dict]:
     """
     # Lazy imports: proto classes only available when protos are compiled.
     try:
-        _repo_root = Path(__file__).parent.parent
-        _proto_root = _repo_root / "protos"
-        for _p in (_repo_root, _proto_root):
-            if str(_p) not in sys.path:
-                sys.path.insert(0, str(_p))
-
         from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import (  # noqa: PLC0415
             ServiceDiscoveryResponse,
         )

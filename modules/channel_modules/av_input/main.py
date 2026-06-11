@@ -48,10 +48,10 @@ from typing import Any
 _HERE         = Path(__file__).parent
 _CHANNEL_MODS = _HERE.parent
 _MODULES      = _CHANNEL_MODS.parent
-_V2           = _MODULES.parent
-_PROTOS       = _V2 / "protos"
+_REPO_ROOT    = _MODULES.parent         # root
+_PROTO_ROOT   = _REPO_ROOT / "protos"  # root/protos
 
-for _p in (_V2, _MODULES, _CHANNEL_MODS, _PROTOS):
+for _p in (_REPO_ROOT, _MODULES, _CHANNEL_MODS, _PROTO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
