@@ -250,21 +250,27 @@ def _run_qt() -> None:
     FONT_ICON.setPixelSize(16)
     FONT_ICON.setWeight(QFont.Weight.Normal)
 
-    ICON_HOME     = "⌂"
-    ICON_PREV     = "◄◄"
-    ICON_PLAY     = "►"
-    ICON_PAUSE    = "▌▌"
-    ICON_NEXT     = "►►"
-    ICON_SETTINGS = "⚙"
+    # Navbar icon set per UI_DESIGN_SYSTEM.md §Iconography
+    # Lucide Icons thin stroke (stroke-width: 1.5).
+    # Rendered via DM Sans glyphs — SVG rendering can be added via QtSvg.
+    # Using Unicode Private Use / closest readable approximation until
+    # SVG resources are bundled; names match the Lucide navbar icon table.
+    ICON_HOME     = "○"  # Lucide: circle (filled via CSS; Home button)
+    ICON_PREV     = "⏮"  # Lucide: skip-back
+    ICON_PLAY     = "▶"  # Lucide: play
+    ICON_PAUSE    = "⏸"  # Lucide: pause
+    ICON_NEXT     = "⏭"  # Lucide: skip-forward
+    ICON_SETTINGS = "⚙"  # Lucide: settings (gear)
 
     # ------------------------------------------------------------------
     class NavbarWindow(QWidget):
         def __init__(self):
             super().__init__()
+            # Z-order managed exclusively by ui_shell via ui.widget.register
+            # (z_order=2). Never set WindowStaysOnTopHint directly.
             self.setWindowFlags(
                 Qt.WindowType.FramelessWindowHint |
-                Qt.WindowType.Tool |
-                Qt.WindowType.WindowStaysOnTopHint
+                Qt.WindowType.Tool
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self.setFont(FONT_BODY)
@@ -319,8 +325,9 @@ def _run_qt() -> None:
 
         def _layout_buttons(self) -> dict[str, tuple]:
             w, h  = self._bar_w, self._bar_h
-            bsize = min(h - 8, 44)
-            pad   = 16
+            # Touch target: hard floor of 44px per UI_DESIGN_SYSTEM.md §Navbar
+            bsize = max(44, min(h - 8, 44))
+            pad   = 24  # Navbar padding: 0 24px (UI_DESIGN_SYSTEM.md)
             gap   = 8
             yo    = (h - bsize) // 2
 
@@ -508,13 +515,6 @@ def run() -> None:
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)
     on_system_readytostart()
-    time.sleep(0.1)
-    on_system_start(topic="",payload={"priority":PRIORITY})
-    time.sleep(0.1)
-    on_ui_shell_ready(topic="", payload={})
-    time.sleep(0.1)
-    on_widget_geometry(topic="",payload={"name":MODULE_NAME, "x":100, "y":250, "w":320, "h":90})
-    time.sleep(0.1)
     try:
         if bus_thread is not None:
             bus_thread.join()

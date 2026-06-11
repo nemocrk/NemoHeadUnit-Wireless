@@ -1,15 +1,20 @@
 """
 NemoHeadUnit-Wireless v2 — bluetooth_ui module
 
-Standalone PyQt6 window to trigger and monitor Bluetooth pairing.
-Useful for validating the v2 IPC infrastructure end-to-end.
+On-request PyQt6 panel for Bluetooth pairing and device management.
+Registered as an on_request widget via the ui_shell compositor.
 
 Module contract:
   Name        : bluetooth_ui
-  Priority    : 2  (UI level)
+  Priority    : 4  (on_request widget — ui_shell guaranteed ready)
   Subscribes  : system.readytostart
                 system.start
                 system.stop
+                ui.shell.ready              → {} (triggers registration)
+                ui.widget.geometry          → {name, x, y, w, h, dpi_factor}
+                ui.module.open              → {name}  (show panel)
+                ui.module.close             → {name}  (hide panel)
+                input.event.bluetooth_ui    → {type, x, y, ...}
                 bluetooth_manager.device.found        {address, name, rssi}
                 bluetooth_manager.discovery.completed {devices: [...]}
                 bluetooth_manager.pairing.pin         {device_address, pin}
@@ -22,6 +27,8 @@ Module contract:
                 bluetooth_manager.paired.failed       {device_address, error}
   Publishes   : system.module_ready            {name, priority}
                 system.ready                   {name, priority}
+                ui.widget.register             {name, z_order, dock, on_request, menu_order, icon}
+                ui.widget.unregister           {name}
                 bluetooth_manager.discover            {duration_sec: int}
                 bluetooth_manager.pair                {device_address: str}
                 bluetooth_manager.confirm_pairing     {device_address: str, pin: str}
@@ -30,6 +37,13 @@ Module contract:
                 bluetooth_manager.paired.disconnect   {device_address: str}
                 bluetooth_manager.paired.remove       {device_address: str}
                 bluetooth_manager.try_autoconnect     {}
+
+UI Architecture compliance:
+  - Frameless, transparent, Tool window (never touches z-order directly)
+  - Registered as on_request=True; floating_menu_ui discovers it and adds arc icon
+  - All geometry driven by ui.widget.geometry from ui_shell
+  - Input received via input.event.bluetooth_ui (routed by ui_shell/input_trap)
+  - Design tokens: DM Sans typography, --color-surface palette
 """
 
 import sys
@@ -62,10 +76,24 @@ from shared.logger import get_logger    # noqa: E402
 # ---------------------------------------------------------------------------
 
 MODULE_NAME = "bluetooth_ui"
-PRIORITY    = 2  # UI level
+PRIORITY    = 4  # on_request widget (ui_shell at priority 2 is guaranteed ready)
 
 bus = BusClient(module_name=MODULE_NAME)
 log = get_logger(MODULE_NAME, bus=bus)
+
+# ---------------------------------------------------------------------------
+# Design system tokens (UI_DESIGN_SYSTEM.md)
+# ---------------------------------------------------------------------------
+# Colors applied in Qt stylesheet below
+_COLOR_BG        = "#141414"   # --color-bg
+_COLOR_SURFACE   = "#1c1c1c"   # --color-surface
+_COLOR_SURFACE_2 = "#242424"   # --color-surface-2
+_COLOR_BORDER    = "rgba(255,255,255,0.06)"  # --color-border
+_COLOR_TEXT      = "#f0ece4"   # --color-text
+_COLOR_TEXT_MUTED = "#8a8680"  # --color-text-muted
+_COLOR_ACCENT    = "#c8b89a"   # --color-accent
+_COLOR_DANGER    = "#c0392b"   # --color-danger
+_COLOR_SUCCESS   = "#4a7c59"   # --color-success
 
 # ---------------------------------------------------------------------------
 # PIN confirmation dialog
@@ -98,19 +126,81 @@ class PinDialog(QDialog):
 class BluetoothPairingWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # ── UI Architecture compliance: frameless transparent tool window ──
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.Tool                 # hidden from taskbar
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("Bluetooth Pairing — NemoHeadUnit v2")
+        self.hide()  # hidden until ui_shell sends ui.module.open
 
         self._devices: dict[str, dict] = {}
         self._pending_pin_address: str = ""
 
         self._build_ui()
+        self._apply_design_tokens()
 
-    def apply_default_geometry(self, app: QApplication) -> None:
-        """Top-left quarter of the primary screen."""
-        screen = app.primaryScreen().availableGeometry()
-        w = screen.width() // 2
-        h = screen.height() // 2
-        self.setGeometry(screen.x(), screen.y(), w, h)
+    # ── UI Shell geometry contract ────────────────────────────────────────
+
+    @pyqtSlot(int, int, int, int)
+    def apply_geometry_slot(self, x: int, y: int, w: int, h: int) -> None:
+        """Called on the Qt thread via invokeMethod from on_widget_geometry."""
+        self.setGeometry(x, y, w, h)
+        self.show()
+        self.raise_()
+
+    @pyqtSlot(bool)
+    def set_visible_slot(self, visible: bool) -> None:
+        """Show or hide panel as requested by floating_menu_ui via ZMQ."""
+        if visible:
+            self.show()
+            self.raise_()
+        else:
+            self.hide()
+
+    # ── Design tokens ─────────────────────────────────────────────────────
+
+    def _apply_design_tokens(self) -> None:
+        """Apply DM Sans typography and design-system color palette."""
+        self.setStyleSheet(f"""
+            QMainWindow, QWidget {{
+                font-family: 'DM Sans', sans-serif;
+                font-size: 14px;
+                background-color: {_COLOR_SURFACE};
+                color: {_COLOR_TEXT};
+            }}
+            QPushButton {{
+                background-color: {_COLOR_SURFACE_2};
+                color: {_COLOR_TEXT};
+                border: 1px solid {_COLOR_BORDER};
+                border-radius: 8px;
+                padding: 6px 12px;
+                font-family: 'DM Sans', sans-serif;
+            }}
+            QPushButton:hover {{
+                background-color: {_COLOR_ACCENT};
+                color: {_COLOR_BG};
+            }}
+            QPushButton:disabled {{
+                color: {_COLOR_TEXT_MUTED};
+            }}
+            QListWidget {{
+                background-color: {_COLOR_BG};
+                border: 1px solid {_COLOR_BORDER};
+                border-radius: 8px;
+                color: {_COLOR_TEXT};
+                font-family: 'DM Sans', sans-serif;
+            }}
+            QLabel {{
+                color: {_COLOR_TEXT_MUTED};
+                font-family: 'DM Sans', sans-serif;
+            }}
+            QStatusBar {{
+                background-color: {_COLOR_SURFACE};
+                color: {_COLOR_TEXT_MUTED};
+            }}
+        """)
 
     def _build_ui(self):
         central = QWidget()
@@ -380,12 +470,30 @@ class BluetoothPairingWindow(QMainWindow):
 
 _window: BluetoothPairingWindow | None = None
 
+# Track whether ui.shell.ready has been received
+_shell_ready: bool = False
+
 
 def _invoke(slot_name: str, *args):
     if _window is None:
         return
     q_args = [Q_ARG(type(a), a) for a in args]
     QMetaObject.invokeMethod(_window, slot_name, Qt.ConnectionType.QueuedConnection, *q_args)
+
+
+def _register() -> None:
+    """Publish ui.widget.register — on_request so floating_menu_ui shows arc icon."""
+    bus.publish("ui.widget.register", {
+        "name":       MODULE_NAME,
+        "z_order":    2,
+        "dock":       "center",
+        "on_request": True,
+        "menu_order": 1,
+        "icon":       "📱",  # Bluetooth phone glyph for arc menu
+        "width":      480,
+        "height":     560,
+    })
+    log.info("ui.widget.register published (on_request)")
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +506,50 @@ def on_system_readytostart() -> None:
         "name":     MODULE_NAME,
         "priority": PRIORITY,
     })
+
+
+def on_ui_shell_ready(topic: str, payload: dict) -> None:
+    global _shell_ready
+    _shell_ready = True
+    log.info("ui.shell.ready received — registering bluetooth_ui")
+    _register()
+
+
+def on_widget_geometry(topic: str, payload: dict) -> None:
+    """Called from bus thread — must NOT touch Qt directly."""
+    if payload.get("name") != MODULE_NAME:
+        return
+    x, y, w, h = int(payload["x"]), int(payload["y"]), int(payload["w"]), int(payload["h"])
+    log.info(f"Geometry received: x={x} y={y} w={w} h={h}")
+    _invoke("apply_geometry_slot", x, y, w, h)
+
+
+def on_module_open(topic: str, payload: dict) -> None:
+    if payload.get("name") != MODULE_NAME:
+        return
+    log.info("ui.module.open received — showing bluetooth_ui")
+    _invoke("set_visible_slot", True)
+    # Auto-populate paired list on open
+    bus.publish("bluetooth_manager.paired.list", {})
+
+
+def on_module_close(topic: str, payload: dict) -> None:
+    if payload.get("name") != MODULE_NAME:
+        return
+    log.info("ui.module.close received — hiding bluetooth_ui")
+    _invoke("set_visible_slot", False)
+
+
+def on_input_event(topic: str, payload: dict) -> None:
+    """Input routed via ui_shell input_trap — reconstruct Qt synthetic events."""
+    if _window is None:
+        return
+    ev_type = payload.get("type")
+    x = int(payload.get("x", 0))
+    y = int(payload.get("y", 0))
+    # For this panel, native Qt interaction via show() is sufficient;
+    # input_trap routing arrives here for logging/future use.
+    log.debug(f"input.event received: type={ev_type} x={x} y={y}")
 
 
 def on_system_start(topic: str, payload: dict) -> None:
@@ -424,8 +576,9 @@ def on_system_start(topic: str, payload: dict) -> None:
     })
     log.info("system.ready published — bluetooth_ui online")
 
-    # Auto-populate paired list on startup
-    bus.publish("bluetooth_manager.paired.list", {})
+    if _shell_ready:
+        log.info("ui.shell.ready already received — registering immediately")
+        _register()
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
@@ -510,9 +663,14 @@ _app: QApplication | None = None
 def run() -> None:
     global _app, _window
 
-    bus.subscribe("system.readytostart",           on_system_readytostart)
-    bus.subscribe("system.start",                  on_system_start)
-    bus.subscribe("system.stop",                   on_system_stop)
+    bus.subscribe("system.readytostart",              on_system_readytostart)
+    bus.subscribe("system.start",                     on_system_start)
+    bus.subscribe("system.stop",                      on_system_stop)
+    bus.subscribe("ui.shell.ready",                   on_ui_shell_ready)
+    bus.subscribe("ui.widget.geometry",               on_widget_geometry)
+    bus.subscribe("ui.module.open",                   on_module_open)
+    bus.subscribe("ui.module.close",                  on_module_close)
+    bus.subscribe(f"input.event.{MODULE_NAME}",       on_input_event)
 
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)
@@ -520,11 +678,14 @@ def run() -> None:
 
     _app = QApplication(sys.argv)
     _window = BluetoothPairingWindow()
-    _window.apply_default_geometry(_app)  # top-left quarter
-    _window.show()
+    # Window is hidden by default; ui_shell will send ui.module.open
+    # when the user taps the arc menu icon.
 
-    log.info("bluetooth_ui window open")
-    sys.exit(_app.exec())
+    log.info("bluetooth_ui window created (hidden, awaiting ui.module.open)")
+    try:
+        bus_thread.join()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

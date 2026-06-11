@@ -53,6 +53,7 @@ def _make_zmq_stub():
     zmq_mod.SUBSCRIBE = 9
     zmq_mod.Again    = type("Again",    (Exception,), {})
     zmq_mod.ZMQError = type("ZMQError", (Exception,), {})
+    zmq_mod.Socket   = type("Socket", (), {})
 
     fake_socket  = MagicMock()
     fake_context = MagicMock()

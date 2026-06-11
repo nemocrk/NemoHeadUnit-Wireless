@@ -417,10 +417,11 @@ def _run_qt() -> None:
     class ArcMenuWindow(QWidget):
         def __init__(self):
             super().__init__()
+            # Z-order managed exclusively by ui_shell via ui.widget.register
+            # z_order=3 field — never set WindowStaysOnTopHint directly.
             self.setWindowFlags(
                 Qt.WindowType.FramelessWindowHint |
-                Qt.WindowType.Tool |
-                Qt.WindowType.WindowStaysOnTopHint
+                Qt.WindowType.Tool
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
             self.hide()

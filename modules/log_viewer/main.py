@@ -4,6 +4,20 @@ NemoHeadUnit-Wireless v2 — log_viewer module
 Standalone PyQt6 window that displays log entries published on the bus
 in real-time by any module.
 
+UI Architecture note (standalone exception):
+  log_viewer is a standalone developer utility, not a dashboard widget.
+  It is explicitly exempt from the ui_shell compositor routing:
+    - Does NOT publish ui.widget.register
+    - Does NOT subscribe to ui.widget.geometry
+    - Operates as an independent decorated window
+  The setGeometry() call in apply_default_geometry() is an accepted
+  exception for this developer-only window.
+
+Design System compliance:
+  - _LEVEL_COLORS use design system token values (UI_DESIGN_SYSTEM.md)
+  - QTextEdit stylesheet uses design system surface/border tokens
+  - Font: DM Mono (--font-mono) for log area, DM Sans for labels
+
 Performance note:
   on_log_entry() accumulates records in a thread-safe deque.
   A QTimer fires every LOG_FLUSH_INTERVAL_MS ms on the Qt main thread
@@ -81,12 +95,14 @@ _config: dict = {k: v.default for k, v in _SCHEMA.items()}
 # Level → colour mapping
 # ---------------------------------------------------------------------------
 
+# Design system tokens (UI_DESIGN_SYSTEM.md) — applied to level indicators
+# Using exact token hex values from the palette table.
 _LEVEL_COLORS: dict[str, str] = {
-    "DEBUG":    "#888888",
-    "INFO":     "#d4d4d4",
-    "WARNING":  "#f0c040",
-    "ERROR":    "#e05050",
-    "CRITICAL": "#ff4444",
+    "DEBUG":    "#4a4844",   # --color-text-faint  (inactive/disabled)
+    "INFO":     "#f0ece4",   # --color-text        (primary warm-white)
+    "WARNING":  "#c8b89a",   # --color-accent      (warm sand)
+    "ERROR":    "#c0392b",   # --color-danger      (errors, critical alerts)
+    "CRITICAL": "#c0392b",   # --color-danger      (same; no brighter override)
 }
 
 _LEVEL_ORDER = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -180,9 +196,13 @@ class LogViewerWindow(QMainWindow):
 
         self._log_area = QTextEdit()
         self._log_area.setReadOnly(True)
-        self._log_area.setFont(QFont("Monospace", 10))
+        # DM Mono (--font-mono) for log readability; 10px matches --text-sm
+        self._log_area.setFont(QFont("DM Mono", 10))
+        # Design system surface/border tokens (UI_DESIGN_SYSTEM.md)
         self._log_area.setStyleSheet(
-            "background-color: #1e1e1e; color: #d4d4d4; border: 1px solid #444;"
+            "background-color: #1c1c1c;"
+            " color: #f0ece4;"
+            " border: 1px solid rgba(255,255,255,0.06);"
         )
         root.addWidget(self._log_area, stretch=1)
 
