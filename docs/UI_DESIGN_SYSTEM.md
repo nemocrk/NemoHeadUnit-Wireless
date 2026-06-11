@@ -183,7 +183,7 @@ COLOR_ICON       = QColor(240, 236, 228)      # --color-text
 COLOR_ACTIVE_ICON= QColor(28,  28,  28)       # --color-bg
 ```
 
-### Floating panel (`bt_ui`, `config_ui`)
+### Floating panel (`bluetooth_ui`, `config_ui`)
 
 ```
 Background:    --color-surface  rgba(28,28,28,0.97)

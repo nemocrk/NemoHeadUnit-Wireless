@@ -291,7 +291,7 @@ Priority 3  floating_menu_ui      → subscribes to ui.widget.register
 
 Priority 4  video_ui              → publishes ui.widget.register
             navbar_ui             → publishes ui.widget.register
-            bt_ui                 → publishes ui.widget.register {on_request: true}
+            bluetooth_ui          → publishes ui.widget.register {on_request: true}
             config_ui             → publishes ui.widget.register {on_request: true}
 ```
 
@@ -324,7 +324,7 @@ Z-order:      3  (above navbar=2, above on_request widgets=2)
 | `modules/floating_menu_ui/` | Arc-shaped on_request module launcher | 3 |
 | `modules/video_ui/` | GStreamer H.264 decode + GL render | 4 |
 | `modules/navbar_ui/` | Navigation bar, always visible | 4 |
-| `modules/bt_ui/` | Bluetooth status panel (on_request) | 4 |
+| `modules/bluetooth_ui/` | Bluetooth status panel (on_request) | 4 |
 | `modules/config_ui/` | Settings panel (on_request) | 4 |
 
 All modules follow the standard boot protocol defined in `modules/_template/main.py`.
