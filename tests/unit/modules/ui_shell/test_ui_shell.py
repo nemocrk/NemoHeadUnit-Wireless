@@ -75,6 +75,8 @@ def reset_state():
     uis._registry.clear()
     uis._screen_w = 1024
     uis._screen_h = 600
+    uis._focused_widget = None
+    uis._pointer_target = None
     uis._config   = {k: v.default for k, v in uis._SCHEMA.items()}
     _bus_mock.reset_mock()
     yield
@@ -351,9 +353,13 @@ class TestOnWidgetUnregister:
 # ---------------------------------------------------------------------------
 
 class TestHitTest:
-    def _add_widget(self, name, x, y, w, h, z=2):
+    def _add_widget(self, name, x, y, w, h, z=2, visible=True):
         c = uis.WidgetConstraints(name=name, z_order=z, dock="bottom")
-        rec = uis.WidgetRecord(constraints=c, geometry=uis.WidgetGeometry(x=x, y=y, w=w, h=h))
+        rec = uis.WidgetRecord(
+            constraints=c,
+            geometry=uis.WidgetGeometry(x=x, y=y, w=w, h=h),
+            visible=visible,
+        )
         uis._registry[name] = rec
 
     def test_hit_inside_widget(self):
@@ -369,6 +375,11 @@ class TestHitTest:
         self._add_widget("overlay", 0, 530, 1024, 80, z=3)
         assert uis._hit_test(100, 550) == "overlay"
 
+    def test_hidden_widget_does_not_win_hit_test(self):
+        self._add_widget("bottom",  0, 540, 1024, 60, z=2)
+        self._add_widget("overlay", 0, 530, 1024, 80, z=3, visible=False)
+        assert uis._hit_test(100, 550) == "bottom"
+
     def test_empty_registry_returns_none(self):
         assert uis._hit_test(0, 0) is None
 
@@ -378,9 +389,13 @@ class TestHitTest:
 # ---------------------------------------------------------------------------
 
 class TestOnInputRaw:
-    def _add_widget(self, name, x, y, w, h):
-        c = uis.WidgetConstraints(name=name, z_order=2, dock="bottom")
-        rec = uis.WidgetRecord(constraints=c, geometry=uis.WidgetGeometry(x=x, y=y, w=w, h=h))
+    def _add_widget(self, name, x, y, w, h, z=2, visible=True):
+        c = uis.WidgetConstraints(name=name, z_order=z, dock="bottom")
+        rec = uis.WidgetRecord(
+            constraints=c,
+            geometry=uis.WidgetGeometry(x=x, y=y, w=w, h=h),
+            visible=visible,
+        )
         uis._registry[name] = rec
 
     def test_routes_to_correct_widget(self):
@@ -407,6 +422,26 @@ class TestOnInputRaw:
         payload = geometry_calls[0].args[1]
         assert payload["x"] == 100
         assert payload["y"] == 10
+
+    def test_hidden_overlay_does_not_steal_input(self):
+        self._add_widget("navbar", 0, 540, 1024, 60, z=2)
+        self._add_widget("menu", 0, 530, 1024, 80, z=3, visible=False)
+        uis.on_input_raw("", {"type": "press", "x_global": 100, "y_global": 550, "timestamp": 1})
+        calls_topics = [c.args[0] for c in _bus_mock.publish.call_args_list]
+        assert "input.event.navbar" in calls_topics
+        assert "input.event.menu" not in calls_topics
+
+    def test_key_routes_to_pressed_widget_focus(self):
+        self._add_widget("config_ui", 100, 100, 400, 300)
+        uis.on_input_raw("", {"type": "press", "x_global": 120, "y_global": 140, "timestamp": 1})
+        _bus_mock.reset_mock()
+        uis.on_input_raw("", {"type": "key_press", "key": 65, "text": "a", "timestamp": 2})
+        geometry_calls = [
+            c for c in _bus_mock.publish.call_args_list
+            if c.args[0] == "input.event.config_ui"
+        ]
+        assert len(geometry_calls) == 1
+        assert geometry_calls[0].args[1]["text"] == "a"
 
 
 # ---------------------------------------------------------------------------

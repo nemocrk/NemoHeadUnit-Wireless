@@ -34,12 +34,14 @@ Path layout:
           └── main.py
 """
 
+import signal
 import sys
 import time
 import threading
+from multiprocessing import shared_memory
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 # ---------------------------------------------------------------------------
 # sys.path bootstrap
@@ -129,6 +131,9 @@ class WidgetGeometry:
 class WidgetRecord:
     constraints: WidgetConstraints
     geometry: WidgetGeometry = field(default_factory=WidgetGeometry)
+    shm_buffer: Optional[Any] = None
+    qimage: Optional["QImage"] = None
+    visible: bool = True
 
 
 # Active widget registry: name → WidgetRecord
@@ -138,6 +143,11 @@ _registry_lock = threading.Lock()
 # Screen dimensions (updated when ui_shell window resizes)
 _screen_w: int = 1024
 _screen_h: int = 600
+
+# Input routing state. Mouse/touch streams keep going to the widget that
+# received the press so drags and releases are not stolen by overlapping panes.
+_focused_widget: Optional[str] = None
+_pointer_target: Optional[str] = None
 
 # ---------------------------------------------------------------------------
 # Layout engine
@@ -331,27 +341,51 @@ def _hit_test(x_global: int, y_global: int) -> Optional[str]:
             reverse=True,
         )
         for name in sorted_names:
+            rec = _registry[name]
+            if not rec.visible:
+                continue
             g = _registry[name].geometry
+            if g.w <= 0 or g.h <= 0:
+                continue
             if g.x <= x_global < g.x + g.w and g.y <= y_global < g.y + g.h:
                 return name
     return None
 
 
 def on_input_raw(topic: str, payload: dict) -> None:
-    x_global = payload.get("x_global", 0)
-    y_global = payload.get("y_global", 0)
-    target = _hit_test(x_global, y_global)
+    global _focused_widget, _pointer_target
+
+    event_type = payload.get("type")
+    x_global = int(payload.get("x_global", 0))
+    y_global = int(payload.get("y_global", 0))
+
+    if event_type in ("key", "key_press", "key_release"):
+        target = _focused_widget
+    elif event_type == "press":
+        target = _hit_test(x_global, y_global)
+        _pointer_target = target
+        _focused_widget = target
+        if target is not None:
+            bus.publish("ui.focus.changed", {"name": target})
+    elif event_type in ("move", "release"):
+        target = _pointer_target or _hit_test(x_global, y_global)
+        if event_type == "release":
+            _pointer_target = None
+    else:
+        target = _hit_test(x_global, y_global)
+
     if target is None:
         return
 
     with _registry_lock:
-        g = _registry[target].geometry if target in _registry else None
+        rec = _registry.get(target)
+        g = rec.geometry if rec is not None and rec.visible else None
     if g is None:
         return
 
     routed = dict(payload)
-    routed["x"] = x_global - g.x
-    routed["y"] = y_global - g.y
+    routed["x"] = max(0, min(x_global - g.x, g.w))
+    routed["y"] = max(0, min(y_global - g.y, g.h))
     bus.publish(f"input.event.{target}", routed)
 
 
@@ -387,7 +421,9 @@ def on_widget_register(topic: str, payload: dict) -> None:
     )
 
     with _registry_lock:
-        _registry[name] = WidgetRecord(constraints=constraints)
+        record = WidgetRecord(constraints=constraints)
+        record.visible = not constraints.on_request
+        _registry[name] = record
 
     log.info(f"Widget registered: '{name}' dock={dock} z={constraints.z_order} on_request={constraints.on_request}")
     new_geometries = _reflow()
@@ -424,11 +460,87 @@ def on_widget_unregister(topic: str, payload: dict) -> None:
         removed = _registry.pop(name, None)
 
     if removed:
+        if removed.shm_buffer is not None:
+            try:
+                removed.shm_buffer.cleanup()
+            except Exception:
+                pass
         log.info(f"Widget unregistered: '{name}'")
         new_geometries = _reflow()
         _publish_geometries(new_geometries)
     else:
         log.warning(f"ui.widget.unregister: unknown widget '{name}' — ignored")
+
+
+def _invoke(obj, slot: str, *args) -> None:
+    """Schedule a slot call on the Qt thread via QTimer.singleShot."""
+    if obj is None:
+        return
+    try:
+        from PyQt6.QtCore import QTimer
+        fn = getattr(obj, slot, None)
+        if fn is not None:
+            QTimer.singleShot(0, lambda: fn(*args))
+    except Exception as exc:
+        log.warning(f"_invoke({slot}) failed: {exc}")
+
+
+def on_widget_frame_ready(topic: str, payload: dict) -> None:
+    name = payload.get("name")
+    w = int(payload.get("w", 0))
+    h = int(payload.get("h", 0))
+    buffer_index = int(payload.get("buffer_index", payload.get("active_slot", 0)))
+    max_width = int(payload.get("max_width", 1024))
+    max_height = int(payload.get("max_height", 600))
+
+    if _window is not None:
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+            QMetaObject.invokeMethod(
+                _window,
+                "update_widget_frame",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(str, name),
+                Q_ARG(int, buffer_index),
+                Q_ARG(int, w),
+                Q_ARG(int, h),
+                Q_ARG(int, max_width),
+                Q_ARG(int, max_height)
+            )
+        except Exception as exc:
+            log.warning(f"on_widget_frame_ready dispatch failed for {name}: {exc}")
+
+
+def on_module_open(topic: str, payload: dict) -> None:
+    name = payload.get("name")
+    if not name:
+        return
+    with _registry_lock:
+        if name in _registry:
+            _registry[name].visible = True
+            log.info(f"Module open: set '{name}' visible=True")
+    if _window is not None:
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_window, "update", Qt.ConnectionType.QueuedConnection)
+        except Exception:
+            pass
+
+
+def on_module_close(topic: str, payload: dict) -> None:
+    name = payload.get("name")
+    if not name:
+        return
+    with _registry_lock:
+        if name in _registry:
+            _registry[name].visible = False
+            log.info(f"Module close: set '{name}' visible=False")
+    if _window is not None:
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_window, "update", Qt.ConnectionType.QueuedConnection)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -448,20 +560,21 @@ def on_screen_resize(new_w: int, new_h: int) -> None:
 # PyQt6 UI — ui_shell window + input_trap
 # ---------------------------------------------------------------------------
 
+_window: Optional["QWidget"] = None
 _qt_app = None
-_qt_thread: Optional[threading.Thread] = None
+_system_start_event = threading.Event()
 
 
 def _run_qt() -> None:
     try:
         from PyQt6.QtWidgets import QApplication, QWidget
-        from PyQt6.QtCore import Qt, QTimer
-        from PyQt6.QtGui import QPainter, QColor
+        from PyQt6.QtCore import Qt, QTimer, QRect, pyqtSlot, QMetaObject, QEvent
+        from PyQt6.QtGui import QPainter, QColor, QImage
     except ImportError:
         log.warning("PyQt6 not available — ui_shell running in headless mode")
         return
 
-    global _qt_app
+    global _qt_app, _window
 
     _qt_app = QApplication.instance() or QApplication(sys.argv)
 
@@ -469,7 +582,8 @@ def _run_qt() -> None:
         def __init__(self):
             super().__init__()
             self.setWindowTitle("NemoHeadUnit")
-            self.setStyleSheet("background: #141414;")
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self.setMouseTracking(True)
             if _config.get("fullscreen", True):
                 self.showFullScreen()
             else:
@@ -478,65 +592,167 @@ def _run_qt() -> None:
                 self.setGeometry(0, 0, w, h)
                 self.show()
 
+            # Prevent any size propagation up to parent layout
+            from PyQt6.QtWidgets import QSizePolicy
+            self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+
+        def sizeHint(self):
+            from PyQt6.QtCore import QSize
+            return QSize(0, 0)
+
+        def minimumSizeHint(self):
+            from PyQt6.QtCore import QSize
+            return QSize(0, 0)
+
+        def event(self, event):
+            if event.type() == QEvent.Type.LayoutRequest:
+                # Swallow bottom-up layout requests to prevent feedback loops
+                return True
+            return super().event(event)
+
+        def updateGeometry(self):
+            # Swallow layout updates on the main window
+            pass
+
         def resizeEvent(self, event):
             super().resizeEvent(event)
             on_screen_resize(self.width(), self.height())
-            if hasattr(self, "_trap") and self._trap is not None:
-                self._trap.setGeometry(self.geometry())
+
+        @pyqtSlot(str, int, int, int, int, int)
+        def update_widget_frame(self, name: str, buffer_index: int, w: int, h: int, max_width: int, max_height: int) -> None:
+            with _registry_lock:
+                record = _registry.get(name)
+                if not record:
+                    return
+
+                if record.shm_buffer is None or record.shm_buffer.max_width != max_width or record.shm_buffer.max_height != max_height:
+                    if record.shm_buffer is not None:
+                        try:
+                            record.shm_buffer.cleanup()
+                        except Exception:
+                            pass
+                    try:
+                        from shared.shm_helper import DoubleSharedBuffer
+                        record.shm_buffer = DoubleSharedBuffer(name, max_width, max_height, create=False)
+                        log.info(f"[COMPOSITOR] Attached to DoubleSharedBuffer for {name} ({max_width}x{max_height})")
+                    except Exception as exc:
+                        log.warning(f"Failed to attach DoubleSharedBuffer for {name}: {exc}")
+                        return
+
+                try:
+                    record.qimage = record.shm_buffer.get_image(buffer_index, w, h)
+                except Exception as exc:
+                    log.warning(f"Failed to get QImage for {name} from DoubleSharedBuffer: {exc}")
+                    return
+
+            # Acknowledge frame consumption to release the backbuffer to the widget
+            bus.publish(f"ui.widget.frame_ack.{name}", {})
+            self.update()
 
         def paintEvent(self, event):
             p = QPainter(self)
             p.fillRect(self.rect(), QColor(0x14, 0x14, 0x14))
 
-    class InputTrap(QWidget):
-        def __init__(self, shell: ShellWindow):
-            super().__init__()
-            self._shell = shell
-            self.setWindowFlags(
-                Qt.WindowType.FramelessWindowHint       |
-                Qt.WindowType.WindowStaysOnTopHint      |
-                Qt.WindowType.Tool
-            )
-            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-            self.setGeometry(shell.geometry())
-            self.show()
+            with _registry_lock:
+                sorted_records = sorted(
+                    _registry.values(),
+                    key=lambda r: (r.constraints.z_order, r.constraints.name)
+                )
+                for rec in sorted_records:
+                    if getattr(rec, "visible", True) and getattr(rec, "qimage", None) is not None:
+                        x, y, w, h = rec.geometry.x, rec.geometry.y, rec.geometry.w, rec.geometry.h
+                        img = rec.qimage
+                        iw, ih = img.width(), img.height()
+                        if iw == w and ih == h:
+                            p.drawImage(x, y, img)
+                        else:
+                            # Scale-to-fit preserving aspect ratio; background fills letterbox bars
+                            scale = min(w / iw, h / ih) if iw > 0 and ih > 0 else 1.0
+                            sw = int(iw * scale)
+                            sh = int(ih * scale)
+                            ox = x + (w - sw) // 2
+                            oy = y + (h - sh) // 2
+                            p.drawImage(QRect(ox, oy, sw, sh), img)
+            p.end()
 
-        def _publish_raw(self, event_type: str, x: int, y: int) -> None:
+        @staticmethod
+        def _qt_int(value) -> int:
+            return value.value if hasattr(value, "value") else int(value)
+
+        def _publish_raw(self, event_type: str, ev) -> None:
             bus.publish("input.raw", {
                 "type":      event_type,
-                "x_global":  x,
-                "y_global":  y,
+                "x_global":  int(ev.position().x()),
+                "y_global":  int(ev.position().y()),
+                "button":    self._qt_int(ev.button()),
+                "buttons":   self._qt_int(ev.buttons()),
+                "modifiers": self._qt_int(ev.modifiers()),
                 "timestamp": int(time.time() * 1000),
             })
 
         def mousePressEvent(self, ev):
-            self._publish_raw("press", int(ev.globalPosition().x()), int(ev.globalPosition().y()))
+            self.setFocus()
+            self._publish_raw("press", ev)
+            ev.accept()
 
         def mouseMoveEvent(self, ev):
-            self._publish_raw("move", int(ev.globalPosition().x()), int(ev.globalPosition().y()))
+            self._publish_raw("move", ev)
+            ev.accept()
 
         def mouseReleaseEvent(self, ev):
-            self._publish_raw("release", int(ev.globalPosition().x()), int(ev.globalPosition().y()))
+            self._publish_raw("release", ev)
+            ev.accept()
 
         def keyPressEvent(self, ev):
             bus.publish("input.raw", {
-                "type":           "key",
+                "type":           "key_press",
                 "key":            ev.key(),
                 "text":           ev.text(),
+                "modifiers":      self._qt_int(ev.modifiers()),
                 "is_auto_repeat": ev.isAutoRepeat(),
                 "x_global":       0,
                 "y_global":       0,
                 "timestamp":      int(time.time() * 1000),
             })
+            ev.accept()
 
-    shell = ShellWindow()
-    trap  = InputTrap(shell)
-    shell._trap = trap
+        def keyReleaseEvent(self, ev):
+            bus.publish("input.raw", {
+                "type":           "key_release",
+                "key":            ev.key(),
+                "text":           ev.text(),
+                "modifiers":      self._qt_int(ev.modifiers()),
+                "is_auto_repeat": ev.isAutoRepeat(),
+                "x_global":       0,
+                "y_global":       0,
+                "timestamp":      int(time.time() * 1000),
+            })
+            ev.accept()
+
+    _window = ShellWindow()
 
     bus.publish("ui.shell.ready", {})
     log.info("ui.shell.ready published — shell window active")
 
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     _qt_app.exec()
+
+    log.info("Qt event loop exited, cleaning up ui_shell resources...")
+    if _window is not None:
+        try:
+            _window.close()
+        except RuntimeError:
+            pass
+        _window = None
+    with _registry_lock:
+        for rec in _registry.values():
+            if rec.shm_buffer is not None:
+                try:
+                    rec.shm_buffer.cleanup()
+                except Exception:
+                    pass
+                rec.shm_buffer = None
+    _qt_app = None
 
 
 # ---------------------------------------------------------------------------
@@ -586,9 +802,7 @@ def on_system_start(topic: str, payload: dict) -> None:
     _screen_w = _config.get("screen_w", 1024)
     _screen_h = _config.get("screen_h", 600)
 
-    global _qt_thread
-    _qt_thread = threading.Thread(target=_run_qt, name="ui_shell-qt", daemon=True)
-    _qt_thread.start()
+    _system_start_event.set()
 
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info(f"system.ready published (priority={PRIORITY})")
@@ -598,7 +812,8 @@ def on_system_stop(topic: str, payload: dict) -> None:
     log.info("system.stop — shutting down ui_shell")
     if _qt_app is not None:
         try:
-            _qt_app.quit()
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_qt_app, "quit", Qt.ConnectionType.QueuedConnection)
         except Exception:
             pass
     bus.stop()
@@ -620,6 +835,9 @@ def run() -> None:
     bus.subscribe("ui.widget.register",   on_widget_register)
     bus.subscribe("ui.widget.update",     on_widget_update)
     bus.subscribe("ui.widget.unregister", on_widget_unregister)
+    bus.subscribe("ui.widget.frame_ready", on_widget_frame_ready)
+    bus.subscribe("ui.module.open",        on_module_open)
+    bus.subscribe("ui.module.close",       on_module_close)
     bus.subscribe("input.raw",            on_input_raw)
 
     log.info("ui_shell started, waiting for messages...")
@@ -627,7 +845,10 @@ def run() -> None:
     time.sleep(0.05)
     on_system_readytostart()
     try:
-        bus_thread.join()
+        _system_start_event.wait()
+        _run_qt()
+        if bus_thread is not None:
+            bus_thread.join()
     except KeyboardInterrupt:
         pass
 
