@@ -52,6 +52,7 @@ class BusClient:
         )
 
         # Publisher socket
+        self._pub_lock = threading.RLock()
         self._pub = self._context.socket(zmq.PUB)
         self._pub.setsockopt(zmq.SNDHWM, BUS_HWM)
         self._pub.setsockopt(zmq.LINGER, 0)
@@ -146,75 +147,91 @@ class BusClient:
 
         size = self._payload_size(topic_b, payload_b)
 
-        if trace_enabled:
-            get_sock_opt_ok = False
+        with self._pub_lock:
+            if trace_enabled:
+                get_sock_opt_ok = False
+                try:
+                    self._pub.getsockopt(zmq.SNDHWM)
+                    get_sock_opt_ok = True
+                except Exception:
+                    # Avoid tracing errors interfering with normal message processing.
+                    pass
+                if get_sock_opt_ok:
+                    self._tracer.emit(
+                        "publish_attempt",
+                        topic=topic,
+                        seq=seq,
+                        bytes=size,
+                        sndhwm=self._pub.getsockopt(zmq.SNDHWM),
+                    )
+
+            send_start_ns = time.monotonic_ns()
             try:
-                self._pub.getsockopt(zmq.SNDHWM)
-                get_sock_opt_ok = True
-            except Exception:
-                # Avoid tracing errors interfering with normal message processing.
-                pass
-            if get_sock_opt_ok:
-                self._tracer.emit(
-                    "publish_attempt",
-                    topic=topic,
-                    seq=seq,
-                    bytes=size,
-                    sndhwm=self._pub.getsockopt(zmq.SNDHWM),
+                self._pub.send_multipart([topic_b, payload_b], flags=zmq.NOBLOCK)
+                send_us = (time.monotonic_ns() - send_start_ns) / 1000.0
+                self._stat_pub_ok += 1
+
+                if trace_enabled:
+                    self._tracer.emit(
+                        "publish_ok",
+                        topic=topic,
+                        seq=seq,
+                        bytes=size,
+                        send_us=send_us,
+                        sndhwm=self._pub.getsockopt(zmq.SNDHWM),
+                    )
+                return True
+
+            except zmq.Again:
+                self._stat_pub_drop += 1
+                self._drop_by_topic[topic] = self._drop_by_topic.get(topic, 0) + 1
+
+                if trace_enabled:
+                    self._tracer.emit(
+                        "publish_drop",
+                        topic=topic,
+                        seq=seq,
+                        bytes=size,
+                        reason="zmq_again",
+                        sndhwm=self._pub.getsockopt(zmq.SNDHWM),
+                        total_drops=self._stat_pub_drop,
+                        topic_drops=self._drop_by_topic[topic],
+                    )
+
+                self.log.warning(
+                    "publish DROPPED (HWM saturated): topic=%s  "
+                    "[total_drops=%d this_topic=%d]",
+                    topic,
+                    self._stat_pub_drop,
+                    self._drop_by_topic[topic],
                 )
+                return False
 
-        send_start_ns = time.monotonic_ns()
-        try:
-            self._pub.send_multipart([topic_b, payload_b], flags=zmq.NOBLOCK)
-            send_us = (time.monotonic_ns() - send_start_ns) / 1000.0
-            self._stat_pub_ok += 1
+            except zmq.ZMQError as e:
+                # If socket is closed or we're not running, fail gracefully without raising.
+                if not self._running or e.errno == zmq.ENOTSOCK:
+                    self.log.debug(f"publish ignored (bus stopped/closed): topic={topic}")
+                    return False
+                if trace_enabled:
+                    self._tracer.emit(
+                        "publish_error",
+                        topic=topic,
+                        seq=seq,
+                        bytes=size,
+                        error=repr(e),
+                    )
+                raise
 
-            if trace_enabled:
-                self._tracer.emit(
-                    "publish_ok",
-                    topic=topic,
-                    seq=seq,
-                    bytes=size,
-                    send_us=send_us,
-                    sndhwm=self._pub.getsockopt(zmq.SNDHWM),
-                )
-            return True
-
-        except zmq.Again:
-            self._stat_pub_drop += 1
-            self._drop_by_topic[topic] = self._drop_by_topic.get(topic, 0) + 1
-
-            if trace_enabled:
-                self._tracer.emit(
-                    "publish_drop",
-                    topic=topic,
-                    seq=seq,
-                    bytes=size,
-                    reason="zmq_again",
-                    sndhwm=self._pub.getsockopt(zmq.SNDHWM),
-                    total_drops=self._stat_pub_drop,
-                    topic_drops=self._drop_by_topic[topic],
-                )
-
-            self.log.warning(
-                "publish DROPPED (HWM saturated): topic=%s  "
-                "[total_drops=%d this_topic=%d]",
-                topic,
-                self._stat_pub_drop,
-                self._drop_by_topic[topic],
-            )
-            return False
-
-        except Exception as e:
-            if trace_enabled:
-                self._tracer.emit(
-                    "publish_error",
-                    topic=topic,
-                    seq=seq,
-                    bytes=size,
-                    error=repr(e),
-                )
-            raise
+            except Exception as e:
+                if trace_enabled:
+                    self._tracer.emit(
+                        "publish_error",
+                        topic=topic,
+                        seq=seq,
+                        bytes=size,
+                        error=repr(e),
+                    )
+                raise
 
     def start(self, blocking: bool = True):
         """Start the receive loop. Set blocking=False to run in a thread."""
