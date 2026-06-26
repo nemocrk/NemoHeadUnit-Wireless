@@ -414,32 +414,44 @@ def _start_process(script: Path, label: str) -> subprocess.Popen:
 
 def _terminate_all(processes: list[tuple[str, subprocess.Popen]]) -> None:
     deadline = time.monotonic() + GRACE_PERIOD
+    
+    # 1. Wait for all processes to exit cleanly, up to GRACE_PERIOD
     for label, proc in processes:
         if proc.poll() is not None:
-            log.info(f"{label} exited on its own (code {proc.returncode})")
             continue
         remaining = max(0.0, deadline - time.monotonic())
         if remaining <= 0:
             break
         try:
-            proc.wait(timeout=min(0.25, remaining))
-            log.info(f"{label} exited on its own (code {proc.returncode})")
+            proc.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
-            continue
+            pass
 
+    # 2. Log status of all processes
+    for label, proc in processes:
+        if proc.poll() is not None:
+            log.info(f"{label} exited on its own (code {proc.returncode})")
+
+    # 3. Terminate any processes that are still running
     for label, proc in reversed(processes):
         if proc.poll() is None:
             log.info(f"Terminating {label} (PID {proc.pid})...")
             proc.terminate()
 
+    # 4. Wait for terminated processes to exit, or kill them
     for label, proc in processes:
-        if proc.returncode is not None:
-            continue
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            log.warning(f"{label} did not exit cleanly, killing...")
-            proc.kill()
+        if proc.poll() is None:
+            try:
+                proc.wait(timeout=5.0)
+                log.info(f"{label} exited after terminate (code {proc.returncode})")
+            except subprocess.TimeoutExpired:
+                log.warning(f"{label} did not exit cleanly, killing...")
+                proc.kill()
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+                log.info(f"{label} killed (code {proc.returncode})")
 
 
 # ---------------------------------------------------------------------------
