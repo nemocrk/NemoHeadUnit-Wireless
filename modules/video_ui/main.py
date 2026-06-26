@@ -102,6 +102,7 @@ Fix notes (2026-05-12 rev5 — decoder probe estesa + artefatti residui):
 from __future__ import annotations
 
 import base64
+import signal
 import sys
 import threading
 from datetime import datetime
@@ -119,7 +120,7 @@ for _p in (_REPO_ROOT, _PROTO_ROOT, _MODULES):
 from PyQt6.QtCore import (                                              # noqa: E402
     Qt, QTimer, QMetaObject, Q_ARG, pyqtSlot, QSize,
 )
-from PyQt6.QtGui import QFont, QImage, QPixmap                         # noqa: E402
+from PyQt6.QtGui import QFont, QImage, QPixmap, QPainter               # noqa: E402
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget                        # noqa: E402
 from PyQt6.QtWidgets import (                                           # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -146,7 +147,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 MODULE_NAME = "video_ui"
-PRIORITY    = 2
+PRIORITY    = 4
 
 bus = BusClient(module_name=MODULE_NAME)
 log = get_logger(MODULE_NAME, bus=bus)
@@ -161,11 +162,12 @@ _STATE_STREAMING    = "STREAMING"
 _STATE_INTERRUPTED  = "INTERRUPTED"
 
 _STATE_LABELS = {
-    _STATE_WAITING_BT:  ("#e05252", "●  In attesa di connessione BT"),
-    _STATE_HANDSHAKE:   ("#e0b84a", "●  Handshake AA in corso"),
-    _STATE_STREAMING:   ("#4caf50", "●  Stream attivo"),
-    _STATE_INTERRUPTED: ("#e05252", "●  Stream interrotto"),
+    _STATE_WAITING_BT:  ("#c0392b", "●  In attesa di connessione BT"),
+    _STATE_HANDSHAKE:   ("#c8b89a", "●  Handshake AA in corso"),
+    _STATE_STREAMING:   ("#4a7c59", "●  Stream attivo"),
+    _STATE_INTERRUPTED: ("#c0392b", "●  Stream interrotto"),
 }
+
 
 # ---------------------------------------------------------------------------
 # GStreamer pipeline builder
@@ -380,6 +382,8 @@ class _NV12GLWidget(QOpenGLWidget):
         self._width      = width
         self._height     = height
         self.update()
+        if _window is not None:
+            _window.render_to_shm()
 
     def initializeGL(self) -> None:
         from OpenGL import GL  # type: ignore
@@ -476,6 +480,8 @@ class _RGBLabelWidget(QLabel):
             Qt.TransformationMode.SmoothTransformation,
         )
         self.setPixmap(pix)
+        if _window is not None:
+            _window.render_to_shm()
 
 # ---------------------------------------------------------------------------
 # Placeholder widget (clock + connection state)
@@ -486,25 +492,26 @@ class _PlaceholderWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setStyleSheet("background: #0d0d0d;")
+        self.setStyleSheet("background: #141414;")
 
         root = QVBoxLayout(self)
         root.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.setSpacing(16)
 
         self._clock_label = QLabel("00:00:00")
-        font = QFont("Monospace", 48, QFont.Weight.Light)
-        font.setStyleHint(QFont.StyleHint.TypeWriter)
+        font = QFont("DM Sans", 48, QFont.Weight.Light)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 4.0)
         self._clock_label.setFont(font)
         self._clock_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._clock_label.setStyleSheet("color: #e8e8e8; letter-spacing: 4px;")
+        self._clock_label.setStyleSheet("color: #c8b89a;")
         root.addWidget(self._clock_label)
 
         self._state_label = QLabel("●  In attesa di connessione BT")
-        self._state_label.setFont(QFont("Sans", 13))
+        self._state_label.setFont(QFont("DM Sans", 13))
         self._state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._state_label.setStyleSheet("color: #e05252;")
+        self._state_label.setStyleSheet("color: #c0392b;")
         root.addWidget(self._state_label)
+
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -513,11 +520,15 @@ class _PlaceholderWidget(QWidget):
 
     def _tick(self) -> None:
         self._clock_label.setText(datetime.now().strftime("%H:%M:%S"))
+        if _window is not None:
+            _window.render_to_shm()
 
     @pyqtSlot(str, str)
     def set_conn_state(self, color: str, text: str) -> None:
         self._state_label.setStyleSheet(f"color: {color};")
         self._state_label.setText(text)
+        if _window is not None:
+            _window.render_to_shm()
 
 # ---------------------------------------------------------------------------
 # Main video widget
@@ -756,23 +767,92 @@ class VideoWidget(QWidget):
 
 
 # ---------------------------------------------------------------------------
-# Standalone window wrapper (dev / test only)
+# Standalone window wrapper (V3 offscreen engine)
 # ---------------------------------------------------------------------------
 
 class _VideoWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.Tool                 # hidden from taskbar
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        if hasattr(Qt.WidgetAttribute, "WA_DontShowOnScreen"):
+            self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
         self.setWindowTitle("NemoHeadUnit v2 — Video")
         self._video = VideoWidget()
         self.setCentralWidget(self._video)
+        self.hide()  # hidden until geometry is applied
+
+        self._shm_engine = None
 
     @property
     def video(self) -> VideoWidget:
         return self._video
 
+    @pyqtSlot(int, int, int, int)
+    def apply_geometry_slot(self, x: int, y: int, w: int, h: int) -> None:
+        self.setGeometry(x, y, w, h)
+        needs_rebuild = (
+            self._shm_engine is None
+            or w > self._shm_engine.max_width
+            or h > self._shm_engine.max_height
+        )
+        if needs_rebuild:
+            if self._shm_engine is not None:
+                self._shm_engine.cleanup()
+            from shared.shm_helper import OffscreenWidgetEngine
+            self._shm_engine = OffscreenWidgetEngine(
+                MODULE_NAME, w, h, bus=bus, max_width=w, max_height=h
+            )
+        else:
+            self._shm_engine.resize(w, h)
+        self.render_to_shm()
+
+    @pyqtSlot(bool)
+    def set_visible_slot(self, visible: bool) -> None:
+        if visible:
+            self.show()
+            self.raise_()
+        else:
+            self.hide()
+        self.render_to_shm()
+
+    def render_to_shm(self) -> None:
+        if self._shm_engine is None:
+            return
+        self._shm_engine.render_and_swap(self)
+
+    @pyqtSlot()
+    def handle_frame_ack(self) -> None:
+        if self._shm_engine is not None:
+            self._shm_engine.on_swap_ack()
+            if self._shm_engine.needs_redraw:
+                self.render_to_shm()
+
+    @pyqtSlot(dict)
+    def handle_input(self, payload: dict) -> None:
+        from shared.shm_helper import inject_input_event
+        inject_input_event(self, payload)
+        QApplication.processEvents()
+        self.render_to_shm()
+
+    def closeEvent(self, event) -> None:
+        if self._shm_engine is not None:
+            self._shm_engine.cleanup()
+        self._video.close()
+        super().closeEvent(event)
+
 
 _window: _VideoWindow | None = None
 _app:    QApplication | None = None
+_system_start_event = threading.Event()
+
+_shell_ready = False
+_geometry_set = False
+_pending_geometry: tuple[int, int, int, int] | None = None
+_pending_geometry_lock = threading.Lock()
 
 
 def _invoke(obj, slot: str, *args):
@@ -802,6 +882,77 @@ def _set_conn_state(new_state: str) -> None:
 # Bus handlers
 # ---------------------------------------------------------------------------
 
+def _register() -> None:
+    bus.publish("ui.widget.register", {
+        "name":          MODULE_NAME,
+        "z_order":       1,
+        "dock":          "center",
+        "width":         None,
+        "min_width":     None,
+        "max_width":     None,
+        "height":        None,
+        "min_height":    None,
+        "max_height":    None,
+        "aspect_ratio":  1.7777777777777777,
+        "on_request":    False,
+        "menu_order":    99,
+        "icon":          "🚗",
+    })
+    log.info("ui.widget.register published (dock=center)")
+
+
+def on_ui_shell_ready(topic: str, payload: dict) -> None:
+    global _shell_ready
+    _shell_ready = True
+    log.info("ui.shell.ready received — registering video_ui")
+    _register()
+
+
+def on_widget_geometry(topic: str, payload: dict) -> None:
+    global _geometry_set
+    if payload.get("name") != MODULE_NAME:
+        return
+    x, y, w, h = int(payload["x"]), int(payload["y"]), int(payload["w"]), int(payload["h"])
+    log.info(f"Geometry received: x={x} y={y} w={w} h={h}")
+    _geometry_set = True
+
+    if _window is not None:
+        QMetaObject.invokeMethod(
+            _window,
+            "apply_geometry_slot",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(int, x),
+            Q_ARG(int, y),
+            Q_ARG(int, w),
+            Q_ARG(int, h),
+        )
+    else:
+        with _pending_geometry_lock:
+            global _pending_geometry
+            _pending_geometry = (x, y, w, h)
+            log.debug("Geometry queued (Qt not ready yet)")
+
+
+def on_module_open(topic: str, payload: dict) -> None:
+    if payload.get("name") != MODULE_NAME:
+        return
+    log.info("ui.module.open received — showing video_ui")
+    _invoke(_window, "set_visible_slot", True)
+
+
+def on_module_close(topic: str, payload: dict) -> None:
+    if payload.get("name") != MODULE_NAME:
+        return
+    log.info("ui.module.close received — hiding video_ui")
+    _invoke(_window, "set_visible_slot", False)
+
+
+def on_input_event(topic: str, payload: dict) -> None:
+    if _window is None:
+        return
+    _invoke(_window, "handle_input", payload)
+
+
 def on_system_readytostart() -> None:
     log.info("system.readytostart — announcing priority %d", PRIORITY)
     bus.publish("system.module_ready", {"name": MODULE_NAME, "priority": PRIORITY})
@@ -810,7 +961,7 @@ def on_system_readytostart() -> None:
 def on_system_start(topic: str, payload: dict) -> None:
     if payload.get("priority") != PRIORITY:
         return
-    log.info("system.start priority=2 — video_ui ready")
+    log.info(f"system.start priority={PRIORITY} — video_ui ready")
     if _window:
         winid = int(_window.video.winId())
         bus.publish("video.ui.winid", {"winid": winid})
@@ -822,14 +973,31 @@ def on_system_start(topic: str, payload: dict) -> None:
     bus.subscribe("aa.session.shutdown",          on_aa_session_shutdown)
     bus.subscribe("bluetooth_manager.pairing.completed",  on_bluetooth_pairing_completed)
 
+    _system_start_event.set()
+
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
+
+    if _shell_ready:
+        log.info("ui.shell.ready already received — registering immediately")
+        _register()
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
     log.info("system.stop — exiting")
+    bus.publish("ui.widget.unregister", {"name": MODULE_NAME})
     bus.stop()
-    if _app:
-        QMetaObject.invokeMethod(_app, "quit", Qt.ConnectionType.QueuedConnection)
+    if _window is not None:
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_window, "close", Qt.ConnectionType.QueuedConnection)
+        except Exception as exc:
+            log.warning(f"Failed to close video window: {exc}")
+    if _app is not None:
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_app, "quit", Qt.ConnectionType.QueuedConnection)
+        except Exception as exc:
+            log.warning(f"Failed to quit video app: {exc}")
 
 
 def on_video_frame(topic: str, payload: dict) -> None:
@@ -871,6 +1039,42 @@ def on_bluetooth_pairing_completed(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Qt Thread entry point
+# ---------------------------------------------------------------------------
+
+def _run_qt() -> None:
+    global _app, _window
+    _app = QApplication.instance() or QApplication(sys.argv)
+    _window = _VideoWindow()
+
+    # Apply any geometry that arrived before this thread was ready.
+    def _apply_pending() -> None:
+        with _pending_geometry_lock:
+            pending = _pending_geometry
+        if pending is not None:
+            log.debug(f"Applying pending geometry: {pending}")
+            if _window is not None:
+                _window.apply_geometry_slot(*pending)
+
+    QTimer.singleShot(0, _apply_pending)
+
+    # Publish the winid once window is ready (primarily for unit test compatibility)
+    winid = int(_window.video.winId())
+    bus.publish("video.ui.winid", {"winid": winid})
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _app.exec()
+
+    log.info("Qt event loop exited, cleaning up video UI resources...")
+    if _window is not None:
+        if _window._shm_engine is not None:
+            _window._shm_engine.cleanup()
+        _window.close()
+        _window = None
+    _app = None
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -878,30 +1082,35 @@ import base64  # noqa: E402
 import time  # noqa: E402
 
 
-def run() -> None:
-    global _app, _window
+def on_widget_frame_ack(topic: str, payload: dict) -> None:
+    if _window is not None:
+        _invoke(_window, "handle_frame_ack")
 
+
+def run() -> None:
     bus.subscribe("system.readytostart",          on_system_readytostart)
     bus.subscribe("system.start",                 on_system_start)
     bus.subscribe("system.stop",                  on_system_stop)
 
+    bus.subscribe("ui.shell.ready",               on_ui_shell_ready)
+    bus.subscribe("ui.widget.geometry",           on_widget_geometry)
+    bus.subscribe("ui.module.open",               on_module_open)
+    bus.subscribe("ui.module.close",              on_module_close)
+    bus.subscribe(f"input.event.{MODULE_NAME}",   on_input_event)
+    bus.subscribe(f"ui.widget.frame_ack.{MODULE_NAME}", on_widget_frame_ack)
+
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)
     on_system_readytostart()
-
-    _app    = QApplication(sys.argv)
-    _window = _VideoWindow()
-
-    screen = _app.primaryScreen().availableGeometry()
-    _window.setGeometry(screen.x(), screen.y(), screen.width() // 2, screen.height() // 2)
-    _window.show()
-
-    log.info("video_ui window open")
-    exit_code = _app.exec()
-
-    bus_thread.join(timeout=2)
-    sys.exit(exit_code)
+    try:
+        _system_start_event.wait()
+        _run_qt()
+        if bus_thread is not None:
+            bus_thread.join()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
     run()
+

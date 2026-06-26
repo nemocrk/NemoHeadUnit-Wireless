@@ -305,10 +305,10 @@ class TestVideoUiBoot:
             pytest.fail(f"on_system_stop ha sollevato: {exc}")
 
     @pytest.mark.integration
-    def test_readytostart_priority_is_2(self, in_process_broker):
-        """Il modulo video_ui ha PRIORITY == 2 (UI level)."""
+    def test_readytostart_priority_is_4(self, in_process_broker):
+        """Il modulo video_ui ha PRIORITY == 4 (UI level)."""
         vui = _load_video_ui(in_process_broker)
-        assert vui.PRIORITY == 2
+        assert vui.PRIORITY == 4
 
 
 # ===========================================================================
