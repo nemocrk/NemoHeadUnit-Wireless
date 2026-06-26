@@ -14,7 +14,7 @@ SERVICE_NAME="org.nemo.APManager.service"
 GROUP_NAME="ap_manager"
 BLUETOOTH_GROUP_NAME="bluetooth"
 APP_DIR="/opt/nemo-headunit"
-CONDA_ENV_DIR="${APP_DIR}/env"
+ENV_PREFIX="${APP_DIR}/env"
 
 log() { echo "[nemo-headunit prerm] $*"; }
 
@@ -26,7 +26,6 @@ remove)
     systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
 
     log "Cleaning up system resources"
-    # Remove system groups
     if getent group "${GROUP_NAME}" &>/dev/null; then
         log "Removing group '${GROUP_NAME}'"
         groupdel "${GROUP_NAME}" || true
@@ -36,13 +35,11 @@ remove)
         groupdel "${BLUETOOTH_GROUP_NAME}" || true
     fi
 
-    # Remove Conda environment
-    if [ -d "${CONDA_ENV_DIR}" ]; then
-        log "Removing Conda env: ${CONDA_ENV_DIR}"
-        rm -rf "${CONDA_ENV_DIR}"
+    if [ -d "${ENV_PREFIX}" ]; then
+        log "Removing Micromamba env: ${ENV_PREFIX}"
+        rm -rf "${ENV_PREFIX}"
     fi
 
-    # Remove desktop shortcuts for human users
     log "Removing desktop shortcuts for human users"
     while IFS=: read -r username _ uid _ _ homedir _; do
         if [ "${uid}" -ge 1000 ] && [ "${uid}" -lt 60000 ] && [ -d "${homedir}/Desktop" ]; then
@@ -56,6 +53,14 @@ remove)
 
     log "Cleanup complete."
     ;;
+>>>>
+<task_progress>
+- [x] List files in packaging_micromamba
+- [x] Read prerm script
+- [x] Read postrm script (if exists)
+- [x] Analyze removal process
+- [x] Add unhandled cleanup to prerm
+</task_progress>
 
 upgrade)
     # During upgrade dpkg installs the new version first, then calls
