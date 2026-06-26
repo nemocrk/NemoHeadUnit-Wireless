@@ -1,5 +1,5 @@
 """
-NemoHeadUnit-Wireless v2 — BusClient
+NemoHeadUnit-Wireless — BusClient
 Reusable helper for modules to publish and subscribe on the ZMQ bus.
 
 Instrumented version:

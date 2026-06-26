@@ -1,5 +1,5 @@
 """
-NemoHeadUnit-Wireless v2 — ConfigClient
+NemoHeadUnit-Wireless — ConfigClient
 
 Convenience helper that any module can use to interact with the
 config_manager module without hand-crafting bus messages.

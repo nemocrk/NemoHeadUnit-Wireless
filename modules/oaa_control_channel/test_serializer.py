@@ -4,7 +4,7 @@ Test script for OAA Messenger Protocol Serializer
 """
 
 import sys
-sys.path.insert(0, '/home/nemo/NemoHeadUnit-Wireless/v2')
+sys.path.insert(0, '/home/nemo/NemoHeadUnit-Wireless')
 
 from modules.oaa_control_channel.serializer import Messenger, FrameType, FrameHeader
 

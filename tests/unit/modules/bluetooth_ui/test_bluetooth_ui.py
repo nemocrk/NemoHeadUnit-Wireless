@@ -380,6 +380,16 @@ class TestOnWidgetGeometry:
         })
         bt.QMetaObject.invokeMethod.assert_not_called()
 
+    def test_run_qt_applies_pending_geometry_on_window_creation(self, bt):
+        win = MagicMock()
+        bt._pending_geometry = (10, 20, 480, 560)
+        bt.QApplication.instance.return_value = MagicMock()
+        bt.QApplication.instance.return_value.exec.return_value = 0
+        with patch.object(bt, "BluetoothPairingWindow", return_value=win), \
+             patch.object(bt.signal, "signal"):
+            bt._run_qt()
+        win.apply_geometry_slot.assert_called_once_with(10, 20, 480, 560)
+
 
 # ---------------------------------------------------------------------------
 # 8. on_module_open

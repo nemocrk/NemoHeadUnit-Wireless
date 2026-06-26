@@ -661,6 +661,8 @@ def _run_qt() -> None:
                 for rec in sorted_records:
                     if getattr(rec, "visible", True) and getattr(rec, "qimage", None) is not None:
                         x, y, w, h = rec.geometry.x, rec.geometry.y, rec.geometry.w, rec.geometry.h
+                        if rec.constraints.on_request:
+                            p.fillRect(QRect(x, y, w, h), QColor(0x14, 0x14, 0x14))
                         img = rec.qimage
                         iw, ih = img.width(), img.height()
                         if iw == w and ih == h:

@@ -1,5 +1,5 @@
 """
-NemoHeadUnit-Wireless v2 — Logger
+NemoHeadUnit-Wireless — Logger
 Per-module verbosity control — backed by loguru (async enqueue backend).
 
 Usage:
@@ -284,7 +284,7 @@ def attach_bus(bus: "BusClient") -> None:  # noqa: ARG001  (bus param kept for A
 class Logger:
     """
     Per-module logger with independent verbosity control.
-    Each v2 module should obtain its instance via get_logger().
+    Each module should obtain its instance via get_logger().
 
     The underlying loguru proxy is created via logger.bind(module=name),
     which tags every record with the module name.  All records flow
@@ -386,7 +386,7 @@ class Logger:
 # ---------------------------------------------------------------------------
 
 class LoggerManager:
-    """Centralised registry of all v2 loggers."""
+    """Centralised registry of all loggers."""
 
     _loggers: dict[str, Logger] = {}
 

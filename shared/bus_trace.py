@@ -1,5 +1,5 @@
 """
-NemoHeadUnit-Wireless v2 — Bus Trace helper
+NemoHeadUnit-Wireless — Bus Trace helper
 
 Non-blocking instrumentation side-channel for BusClient.
 

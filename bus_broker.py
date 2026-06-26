@@ -1,5 +1,5 @@
 """
-NemoHeadUnit-Wireless v2 — Bus Broker
+NemoHeadUnit-Wireless — Bus Broker
 Central IPC message broker using ZeroMQ XPUB/XSUB pattern.
 
 Started automatically by main.py — do not run manually in production.

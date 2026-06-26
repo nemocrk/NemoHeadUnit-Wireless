@@ -198,22 +198,23 @@ def _visible_count() -> int:
 def _icon_center(index: int, total_visible: int) -> tuple[float, float]:
     radius, icon_sz, gap, arc_len = _arc_params()
     angle  = (math.pi / 2) * (index / max(total_visible - 1, 1))
-    pivot_x = radius
-    pivot_y = _bounding_h()
+    pad = icon_sz / 2
+    pivot_x = radius + pad
+    pivot_y = _bounding_h() - pad
     cx = pivot_x - radius * math.cos(angle)
     cy = pivot_y - radius * math.sin(angle)
     return cx, cy
 
 
 def _bounding_w() -> int:
-    radius, _, _, _ = _arc_params()
-    return int(radius)
+    radius, icon_sz, _, _ = _arc_params()
+    return int(math.ceil(radius + icon_sz))
 
 
 def _bounding_h() -> int:
-    radius, _, _, _ = _arc_params()
+    radius, icon_sz, _, _ = _arc_params()
     available = _screen_h - _navbar_h
-    return int(min(radius, available))
+    return int(min(math.ceil(radius + icon_sz), available))
 
 
 # ---------------------------------------------------------------------------

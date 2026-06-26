@@ -1,5 +1,5 @@
 """
-NemoHeadUnit-Wireless v2 — config_schema
+NemoHeadUnit-Wireless — config_schema
 
 Lightweight schema descriptor for module configuration keys.
 

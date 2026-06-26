@@ -335,6 +335,19 @@ class TestArcGeometry:
         assert 0 <= cx <= bw
         assert 0 <= cy <= bh
 
+    def test_icon_rects_fit_inside_bounding_box(self):
+        fmu._dpi_factor = 1.0
+        bw = fmu._bounding_w()
+        bh = fmu._bounding_h()
+        icon_sz = int(float(fmu._config["icon_size"]) * fmu._dpi_factor)
+        r = icon_sz // 2
+        for i in range(3):
+            cx, cy = fmu._icon_center(i, 3)
+            assert cx - r >= 0
+            assert cy - r >= 0
+            assert cx + r <= bw
+            assert cy + r <= bh
+
 
 # ---------------------------------------------------------------------------
 # _visible_count

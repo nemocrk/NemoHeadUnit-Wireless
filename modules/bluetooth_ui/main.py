@@ -744,6 +744,15 @@ def _run_qt() -> None:
     global _app, _window
     _app = QApplication.instance() or QApplication(sys.argv)
     _window = BluetoothPairingWindow()
+
+    # Geometry can arrive before the Qt window exists. Match config_ui's
+    # startup behavior so the first open can render without waiting for a
+    # later shell resize to republish geometry.
+    with _pending_geometry_lock:
+        geom = _pending_geometry
+    if geom is not None:
+        _window.apply_geometry_slot(*geom)
+
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _app.exec()
 
