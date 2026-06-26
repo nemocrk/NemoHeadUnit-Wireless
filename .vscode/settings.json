@@ -12,5 +12,6 @@
         "./protos",
         "./modules"
     ],
-    "python.analysis.typeCheckingMode": "standard"
+    "python.analysis.typeCheckingMode": "standard",
+    "chatgpt.runCodexInWindowsSubsystemForLinux": true
 }

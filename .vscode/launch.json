@@ -16,7 +16,10 @@
             "name": "Multi Process Version",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/main.py"
+            "program": "${workspaceFolder}/main.py",
+            "env": {
+                "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=/run/dbus/system_bus_socket"
+            }
         },
         {
             "name": "Explore Protocol",
