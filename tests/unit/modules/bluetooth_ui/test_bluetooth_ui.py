@@ -62,12 +62,24 @@ def _make_stubs():
     stubs["shared.logger"]        = MagicMock(get_logger=MagicMock(return_value=mock_log))
     stubs["shared.config_client"] = MagicMock(ConfigClient=MagicMock(return_value=mock_cfg))
     stubs["shared.config_schema"] = MagicMock()
+    def _make_shm_engine(name, w, h, **kw):
+        m = MagicMock()
+        m.max_width  = kw.get("max_width", w)
+        m.max_height = kw.get("max_height", h)
+        m.w = w
+        m.h = h
+        return m
+    shm_stub = MagicMock()
+    shm_stub.OffscreenWidgetEngine.side_effect = _make_shm_engine
+    stubs["shared.shm_helper"]    = shm_stub
 
     # PyQt6
     qt_stub   = types.ModuleType("PyQt6")
     qtcore    = types.ModuleType("PyQt6.QtCore")
     qtwid     = types.ModuleType("PyQt6.QtWidgets")
     qtgui_mod = types.ModuleType("PyQt6.QtGui")
+    qtgui_mod.QPainter = MagicMock
+    qtgui_mod.QImage = MagicMock
 
     class _FakeQt:
         class WindowType:
@@ -252,12 +264,18 @@ class TestOnSystemStart:
 
     def test_correct_priority_publishes_ready(self, bt):
         bt._mock_bus.publish.reset_mock()
-        bt.on_system_start("system.start", {"priority": 4})
+        with patch.object(bt, "_run_qt"), \
+             patch("threading.Thread") as mock_thread:
+            mock_thread.return_value.start = MagicMock()
+            bt.on_system_start("system.start", {"priority": 4})
         topics = [c.args[0] for c in bt._mock_bus.publish.call_args_list]
         assert "system.ready" in topics
 
     def test_correct_priority_subscribes_bluetooth_events(self, bt):
-        bt.on_system_start("system.start", {"priority": 4})
+        with patch.object(bt, "_run_qt"), \
+             patch("threading.Thread") as mock_thread:
+            mock_thread.return_value.start = MagicMock()
+            bt.on_system_start("system.start", {"priority": 4})
         subscribed = [c.args[0] for c in bt._mock_bus.subscribe.call_args_list]
         assert "bluetooth_manager.device.found" in subscribed
         assert "bluetooth_manager.pairing.pin" in subscribed
@@ -266,7 +284,10 @@ class TestOnSystemStart:
     def test_shell_ready_triggers_register(self, bt):
         bt._shell_ready = True
         bt._mock_bus.publish.reset_mock()
-        bt.on_system_start("system.start", {"priority": 4})
+        with patch.object(bt, "_run_qt"), \
+             patch("threading.Thread") as mock_thread:
+            mock_thread.return_value.start = MagicMock()
+            bt.on_system_start("system.start", {"priority": 4})
         topics = [c.args[0] for c in bt._mock_bus.publish.call_args_list]
         assert "ui.widget.register" in topics
 
@@ -346,18 +367,18 @@ class TestRegister:
 class TestOnWidgetGeometry:
     def test_matching_name_invokes_apply_geometry(self, bt):
         bt._window = MagicMock()
-        with patch.object(bt, "_invoke") as mock_invoke:
-            bt.on_widget_geometry("ui.widget.geometry", {
-                "name": "bluetooth_ui", "x": 10, "y": 20, "w": 480, "h": 560,
-            })
-        mock_invoke.assert_called_once_with("apply_geometry_slot", 10, 20, 480, 560)
+        bt.QMetaObject.invokeMethod.reset_mock()
+        bt.on_widget_geometry("ui.widget.geometry", {
+            "name": "bluetooth_ui", "x": 10, "y": 20, "w": 480, "h": 560,
+        })
+        bt.QMetaObject.invokeMethod.assert_called_once()
 
     def test_non_matching_name_no_invoke(self, bt):
-        with patch.object(bt, "_invoke") as mock_invoke:
-            bt.on_widget_geometry("ui.widget.geometry", {
-                "name": "other_widget", "x": 0, "y": 0, "w": 0, "h": 0,
-            })
-        mock_invoke.assert_not_called()
+        bt.QMetaObject.invokeMethod.reset_mock()
+        bt.on_widget_geometry("ui.widget.geometry", {
+            "name": "other_widget", "x": 0, "y": 0, "w": 0, "h": 0,
+        })
+        bt.QMetaObject.invokeMethod.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

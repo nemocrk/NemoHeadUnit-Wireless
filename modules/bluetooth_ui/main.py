@@ -46,10 +46,12 @@ UI Architecture compliance:
   - Design tokens: DM Sans typography, --color-surface palette
 """
 
+import signal
 import sys
 import threading
 from pathlib import Path
 import time
+from typing import Optional
 
 _HERE    = Path(__file__).parent
 _MODULES = _HERE.parent
@@ -67,9 +69,9 @@ from PyQt6.QtCore import Qt, QMetaObject, Q_ARG, pyqtSlot          # noqa: E402
 from PyQt6.QtWidgets import (                                        # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QListWidget, QListWidgetItem, QLabel, QStatusBar,
-    QDialog, QDialogButtonBox, QLineEdit, QFormLayout, QMessageBox,
-    QFrame,
+    QLineEdit, QFormLayout, QFrame,
 )
+from PyQt6.QtGui import QPainter, QImage                             # noqa: E402
 
 from shared.bus_client import BusClient             # noqa: E402
 from shared.logger import get_logger    # noqa: E402
@@ -99,59 +101,60 @@ _COLOR_DANGER    = "#c0392b"   # --color-danger
 _COLOR_SUCCESS   = "#4a7c59"   # --color-success
 
 # ---------------------------------------------------------------------------
-# PIN confirmation dialog
-# ---------------------------------------------------------------------------
-
-class PinDialog(QDialog):
-    def __init__(self, device_address: str, pin: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Conferma PIN Bluetooth")
-        self.setMinimumWidth(320)
-
-        self._address = device_address
-
-        layout = QFormLayout(self)
-        layout.addRow("Dispositivo:", QLabel(device_address))
-        layout.addRow("PIN:", QLabel(f"<b>{pin}</b>"))
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
-
-
-# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
 class BluetoothPairingWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        # ── UI Architecture compliance: frameless transparent tool window ──
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.Tool                 # hidden from taskbar
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        if hasattr(Qt.WidgetAttribute, "WA_DontShowOnScreen"):
+            self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
         self.setWindowTitle("Bluetooth Pairing — NemoHeadUnit v2")
         self.hide()  # hidden until ui_shell sends ui.module.open
 
         self._devices: dict[str, dict] = {}
         self._pending_pin_address: str = ""
+        self._pending_pin_value: str = ""
+        self._shm_engine = None
 
         self._build_ui()
         self._apply_design_tokens()
 
     # ── UI Shell geometry contract ────────────────────────────────────────
 
+    @pyqtSlot()
+    def apply_pending_geometry(self) -> None:
+        """No-arg slot: reads latest geometry from _pending_geometry and applies it."""
+        with _pending_geometry_lock:
+            pending = _pending_geometry
+        if pending is not None:
+            x, y, w, h = pending
+            self.apply_geometry_slot(x, y, w, h)
+
     @pyqtSlot(int, int, int, int)
     def apply_geometry_slot(self, x: int, y: int, w: int, h: int) -> None:
         """Called on the Qt thread via invokeMethod from on_widget_geometry."""
         self.setGeometry(x, y, w, h)
-        self.show()
-        self.raise_()
+        needs_rebuild = (
+            self._shm_engine is None
+            or w > self._shm_engine.max_width
+            or h > self._shm_engine.max_height
+        )
+        if needs_rebuild:
+            if self._shm_engine is not None:
+                self._shm_engine.cleanup()
+            from shared.shm_helper import OffscreenWidgetEngine
+            self._shm_engine = OffscreenWidgetEngine(
+                MODULE_NAME, w, h, bus=bus, max_width=w, max_height=h
+            )
+        else:
+            self._shm_engine.resize(w, h)
+        self.render_to_shm()
 
     @pyqtSlot(bool)
     def set_visible_slot(self, visible: bool) -> None:
@@ -161,6 +164,26 @@ class BluetoothPairingWindow(QMainWindow):
             self.raise_()
         else:
             self.hide()
+        self.render_to_shm()
+
+    def render_to_shm(self) -> None:
+        if self._shm_engine is None:
+            return
+        self._shm_engine.render_and_swap(self)
+
+    @pyqtSlot()
+    def handle_frame_ack(self) -> None:
+        if self._shm_engine is not None:
+            self._shm_engine.on_swap_ack()
+            if self._shm_engine.needs_redraw:
+                self.render_to_shm()
+
+    @pyqtSlot(dict)
+    def handle_input(self, payload: dict) -> None:
+        from shared.shm_helper import inject_input_event
+        inject_input_event(self, payload)
+        QApplication.processEvents()
+        self.render_to_shm()
 
     # ── Design tokens ─────────────────────────────────────────────────────
 
@@ -280,6 +303,38 @@ class BluetoothPairingWindow(QMainWindow):
         paired_actions.addWidget(self._btn_remove_paired)
         root.addLayout(paired_actions)
 
+        # ── Inline PIN confirmation panel ──
+        self._pin_panel = QFrame()
+        self._pin_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        self._pin_panel.setStyleSheet(f"""
+            QFrame {{
+                background-color: {_COLOR_SURFACE_2};
+                border: 1px solid {_COLOR_ACCENT};
+                border-radius: 8px;
+            }}
+        """)
+        pin_layout = QVBoxLayout(self._pin_panel)
+        self._lbl_pin_title = QLabel("<b>Conferma PIN Bluetooth</b>")
+        self._lbl_pin_title.setStyleSheet(f"color: {_COLOR_ACCENT}; font-size: 14px;")
+        self._lbl_pin_dev = QLabel("Dispositivo: ")
+        self._lbl_pin_val = QLabel("PIN: ")
+        
+        btn_layout = QHBoxLayout()
+        self._btn_pin_ok = QPushButton("Conferma")
+        self._btn_pin_ok.clicked.connect(self._on_pin_ok_clicked)
+        self._btn_pin_cancel = QPushButton("Annulla")
+        self._btn_pin_cancel.clicked.connect(self._on_pin_cancel_clicked)
+        btn_layout.addWidget(self._btn_pin_ok)
+        btn_layout.addWidget(self._btn_pin_cancel)
+        
+        pin_layout.addWidget(self._lbl_pin_title)
+        pin_layout.addWidget(self._lbl_pin_dev)
+        pin_layout.addWidget(self._lbl_pin_val)
+        pin_layout.addLayout(btn_layout)
+        
+        self._pin_panel.hide()
+        root.addWidget(self._pin_panel)
+
         # ── Status bar ───────────────────────────────────────────────────
         self._status = QStatusBar()
         self.setStatusBar(self._status)
@@ -290,6 +345,23 @@ class BluetoothPairingWindow(QMainWindow):
     @pyqtSlot(str)
     def set_status(self, message: str):
         self._status.showMessage(message)
+        self.render_to_shm()
+
+    def _on_pin_ok_clicked(self):
+        address = self._pending_pin_address
+        pin = self._pending_pin_value
+        bus.publish("bluetooth_manager.confirm_pairing", {
+            "device_address": address,
+            "pin": pin,
+        })
+        self.set_status(f"PIN confermato per {address}")
+        self._pin_panel.hide()
+        self.render_to_shm()
+
+    def _on_pin_cancel_clicked(self):
+        self.set_status("Pairing annullato dall'utente")
+        self._pin_panel.hide()
+        self.render_to_shm()
 
     # ── Discovery / Pairing slots ─────────────────────────────────────────
 
@@ -302,30 +374,25 @@ class BluetoothPairingWindow(QMainWindow):
         item = QListWidgetItem(label)
         item.setData(Qt.ItemDataRole.UserRole, address)
         self._device_list.addItem(item)
+        self.render_to_shm()
 
     @pyqtSlot(str, str)
     def show_pin_dialog(self, address: str, pin: str):
         self._pending_pin_address = address
+        self._pending_pin_value = pin
         self.set_status(f"PIN richiesto per {address}: {pin}")
-        dlg = PinDialog(address, pin, parent=self)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            bus.publish("bluetooth_manager.confirm_pairing", {
-                "device_address": address,
-                "pin": pin,
-            })
-            self.set_status(f"PIN confermato per {address}")
-        else:
-            self.set_status("Pairing annullato dall'utente")
+        self._lbl_pin_dev.setText(f"Dispositivo: {address}")
+        self._lbl_pin_val.setText(f"PIN: <b>{pin}</b>")
+        self._pin_panel.show()
+        self.render_to_shm()
 
     @pyqtSlot(str)
     def on_pairing_completed(self, address: str):
         self.set_status(f"✅  Pairing completato con {address}")
-        QMessageBox.information(self, "Pairing completato", f"Connesso a:\n{address}")
 
     @pyqtSlot(str, str)
     def on_pairing_failed(self, address: str, error: str):
         self.set_status(f"❌  Pairing fallito con {address}: {error}")
-        QMessageBox.warning(self, "Pairing fallito", f"Dispositivo: {address}\nErrore: {error}")
 
     # ── Paired devices slots ──────────────────────────────────────────────
 
@@ -351,6 +418,7 @@ class BluetoothPairingWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole + 1, connected)
             self._paired_list.addItem(item)
         self._update_paired_buttons()
+        self.render_to_shm()
 
     @pyqtSlot(str)
     def on_paired_connected(self, address: str):
@@ -430,9 +498,11 @@ class BluetoothPairingWindow(QMainWindow):
 
     def _on_selection_changed(self):
         self._btn_pair.setEnabled(bool(self._device_list.currentItem()))
+        self.render_to_shm()
 
     def _on_paired_selection_changed(self):
         self._update_paired_buttons()
+        self.render_to_shm()
 
     def _on_refresh_paired_clicked(self):
         self.set_status("Aggiornamento lista dispositivi accoppiati…")
@@ -460,15 +530,8 @@ class BluetoothPairingWindow(QMainWindow):
         address = self._selected_paired_address()
         if not address:
             return
-        reply = QMessageBox.question(
-            self,
-            "Rimuovi dispositivo",
-            f"Rimuovere il dispositivo\n{address}\ndall'elenco accoppiati?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.set_status(f"Rimozione {address}…")
-            bus.publish("bluetooth_manager.paired.remove", {"device_address": address})
+        self.set_status(f"Rimozione {address}…")
+        bus.publish("bluetooth_manager.paired.remove", {"device_address": address})
 
 
 _window: BluetoothPairingWindow | None = None
@@ -476,25 +539,37 @@ _window: BluetoothPairingWindow | None = None
 # Track whether ui.shell.ready has been received
 _shell_ready: bool = False
 
+# Pending geometry from bus thread (applied on Qt thread via apply_pending_geometry slot)
+_pending_geometry: tuple[int, int, int, int] | None = None
+_pending_geometry_lock = threading.Lock()
+
 
 def _invoke(slot_name: str, *args):
     if _window is None:
         return
-    q_args = [Q_ARG(type(a), a) for a in args]
-    QMetaObject.invokeMethod(_window, slot_name, Qt.ConnectionType.QueuedConnection, *q_args)
+    try:
+        q_args = [Q_ARG(type(a), a) for a in args]
+        QMetaObject.invokeMethod(_window, slot_name, Qt.ConnectionType.QueuedConnection, *q_args)
+    except Exception as exc:
+        log.warning(f"_invoke({slot_name}) failed: {exc}")
 
 
 def _register() -> None:
     """Publish ui.widget.register — on_request so floating_menu_ui shows arc icon."""
     bus.publish("ui.widget.register", {
-        "name":       MODULE_NAME,
-        "z_order":    2,
-        "dock":       "center",
-        "on_request": True,
-        "menu_order": 1,
-        "icon":       "📱",  # Bluetooth phone glyph for arc menu
-        "width":      480,
-        "height":     560,
+        "name":          MODULE_NAME,
+        "z_order":       2,
+        "dock":          "center",
+        "width":         None,
+        "min_width":     None,
+        "max_width":     None,
+        "height":        None,
+        "min_height":    None,
+        "max_height":    None,
+        "aspect_ratio":  None,
+        "on_request":    True,
+        "menu_order":    1,
+        "icon":          "📱",
     })
     log.info("ui.widget.register published (on_request)")
 
@@ -524,7 +599,15 @@ def on_widget_geometry(topic: str, payload: dict) -> None:
         return
     x, y, w, h = int(payload["x"]), int(payload["y"]), int(payload["w"]), int(payload["h"])
     log.info(f"Geometry received: x={x} y={y} w={w} h={h}")
-    _invoke("apply_geometry_slot", x, y, w, h)
+    with _pending_geometry_lock:
+        global _pending_geometry  # noqa: PLW0603
+        _pending_geometry = (x, y, w, h)
+    if _window is not None:
+        try:
+            QMetaObject.invokeMethod(_window, "apply_pending_geometry",
+                                     Qt.ConnectionType.QueuedConnection)
+        except Exception as exc:
+            log.warning(f"on_widget_geometry dispatch failed: {exc}")
 
 
 def on_module_open(topic: str, payload: dict) -> None:
@@ -544,15 +627,10 @@ def on_module_close(topic: str, payload: dict) -> None:
 
 
 def on_input_event(topic: str, payload: dict) -> None:
-    """Input routed via ui_shell input_trap — reconstruct Qt synthetic events."""
+    log.info(f"input.event.{MODULE_NAME} received: {payload}")
     if _window is None:
         return
-    ev_type = payload.get("type")
-    x = int(payload.get("x", 0))
-    y = int(payload.get("y", 0))
-    # For this panel, native Qt interaction via show() is sufficient;
-    # input_trap routing arrives here for logging/future use.
-    log.debug(f"input.event received: type={ev_type} x={x} y={y}")
+    _invoke("handle_input", payload)
 
 
 def on_system_start(topic: str, payload: dict) -> None:
@@ -560,7 +638,6 @@ def on_system_start(topic: str, payload: dict) -> None:
         return
 
     log.info(f"system.start priority={PRIORITY} — bluetooth_ui ready")
-    _invoke("set_status", "Sistema pronto. Avvia una ricerca Bluetooth.")
 
     bus.subscribe("bluetooth_manager.device.found",        on_device_found)
     bus.subscribe("bluetooth_manager.discovery.completed", on_discovery_completed)
@@ -572,6 +649,9 @@ def on_system_start(topic: str, payload: dict) -> None:
     bus.subscribe("bluetooth_manager.paired.disconnected", on_paired_disconnected)
     bus.subscribe("bluetooth_manager.paired.removed",      on_paired_removed)
     bus.subscribe("bluetooth_manager.paired.failed",       on_paired_failed)
+
+    # Signal main thread to start Qt
+    _system_start_event.set()
 
     bus.publish("system.ready", {
         "name":     MODULE_NAME,
@@ -657,15 +737,38 @@ def on_paired_failed(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Qt Thread entry point
+# ---------------------------------------------------------------------------
+
+def _run_qt() -> None:
+    global _app, _window
+    _app = QApplication.instance() or QApplication(sys.argv)
+    _window = BluetoothPairingWindow()
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _app.exec()
+
+    log.info("Qt event loop exited, cleaning up bluetooth UI resources...")
+    if _window is not None:
+        if _window._shm_engine is not None:
+            _window._shm_engine.cleanup()
+        _window.close()
+        _window = None
+    _app = None
+
+
+def on_widget_frame_ack(topic: str, payload: dict) -> None:
+    _invoke("handle_frame_ack")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 _app: QApplication | None = None
+_system_start_event = threading.Event()
 
 
 def run() -> None:
-    global _app, _window
-
     bus.subscribe("system.readytostart",              on_system_readytostart)
     bus.subscribe("system.start",                     on_system_start)
     bus.subscribe("system.stop",                      on_system_stop)
@@ -674,19 +777,16 @@ def run() -> None:
     bus.subscribe("ui.module.open",                   on_module_open)
     bus.subscribe("ui.module.close",                  on_module_close)
     bus.subscribe(f"input.event.{MODULE_NAME}",       on_input_event)
+    bus.subscribe(f"ui.widget.frame_ack.{MODULE_NAME}", on_widget_frame_ack)
 
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)
     on_system_readytostart()
-
-    _app = QApplication(sys.argv)
-    _window = BluetoothPairingWindow()
-    # Window is hidden by default; ui_shell will send ui.module.open
-    # when the user taps the arc menu icon.
-
-    log.info("bluetooth_ui window created (hidden, awaiting ui.module.open)")
     try:
-        bus_thread.join()
+        _system_start_event.wait()
+        _run_qt()
+        if bus_thread is not None:
+            bus_thread.join()
     except KeyboardInterrupt:
         pass
 
