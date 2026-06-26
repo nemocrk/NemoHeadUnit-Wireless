@@ -167,7 +167,7 @@ class TestShellReadyAndRegistration:
             c for c in _bus_mock.publish.call_args_list
             if c.args[0] == "ui.widget.register"
         )
-        assert reg_call.args[1]["z_order"] == 2
+        assert reg_call.args[1]["z_order"] == 1
 
     def test_register_uses_config_height(self):
         nav._config["height"] = 72
@@ -220,7 +220,10 @@ class TestStateHandlers:
     def test_on_media_state_calls_window(self):
         mock_win = MagicMock()
         nav._qt_window = mock_win
-        nav.on_media_state("", {"state": "paused"})
+        def fake_invoke(obj, slot, *args):
+            getattr(obj, slot)(*args)
+        with patch.object(nav, "_invoke", side_effect=fake_invoke):
+            nav.on_media_state("", {"state": "paused"})
         mock_win.set_media_state.assert_called_once_with("paused")
 
     def test_on_bt_state_connected(self):
@@ -235,14 +238,20 @@ class TestStateHandlers:
     def test_on_bt_state_calls_window(self):
         mock_win = MagicMock()
         nav._qt_window = mock_win
-        nav.on_bt_state("", {"connected": True, "device_name": "Car"})
+        def fake_invoke(obj, slot, *args):
+            getattr(obj, slot)(*args)
+        with patch.object(nav, "_invoke", side_effect=fake_invoke):
+            nav.on_bt_state("", {"connected": True, "device_name": "Car"})
         mock_win.set_bt_state.assert_called_once_with(True, "Car")
 
     def test_on_input_event_delegates_to_window(self):
         mock_win = MagicMock()
         nav._qt_window = mock_win
         payload = {"type": "press", "x": 10, "y": 5}
-        nav.on_input_event("", payload)
+        def fake_invoke(obj, slot, *args):
+            getattr(obj, slot)(*args)
+        with patch.object(nav, "_invoke", side_effect=fake_invoke):
+            nav.on_input_event("", payload)
         mock_win.handle_input.assert_called_once_with(payload)
 
     def test_on_input_event_no_window_no_crash(self):

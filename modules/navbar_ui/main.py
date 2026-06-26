@@ -39,6 +39,7 @@ Path layout:
           └── main.py
 """
 
+import signal
 import sys
 import time
 import threading
@@ -102,7 +103,7 @@ _bt_device: str     = ""
 
 _qt_app    = None
 _qt_window = None
-_qt_thread: Optional[threading.Thread] = None
+_system_start_event = threading.Event()
 
 # Geometry received before Qt window is ready is stored here and applied
 # once the window is initialised (via QTimer inside _run_qt).
@@ -120,12 +121,19 @@ _geometry_set = False
 def _register() -> None:
     """Publish ui.widget.register with current config constraints."""
     bus.publish("ui.widget.register", {
-        "name":       MODULE_NAME,
-        "z_order":    2,
-        "dock":       "bottom",
-        "height":     _config.get("height",     60),
-        "min_height": _config.get("min_height", 48),
-        "max_height": _config.get("max_height", 80),
+        "name":          MODULE_NAME,
+        "z_order":       1,
+        "dock":          "bottom",
+        "width":         None,
+        "min_width":     None,
+        "max_width":     None,
+        "height":        _config.get("height",     60),
+        "min_height":    _config.get("min_height", 48),
+        "max_height":    _config.get("max_height", 80),
+        "aspect_ratio":  None,
+        "on_request":    False,
+        "menu_order":    99,
+        "icon":          "",
     })
     log.info("ui.widget.register published")
 
@@ -162,41 +170,42 @@ def on_widget_geometry(topic: str, payload: dict) -> None:
 
 
 def _qt_invoke_geometry(x: int, y: int, w: int, h: int) -> None:
-    """Schedule apply_geometry on the Qt thread via QMetaObject.invokeMethod."""
-    try:
-        from PyQt6.QtCore import QMetaObject, Qt
-        QMetaObject.invokeMethod(
-            _qt_window,
-            "apply_geometry_slot",
-            Qt.ConnectionType.QueuedConnection,
-            x, y, w, h,
-        )
-    except Exception:
-        # Fallback: direct call (safe only if already on Qt thread, e.g. in tests)
+    """Thread-safe geometry dispatch: store args, then poke the Qt event loop."""
+    with _pending_geometry_lock:
+        global _pending_geometry  # noqa: PLW0603
+        _pending_geometry = (x, y, w, h)
+    if _qt_window is not None:
         try:
-            if _qt_window is not None:
-                _qt_window.apply_geometry(x, y, w, h)
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_qt_window, "apply_pending_geometry",
+                                     Qt.ConnectionType.QueuedConnection)
         except Exception as exc:
-            log.warning(f"apply_geometry fallback failed: {exc}")
+            log.warning(f"_qt_invoke_geometry failed: {exc}")
+
+
+def _invoke(obj, slot: str, *args):
+    if obj is None:
+        return
+    try:
+        from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+        q_args = [Q_ARG(type(a), a) for a in args]
+        QMetaObject.invokeMethod(obj, slot, Qt.ConnectionType.QueuedConnection, *q_args)
+    except Exception as exc:
+        log.warning(f"_invoke({slot}) failed: {exc}")
 
 
 def on_input_event(topic: str, payload: dict) -> None:
+    log.info(f"input.event.{MODULE_NAME} received: {payload}")
     if _qt_window is None:
         return
-    try:
-        _qt_window.handle_input(payload)
-    except Exception as exc:
-        log.warning(f"handle_input failed: {exc}")
+    _invoke(_qt_window, "handle_input", payload)
 
 
 def on_media_state(topic: str, payload: dict) -> None:
     global _media_state
     _media_state = payload.get("state", "stopped")
     if _qt_window is not None:
-        try:
-            _qt_window.set_media_state(_media_state)
-        except Exception:
-            pass
+        _invoke(_qt_window, "set_media_state", _media_state)
 
 
 def on_bt_state(topic: str, payload: dict) -> None:
@@ -204,10 +213,7 @@ def on_bt_state(topic: str, payload: dict) -> None:
     _bt_connected = bool(payload.get("connected", False))
     _bt_device    = payload.get("device_name", "")
     if _qt_window is not None:
-        try:
-            _qt_window.set_bt_state(_bt_connected, _bt_device)
-        except Exception:
-            pass
+        _invoke(_qt_window, "set_bt_state", _bt_connected, _bt_device)
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +282,8 @@ def _run_qt() -> None:
                 Qt.WindowType.Tool
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            if hasattr(Qt.WidgetAttribute, "WA_DontShowOnScreen"):
+                self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
             self.setFont(FONT_BODY)
 
             self._media_state  = "stopped"
@@ -285,8 +293,17 @@ def _run_qt() -> None:
             self._buttons: dict[str, tuple]  = {}
             self._bar_w = 1024
             self._bar_h = 60
+            self._shm_engine = None
 
         # ------ thread-safe public API ------
+
+        @pyqtSlot()
+        def apply_pending_geometry(self) -> None:
+            """No-arg slot: reads latest geometry from _pending_geometry and applies it."""
+            with _pending_geometry_lock:
+                pending = _pending_geometry
+            if pending is not None:
+                self.apply_geometry(*pending)
 
         @pyqtSlot(int, int, int, int)
         def apply_geometry_slot(self, x: int, y: int, w: int, h: int) -> None:
@@ -297,32 +314,62 @@ def _run_qt() -> None:
             self._bar_w = w
             self._bar_h = h
             self.setGeometry(x, y, w, h)
-            self.show()
-            self.raise_()
-            self.update()
 
+            needs_rebuild = (
+                self._shm_engine is None
+                or w > self._shm_engine.max_width
+                or h > self._shm_engine.max_height
+            )
+            if needs_rebuild:
+                if self._shm_engine is not None:
+                    self._shm_engine.cleanup()
+                from shared.shm_helper import OffscreenWidgetEngine
+                self._shm_engine = OffscreenWidgetEngine(
+                    MODULE_NAME, w, h, bus=bus, max_width=w, max_height=h
+                )
+            else:
+                self._shm_engine.resize(w, h)
+
+            self.render_to_shm()
+
+        def render_to_shm(self) -> None:
+            if self._shm_engine is None:
+                return
+            self._shm_engine.render_and_swap(self)
+
+        @pyqtSlot()
+        def handle_frame_ack(self) -> None:
+            if self._shm_engine is not None:
+                self._shm_engine.on_swap_ack()
+                if self._shm_engine.needs_redraw:
+                    self.render_to_shm()
+
+        @pyqtSlot(str)
         def set_media_state(self, state: str) -> None:
             self._media_state = state
-            self.update()
+            self.render_to_shm()
 
+        @pyqtSlot(bool, str)
         def set_bt_state(self, connected: bool, device: str) -> None:
             self._bt_connected = connected
             self._bt_device    = device
-            self.update()
+            self.render_to_shm()
 
+        @pyqtSlot(dict)
         def handle_input(self, payload: dict) -> None:
-            ev_type = payload.get("type")
-            x = int(payload.get("x", 0))
-            y = int(payload.get("y", 0))
-            if ev_type == "press":
-                self._pressed_btn = self._hit_button(x, y)
-                self.update()
-            elif ev_type == "release":
-                btn = self._hit_button(x, y)
-                if btn and btn == self._pressed_btn:
-                    self._on_button_tap(btn)
-                self._pressed_btn = None
-                self.update()
+            from shared.shm_helper import inject_input_event
+            inject_input_event(self, payload)
+
+        def mousePressEvent(self, ev) -> None:
+            self._pressed_btn = self._hit_button(int(ev.position().x()), int(ev.position().y()))
+            self.render_to_shm()
+
+        def mouseReleaseEvent(self, ev) -> None:
+            btn = self._hit_button(int(ev.position().x()), int(ev.position().y()))
+            if btn and btn == self._pressed_btn:
+                self._on_button_tap(btn)
+            self._pressed_btn = None
+            self.render_to_shm()
 
         # ------ layout ------
 
@@ -428,7 +475,16 @@ def _run_qt() -> None:
 
     QTimer.singleShot(0, _apply_pending)
 
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     _qt_app.exec()
+
+    log.info("Qt event loop exited, cleaning up navbar UI resources...")
+    if _qt_window is not None:
+        if _qt_window._shm_engine is not None:
+            _qt_window._shm_engine.cleanup()
+        _qt_window.close()
+        _qt_window = None
+    _qt_app = None
 
 
 # ---------------------------------------------------------------------------
@@ -472,9 +528,7 @@ def on_system_start(topic: str, payload: dict) -> None:
     log.info(f"system.start priority={PRIORITY} — launching navbar_ui")
     cfg.get(schema=_SCHEMA)
 
-    global _qt_thread
-    _qt_thread = threading.Thread(target=_run_qt, name="navbar_ui-qt", daemon=True)
-    _qt_thread.start()
+    _system_start_event.set()
 
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info(f"system.ready published (priority={PRIORITY})")
@@ -489,10 +543,16 @@ def on_system_stop(topic: str, payload: dict) -> None:
     bus.publish("ui.widget.unregister", {"name": MODULE_NAME})
     if _qt_app is not None:
         try:
-            _qt_app.quit()
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_qt_app, "quit", Qt.ConnectionType.QueuedConnection)
         except Exception:
             pass
     bus.stop()
+
+
+def on_widget_frame_ack(topic: str, payload: dict) -> None:
+    if _qt_window is not None:
+        _invoke(_qt_window, "handle_frame_ack")
 
 
 # ---------------------------------------------------------------------------
@@ -513,12 +573,15 @@ def run() -> None:
     bus.subscribe(f"input.event.{MODULE_NAME}", on_input_event)
     bus.subscribe("media.state",                on_media_state)
     bus.subscribe("bt.state",                   on_bt_state)
+    bus.subscribe(f"ui.widget.frame_ack.{MODULE_NAME}", on_widget_frame_ack)
 
     log.info("navbar_ui started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)
     on_system_readytostart()
     try:
+        _system_start_event.wait()
+        _run_qt()
         if bus_thread is not None:
             bus_thread.join()
     except KeyboardInterrupt:
