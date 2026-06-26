@@ -49,6 +49,7 @@ Path layout:
 """
 
 import math
+import signal
 import sys
 import time
 import threading
@@ -130,7 +131,7 @@ _menu_visible: bool = False
 
 _qt_app    = None
 _qt_window = None
-_qt_thread: Optional[threading.Thread] = None
+_system_start_event = threading.Event()
 
 # Geometry received before Qt window is ready is stored here and applied
 # via QTimer.singleShot(0) inside _run_qt.
@@ -148,12 +149,19 @@ _geometry_set: bool = False
 def _register() -> None:
     """Register as a hidden widget at bottom-right; dimensions are 0,0 until visible."""
     bus.publish("ui.widget.register", {
-        "name":       MODULE_NAME,
-        "z_order":    3,
-        "dock":       "bottom-right",
-        "width":      0,
-        "height":     0,
-        "on_request": False,
+        "name":          MODULE_NAME,
+        "z_order":       3,
+        "dock":          "bottom-right",
+        "width":         0,
+        "min_width":     None,
+        "max_width":     None,
+        "height":        0,
+        "min_height":    None,
+        "max_height":    None,
+        "aspect_ratio":  None,
+        "on_request":    False,
+        "menu_order":    99,
+        "icon":          "",
     })
     log.info("ui.widget.register published (hidden)")
 
@@ -288,20 +296,17 @@ def on_widget_geometry(topic: str, payload: dict) -> None:
 
 
 def _qt_invoke_geometry(x: int, y: int, w: int, h: int) -> None:
-    """Schedule apply_geometry on the Qt thread via QMetaObject.invokeMethod."""
-    try:
-        from PyQt6.QtCore import QMetaObject, Qt
-        QMetaObject.invokeMethod(
-            _qt_window,
-            "apply_geometry_slot",
-            Qt.ConnectionType.QueuedConnection,
-            x, y, w, h,
-        )
-    except Exception:
+    """Thread-safe geometry dispatch: store args, then poke the Qt event loop."""
+    with _pending_geometry_lock:
+        global _pending_geometry  # noqa: PLW0603
+        _pending_geometry = (x, y, w, h)
+    if _qt_window is not None:
         try:
-            _qt_window.apply_geometry(x, y, w, h)
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_qt_window, "apply_pending_geometry",
+                                     Qt.ConnectionType.QueuedConnection)
         except Exception as exc:
-            log.warning(f"apply_geometry fallback failed: {exc}")
+            log.warning(f"_qt_invoke_geometry failed: {exc}")
 
 
 def _qt_invoke_refresh() -> None:
@@ -320,13 +325,21 @@ def _qt_invoke_refresh() -> None:
             pass
 
 
+def _invoke(obj, slot: str, *args):
+    if obj is None:
+        return
+    try:
+        from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+        q_args = [Q_ARG(type(a), a) for a in args]
+        QMetaObject.invokeMethod(obj, slot, Qt.ConnectionType.QueuedConnection, *q_args)
+    except Exception as exc:
+        log.warning(f"_invoke({slot}) failed: {exc}")
+
+
 def on_input_event(topic: str, payload: dict) -> None:
     if _qt_window is None:
         return
-    try:
-        _qt_window.handle_input(payload)
-    except Exception as exc:
-        log.warning(f"handle_input error: {exc}")
+    _invoke(_qt_window, "handle_input", payload)
 
 
 def on_settings_toggle(topic: str, payload: dict) -> None:
@@ -334,19 +347,16 @@ def on_settings_toggle(topic: str, payload: dict) -> None:
     _menu_visible = not _menu_visible
     log.info(f"settings.toggle — menu_visible={_menu_visible}")
     if _qt_window is not None:
-        try:
-            from PyQt6.QtCore import QMetaObject, Qt
-            QMetaObject.invokeMethod(
-                _qt_window, "set_visible_slot",
-                Qt.ConnectionType.QueuedConnection,
-                _menu_visible,
-            )
-        except Exception:
-            pass
+        _invoke(_qt_window, "set_visible_slot", _menu_visible)
+    else:
+        if _menu_visible:
+            _update_geometry(_bounding_w(), _bounding_h())
+        else:
+            _update_geometry(0, 0)
+        return
+
     if _menu_visible:
         _update_geometry(_bounding_w(), _bounding_h())
-    else:
-        _update_geometry(0, 0)
 
 
 def on_home_pressed(topic: str, payload: dict) -> None:
@@ -356,16 +366,9 @@ def on_home_pressed(topic: str, payload: dict) -> None:
     _active_module = None
     _menu_visible  = False
     if _qt_window is not None:
-        try:
-            from PyQt6.QtCore import QMetaObject, Qt
-            QMetaObject.invokeMethod(
-                _qt_window, "set_visible_slot",
-                Qt.ConnectionType.QueuedConnection,
-                False,
-            )
-        except Exception:
-            pass
-    _update_geometry(0, 0)
+        _invoke(_qt_window, "set_visible_slot", False)
+    else:
+        _update_geometry(0, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +401,7 @@ def _run_qt() -> None:
     try:
         from PyQt6.QtWidgets import QApplication, QWidget
         from PyQt6.QtCore import (
-            Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtSlot,
+            Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtSlot, pyqtProperty,
         )
         from PyQt6.QtGui import QColor, QPainter, QFont
     except ImportError:
@@ -408,11 +411,6 @@ def _run_qt() -> None:
     global _qt_app, _qt_window
 
     _qt_app = QApplication.instance() or QApplication(sys.argv)
-
-    COLOR_ICON        = QColor(240, 236, 228)
-    COLOR_ICON_BG     = QColor(50, 50, 50, 200)
-    COLOR_ACTIVE_BG   = QColor(240, 236, 228, 240)
-    COLOR_ACTIVE_ICON = QColor(28, 28, 28)
 
     FONT_ICON = QFont("DM Sans", -1)
     FONT_ICON.setPixelSize(18)
@@ -427,6 +425,8 @@ def _run_qt() -> None:
                 Qt.WindowType.Tool
             )
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            if hasattr(Qt.WidgetAttribute, "WA_DontShowOnScreen"):
+                self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
             self.hide()
 
             self._is_visible    = False
@@ -434,8 +434,27 @@ def _run_qt() -> None:
             self._drag_start_y: Optional[int] = None
             self._drag_start_offset: int = 0
             self._anim: Optional[QPropertyAnimation] = None
+            self._opacity = 0.0
+            self._shm_engine = None
+
+        def get_opacity(self) -> float:
+            return self._opacity
+
+        def set_opacity(self, val: float) -> None:
+            self._opacity = val
+            self.render_to_shm()
+
+        opacity = pyqtProperty(float, fget=get_opacity, fset=set_opacity)
 
         # ---- thread-safe public API ----
+
+        @pyqtSlot()
+        def apply_pending_geometry(self) -> None:
+            """No-arg slot: reads latest geometry from _pending_geometry and applies it."""
+            with _pending_geometry_lock:
+                pending = _pending_geometry
+            if pending is not None:
+                self.apply_geometry(*pending)
 
         @pyqtSlot(int, int, int, int)
         def apply_geometry_slot(self, x: int, y: int, w: int, h: int) -> None:
@@ -452,10 +471,37 @@ def _run_qt() -> None:
         def apply_geometry(self, x: int, y: int, w: int, h: int) -> None:
             if w > 0 and h > 0:
                 self.setGeometry(x, y, w, h)
-                self.show()
-                self.raise_()
+                needs_rebuild = (
+                    self._shm_engine is None
+                    or w > self._shm_engine.max_width
+                    or h > self._shm_engine.max_height
+                )
+                if needs_rebuild:
+                    if self._shm_engine is not None:
+                        self._shm_engine.cleanup()
+                    from shared.shm_helper import OffscreenWidgetEngine
+                    self._shm_engine = OffscreenWidgetEngine(
+                        MODULE_NAME, w, h, bus=bus, max_width=w, max_height=h
+                    )
+                else:
+                    self._shm_engine.resize(w, h)
+                self.render_to_shm()
             else:
-                self.hide()
+                if self._shm_engine is not None:
+                    self._shm_engine.cleanup()
+                    self._shm_engine = None
+
+        def render_to_shm(self) -> None:
+            if self._shm_engine is None:
+                return
+            self._shm_engine.render_and_swap(self)
+
+        @pyqtSlot()
+        def handle_frame_ack(self) -> None:
+            if self._shm_engine is not None:
+                self._shm_engine.on_swap_ack()
+                if self._shm_engine.needs_redraw:
+                    self.render_to_shm()
 
         def set_visible(self, visible: bool) -> None:
             self._is_visible = visible
@@ -464,58 +510,67 @@ def _run_qt() -> None:
             else:
                 self._animate_out()
 
+        @pyqtSlot(dict)
         def handle_input(self, payload: dict) -> None:
-            ev = payload.get("type")
-            x  = int(payload.get("x", 0))
-            y  = int(payload.get("y", 0))
+            from shared.shm_helper import inject_input_event
+            inject_input_event(self, payload)
 
-            if ev == "press":
-                self._drag_start_y      = y
-                self._drag_start_offset = self._scroll_offset
-            elif ev == "move":
-                if self._drag_start_y is not None:
-                    delta   = y - self._drag_start_y
-                    icon_sz = float(_config.get("icon_size", 52)) * _dpi_factor
-                    gap     = float(_config.get("icon_gap", 8))   * _dpi_factor
-                    step    = icon_sz + gap
-                    total   = len(_on_request_modules)
-                    vis     = _visible_count()
-                    new_off = self._drag_start_offset - int(delta / step)
-                    self._scroll_offset = max(0, min(new_off, total - vis))
-                    self.update()
-            elif ev == "release":
-                if self._drag_start_y is not None:
-                    if abs(y - self._drag_start_y) < 8:
-                        hit = self._hit_icon(x, y)
-                        if hit is not None:
-                            _open_module(hit)
-                            self.update()
-                self._drag_start_y = None
+        def mousePressEvent(self, ev) -> None:
+            y = int(ev.position().y())
+            self._drag_start_y      = y
+            self._drag_start_offset = self._scroll_offset
+            self.render_to_shm()
+
+        def mouseMoveEvent(self, ev) -> None:
+            y = int(ev.position().y())
+            if self._drag_start_y is not None:
+                delta   = y - self._drag_start_y
+                icon_sz = float(_config.get("icon_size", 52)) * _dpi_factor
+                gap     = float(_config.get("icon_gap", 8))   * _dpi_factor
+                step    = icon_sz + gap
+                total   = len(_on_request_modules)
+                vis     = _visible_count()
+                new_off = self._drag_start_offset - int(delta / step)
+                self._scroll_offset = max(0, min(new_off, total - vis))
+                self.render_to_shm()
+
+        def mouseReleaseEvent(self, ev) -> None:
+            x = int(ev.position().x())
+            y = int(ev.position().y())
+            if self._drag_start_y is not None:
+                if abs(y - self._drag_start_y) < 8:
+                    hit = self._hit_icon(x, y)
+                    if hit is not None:
+                        _open_module(hit)
+                        self.render_to_shm()
+            self._drag_start_y = None
+            self.render_to_shm()
 
         # ---- animation ----
 
         def _animate_in(self) -> None:
             if self._anim:
                 self._anim.stop()
-            self._anim = QPropertyAnimation(self, b"windowOpacity")
+            self._anim = QPropertyAnimation(self, b"opacity")
             self._anim.setDuration(220)
             self._anim.setStartValue(0.0)
             self._anim.setEndValue(1.0)
             self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-            self.setWindowOpacity(0.0)
-            self.show()
             self._anim.start()
 
         def _animate_out(self) -> None:
             if self._anim:
                 self._anim.stop()
-            self._anim = QPropertyAnimation(self, b"windowOpacity")
+            self._anim = QPropertyAnimation(self, b"opacity")
             self._anim.setDuration(180)
             self._anim.setStartValue(1.0)
             self._anim.setEndValue(0.0)
             self._anim.setEasingCurve(QEasingCurve.Type.InCubic)
-            self._anim.finished.connect(self.hide)
+            self._anim.finished.connect(self._on_animate_out_finished)
             self._anim.start()
+
+        def _on_animate_out_finished(self) -> None:
+            _update_geometry(0, 0)
 
         # ---- hit testing ----
 
@@ -547,6 +602,12 @@ def _run_qt() -> None:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.setFont(FONT_ICON)
 
+            opacity_val = int(self._opacity * 255)
+            COLOR_ICON_with_opacity = QColor(240, 236, 228, opacity_val)
+            COLOR_ICON_BG_with_opacity = QColor(50, 50, 50, int(0.78 * opacity_val))
+            COLOR_ACTIVE_BG_with_opacity = QColor(240, 236, 228, int(0.94 * opacity_val))
+            COLOR_ACTIVE_ICON_with_opacity = QColor(28, 28, 28, opacity_val)
+
             entries = _sorted_entries()
             vis     = _visible_count()
             start   = self._scroll_offset
@@ -559,10 +620,10 @@ def _run_qt() -> None:
                 is_active = (entry.name == _active_module)
 
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(COLOR_ACTIVE_BG if is_active else COLOR_ICON_BG)
+                p.setBrush(COLOR_ACTIVE_BG_with_opacity if is_active else COLOR_ICON_BG_with_opacity)
                 p.drawEllipse(int(cx) - r, int(cy) - r, icon_sz, icon_sz)
 
-                p.setPen(COLOR_ACTIVE_ICON if is_active else COLOR_ICON)
+                p.setPen(COLOR_ACTIVE_ICON_with_opacity if is_active else COLOR_ICON_with_opacity)
                 p.drawText(
                     int(cx) - r, int(cy) - r, icon_sz, icon_sz,
                     Qt.AlignmentFlag.AlignCenter,
@@ -570,9 +631,9 @@ def _run_qt() -> None:
                 )
 
             if len(entries) > vis:
-                self._draw_scroll_hint(p, len(entries), vis)
+                self._draw_scroll_hint(p, len(entries), vis, opacity_val)
 
-        def _draw_scroll_hint(self, p: "QPainter", total: int, vis: int) -> None:
+        def _draw_scroll_hint(self, p: "QPainter", total: int, vis: int, opacity_val: int) -> None:
             dot_r   = 3
             dot_gap = 8
             dots    = min(total, 5)
@@ -581,7 +642,8 @@ def _run_qt() -> None:
             for i in range(dots):
                 frac   = (self._scroll_offset + vis / 2) / max(total - vis, 1)
                 active = abs(i / (dots - 1) - frac) < 0.3 if dots > 1 else True
-                clr    = QColor(240, 236, 228, 200 if active else 80)
+                alpha  = int((0.78 if active else 0.31) * opacity_val)
+                clr    = QColor(240, 236, 228, alpha)
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(clr)
                 iy = start_y + i * (dot_r * 2 + dot_gap)
@@ -600,7 +662,16 @@ def _run_qt() -> None:
 
     QTimer.singleShot(0, _apply_pending)
 
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     _qt_app.exec()
+
+    log.info("Qt event loop exited, cleaning up floating menu UI resources...")
+    if _qt_window is not None:
+        if _qt_window._shm_engine is not None:
+            _qt_window._shm_engine.cleanup()
+        _qt_window.close()
+        _qt_window = None
+    _qt_app = None
 
 
 # ---------------------------------------------------------------------------
@@ -642,9 +713,7 @@ def on_system_start(topic: str, payload: dict) -> None:
     log.info(f"system.start priority={PRIORITY} — launching floating_menu_ui")
     cfg.get(schema=_SCHEMA)
 
-    global _qt_thread
-    _qt_thread = threading.Thread(target=_run_qt, name="floating_menu_ui-qt", daemon=True)
-    _qt_thread.start()
+    _system_start_event.set()
 
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info(f"system.ready published (priority={PRIORITY})")
@@ -659,10 +728,16 @@ def on_system_stop(topic: str, payload: dict) -> None:
     bus.publish("ui.widget.unregister", {"name": MODULE_NAME})
     if _qt_app is not None:
         try:
-            _qt_app.quit()
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_qt_app, "quit", Qt.ConnectionType.QueuedConnection)
         except Exception:
             pass
     bus.stop()
+
+
+def on_widget_frame_ack(topic: str, payload: dict) -> None:
+    if _qt_window is not None:
+        _invoke(_qt_window, "handle_frame_ack")
 
 
 # ---------------------------------------------------------------------------
@@ -685,13 +760,17 @@ def run() -> None:
     bus.subscribe(f"input.event.{MODULE_NAME}",   on_input_event)
     bus.subscribe("ui.settings.toggle",           on_settings_toggle)
     bus.subscribe("ui.home.pressed",              on_home_pressed)
+    bus.subscribe(f"ui.widget.frame_ack.{MODULE_NAME}", on_widget_frame_ack)
 
     log.info("floating_menu_ui started, waiting for messages...")
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)
     on_system_readytostart()
     try:
-        bus_thread.join()
+        _system_start_event.wait()
+        _run_qt()
+        if bus_thread is not None:
+            bus_thread.join()
     except KeyboardInterrupt:
         pass
 
