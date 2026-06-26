@@ -43,8 +43,10 @@ Flow:
   7. User clicks Shutdown -> publish system.shutdown {}
 """
 
+import signal
 import sys
 import time
+import threading
 from pathlib import Path
 
 _HERE    = Path(__file__).parent
@@ -56,23 +58,15 @@ for _p in (str(_REPO_ROOT), str(_MODULES), str(_PROTO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from PyQt6.QtCore import Qt, QMetaObject, Q_ARG, pyqtSlot           # noqa: E402
-from PyQt6.QtWidgets import (                                         # noqa: E402
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QTabWidget, QLabel,
-    QStatusBar, QMessageBox,
-)
-
-from shared.bus_client import BusClient              # noqa: E402
-from shared.logger import get_logger                 # noqa: E402
-from config_ui.module_tab import ModuleConfigTab  # noqa: E402
+from shared.bus_client import BusClient
+from shared.logger import get_logger
 
 # ---------------------------------------------------------------------------
 # Module identity
 # ---------------------------------------------------------------------------
 
 MODULE_NAME = "config_ui"
-PRIORITY    = 2  # UI level
+PRIORITY    = 4  # on_request widget priority (ui_shell at priority 2 is guaranteed ready)
 
 bus = BusClient(module_name=MODULE_NAME)
 log = get_logger(MODULE_NAME, bus=bus)
@@ -82,118 +76,52 @@ def _request_config(module: str) -> None:
     bus.publish("config.get", {"module": module, "requester": MODULE_NAME})
 
 
-# ---------------------------------------------------------------------------
-# ConfigWindow
-# ---------------------------------------------------------------------------
-
-class ConfigWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Configurazione moduli - NemoHeadUnit v2")
-        self._tabs: dict[str, ModuleConfigTab] = {}
-        self._build_ui()
-
-    def apply_default_geometry(self, app: QApplication) -> None:
-        screen = app.primaryScreen().availableGeometry()
-        w = screen.width() // 2
-        h = screen.height() // 2
-        x = screen.x()
-        y = screen.y() + h
-        self.setGeometry(x, y, w, h)
-
-    def _build_ui(self) -> None:
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-
-        toolbar = QHBoxLayout()
-        toolbar.setContentsMargins(8, 6, 8, 0)
-        self._btn_refresh_all = QPushButton("Aggiorna lista moduli")
-        self._btn_refresh_all.clicked.connect(self._on_refresh_all)
-        toolbar.addWidget(self._btn_refresh_all)
-        toolbar.addStretch()
-        self._btn_shutdown = QPushButton("Spegni sistema")
-        self._btn_shutdown.setStyleSheet(
-            "QPushButton { color: #cc3333; font-weight: bold; }"
-            "QPushButton:hover { background-color: #3a1a1a; }"
-        )
-        self._btn_shutdown.setMinimumHeight(32)
-        self._btn_shutdown.clicked.connect(self._on_shutdown_clicked)
-        toolbar.addWidget(self._btn_shutdown)
-        root.addLayout(toolbar)
-
-        self._tab_widget = QTabWidget()
-        root.addWidget(self._tab_widget, stretch=1)
-
-        self._status = QStatusBar()
-        self.setStatusBar(self._status)
-        self._status.showMessage("In attesa di system.start...")
-
-    @pyqtSlot(str)
-    def set_status(self, message: str) -> None:
-        self._status.showMessage(message)
-
-    @pyqtSlot(str, int, str)
-    def add_or_update_module_tab(self, name: str, pid: int, status: str) -> None:
-        if name in self._tabs:
-            self._tabs[name].update_status(pid, status)
-            return
-        tab = ModuleConfigTab(name, pid, status)
-        self._tabs[name] = tab
-        self._tab_widget.addTab(tab, name)
-        _request_config(name)
-
-    @pyqtSlot(str, str, str)
-    def populate_module_config(self, module: str, config_json: str, schema_json: str) -> None:
-        import json
-        tab = self._tabs.get(module)
-        if tab is None:
-            return
-        config     = json.loads(config_json)
-        schema_raw = json.loads(schema_json) if schema_json else None
-        tab.populate(config, schema_raw)
-        self.set_status(f"Configurazione caricata per '{module}'")
-
-    @pyqtSlot(str, str, str)
-    def show_config_error(self, module: str, key: str, reason: str) -> None:
-        tab = self._tabs.get(module)
-        if tab:
-            tab.mark_error(key, reason)
-        self.set_status(f"Errore di validazione: '{module}'.{key} - {reason}")
-
-    def _on_refresh_all(self) -> None:
-        bus.publish("system.get_modules", {})
-        self.set_status("Aggiornamento lista moduli...")
-
-    def _on_shutdown_clicked(self) -> None:
-        reply = QMessageBox.question(
-            self,
-            "Conferma spegnimento",
-            "Vuoi davvero spegnere il sistema?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        log.info("Shutdown requested by user")
-        bus.publish("system.shutdown", {})
-        self.set_status("Segnale di spegnimento inviato...")
+def _register() -> None:
+    """Publish ui.widget.register — on_request so floating_menu_ui shows arc icon."""
+    bus.publish("ui.widget.register", {
+        "name":          MODULE_NAME,
+        "z_order":       2,
+        "dock":          "center",
+        "width":         None,
+        "min_width":     None,
+        "max_width":     None,
+        "height":        None,
+        "min_height":    None,
+        "max_height":    None,
+        "aspect_ratio":  None,
+        "on_request":    True,
+        "menu_order":    2,
+        "icon":          "⚙",
+    })
+    log.info("ui.widget.register published (on_request)")
 
 
 # ---------------------------------------------------------------------------
 # Module-level window reference
 # ---------------------------------------------------------------------------
 
-_window: "ConfigWindow | None" = None
-_app:    "QApplication | None" = None
+_window = None
+_app = None
+_system_start_event = threading.Event()
+
+# Track whether ui.shell.ready has been received
+_shell_ready = False
+
+# Pending geometry from bus thread (applied on Qt thread via apply_pending_geometry slot)
+_pending_geometry = None
+_pending_geometry_lock = threading.Lock()
 
 
 def _invoke(slot: str, *args) -> None:
+    global _window
     if _window is None:
         return
-    q_args = [Q_ARG(type(a), a) for a in args]
-    QMetaObject.invokeMethod(_window, slot, Qt.ConnectionType.QueuedConnection, *q_args)
+    try:
+        from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+        q_args = [Q_ARG(type(a), a) for a in args]
+        QMetaObject.invokeMethod(_window, slot, Qt.ConnectionType.QueuedConnection, *q_args)
+    except Exception as exc:
+        log.warning(f"_invoke({slot}) failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -205,27 +133,82 @@ def on_system_readytostart() -> None:
     bus.publish("system.module_ready", {"name": MODULE_NAME, "priority": PRIORITY})
 
 
+def on_ui_shell_ready(topic: str, payload: dict) -> None:
+    global _shell_ready
+    _shell_ready = True
+    log.info("ui.shell.ready received — registering config_ui")
+    _register()
+
+
+def on_widget_geometry(topic: str, payload: dict) -> None:
+    if payload.get("name") != MODULE_NAME:
+        return
+    x, y, w, h = int(payload["x"]), int(payload["y"]), int(payload["w"]), int(payload["h"])
+    log.info(f"Geometry received: x={x} y={y} w={w} h={h}")
+    global _pending_geometry
+    with _pending_geometry_lock:
+        _pending_geometry = (x, y, w, h)
+    if _window is not None:
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_window, "apply_pending_geometry",
+                                     Qt.ConnectionType.QueuedConnection)
+        except Exception as exc:
+            log.warning(f"on_widget_geometry dispatch failed: {exc}")
+
+
+def on_module_open(topic: str, payload: dict) -> None:
+    if payload.get("name") != MODULE_NAME:
+        return
+    log.info("ui.module.open received — showing config_ui")
+    _invoke("set_visible_slot", True)
+
+
+def on_module_close(topic: str, payload: dict) -> None:
+    if payload.get("name") != MODULE_NAME:
+        return
+    log.info("ui.module.close received — hiding config_ui")
+    _invoke("set_visible_slot", False)
+
+
+def on_input_event(topic: str, payload: dict) -> None:
+    log.info(f"input.event.{MODULE_NAME} received: {payload}")
+    if _window is None:
+        return
+    _invoke("handle_input", payload)
+
+
 def on_system_start(topic: str, payload: dict) -> None:
     if payload.get("priority") != PRIORITY:
         return
     log.info(f"system.start priority={PRIORITY} - requesting module list")
-    _invoke("set_status", "Sistema pronto. Recupero lista moduli...")
 
     bus.subscribe("system.modules_response", on_modules_response)
     bus.subscribe("config.response",         on_config_response)
     bus.subscribe("config.error",            on_config_error)
 
+    _system_start_event.set()
+
     bus.publish("system.get_modules", {})
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info("system.ready published - config_ui online")
+
+    if _shell_ready:
+        log.info("ui.shell.ready already received — registering immediately")
+        _register()
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
     log.info("system.stop received")
     _invoke("set_status", "Sistema in arresto...")
     bus.stop()
+    global _app
     if _app:
-        QMetaObject.invokeMethod(_app, "quit", Qt.ConnectionType.QueuedConnection)
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_app, "quit", Qt.ConnectionType.QueuedConnection)
+        except Exception as exc:
+            log.warning(f"Failed to invoke quit on QApplication: {exc}")
 
 
 def on_modules_response(topic: str, payload: dict) -> None:
@@ -266,27 +249,208 @@ def on_config_error(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Qt Thread entry point
+# ---------------------------------------------------------------------------
+
+def _run_qt() -> None:
+    global _app, _window
+    from PyQt6.QtCore import Qt, QMetaObject, Q_ARG, pyqtSlot
+    from PyQt6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+        QPushButton, QTabWidget, QLabel, QStatusBar,
+    )
+    from PyQt6.QtGui import QPainter, QImage
+    from config_ui.module_tab import ModuleConfigTab
+
+    class ConfigWindow(QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint |
+                Qt.WindowType.Tool
+            )
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            if hasattr(Qt.WidgetAttribute, "WA_DontShowOnScreen"):
+                self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            self.setWindowTitle("Configurazione moduli - NemoHeadUnit v2")
+            self.hide()
+            self._tabs: dict[str, ModuleConfigTab] = {}
+            self._shm_engine = None
+            self._build_ui()
+
+        @pyqtSlot()
+        def apply_pending_geometry(self) -> None:
+            with _pending_geometry_lock:
+                pending = _pending_geometry
+            if pending is not None:
+                x, y, w, h = pending
+                self.apply_geometry_slot(x, y, w, h)
+
+        @pyqtSlot(int, int, int, int)
+        def apply_geometry_slot(self, x: int, y: int, w: int, h: int) -> None:
+            self.setGeometry(x, y, w, h)
+            needs_rebuild = (
+                self._shm_engine is None
+                or w > self._shm_engine.max_width
+                or h > self._shm_engine.max_height
+            )
+            if needs_rebuild:
+                if self._shm_engine is not None:
+                    self._shm_engine.cleanup()
+                from shared.shm_helper import OffscreenWidgetEngine
+                self._shm_engine = OffscreenWidgetEngine(
+                    MODULE_NAME, w, h, bus=bus, max_width=w, max_height=h
+                )
+            else:
+                self._shm_engine.resize(w, h)
+            self.render_to_shm()
+
+        @pyqtSlot(bool)
+        def set_visible_slot(self, visible: bool) -> None:
+            if visible:
+                self.show()
+                self.raise_()
+            else:
+                self.hide()
+            self.render_to_shm()
+
+        def render_to_shm(self) -> None:
+            if self._shm_engine is None:
+                return
+            img = self._shm_engine.get_write_image()
+            if img is not None:
+                img.fill(0)
+                p = QPainter(img)
+                self.render(p)
+                p.end()
+                self._shm_engine.swap_and_notify()
+
+        @pyqtSlot(dict)
+        def handle_input(self, payload: dict) -> None:
+            from shared.shm_helper import inject_input_event
+            inject_input_event(self, payload)
+            QApplication.processEvents()
+            self.render_to_shm()
+
+        def _build_ui(self) -> None:
+            central = QWidget()
+            self.setCentralWidget(central)
+            root = QVBoxLayout(central)
+            root.setContentsMargins(0, 0, 0, 0)
+
+            toolbar = QHBoxLayout()
+            toolbar.setContentsMargins(8, 6, 8, 0)
+            self._btn_refresh_all = QPushButton("Aggiorna lista moduli")
+            self._btn_refresh_all.clicked.connect(self._on_refresh_all)
+            toolbar.addWidget(self._btn_refresh_all)
+            toolbar.addStretch()
+            self._btn_shutdown = QPushButton("Spegni sistema")
+            self._btn_shutdown.setStyleSheet(
+                "QPushButton { color: #cc3333; font-weight: bold; }"
+                "QPushButton:hover { background-color: #3a1a1a; }"
+            )
+            self._btn_shutdown.setMinimumHeight(32)
+            self._btn_shutdown.clicked.connect(self._on_shutdown_clicked)
+            toolbar.addWidget(self._btn_shutdown)
+            root.addLayout(toolbar)
+
+            self._tab_widget = QTabWidget()
+            # Connect tab change to redraw
+            self._tab_widget.currentChanged.connect(self.render_to_shm)
+            root.addWidget(self._tab_widget, stretch=1)
+
+            self._status = QStatusBar()
+            self.setStatusBar(self._status)
+            self._status.showMessage("In attesa di system.start...")
+
+        @pyqtSlot(str)
+        def set_status(self, message: str) -> None:
+            self._status.showMessage(message)
+            self.render_to_shm()
+
+        @pyqtSlot(str, int, str)
+        def add_or_update_module_tab(self, name: str, pid: int, status: str) -> None:
+            if name in self._tabs:
+                self._tabs[name].update_status(pid, status)
+                self.render_to_shm()
+                return
+            tab = ModuleConfigTab(name, pid, status)
+            self._tabs[name] = tab
+            self._tab_widget.addTab(tab, name)
+            _request_config(name)
+            self.render_to_shm()
+
+        @pyqtSlot(str, str, str)
+        def populate_module_config(self, module: str, config_json: str, schema_json: str) -> None:
+            import json
+            tab = self._tabs.get(module)
+            if tab is None:
+                return
+            config     = json.loads(config_json)
+            schema_raw = json.loads(schema_json) if schema_json else None
+            tab.populate(config, schema_raw)
+            self.set_status(f"Configurazione caricata per '{module}'")
+
+        @pyqtSlot(str, str, str)
+        def show_config_error(self, module: str, key: str, reason: str) -> None:
+            tab = self._tabs.get(module)
+            if tab:
+                tab.mark_error(key, reason)
+            self.set_status(f"Errore di validazione: '{module}'.{key} - {reason}")
+
+        def _on_refresh_all(self) -> None:
+            bus.publish("system.get_modules", {})
+            self.set_status("Aggiornamento lista moduli...")
+
+        def _on_shutdown_clicked(self) -> None:
+            log.info("Shutdown requested by user (direct)")
+            bus.publish("system.shutdown", {})
+            self.set_status("Segnale di spegnimento inviato...")
+
+    _app = QApplication.instance() or QApplication(sys.argv)
+    _window = ConfigWindow()
+
+    # Apply pending geometry if it arrived before window construction
+    with _pending_geometry_lock:
+        geom = _pending_geometry
+    if geom is not None:
+        _window.apply_geometry_slot(*geom)
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _app.exec()
+    log.info("Qt event loop exited, cleaning up config UI resources...")
+    if _window is not None:
+        if _window._shm_engine is not None:
+            _window._shm_engine.cleanup()
+        _window.close()
+        _window = None
+    _app = None
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def run() -> None:
-    global _app, _window
-
-    bus.subscribe("system.readytostart",     on_system_readytostart)
-    bus.subscribe("system.start",            on_system_start)
-    bus.subscribe("system.stop",             on_system_stop)
+    bus.subscribe("system.readytostart",              on_system_readytostart)
+    bus.subscribe("system.start",                     on_system_start)
+    bus.subscribe("system.stop",                      on_system_stop)
+    bus.subscribe("ui.shell.ready",                   on_ui_shell_ready)
+    bus.subscribe("ui.widget.geometry",               on_widget_geometry)
+    bus.subscribe("ui.module.open",                   on_module_open)
+    bus.subscribe("ui.module.close",                  on_module_close)
+    bus.subscribe(f"input.event.{MODULE_NAME}",       on_input_event)
 
     bus_thread = bus.start(blocking=False)
     time.sleep(0.05)
     on_system_readytostart()
-
-    _app    = QApplication(sys.argv)
-    _window = ConfigWindow()
-    _window.apply_default_geometry(_app)
-    _window.show()
-
-    log.info("config_ui window open")
-    sys.exit(_app.exec())
+    try:
+        _system_start_event.wait()
+        _run_qt()
+        if bus_thread is not None:
+            bus_thread.join()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
