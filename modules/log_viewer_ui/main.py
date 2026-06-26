@@ -38,8 +38,10 @@ Module contract:
   State       : private
 """
 
+import signal
 import sys
 import time
+import threading
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -57,8 +59,9 @@ if str(_MODULES) not in sys.path:
 if str(_PROTO_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROTO_ROOT))
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSlot                        # noqa: E402
-from PyQt6.QtGui import QColor, QTextCharFormat, QTextCursor, QFont  # noqa: E402
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot, QMetaObject, Q_ARG       # noqa: E402
+from PyQt6.QtGui import QColor, QTextCharFormat, QTextCursor, QFont, QPainter, QImage  # noqa: E402
+
 from PyQt6.QtWidgets import (                                         # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QTextEdit, QStatusBar,
@@ -73,8 +76,9 @@ from shared.config_schema import field_int     # noqa: E402
 # Module identity
 # ---------------------------------------------------------------------------
 
-MODULE_NAME = "log_viewer"
-PRIORITY    = 2  # UI level
+MODULE_NAME = "log_viewer_ui"
+PRIORITY    = 4  # UI level
+
 
 # Flush interval: drain the record buffer and update the QTextEdit every N ms.
 # 250 ms gives ~4 redraws/s which is visually responsive without thrashing Qt.
@@ -158,19 +162,81 @@ def _on_config_changed(key: str, value) -> None:
 class LogViewerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.Tool                 # hidden from taskbar
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        if hasattr(Qt.WidgetAttribute, "WA_DontShowOnScreen"):
+            self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
         self.setWindowTitle("Log Viewer — NemoHeadUnit v2")
         self._line_count  = 0
         self._filter_level = "ALL"
         self._build_ui()
+        self.hide()  # hidden until geometry is applied
 
-    def apply_default_geometry(self, app: QApplication) -> None:
-        """Right half of the primary screen, full height."""
-        screen = app.primaryScreen().availableGeometry()
-        w = screen.width() // 2
-        h = screen.height()
-        x = screen.x() + w
-        y = screen.y()
+        self._shm_engine = None
+
+    @pyqtSlot()
+    def apply_pending_geometry(self) -> None:
+        """No-arg slot: reads latest geometry from _pending_geometry and applies it."""
+        with _pending_geometry_lock:
+            pending = _pending_geometry
+        if pending is not None:
+            x, y, w, h = pending
+            self.apply_geometry_slot(x, y, w, h)
+
+    @pyqtSlot(int, int, int, int)
+    def apply_geometry_slot(self, x: int, y: int, w: int, h: int) -> None:
         self.setGeometry(x, y, w, h)
+        needs_rebuild = (
+            self._shm_engine is None
+            or w > self._shm_engine.max_width
+            or h > self._shm_engine.max_height
+        )
+        if needs_rebuild:
+            if self._shm_engine is not None:
+                self._shm_engine.cleanup()
+            from shared.shm_helper import OffscreenWidgetEngine
+            self._shm_engine = OffscreenWidgetEngine(
+                MODULE_NAME, w, h, bus=bus, max_width=w, max_height=h
+            )
+        else:
+            self._shm_engine.resize(w, h)
+        self.render_to_shm()
+
+    @pyqtSlot(bool)
+    def set_visible_slot(self, visible: bool) -> None:
+        if visible:
+            self.show()
+            self.raise_()
+        else:
+            self.hide()
+        self.render_to_shm()
+
+    def render_to_shm(self) -> None:
+        if self._shm_engine is None:
+            return
+        self._shm_engine.render_and_swap(self)
+
+    @pyqtSlot()
+    def handle_frame_ack(self) -> None:
+        if self._shm_engine is not None:
+            self._shm_engine.on_swap_ack()
+            if self._shm_engine.needs_redraw:
+                self.render_to_shm()
+
+    @pyqtSlot(dict)
+    def handle_input(self, payload: dict) -> None:
+        from shared.shm_helper import inject_input_event
+        inject_input_event(self, payload)
+        QApplication.processEvents()
+        self.render_to_shm()
+
+    def closeEvent(self, event) -> None:
+        if self._shm_engine is not None:
+            self._shm_engine.cleanup()
+        super().closeEvent(event)
 
     def _build_ui(self):
         central = QWidget()
@@ -270,6 +336,7 @@ class LogViewerWindow(QMainWindow):
 
         scrollbar = self._log_area.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+        self.render_to_shm()
 
     # ------------------------------------------------------------------
     # Slots
@@ -278,15 +345,19 @@ class LogViewerWindow(QMainWindow):
     @pyqtSlot(str)
     def set_status(self, message: str):
         self._status.showMessage(message)
+        self.render_to_shm()
 
     def _on_clear_clicked(self):
         self._log_area.clear()
         self._line_count = 0
         self._status.showMessage("Log pulito.")
+        self.render_to_shm()
 
     def _on_filter_changed(self, level: str):
         self._filter_level = level
         self._status.showMessage(f"Filtro: {level}")
+        self.render_to_shm()
+
 
 
 # ---------------------------------------------------------------------------
@@ -295,10 +366,95 @@ class LogViewerWindow(QMainWindow):
 
 _window: LogViewerWindow | None = None
 _app:    QApplication    | None = None
+_system_start_event = threading.Event()
+
+_shell_ready = False
+_geometry_set = False
+_pending_geometry: tuple[int, int, int, int] | None = None
+_pending_geometry_lock = threading.Lock()
+
+
+def _invoke(slot_name: str, *args):
+    if _window is None:
+        return
+    try:
+        q_args = [Q_ARG(type(a), a) for a in args]
+        QMetaObject.invokeMethod(_window, slot_name, Qt.ConnectionType.QueuedConnection, *q_args)
+    except Exception as exc:
+        log.warning(f"_invoke({slot_name}) failed: {exc}")
+
+
+def _register() -> None:
+    bus.publish("ui.widget.register", {
+        "name":          MODULE_NAME,
+        "z_order":       2,
+        "dock":          "center",
+        "width":         None,
+        "min_width":     None,
+        "max_width":     None,
+        "height":        None,
+        "min_height":    None,
+        "max_height":    None,
+        "aspect_ratio":  None,
+        "on_request":    True,
+        "menu_order":    3,
+        "icon":          "📝",
+    })
+    log.info("ui.widget.register published (on_request)")
+
 
 # ---------------------------------------------------------------------------
 # Bus handlers
 # ---------------------------------------------------------------------------
+
+def on_ui_shell_ready(topic: str, payload: dict) -> None:
+    global _shell_ready
+    _shell_ready = True
+    log.info("ui.shell.ready received — registering log_viewer_ui")
+    _register()
+
+
+def on_widget_geometry(topic: str, payload: dict) -> None:
+    global _geometry_set
+    if payload.get("name") != MODULE_NAME:
+        return
+    x, y, w, h = int(payload["x"]), int(payload["y"]), int(payload["w"]), int(payload["h"])
+    log.info(f"Geometry received: x={x} y={y} w={w} h={h}")
+    _geometry_set = True
+
+    with _pending_geometry_lock:
+        global _pending_geometry
+        _pending_geometry = (x, y, w, h)
+
+    if _window is not None:
+        try:
+            QMetaObject.invokeMethod(_window, "apply_pending_geometry",
+                                     Qt.ConnectionType.QueuedConnection)
+        except Exception as exc:
+            log.warning(f"on_widget_geometry dispatch failed: {exc}")
+    else:
+        log.debug("Geometry queued (Qt not ready yet)")
+
+
+def on_module_open(topic: str, payload: dict) -> None:
+    if payload.get("name") != MODULE_NAME:
+        return
+    log.info("ui.module.open received — showing log_viewer_ui")
+    _invoke("set_visible_slot", True)
+
+
+def on_module_close(topic: str, payload: dict) -> None:
+    if payload.get("name") != MODULE_NAME:
+        return
+    log.info("ui.module.close received — hiding log_viewer_ui")
+    _invoke("set_visible_slot", False)
+
+
+def on_input_event(topic: str, payload: dict) -> None:
+    if _window is None:
+        return
+    _invoke("handle_input", payload)
+
 
 def on_system_readytostart() -> None:
     log.info(f"system.readytostart — announcing priority {PRIORITY}")
@@ -314,18 +470,22 @@ def on_system_start(topic: str, payload: dict) -> None:
 
     log.info(f"system.start priority={PRIORITY} — log_viewer ready")
     cfg.get(schema=_SCHEMA)
-    if _window is not None:
-        _window.set_status("Sistema pronto. In ascolto log…")
+
+    _system_start_event.set()
+
+    if _shell_ready:
+        log.info("ui.shell.ready already received — registering immediately")
+        _register()
 
 
 def on_system_stop(topic: str, payload: dict) -> None:
     log.info("system.stop — log_viewer exiting")
+    bus.publish("ui.widget.unregister", {"name": MODULE_NAME})
     if _window is not None:
-        _window.set_status("Sistema in arresto…")
+        _invoke("set_status", "Sistema in arresto…")
     bus.stop()
     if _app is not None:
-        from PyQt6.QtCore import QMetaObject, Qt as _Qt
-        QMetaObject.invokeMethod(_app, "quit", _Qt.ConnectionType.QueuedConnection)
+        QMetaObject.invokeMethod(_app, "quit", Qt.ConnectionType.QueuedConnection)
 
 
 def on_log_entry(topic: str, payload: dict) -> None:
@@ -346,12 +506,54 @@ def on_log_entry(topic: str, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Qt Thread entry point
+# ---------------------------------------------------------------------------
+
+def _run_qt() -> None:
+    global _app, _window
+    _app = QApplication.instance() or QApplication(sys.argv)
+    _window = LogViewerWindow()
+
+    # Apply any geometry that arrived before this thread was ready.
+    def _apply_pending() -> None:
+        with _pending_geometry_lock:
+            pending = _pending_geometry
+        if pending is not None:
+            log.debug(f"Applying pending geometry: {pending}")
+            if _window is not None:
+                _window.apply_geometry_slot(*pending)
+
+    QTimer.singleShot(0, _apply_pending)
+
+    # QTimer drives the buffer flush on the Qt main thread.
+    flush_timer = QTimer()
+    flush_timer.setInterval(LOG_FLUSH_INTERVAL_MS)
+    flush_timer.timeout.connect(_window.flush_log_buffer)
+    flush_timer.start()
+    _window.flush_timer = flush_timer  # keep reference alive
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _app.exec()
+
+    log.info("Qt event loop exited, cleaning up log viewer UI resources...")
+    flush_timer.stop()
+    if _window is not None:
+        if _window._shm_engine is not None:
+            _window._shm_engine.cleanup()
+        _window.close()
+        _window = None
+    _app = None
+
+
+def on_widget_frame_ack(topic: str, payload: dict) -> None:
+    _invoke("handle_frame_ack")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def run() -> None:
-    global _app, _window
-
     cfg.on_config_loaded  = _on_config_loaded
     cfg.on_config_changed = _on_config_changed
     cfg.register()
@@ -360,24 +562,25 @@ def run() -> None:
     bus.subscribe("system.start",        on_system_start)
     bus.subscribe("system.stop",         on_system_stop)
 
-    bus.start(blocking=False)
+    bus.subscribe("ui.shell.ready",             on_ui_shell_ready)
+    bus.subscribe("ui.widget.geometry",         on_widget_geometry)
+    bus.subscribe("ui.module.open",             on_module_open)
+    bus.subscribe("ui.module.close",            on_module_close)
+    bus.subscribe(f"input.event.{MODULE_NAME}", on_input_event)
+    bus.subscribe(f"ui.widget.frame_ack.{MODULE_NAME}", on_widget_frame_ack)
+
+    bus_thread = bus.start(blocking=False)
     time.sleep(0.05)
     on_system_readytostart()
-
-    _app = QApplication(sys.argv)
-    _window = LogViewerWindow()
-    _window.apply_default_geometry(_app)
-    _window.show()
-
-    # QTimer drives the buffer flush on the Qt main thread.
-    flush_timer = QTimer()
-    flush_timer.setInterval(LOG_FLUSH_INTERVAL_MS)
-    flush_timer.timeout.connect(_window.flush_log_buffer)
-    flush_timer.start()
-
-    log.info("log_viewer window open")
-    sys.exit(_app.exec())
+    try:
+        _system_start_event.wait()
+        _run_qt()
+        if bus_thread is not None:
+            bus_thread.join()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
     run()
+
