@@ -160,7 +160,7 @@ cp "${REPO_ROOT}/bus_broker.py" "${APP_OPT}/bus_broker.py"
 cp -a "${REPO_ROOT}/modules"   "${APP_OPT}/modules"
 cp -a "${REPO_ROOT}/shared"    "${APP_OPT}/shared"
 cp -a "${REPO_ROOT}/protos"    "${APP_OPT}/protos"
-cp -a "${REPO_ROOT}/config"    "${APP_OPT}/config"
+mkdir "${APP_OPT}/config"
 
 log "  Copying services/"
 mkdir -p "${APP_OPT}/services"

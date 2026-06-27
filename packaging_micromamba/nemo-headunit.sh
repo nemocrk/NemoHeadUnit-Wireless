@@ -6,8 +6,8 @@
 
 MICROMAMBA_ENV_PREFIX="/opt/nemo-headunit/env"
 APP_MAIN="/opt/nemo-headunit/main.py"
-DISPLAY=:0
-DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
+export DISPLAY="${DISPLAY:-:0}"
+export DBUS_SYSTEM_BUS_ADDRESS="${DBUS_SYSTEM_BUS_ADDRESS:-unix:path=/run/dbus/system_bus_socket}"
 
 if [ -x "${MICROMAMBA_ENV_PREFIX}/bin/python" ]; then
     exec "${MICROMAMBA_ENV_PREFIX}/bin/python" "${APP_MAIN}" "$@"
