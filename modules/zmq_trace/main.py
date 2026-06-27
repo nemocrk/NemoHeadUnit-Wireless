@@ -342,9 +342,11 @@ def _on_config_loaded(config: dict) -> None:
     _config = merged
     log.info(f"Config loaded: {_config}")
 
-    metrics = Metrics()
-    threading.Thread(target=collector_loop, args=(metrics,), daemon=True, name="trace-collector").start()
-    threading.Thread(target=reporter_loop, args=(metrics,), daemon=True, name="trace-reporter").start()
+    if _config.get("enabled", True):
+        metrics = Metrics()
+        threading.Thread(target=collector_loop, args=(metrics,), daemon=True, name="trace-collector").start()
+        if _config.get("console_enabled", True) or _config.get("publish_summary_on_bus", False):
+            threading.Thread(target=reporter_loop, args=(metrics,), daemon=True, name="trace-reporter").start()
 
     bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
     log.info(f"system.ready published (priority={PRIORITY})")
