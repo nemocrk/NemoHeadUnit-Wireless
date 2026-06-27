@@ -129,6 +129,7 @@ def _install_qt_stubs():
     qtwid.QVBoxLayout   = _FakeQWidget
     qtwid.QLabel        = _FakeQWidget
     qtwid.QStackedWidget = _FakeQWidget
+    qtwid.QFrame        = _FakeQWidget
     class _FakeQSizePolicy:
         class Policy:
             Expanding = 1
@@ -234,13 +235,13 @@ class TestStateLabels:
     def test_streaming_color_is_green(self, vu):
         mod, _ = vu
         color, _ = mod._STATE_LABELS[mod._STATE_STREAMING]
-        assert "4" in color.lower() or "5" in color.lower()  # #4caf50
+        assert color.lower() == "#388e3c"
 
     @pytest.mark.unit
     def test_waiting_bt_color_is_red(self, vu):
         mod, _ = vu
         color, _ = mod._STATE_LABELS[mod._STATE_WAITING_BT]
-        assert "c0" in color.lower()
+        assert color.lower() == "#d32f2f"
 
 
 
@@ -759,7 +760,7 @@ class TestPlaceholderWidget:
         mod, _ = vu
         ph = self._make_placeholder(mod)
         ph.set_conn_state("#4caf50", "● Stream attivo")
-        ph._state_label.setStyleSheet.assert_called_with("color: #4caf50;")
+        ph._state_label.setStyleSheet.assert_called_with("color: #4caf50; background: transparent;")
 
     @pytest.mark.unit
     def test_sets_text(self, vu):

@@ -59,13 +59,13 @@ class _AccordionItem(QWidget):
         root.setSpacing(0)
 
         # --- header bar ---
-        header = QWidget()
-        header.setStyleSheet(
+        self._header = QWidget()
+        self._header.setStyleSheet(
             "border-radius: 4px;"
         )
-        hbox = QHBoxLayout(header)
-        hbox.setContentsMargins(6, 4, 6, 4)
-        hbox.setSpacing(4)
+        self._hbox = QHBoxLayout(self._header)
+        self._hbox.setContentsMargins(6, 4, 6, 4)
+        self._hbox.setSpacing(4)
 
         self._toggle_btn = QPushButton(f"▼  {header_text}")
         self._toggle_btn.setStyleSheet(
@@ -76,7 +76,7 @@ class _AccordionItem(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._toggle_btn.clicked.connect(self._toggle)
-        hbox.addWidget(self._toggle_btn)
+        self._hbox.addWidget(self._toggle_btn)
 
         btn_del = QPushButton("× Rimuovi")
         btn_del.setStyleSheet(
@@ -86,9 +86,9 @@ class _AccordionItem(QWidget):
         )
         btn_del.clicked.connect(on_delete)
         self._btn_del = btn_del
-        hbox.addWidget(btn_del)
+        self._hbox.addWidget(btn_del)
 
-        root.addWidget(header)
+        root.addWidget(self._header)
 
         # --- body ---
         frame = QFrame()
@@ -96,9 +96,9 @@ class _AccordionItem(QWidget):
             "QFrame { border: 1px solid #2d3f50; border-top: none;"
             " border-radius: 0 0 4px 4px; }"
         )
-        fl = QVBoxLayout(frame)
-        fl.setContentsMargins(8, 6, 8, 6)
-        fl.addWidget(body_widget)
+        self._fl = QVBoxLayout(frame)
+        self._fl.setContentsMargins(8, 6, 8, 6)
+        self._fl.addWidget(body_widget)
         self._frame = frame
         root.addWidget(frame)
 
@@ -126,6 +126,32 @@ class _AccordionItem(QWidget):
         if hasattr(self._body, "get_value"):
             return self._body.get_value()
         return {}
+
+    def scale_layouts(self, df: float) -> None:
+        if self.layout():
+            self.layout().setContentsMargins(0, 0, 0, int(4 * df))
+        if hasattr(self, "_hbox"):
+            self._hbox.setContentsMargins(int(6 * df), int(4 * df), int(6 * df), int(4 * df))
+            self._hbox.setSpacing(int(4 * df))
+        if hasattr(self, "_header"):
+            self._header.setStyleSheet(f"border-radius: {int(4 * df)}px;")
+        if hasattr(self, "_toggle_btn"):
+            self._toggle_btn.setStyleSheet(
+                f"QPushButton {{ background: transparent; border: none; text-align: left; font-size: {int(12 * df)}px; }}"
+            )
+        if hasattr(self, "_btn_del"):
+            self._btn_del.setStyleSheet(
+                f"QPushButton {{ color: #cc4444; background: transparent; border: none; font-size: {int(11 * df)}px; }}"
+                f"QPushButton:hover {{ color: #ff6666; }}"
+            )
+        if hasattr(self, "_frame"):
+            self._frame.setStyleSheet(
+                f"QFrame {{ border: 1px solid #2d3f50; border-top: none; border-radius: 0 0 {int(4 * df)}px {int(4 * df)}px; }}"
+            )
+        if hasattr(self, "_fl"):
+            self._fl.setContentsMargins(int(8 * df), int(6 * df), int(8 * df), int(6 * df))
+        if hasattr(self._body, "scale_layouts"):
+            self._body.scale_layouts(df)
 
 
 # ---------------------------------------------------------------------------
@@ -163,15 +189,15 @@ class _ListEditor(QWidget):
         self._items_vbox.setSpacing(4)
         root.addWidget(self._items_container)
 
-        btn_add = QPushButton("+ Aggiungi elemento")
-        btn_add.setStyleSheet(
+        self._btn_add = QPushButton("+ Aggiungi elemento")
+        self._btn_add.setStyleSheet(
             "QPushButton { color: #4caf50; background: transparent;"
             " border: 1px dashed #4caf50; border-radius: 4px;"
             " padding: 4px 10px; font-size: 12px; }"
             "QPushButton:hover { background: #1a2e1a; }"
         )
-        btn_add.clicked.connect(self._on_add)
-        root.addWidget(btn_add)
+        self._btn_add.clicked.connect(self._on_add)
+        root.addWidget(self._btn_add)
 
         for val in initial_value:
             self._append_item(val)
@@ -243,3 +269,20 @@ class _ListEditor(QWidget):
 
     def get_value(self) -> list:
         return [item.get_value() for item in self._items]
+
+    def scale_layouts(self, df: float) -> None:
+        if self.layout():
+            self.layout().setContentsMargins(0, int(4 * df), 0, int(4 * df))
+            self.layout().setSpacing(int(4 * df))
+        if hasattr(self, "_items_vbox"):
+            self._items_vbox.setSpacing(int(4 * df))
+        if hasattr(self, "_btn_add"):
+            self._btn_add.setStyleSheet(
+                f"QPushButton {{ color: #4caf50; background: transparent;"
+                f" border: 1px dashed #4caf50; border-radius: {int(4 * df)}px;"
+                f" padding: {int(4 * df)}px {int(10 * df)}px; font-size: {int(12 * df)}px; }}"
+                f"QPushButton:hover {{ background: #1a2e1a; }}"
+            )
+        for item in self._items:
+            if hasattr(item, "scale_layouts"):
+                item.scale_layouts(df)

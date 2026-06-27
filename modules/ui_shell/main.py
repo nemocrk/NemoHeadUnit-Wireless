@@ -637,6 +637,8 @@ def _run_qt() -> None:
                         log.info(f"[COMPOSITOR] Attached to DoubleSharedBuffer for {name} ({max_width}x{max_height})")
                     except Exception as exc:
                         log.warning(f"Failed to attach DoubleSharedBuffer for {name}: {exc}")
+                        record.shm_buffer = None
+                        record.qimage = None  # prevent paintEvent from using stale freed-memory pointer
                         return
 
                 try:
@@ -651,7 +653,7 @@ def _run_qt() -> None:
 
         def paintEvent(self, event):
             p = QPainter(self)
-            p.fillRect(self.rect(), QColor(0x14, 0x14, 0x14))
+            p.fillRect(self.rect(), QColor(0xe0, 0xe0, 0xe0))
 
             with _registry_lock:
                 sorted_records = sorted(
@@ -662,7 +664,7 @@ def _run_qt() -> None:
                     if getattr(rec, "visible", True) and getattr(rec, "qimage", None) is not None:
                         x, y, w, h = rec.geometry.x, rec.geometry.y, rec.geometry.w, rec.geometry.h
                         if rec.constraints.on_request:
-                            p.fillRect(QRect(x, y, w, h), QColor(0x14, 0x14, 0x14))
+                            p.fillRect(QRect(x, y, w, h), QColor(0xe0, 0xe0, 0xe0))
                         img = rec.qimage
                         iw, ih = img.width(), img.height()
                         if iw == w and ih == h:

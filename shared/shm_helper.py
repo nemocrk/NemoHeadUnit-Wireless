@@ -27,7 +27,7 @@ from typing import Optional
 
 try:
     from PyQt6.QtCore import QPointF, Qt, QEvent
-    from PyQt6.QtGui import QImage, QMouseEvent, QKeyEvent
+    from PyQt6.QtGui import QImage, QMouseEvent, QKeyEvent, QFocusEvent
     from PyQt6.QtWidgets import QApplication
     _QT_AVAILABLE = True
 except (ImportError, AttributeError):
@@ -346,7 +346,16 @@ def inject_input_event(root_window, payload: dict) -> None:
             while focus_target is not None and focus_target.focusPolicy() == Qt.FocusPolicy.NoFocus:
                 focus_target = focus_target.parentWidget()
             if focus_target is not None:
+                root_window.activateWindow()
                 focus_target.setFocus(Qt.FocusReason.MouseFocusReason)
+                # On WA_DontShowOnScreen windows the OS never activates the window,
+                # so setFocus() may not fire focusInEvent.  Send a synthetic
+                # QFocusEvent directly so focusInEvent is guaranteed to run.
+                if not focus_target.hasFocus():
+                    QApplication.sendEvent(
+                        focus_target,
+                        QFocusEvent(QEvent.Type.FocusIn, Qt.FocusReason.MouseFocusReason),
+                    )
 
         qt_event = QMouseEvent(
             qt_type,
@@ -367,7 +376,7 @@ def inject_input_event(root_window, payload: dict) -> None:
         is_auto_repeat = bool(payload.get("is_auto_repeat", False))
         qt_type = QEvent.Type.KeyRelease if ev_type == "key_release" else QEvent.Type.KeyPress
         modifiers = Qt.KeyboardModifier(payload.get("modifiers", 0))
-        target = QApplication.focusWidget() or root_window
+        target = root_window.focusWidget() or root_window
         if target is not root_window and not root_window.isAncestorOf(target):
             target = root_window
 

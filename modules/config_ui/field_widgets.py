@@ -40,16 +40,15 @@ from typing import TYPE_CHECKING
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QLineEdit,
     QSlider,
     QVBoxLayout,
     QWidget,
 )
+from shared.touch_widgets import TouchComboBox, TouchLineEdit
 
 if TYPE_CHECKING:
     from shared.config_schema import (
@@ -114,7 +113,7 @@ class _FieldWidget(QWidget):
 
     def _build_string(self, value: str) -> None:
         self._widget_type = "lineedit"
-        self._edit = QLineEdit(value)
+        self._edit = TouchLineEdit(value)
         self._edit.setPlaceholderText("(vuoto)")
         self._layout.addWidget(self._edit)
 
@@ -132,7 +131,7 @@ class _FieldWidget(QWidget):
 
     def _build_enum(self, value, choices: list[str]) -> None:
         self._widget_type = "combobox"
-        self._combo = QComboBox()
+        self._combo = TouchComboBox()
         self._combo.addItems(choices)
         if str(value) in choices:
             self._combo.setCurrentText(str(value))
@@ -157,11 +156,12 @@ class _FieldWidget(QWidget):
             self._layout.addWidget(self._val_lbl)
         else:
             self._widget_type = "int_step"
-            self._edit = QLineEdit(str(int_val))
+            self._edit = TouchLineEdit(str(int_val))
             self._edit.setFixedWidth(80)
             btn_minus = QPushButton("-")
             btn_plus  = QPushButton("+")
-            for btn in (btn_minus, btn_plus):
+            self._step_btns = [btn_minus, btn_plus]
+            for btn in self._step_btns:
                 btn.setFixedWidth(28)
             btn_minus.clicked.connect(lambda: self._step_int(-1))
             btn_plus.clicked.connect(lambda: self._step_int(+1))
@@ -192,11 +192,12 @@ class _FieldWidget(QWidget):
             self._layout.addWidget(self._val_lbl)
         else:
             self._widget_type = "float_step"
-            self._edit = QLineEdit(f"{float_val:.2f}")
+            self._edit = TouchLineEdit(f"{float_val:.2f}")
             self._edit.setFixedWidth(80)
             btn_minus = QPushButton("-")
             btn_plus  = QPushButton("+")
-            for btn in (btn_minus, btn_plus):
+            self._step_btns = [btn_minus, btn_plus]
+            for btn in self._step_btns:
                 btn.setFixedWidth(28)
             btn_minus.clicked.connect(lambda: self._step_float(-0.1))
             btn_plus.clicked.connect(lambda: self._step_float(+0.1))
@@ -259,6 +260,45 @@ class _FieldWidget(QWidget):
         else:
             self._error_lbl.setVisible(False)
 
+    def scale_layouts(self, df: float) -> None:
+        if hasattr(self, "_layout"):
+            self._layout.setSpacing(int(4 * df))
+        if hasattr(self, "_error_lbl"):
+            self._error_lbl.setStyleSheet(f"color: #cc3333; font-size: {int(11 * df)}px;")
+        wt = self._widget_type
+        if wt == "int_slider":
+            if hasattr(self, "_val_lbl"):
+                self._val_lbl.setMinimumWidth(int(36 * df))
+            if hasattr(self, "_slider"):
+                handle_sz = int(24 * df)
+                total_sz = handle_sz + int(8 * df)
+                if self._slider.orientation() == Qt.Orientation.Horizontal:
+                    self._slider.setFixedHeight(total_sz)
+                else:
+                    self._slider.setFixedWidth(total_sz)
+        elif wt == "int_step":
+            if hasattr(self, "_edit"):
+                self._edit.setFixedWidth(int(80 * df))
+            if hasattr(self, "_step_btns"):
+                for btn in self._step_btns:
+                    btn.setFixedWidth(int(28 * df))
+        elif wt == "float_slider":
+            if hasattr(self, "_val_lbl"):
+                self._val_lbl.setMinimumWidth(int(44 * df))
+            if hasattr(self, "_slider"):
+                handle_sz = int(24 * df)
+                total_sz = handle_sz + int(8 * df)
+                if self._slider.orientation() == Qt.Orientation.Horizontal:
+                    self._slider.setFixedHeight(total_sz)
+                else:
+                    self._slider.setFixedWidth(total_sz)
+        elif wt == "float_step":
+            if hasattr(self, "_edit"):
+                self._edit.setFixedWidth(int(80 * df))
+            if hasattr(self, "_step_btns"):
+                for btn in self._step_btns:
+                    btn.setFixedWidth(int(28 * df))
+
 
 # ---------------------------------------------------------------------------
 # _ScalarListEditor — compact list of scalar values
@@ -283,6 +323,7 @@ class _ScalarListEditor(QWidget):
         super().__init__(parent)
         self._field_schema = field_schema
         self._rows: list[_FieldWidget] = []
+        self._btn_dels: list[QPushButton] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 2, 0, 2)
@@ -294,14 +335,14 @@ class _ScalarListEditor(QWidget):
         self._rows_vbox.setSpacing(2)
         root.addWidget(self._rows_container)
 
-        btn_add = QPushButton("+ Aggiungi")
-        btn_add.setStyleSheet(
+        self._btn_add = QPushButton("+ Aggiungi")
+        self._btn_add.setStyleSheet(
             "QPushButton { color: #4caf50; background: transparent;"
             " border: 1px dashed #4caf50; border-radius: 4px; padding: 2px 8px; }"
             "QPushButton:hover { background: #1a2e1a; }"
         )
-        btn_add.clicked.connect(self._on_add)
-        root.addWidget(btn_add)
+        self._btn_add.clicked.connect(self._on_add)
+        root.addWidget(self._btn_add)
 
         for val in initial_value:
             self._append_row(val)
@@ -346,13 +387,16 @@ class _ScalarListEditor(QWidget):
         row_layout.addWidget(btn_del)
 
         self._rows.append(fw)
+        self._btn_dels.append(btn_del)
         self._rows_vbox.addWidget(row)
 
-        btn_del.clicked.connect(lambda _checked=False, w=row, f=fw: self._delete_row(w, f))
+        btn_del.clicked.connect(lambda _checked=False, w=row, f=fw, bd=btn_del: self._delete_row(w, f, bd))
 
-    def _delete_row(self, row_widget: QWidget, fw: "_FieldWidget") -> None:
+    def _delete_row(self, row_widget: QWidget, fw: "_FieldWidget", btn_del: QPushButton) -> None:
         if fw in self._rows:
             self._rows.remove(fw)
+        if btn_del in self._btn_dels:
+            self._btn_dels.remove(btn_del)
         self._rows_vbox.removeWidget(row_widget)
         row_widget.hide()
         row_widget.deleteLater()
@@ -366,6 +410,26 @@ class _ScalarListEditor(QWidget):
 
     def get_value(self) -> list:
         return [fw.get_value() for fw in self._rows]
+
+    def scale_layouts(self, df: float) -> None:
+        if self.layout():
+            self.layout().setContentsMargins(0, int(2 * df), 0, int(2 * df))
+            self.layout().setSpacing(int(2 * df))
+        if hasattr(self, "_rows_vbox"):
+            self._rows_vbox.setContentsMargins(0, 0, 0, 0)
+            self._rows_vbox.setSpacing(int(2 * df))
+        if hasattr(self, "_btn_add"):
+            self._btn_add.setStyleSheet(
+                f"QPushButton {{ color: #4caf50; background: transparent;"
+                f" border: 1px dashed #4caf50; border-radius: {int(4 * df)}px; padding: {int(2 * df)}px {int(8 * df)}px; }}"
+                f"QPushButton:hover {{ background: #1a2e1a; }}"
+            )
+        if hasattr(self, "_btn_dels"):
+            for btn in self._btn_dels:
+                btn.setFixedSize(int(22 * df), int(22 * df))
+        for fw in self._rows:
+            if hasattr(fw, "scale_layouts"):
+                fw.scale_layouts(df)
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +467,7 @@ class _OneofWidget(QWidget):
         root.setSpacing(2)
 
         # Branch selector
-        self._combo = QComboBox()
+        self._combo = TouchComboBox()
         # First item is an empty placeholder so no branch is pre-selected
         self._combo.addItem("— seleziona tipo —")
         branch_names = list(field_schema.branches.keys())
@@ -497,6 +561,16 @@ class _OneofWidget(QWidget):
         # No-op — errors on oneof fields are handled at the parent level
         pass
 
+    def scale_layouts(self, df: float) -> None:
+        if self.layout():
+            self.layout().setSpacing(int(2 * df))
+        if hasattr(self, "_body_layout"):
+            self._body_layout.setContentsMargins(int(12 * df), int(4 * df), 0, int(4 * df))
+            self._body_layout.setSpacing(int(2 * df))
+        active_widget = self._active_collect[0]
+        if active_widget and hasattr(active_widget, "scale_layouts"):
+            active_widget.scale_layouts(df)
+
 
 # ---------------------------------------------------------------------------
 # _OptionalMessageWidget — checkbox-gated nested message
@@ -535,15 +609,17 @@ class _OptionalMessageWidget(QWidget):
         root.setSpacing(0)
 
         # Checkbox row
-        chk_row = QWidget()
-        chk_layout = QHBoxLayout(chk_row)
-        chk_layout.setContentsMargins(0, 2, 0, 2)
-        chk_layout.setSpacing(6)
+        self._chk_row = QWidget()
+        self._chk_layout = QHBoxLayout(self._chk_row)
+        self._chk_layout.setContentsMargins(0, 2, 0, 2)
+        self._chk_layout.setSpacing(6)
         self._checkbox = QCheckBox("attivo")
-        self._checkbox.setStyleSheet("font-size: 11px;")
-        chk_layout.addWidget(self._checkbox)
-        chk_layout.addStretch()
-        root.addWidget(chk_row)
+        f = self._checkbox.font()
+        f.setPointSize(11)
+        self._checkbox.setFont(f)
+        self._chk_layout.addWidget(self._checkbox)
+        self._chk_layout.addStretch()
+        root.addWidget(self._chk_row)
 
         # Body frame
         self._frame = QFrame()
@@ -601,3 +677,23 @@ class _OptionalMessageWidget(QWidget):
 
     def set_error(self, message: "str | None") -> None:
         pass
+
+    def scale_layouts(self, df: float) -> None:
+        if self.layout():
+            self.layout().setSpacing(0)
+        if hasattr(self, "_chk_layout"):
+            self._chk_layout.setContentsMargins(0, int(2 * df), 0, int(2 * df))
+            self._chk_layout.setSpacing(int(6 * df))
+        if hasattr(self, "_checkbox"):
+            f = self._checkbox.font()
+            f.setPointSize(int(11 * df))
+            self._checkbox.setFont(f)
+        if hasattr(self, "_frame"):
+            self._frame.setStyleSheet(
+                f"QFrame {{ border: 1px solid #2d3f50; border-radius: {int(4 * df)}px; }}"
+            )
+            if self._frame.layout():
+                self._frame.layout().setContentsMargins(int(10 * df), int(6 * df), int(10 * df), int(6 * df))
+                self._frame.layout().setSpacing(int(4 * df))
+        if hasattr(self, "_body") and hasattr(self._body, "scale_layouts"):
+            self._body.scale_layouts(df)

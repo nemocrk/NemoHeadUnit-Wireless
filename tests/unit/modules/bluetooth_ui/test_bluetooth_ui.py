@@ -852,16 +852,16 @@ class TestBluetoothPairingWindowSlots:
 @pytest.mark.unit
 class TestDesignTokenValues:
     def test_surface_color_matches_token(self, bt):
-        assert bt._COLOR_SURFACE == "#1c1c1c"
+        assert bt._COLOR_SURFACE == "#f5f5f5"
 
     def test_text_color_matches_token(self, bt):
-        assert bt._COLOR_TEXT == "#f0ece4"
+        assert bt._COLOR_TEXT == "#121212"
 
     def test_accent_color_matches_token(self, bt):
-        assert bt._COLOR_ACCENT == "#c8b89a"
+        assert bt._COLOR_ACCENT == "#1976d2"
 
     def test_danger_color_matches_token(self, bt):
-        assert bt._COLOR_DANGER == "#c0392b"
+        assert bt._COLOR_DANGER == "#d32f2f"
 
 
 # ---------------------------------------------------------------------------

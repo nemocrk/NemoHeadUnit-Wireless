@@ -91,27 +91,25 @@ class ModuleConfigTab(QWidget):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
-        # --- metadata row ---
-        meta = QHBoxLayout()
-        meta.addWidget(QLabel(f"<b>Modulo:</b> {module_name}"))
-        meta.addSpacing(24)
+        # --- metadata card ---
+        self._meta_card = QFrame()
+        self._meta_card.setObjectName("meta_card")
+        meta_layout = QHBoxLayout(self._meta_card)
+        meta_layout.setContentsMargins(12, 8, 12, 8)
+        meta_layout.addWidget(QLabel(f"<b>Modulo:</b> {module_name}"))
+        meta_layout.addSpacing(24)
         self._lbl_pid    = QLabel(f"PID: {pid}")
         self._lbl_status = QLabel(f"Stato: {status}")
-        meta.addWidget(self._lbl_pid)
-        meta.addSpacing(12)
-        meta.addWidget(self._lbl_status)
-        meta.addStretch()
+        meta_layout.addWidget(self._lbl_pid)
+        meta_layout.addSpacing(12)
+        meta_layout.addWidget(self._lbl_status)
+        meta_layout.addStretch()
 
-        btn_refresh = QPushButton("↻ Ricarica")
-        btn_refresh.setFixedWidth(90)
-        btn_refresh.clicked.connect(self._on_refresh)
-        meta.addWidget(btn_refresh)
-        root.addLayout(meta)
-
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFrameShadow(QFrame.Shadow.Sunken)
-        root.addWidget(line)
+        self._btn_refresh = QPushButton("↻ Ricarica")
+        self._btn_refresh.setFixedWidth(90)
+        self._btn_refresh.clicked.connect(self._on_refresh)
+        meta_layout.addWidget(self._btn_refresh)
+        root.addWidget(self._meta_card)
 
         # --- scrollable form ---
         scroll = QScrollArea()
@@ -143,6 +141,24 @@ class ModuleConfigTab(QWidget):
         self._error_banner.setWordWrap(True)
         self._error_banner.setVisible(False)
         root.addWidget(self._error_banner)
+
+    def scale_layouts(self, df: float) -> None:
+        """Scale internal layout margins and widget minimum heights with DPI factor."""
+        self.layout().setContentsMargins(int(12 * df), int(12 * df), int(12 * df), int(12 * df))
+        self.layout().setSpacing(int(8 * df))
+        if hasattr(self, "_meta_card") and self._meta_card.layout():
+            self._meta_card.layout().setContentsMargins(int(12 * df), int(8 * df), int(12 * df), int(8 * df))
+        if hasattr(self, "_btn_save"):
+            self._btn_save.setMinimumHeight(int(36 * df))
+        if hasattr(self, "_btn_refresh"):
+            self._btn_refresh.setFixedWidth(int(90 * df))
+            
+        for fw in self._fields.values():
+            if hasattr(fw, "scale_layouts"):
+                fw.scale_layouts(df)
+        for editor in self._struct_editors.values():
+            if hasattr(editor, "scale_layouts"):
+                editor.scale_layouts(df)
 
     # ------------------------------------------------------------------
     # Public API

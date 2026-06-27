@@ -11,27 +11,26 @@
 
 ## Colour Palette
 
-| Token | Hex | OKLCH | Role |
-|---|---|---|---|
-| `--color-bg` | `#141414` | `oklch(0.10 0.00 0)` | Main surface — ui_shell background |
-| `--color-surface` | `#1c1c1c` | `oklch(0.13 0.00 0)` | Widget backgrounds (navbar, panels) |
-| `--color-surface-2` | `#242424` | `oklch(0.16 0.00 0)` | Elevated cards, active states |
-| `--color-divider` | `#2e2e2e` | `oklch(0.20 0.00 0)` | Separator lines |
-| `--color-border` | `rgba(255,255,255,0.06)` | — | Subtle widget edges |
-| `--color-text` | `#f0ece4` | `oklch(0.93 0.01 80)` | Primary text — warm white |
-| `--color-text-muted` | `#8a8680` | `oklch(0.57 0.01 80)` | Secondary labels, metadata |
-| `--color-text-faint` | `#4a4844` | `oklch(0.33 0.01 80)` | Inactive / disabled |
-| `--color-accent` | `#c8b89a` | `oklch(0.77 0.04 80)` | Warm sand — active icons, clock, CTAs |
-| `--color-accent-dim` | `rgba(200,184,154,0.15)` | — | Accent highlight backgrounds |
-| `--color-danger` | `#c0392b` | `oklch(0.46 0.18 27)` | Errors, critical alerts |
-| `--color-success` | `#4a7c59` | `oklch(0.50 0.08 155)` | Connected, OK states |
+| Token | Hex | Role |
+|---|---|---|
+| `--color-bg` | `#e0e0e0` | Main surface — ui_shell background |
+| `--color-surface` | `#f5f5f5` | Widget backgrounds (navbar, panels) |
+| `--color-surface-2` | `#ffffff` | Elevated cards, list views, text areas |
+| `--color-divider` | `#cccccc` | Separator lines |
+| `--color-border` | `rgba(0, 0, 0, 0.12)` | Subtle widget edges (12% black) |
+| `--color-text` | `#121212` | Primary text — dark charcoal / black |
+| `--color-text-muted` | `#5f6368` | Secondary labels, metadata |
+| `--color-text-faint` | `#9aa0a6` | Inactive / disabled |
+| `--color-accent` | `#1976d2` | Material Blue — active icons, clock, CTAs |
+| `--color-accent-dim` | `rgba(25, 118, 210, 0.12)` | Accent highlight backgrounds |
+| `--color-danger` | `#d32f2f` | Errors, critical alerts |
+| `--color-success` | `#388e3c` | Connected, OK states |
 
 ### Usage rules
 
-- **No pure white** (`#ffffff`) anywhere — always warm white (`--color-text`).
-- **No pure black** — background is `#141414`, not `#000000`.
-- **Accent sparingly**: clock, active icon, single CTA per screen. Never more than one accent element per viewport.
-- **No blue, purple, or gradient accents** — warm sand only.
+- **Contrast priority**: Ensure strong legibility (black or dark gray text/glyphs on light-gray or white backgrounds).
+- **Branding accent**: Use Material Blue (`#1976d2`) sparingly for active selections, highlight backgrounds, or primary call-to-actions.
+- **Elevation via Card containers**: Use `#ffffff` cards on top of `#f5f5f5` panel surfaces or `#e0e0e0` shell backgrounds to give depth.
 
 ---
 

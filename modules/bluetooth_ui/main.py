@@ -90,15 +90,17 @@ log = get_logger(MODULE_NAME, bus=bus)
 # Design system tokens (UI_DESIGN_SYSTEM.md)
 # ---------------------------------------------------------------------------
 # Colors applied in Qt stylesheet below
-_COLOR_BG        = "#141414"   # --color-bg
-_COLOR_SURFACE   = "#1c1c1c"   # --color-surface
-_COLOR_SURFACE_2 = "#242424"   # --color-surface-2
-_COLOR_BORDER    = "rgba(255,255,255,0.06)"  # --color-border
-_COLOR_TEXT      = "#f0ece4"   # --color-text
-_COLOR_TEXT_MUTED = "#8a8680"  # --color-text-muted
-_COLOR_ACCENT    = "#c8b89a"   # --color-accent
-_COLOR_DANGER    = "#c0392b"   # --color-danger
-_COLOR_SUCCESS   = "#4a7c59"   # --color-success
+_COLOR_BG         = "#e0e0e0"   # --color-bg
+_COLOR_SURFACE    = "#f5f5f5"   # --color-surface
+_COLOR_SURFACE_2  = "#e9e9e9"   # --color-surface-2
+_COLOR_CARD_BG    = "#ffffff"   # White elevated card background
+_COLOR_BORDER     = "rgba(0,0,0,0.12)"  # --color-border
+_COLOR_TEXT       = "#121212"   # --color-text
+_COLOR_TEXT_MUTED = "#5f6368"  # --color-text-muted
+_COLOR_ACCENT     = "#1976d2"   # --color-accent
+_COLOR_DANGER     = "#d32f2f"   # --color-danger
+_COLOR_SUCCESS    = "#388e3c"   # --color-success
+_dpi_factor: float = 1.0
 
 # ---------------------------------------------------------------------------
 # Main window
@@ -154,6 +156,7 @@ class BluetoothPairingWindow(QMainWindow):
             )
         else:
             self._shm_engine.resize(w, h)
+        self._apply_design_tokens()
         self.render_to_shm()
 
     @pyqtSlot(bool)
@@ -188,35 +191,193 @@ class BluetoothPairingWindow(QMainWindow):
     # ── Design tokens ─────────────────────────────────────────────────────
 
     def _apply_design_tokens(self) -> None:
-        """Apply DM Sans typography and design-system color palette."""
+        """Apply DM Sans typography and design-system color palette with dynamic DPI scaling."""
+        df = _dpi_factor
+        font_size = int(14 * df)
+        font_size_small = int(11 * df)
+        btn_radius = int(20 * df)
+        card_radius = int(16 * df)
+        input_radius = int(8 * df)
+        btn_padding = f"{int(6 * df)}px {int(12 * df)}px"
+
+        # Scrollbar tokens
+        scrollbar_w = int(12 * df)
+        scrollbar_r = int(6 * df)
+        scrollbar_h_min = int(24 * df)
+
+        # Checkbox tokens
+        indicator_sz = int(24 * df)
+        indicator_r = int(4 * df)
+        checkbox_spacing = int(8 * df)
+
+        # ComboBox tokens
+        combo_arrow_w = int(24 * df)
+        arrow_size = int(5 * df)
+        arrow_size_h = int(7 * df)
+        arrow_margin = int(8 * df)
+        item_h = int(32 * df)
+        
         self.setStyleSheet(f"""
             QMainWindow, QWidget {{
                 font-family: 'DM Sans', sans-serif;
-                font-size: 14px;
+                font-size: {font_size}px;
                 background-color: {_COLOR_SURFACE};
                 color: {_COLOR_TEXT};
+            }}
+            QFrame#discovery_card, QFrame#paired_card {{
+                background-color: {_COLOR_CARD_BG};
+                border: 1px solid {_COLOR_BORDER};
+                border-radius: {card_radius}px;
+            }}
+            QFrame#discovery_card QLabel, QFrame#paired_card QLabel {{
+                background-color: transparent;
             }}
             QPushButton {{
                 background-color: {_COLOR_SURFACE_2};
                 color: {_COLOR_TEXT};
                 border: 1px solid {_COLOR_BORDER};
-                border-radius: 8px;
-                padding: 6px 12px;
+                border-radius: {btn_radius}px;
+                padding: {btn_padding};
                 font-family: 'DM Sans', sans-serif;
             }}
             QPushButton:hover {{
                 background-color: {_COLOR_ACCENT};
-                color: {_COLOR_BG};
+                color: #ffffff;
             }}
             QPushButton:disabled {{
                 color: {_COLOR_TEXT_MUTED};
+                background-color: rgba(0,0,0,0.02);
+            }}
+            QPushButton[class="filled"] {{
+                background-color: {_COLOR_ACCENT};
+                color: #ffffff;
+                border: none;
+            }}
+            QPushButton[class="filled"]:hover {{
+                background-color: #1565c0;
+            }}
+            QPushButton[class="outlined"] {{
+                background-color: transparent;
+                color: {_COLOR_TEXT};
+                border: 1px solid rgba(0, 0, 0, 0.12);
+            }}
+            QPushButton[class="outlined"]:hover {{
+                background-color: rgba(0, 0, 0, 0.06);
             }}
             QListWidget {{
                 background-color: {_COLOR_BG};
                 border: 1px solid {_COLOR_BORDER};
-                border-radius: 8px;
+                border-radius: {input_radius}px;
                 color: {_COLOR_TEXT};
                 font-family: 'DM Sans', sans-serif;
+                padding: {int(4 * df)}px;
+            }}
+            QLineEdit, QComboBox {{
+                background-color: {_COLOR_BG};
+                border: 1px solid {_COLOR_BORDER};
+                border-radius: {input_radius}px;
+                color: {_COLOR_TEXT};
+                padding: {int(6 * df)}px {int(12 * df)}px;
+                min-height: {int(32 * df)}px;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: {combo_arrow_w}px;
+                border-left: none;
+            }}
+            QComboBox::down-arrow {{
+                width: 0;
+                height: 0;
+                border-left: {arrow_size}px solid transparent;
+                border-right: {arrow_size}px solid transparent;
+                border-top: {arrow_size_h}px solid {_COLOR_ACCENT};
+                margin-right: {arrow_margin}px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {_COLOR_SURFACE};
+                border: 1px solid {_COLOR_BORDER};
+                border-radius: {input_radius}px;
+                selection-background-color: {_COLOR_ACCENT};
+                selection-color: #ffffff;
+                padding: {int(4 * df)}px;
+            }}
+            QComboBox QAbstractItemView::item {{
+                min-height: {item_h}px;
+                padding: {int(4 * df)}px;
+            }}
+            QCheckBox {{
+                spacing: {checkbox_spacing}px;
+                background: transparent;
+                min-height: {int(36 * df)}px;
+            }}
+            QCheckBox::indicator {{
+                width: {indicator_sz}px;
+                height: {indicator_sz}px;
+                border: 1px solid rgba(0, 0, 0, 0.2);
+                border-radius: {indicator_r}px;
+                background-color: {_COLOR_BG};
+            }}
+            QCheckBox::indicator:hover {{
+                border-color: {_COLOR_ACCENT};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {_COLOR_ACCENT};
+                border-color: {_COLOR_ACCENT};
+            }}
+            QScrollBar:vertical {{
+                border: none;
+                background: transparent;
+                width: {scrollbar_w}px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #b0b0b0;
+                border-radius: {scrollbar_r}px;
+                min-height: {scrollbar_h_min}px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {_COLOR_ACCENT};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                border: none;
+                background: none;
+                height: 0px;
+            }}
+            QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical {{
+                border: none;
+                background: none;
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+            QScrollBar:horizontal {{
+                border: none;
+                background: transparent;
+                height: {scrollbar_w}px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: #b0b0b0;
+                border-radius: {scrollbar_r}px;
+                min-width: {scrollbar_h_min}px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: {_COLOR_ACCENT};
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                border: none;
+                background: none;
+                width: 0px;
+            }}
+            QScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal {{
+                border: none;
+                background: none;
+                width: 0px;
+            }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background: none;
             }}
             QLabel {{
                 color: {_COLOR_TEXT_MUTED};
@@ -228,6 +389,53 @@ class BluetoothPairingWindow(QMainWindow):
             }}
         """)
 
+        # Scale layouts and sizes dynamically
+        if self.centralWidget() and self.centralWidget().layout():
+            layout = self.centralWidget().layout()
+            layout.setContentsMargins(int(12 * df), int(12 * df), int(12 * df), int(12 * df))
+            layout.setSpacing(int(8 * df))
+            
+        if hasattr(self, "_discovery_layout"):
+            self._discovery_layout.setContentsMargins(int(16 * df), int(16 * df), int(16 * df), int(16 * df))
+            self._discovery_layout.setSpacing(int(12 * df))
+            
+        if hasattr(self, "_paired_layout"):
+            self._paired_layout.setContentsMargins(int(16 * df), int(16 * df), int(16 * df), int(16 * df))
+            self._paired_layout.setSpacing(int(12 * df))
+            
+        if hasattr(self, "_btn_scan"):
+            self._btn_scan.setMinimumHeight(int(40 * df))
+        if hasattr(self, "_btn_pair"):
+            self._btn_pair.setMinimumHeight(int(40 * df))
+        if hasattr(self, "_btn_refresh_paired"):
+            self._btn_refresh_paired.setMinimumHeight(int(32 * df))
+        if hasattr(self, "_btn_autoconnect"):
+            self._btn_autoconnect.setMinimumHeight(int(32 * df))
+        if hasattr(self, "_btn_connect_paired"):
+            self._btn_connect_paired.setMinimumHeight(int(36 * df))
+        if hasattr(self, "_btn_disconnect_paired"):
+            self._btn_disconnect_paired.setMinimumHeight(int(36 * df))
+        if hasattr(self, "_btn_remove_paired"):
+            self._btn_remove_paired.setMinimumHeight(int(36 * df))
+            
+        if hasattr(self, "_pin_panel"):
+            self._pin_panel.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {_COLOR_SURFACE_2};
+                    border: 1px solid {_COLOR_ACCENT};
+                    border-radius: {int(8 * df)}px;
+                }}
+            """)
+        if hasattr(self, "_lbl_pin_title"):
+            self._lbl_pin_title.setStyleSheet(
+                f"color: {_COLOR_ACCENT}; font-size: {int(14 * df)}px; background: transparent;"
+            )
+        if hasattr(self, "_pin_layout"):
+            self._pin_layout.setContentsMargins(int(12 * df), int(12 * df), int(12 * df), int(12 * df))
+            self._pin_layout.setSpacing(int(8 * df))
+        if hasattr(self, "_pin_btn_layout"):
+            self._pin_btn_layout.setSpacing(int(6 * df))
+
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -235,65 +443,82 @@ class BluetoothPairingWindow(QMainWindow):
         root.setSpacing(8)
         root.setContentsMargins(12, 12, 12, 12)
 
-        # ── Discovery / Pairing section ──────────────────────────────────
+        # ── Discovery Card ──
+        self._discovery_card = QFrame()
+        self._discovery_card.setObjectName("discovery_card")
+        self._discovery_layout = QVBoxLayout(self._discovery_card)
+        self._discovery_layout.setContentsMargins(16, 16, 16, 16)
+        self._discovery_layout.setSpacing(12)
+
         top = QHBoxLayout()
         self._btn_scan = QPushButton("🔍  Avvia Ricerca (10s)")
+        self._btn_scan.setProperty("class", "filled")
         self._btn_scan.setMinimumHeight(40)
         self._btn_scan.clicked.connect(self._on_scan_clicked)
 
         self._btn_pair = QPushButton("🔗  Pair dispositivo")
+        self._btn_pair.setProperty("class", "outlined")
         self._btn_pair.setMinimumHeight(40)
         self._btn_pair.setEnabled(False)
         self._btn_pair.clicked.connect(self._on_pair_clicked)
 
         top.addWidget(self._btn_scan, stretch=2)
         top.addWidget(self._btn_pair, stretch=1)
-        root.addLayout(top)
+        self._discovery_layout.addLayout(top)
 
-        root.addWidget(QLabel("Dispositivi trovati:"))
+        lbl_found = QLabel("Dispositivi trovati:")
+        self._discovery_layout.addWidget(lbl_found)
         self._device_list = QListWidget()
         self._device_list.itemSelectionChanged.connect(self._on_selection_changed)
-        root.addWidget(self._device_list, stretch=1)
+        self._discovery_layout.addWidget(self._device_list, stretch=1)
 
-        # ── Separator ────────────────────────────────────────────────────
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setFrameShadow(QFrame.Shadow.Sunken)
-        root.addWidget(sep)
+        root.addWidget(self._discovery_card, stretch=1)
 
-        # ── Paired devices section ───────────────────────────────────────
+        # ── Paired Card ──
+        self._paired_card = QFrame()
+        self._paired_card.setObjectName("paired_card")
+        self._paired_layout = QVBoxLayout(self._paired_card)
+        self._paired_layout.setContentsMargins(16, 16, 16, 16)
+        self._paired_layout.setSpacing(12)
+
         paired_header = QHBoxLayout()
-        paired_header.addWidget(QLabel("Dispositivi accoppiati:"))
+        lbl_paired = QLabel("Dispositivi accoppiati:")
+        paired_header.addWidget(lbl_paired)
         paired_header.addStretch()
 
         self._btn_refresh_paired = QPushButton("🔄  Aggiorna")
+        self._btn_refresh_paired.setProperty("class", "outlined")
         self._btn_refresh_paired.setMinimumHeight(32)
         self._btn_refresh_paired.clicked.connect(self._on_refresh_paired_clicked)
         paired_header.addWidget(self._btn_refresh_paired)
 
         self._btn_autoconnect = QPushButton("⚡  Riavvia Autoconnect")
+        self._btn_autoconnect.setProperty("class", "outlined")
         self._btn_autoconnect.setMinimumHeight(32)
         self._btn_autoconnect.clicked.connect(self._on_autoconnect_clicked)
         paired_header.addWidget(self._btn_autoconnect)
 
-        root.addLayout(paired_header)
+        self._paired_layout.addLayout(paired_header)
 
         self._paired_list = QListWidget()
         self._paired_list.itemSelectionChanged.connect(self._on_paired_selection_changed)
-        root.addWidget(self._paired_list, stretch=1)
+        self._paired_layout.addWidget(self._paired_list, stretch=1)
 
         paired_actions = QHBoxLayout()
         self._btn_connect_paired = QPushButton("🔌  Connetti")
+        self._btn_connect_paired.setProperty("class", "filled")
         self._btn_connect_paired.setMinimumHeight(36)
         self._btn_connect_paired.setEnabled(False)
         self._btn_connect_paired.clicked.connect(self._on_connect_paired_clicked)
 
         self._btn_disconnect_paired = QPushButton("⛔  Disconnetti")
+        self._btn_disconnect_paired.setProperty("class", "outlined")
         self._btn_disconnect_paired.setMinimumHeight(36)
         self._btn_disconnect_paired.setEnabled(False)
         self._btn_disconnect_paired.clicked.connect(self._on_disconnect_paired_clicked)
 
         self._btn_remove_paired = QPushButton("🗑  Rimuovi")
+        self._btn_remove_paired.setProperty("class", "outlined")
         self._btn_remove_paired.setMinimumHeight(36)
         self._btn_remove_paired.setEnabled(False)
         self._btn_remove_paired.clicked.connect(self._on_remove_paired_clicked)
@@ -301,7 +526,9 @@ class BluetoothPairingWindow(QMainWindow):
         paired_actions.addWidget(self._btn_connect_paired)
         paired_actions.addWidget(self._btn_disconnect_paired)
         paired_actions.addWidget(self._btn_remove_paired)
-        root.addLayout(paired_actions)
+        self._paired_layout.addLayout(paired_actions)
+
+        root.addWidget(self._paired_card, stretch=1)
 
         # ── Inline PIN confirmation panel ──
         self._pin_panel = QFrame()
@@ -313,29 +540,32 @@ class BluetoothPairingWindow(QMainWindow):
                 border-radius: 8px;
             }}
         """)
-        pin_layout = QVBoxLayout(self._pin_panel)
+        self._pin_layout = QVBoxLayout(self._pin_panel)
         self._lbl_pin_title = QLabel("<b>Conferma PIN Bluetooth</b>")
-        self._lbl_pin_title.setStyleSheet(f"color: {_COLOR_ACCENT}; font-size: 14px;")
+        self._lbl_pin_title.setStyleSheet(f"color: {_COLOR_ACCENT}; font-size: 14px; background: transparent;")
         self._lbl_pin_dev = QLabel("Dispositivo: ")
+        self._lbl_pin_dev.setStyleSheet("background: transparent;")
         self._lbl_pin_val = QLabel("PIN: ")
+        self._lbl_pin_val.setStyleSheet("background: transparent;")
         
-        btn_layout = QHBoxLayout()
+        self._pin_btn_layout = QHBoxLayout()
         self._btn_pin_ok = QPushButton("Conferma")
+        self._btn_pin_ok.setProperty("class", "filled")
         self._btn_pin_ok.clicked.connect(self._on_pin_ok_clicked)
         self._btn_pin_cancel = QPushButton("Annulla")
+        self._btn_pin_cancel.setProperty("class", "outlined")
         self._btn_pin_cancel.clicked.connect(self._on_pin_cancel_clicked)
-        btn_layout.addWidget(self._btn_pin_ok)
-        btn_layout.addWidget(self._btn_pin_cancel)
+        self._pin_btn_layout.addWidget(self._btn_pin_ok)
+        self._pin_btn_layout.addWidget(self._btn_pin_cancel)
         
-        pin_layout.addWidget(self._lbl_pin_title)
-        pin_layout.addWidget(self._lbl_pin_dev)
-        pin_layout.addWidget(self._lbl_pin_val)
-        pin_layout.addLayout(btn_layout)
+        self._pin_layout.addWidget(self._lbl_pin_title)
+        self._pin_layout.addWidget(self._lbl_pin_dev)
+        self._pin_layout.addWidget(self._lbl_pin_val)
+        self._pin_layout.addLayout(self._pin_btn_layout)
         
         self._pin_panel.hide()
         root.addWidget(self._pin_panel)
 
-        # ── Status bar ───────────────────────────────────────────────────
         self._status = QStatusBar()
         self.setStatusBar(self._status)
         self._status.showMessage("In attesa di system.start…")
@@ -595,10 +825,14 @@ def on_ui_shell_ready(topic: str, payload: dict) -> None:
 
 def on_widget_geometry(topic: str, payload: dict) -> None:
     """Called from bus thread — must NOT touch Qt directly."""
+    global _dpi_factor
     if payload.get("name") != MODULE_NAME:
         return
+    df = float(payload.get("dpi_factor", 1.0))
+    if df > 0:
+        _dpi_factor = df
     x, y, w, h = int(payload["x"]), int(payload["y"]), int(payload["w"]), int(payload["h"])
-    log.info(f"Geometry received: x={x} y={y} w={w} h={h}")
+    log.info(f"Geometry received: x={x} y={y} w={w} h={h} dpi={df}")
     with _pending_geometry_lock:
         global _pending_geometry  # noqa: PLW0603
         _pending_geometry = (x, y, w, h)
@@ -627,7 +861,6 @@ def on_module_close(topic: str, payload: dict) -> None:
 
 
 def on_input_event(topic: str, payload: dict) -> None:
-    log.info(f"input.event.{MODULE_NAME} received: {payload}")
     if _window is None:
         return
     _invoke("handle_input", payload)

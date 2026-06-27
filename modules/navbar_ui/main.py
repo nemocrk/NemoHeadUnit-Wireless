@@ -96,6 +96,8 @@ _config: dict = {k: v.default for k, v in _SCHEMA.items()}
 _media_state: str   = "stopped"   # stopped | playing | paused
 _bt_connected: bool = False
 _bt_device: str     = ""
+_active_module: Optional[str] = None
+_dpi_factor: float = 1.0
 
 # ---------------------------------------------------------------------------
 # PyQt6 window — set after Qt starts
@@ -127,9 +129,9 @@ def _register() -> None:
         "width":         None,
         "min_width":     None,
         "max_width":     None,
-        "height":        _config.get("height",     60),
-        "min_height":    _config.get("min_height", 48),
-        "max_height":    _config.get("max_height", 80),
+        "height":        int(_config.get("height",     60) * _dpi_factor),
+        "min_height":    int(_config.get("min_height", 48) * _dpi_factor),
+        "max_height":    int(_config.get("max_height", 80) * _dpi_factor),
         "aspect_ratio":  None,
         "on_request":    False,
         "menu_order":    99,
@@ -151,11 +153,15 @@ def on_ui_shell_ready(topic: str, payload: dict) -> None:
 
 def on_widget_geometry(topic: str, payload: dict) -> None:
     """Called from the bus thread — must NOT touch Qt objects directly."""
-    global _geometry_set
+    global _geometry_set, _dpi_factor
     if payload.get("name") != MODULE_NAME:
         return
+    df = float(payload.get("dpi_factor", 1.0))
+    old_df = _dpi_factor
+    if df > 0:
+        _dpi_factor = df
     x, y, w, h = int(payload["x"]), int(payload["y"]), int(payload["w"]), int(payload["h"])
-    log.info(f"Geometry received: x={x} y={y} w={w} h={h}")
+    log.info(f"Geometry received: x={x} y={y} w={w} h={h} dpi={df}")
     _geometry_set = True
 
     if _qt_window is not None:
@@ -167,6 +173,9 @@ def on_widget_geometry(topic: str, payload: dict) -> None:
             global _pending_geometry  # noqa: PLW0603
             _pending_geometry = (x, y, w, h)
             log.debug("Geometry queued (Qt not ready yet)")
+            
+    if old_df != _dpi_factor and _shell_ready:
+        _register()
 
 
 def _qt_invoke_geometry(x: int, y: int, w: int, h: int) -> None:
@@ -195,7 +204,6 @@ def _invoke(obj, slot: str, *args):
 
 
 def on_input_event(topic: str, payload: dict) -> None:
-    log.info(f"input.event.{MODULE_NAME} received: {payload}")
     if _qt_window is None:
         return
     _invoke(_qt_window, "handle_input", payload)
@@ -214,6 +222,21 @@ def on_bt_state(topic: str, payload: dict) -> None:
     _bt_device    = payload.get("device_name", "")
     if _qt_window is not None:
         _invoke(_qt_window, "set_bt_state", _bt_connected, _bt_device)
+
+
+def on_module_open(topic: str, payload: dict) -> None:
+    global _active_module
+    _active_module = payload.get("name")
+    if _qt_window is not None:
+        _invoke(_qt_window, "set_active_module", _active_module or "")
+
+
+def on_module_close(topic: str, payload: dict) -> None:
+    global _active_module
+    if _active_module == payload.get("name"):
+        _active_module = None
+    if _qt_window is not None:
+        _invoke(_qt_window, "set_active_module", _active_module or "")
 
 
 # ---------------------------------------------------------------------------
@@ -246,10 +269,10 @@ def _run_qt() -> None:
     # ------------------------------------------------------------------
     # Design tokens
     # ------------------------------------------------------------------
-    BG_COLOR    = QColor(28, 28, 28, 245)
-    TEXT_COLOR  = QColor(240, 236, 228)
-    ACCENT      = QColor(200, 184, 154)
-    BT_OFF_CLR  = QColor(255, 255, 255, 60)
+    BG_COLOR    = QColor(245, 245, 245, 245)
+    TEXT_COLOR  = QColor(18, 18, 18)
+    ACCENT      = QColor(25, 118, 210)
+    BT_OFF_CLR  = QColor(0, 0, 0, 60)
 
     FONT_BODY = QFont("DM Sans", -1)
     FONT_BODY.setPixelSize(14)
@@ -289,6 +312,7 @@ def _run_qt() -> None:
             self._media_state  = "stopped"
             self._bt_connected = False
             self._bt_device    = ""
+            self._active_module = None
             self._pressed_btn: Optional[str] = None
             self._buttons: dict[str, tuple]  = {}
             self._bar_w = 1024
@@ -355,6 +379,11 @@ def _run_qt() -> None:
             self._bt_device    = device
             self.render_to_shm()
 
+        @pyqtSlot(str)
+        def set_active_module(self, name: str) -> None:
+            self._active_module = name if name else None
+            self.render_to_shm()
+
         @pyqtSlot(dict)
         def handle_input(self, payload: dict) -> None:
             from shared.shm_helper import inject_input_event
@@ -375,10 +404,16 @@ def _run_qt() -> None:
 
         def _layout_buttons(self) -> dict[str, tuple]:
             w, h  = self._bar_w, self._bar_h
-            # Touch target: hard floor of 44px per UI_DESIGN_SYSTEM.md §Navbar
-            bsize = max(44, min(h - 8, 44))
-            pad   = 24  # Navbar padding: 0 24px (UI_DESIGN_SYSTEM.md)
-            gap   = 8
+            df    = _dpi_factor
+            
+            # Scale touch target and spacing with dpi_factor
+            bsize = int(44 * df)
+            pad   = int(24 * df)
+            gap   = int(8 * df)
+            
+            # Ensure buttons fit within navbar height
+            if bsize > h:
+                bsize = h
             yo    = (h - bsize) // 2
 
             buttons: dict[str, tuple] = {}
@@ -421,7 +456,7 @@ def _run_qt() -> None:
             self._buttons = self._layout_buttons()
 
             p.fillRect(0, 0, w, h, BG_COLOR)
-            p.setPen(QColor(255, 255, 255, 18))
+            p.setPen(QColor(0, 0, 0, 30))
             p.drawLine(0, 0, w, 0)
 
             self._draw_bt_dot(p)
@@ -433,22 +468,48 @@ def _run_qt() -> None:
                 "next":      ICON_NEXT,
                 "settings":  ICON_SETTINGS,
             }
-            p.setFont(FONT_ICON)
+            
+            # Scale font size dynamically with dpi_factor
+            scaled_font = QFont("DM Sans", -1)
+            scaled_font.setPixelSize(int(18 * _dpi_factor))
+            p.setFont(scaled_font)
+ 
             for name, icon in icons.items():
                 bx, by, bw, bh = self._buttons.get(name, (0, 0, 0, 0))
                 if bw == 0:
                     continue
-                is_pressed = self._pressed_btn == name
-                bg = QColor(255, 255, 255, 30 if is_pressed else 12)
-                p.fillRect(bx, by, bw, bh, bg)
-                p.setPen(ACCENT if is_pressed else TEXT_COLOR)
+ 
+                is_pressed = (self._pressed_btn == name)
+                is_active = False
+                if name == "settings" and self._active_module == "config_ui":
+                    is_active = True
+                elif name == "home" and self._active_module is None:
+                    is_active = True
+ 
+                if is_active:
+                    bg = ACCENT
+                    fg = QColor(255, 255, 255)  # White text/icon on blue circle
+                elif is_pressed:
+                    bg = QColor(0, 0, 0, 30)
+                    fg = TEXT_COLOR
+                else:
+                    bg = QColor(0, 0, 0, 10)
+                    fg = TEXT_COLOR
+ 
+                # Render fully circular MD3 button
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(bg)
+                p.drawEllipse(bx, by, bw, bh)
+
+                p.setPen(fg)
                 p.drawText(bx, by, bw, bh,
                            Qt.AlignmentFlag.AlignCenter, icon)
 
         def _draw_bt_dot(self, p: "QPainter") -> None:
             settings_x = self._buttons.get("settings", (0, 0, 0, 0))[0]
-            dot_r  = 4
-            dot_x  = settings_x - 16 - dot_r
+            df = _dpi_factor
+            dot_r  = int(4 * df)
+            dot_x  = settings_x - int(16 * df) - dot_r
             dot_y  = self._bar_h // 2
             color  = ACCENT if self._bt_connected else BT_OFF_CLR
             p.setPen(Qt.PenStyle.NoPen)
@@ -463,6 +524,7 @@ def _run_qt() -> None:
     _qt_window._media_state  = _media_state
     _qt_window._bt_connected = _bt_connected
     _qt_window._bt_device    = _bt_device
+    _qt_window._active_module = _active_module
 
     # Apply any geometry that arrived before this thread was ready.
     def _apply_pending() -> None:
@@ -511,6 +573,8 @@ def _on_config_changed(key: str, value) -> None:
     log.info(f"Config changed: {key} = {value!r}")
     if _shell_ready:
         _register()
+    if _qt_window is not None:
+        _invoke(_qt_window, "render_to_shm")
 
 
 # ---------------------------------------------------------------------------
@@ -573,6 +637,8 @@ def run() -> None:
     bus.subscribe(f"input.event.{MODULE_NAME}", on_input_event)
     bus.subscribe("media.state",                on_media_state)
     bus.subscribe("bt.state",                   on_bt_state)
+    bus.subscribe("ui.module.open",             on_module_open)
+    bus.subscribe("ui.module.close",            on_module_close)
     bus.subscribe(f"ui.widget.frame_ack.{MODULE_NAME}", on_widget_frame_ack)
 
     log.info("navbar_ui started, waiting for messages...")

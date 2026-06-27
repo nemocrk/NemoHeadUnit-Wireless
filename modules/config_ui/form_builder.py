@@ -68,6 +68,7 @@ class _FormWidget(QWidget):
     def __init__(self, parent: "QWidget | None" = None):
         super().__init__(parent)
         self._sub: dict[str, QWidget] = {}
+        self._labels: dict[str, tuple[QLabel, str, bool]] = {}
         layout = QFormLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setVerticalSpacing(6)
@@ -93,6 +94,7 @@ class _FormWidget(QWidget):
             widget.setToolTip(description)
         self._form_layout.addRow(lbl, widget)
         self._sub[key] = widget
+        self._labels[key] = (lbl, label, optional)
 
     def get_value(self) -> dict:
         result = {}
@@ -101,6 +103,18 @@ class _FormWidget(QWidget):
             if val is not None:          # None = optional field not active, omit
                 result[k] = val
         return result
+
+    def scale_layouts(self, df: float) -> None:
+        if self.layout():
+            self.layout().setContentsMargins(0, 0, 0, 0)
+            self.layout().setVerticalSpacing(int(6 * df))
+            self.layout().setHorizontalSpacing(int(10 * df))
+        for key, (lbl, label, optional) in self._labels.items():
+            if optional:
+                lbl.setText(f"{label} <span style='color:#666; font-size:{int(10 * df)}px'>(opz.)</span>")
+        for w in self._sub.values():
+            if hasattr(w, "scale_layouts"):
+                w.scale_layouts(df)
 
 
 # ---------------------------------------------------------------------------

@@ -211,3 +211,5 @@ deploy.*
 tests/reports/
 
 .agents/
+
+config/

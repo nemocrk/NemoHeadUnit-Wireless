@@ -124,7 +124,7 @@ from PyQt6.QtGui import QFont, QImage, QPixmap, QPainter               # noqa: E
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget                        # noqa: E402
 from PyQt6.QtWidgets import (                                           # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout,
-    QLabel, QSizePolicy, QStackedWidget,
+    QLabel, QSizePolicy, QStackedWidget, QFrame,
 )
 
 from shared.bus_client import BusClient   # noqa: E402
@@ -152,6 +152,8 @@ PRIORITY    = 4
 bus = BusClient(module_name=MODULE_NAME)
 log = get_logger(MODULE_NAME, bus=bus)
 
+_dpi_factor: float = 1.0
+
 # ---------------------------------------------------------------------------
 # Connection state constants
 # ---------------------------------------------------------------------------
@@ -162,10 +164,10 @@ _STATE_STREAMING    = "STREAMING"
 _STATE_INTERRUPTED  = "INTERRUPTED"
 
 _STATE_LABELS = {
-    _STATE_WAITING_BT:  ("#c0392b", "●  In attesa di connessione BT"),
-    _STATE_HANDSHAKE:   ("#c8b89a", "●  Handshake AA in corso"),
-    _STATE_STREAMING:   ("#4a7c59", "●  Stream attivo"),
-    _STATE_INTERRUPTED: ("#c0392b", "●  Stream interrotto"),
+    _STATE_WAITING_BT:  ("#d32f2f", "●  In attesa di connessione BT"),
+    _STATE_HANDSHAKE:   ("#b26a00", "●  Handshake AA in corso"),
+    _STATE_STREAMING:   ("#388e3c", "●  Stream attivo"),
+    _STATE_INTERRUPTED: ("#d32f2f", "●  Stream interrotto"),
 }
 
 
@@ -492,31 +494,69 @@ class _PlaceholderWidget(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setStyleSheet("background: #141414;")
+        self.setStyleSheet("background: #e0e0e0;")
 
         root = QVBoxLayout(self)
         root.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.setSpacing(16)
+
+        # Centered Standby Card QFrame
+        self._card = QFrame()
+        self._card.setObjectName("placeholder_card")
+        self._card.setStyleSheet("""
+            QFrame#placeholder_card {
+                background-color: #ffffff;
+                border: 1px solid rgba(0, 0, 0, 0.12);
+                border-radius: 20px;
+            }
+        """)
+        self._card.setMinimumSize(420, 200)
+        self._card.setMaximumSize(500, 240)
+        
+        card_layout = QVBoxLayout(self._card)
+        card_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card_layout.setSpacing(16)
+        card_layout.setContentsMargins(24, 24, 24, 24)
 
         self._clock_label = QLabel("00:00:00")
         font = QFont("DM Sans", 48, QFont.Weight.Light)
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 4.0)
         self._clock_label.setFont(font)
         self._clock_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._clock_label.setStyleSheet("color: #c8b89a;")
-        root.addWidget(self._clock_label)
+        self._clock_label.setStyleSheet("color: #1976d2; background: transparent;")
+        card_layout.addWidget(self._clock_label)
 
         self._state_label = QLabel("●  In attesa di connessione BT")
         self._state_label.setFont(QFont("DM Sans", 13))
         self._state_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._state_label.setStyleSheet("color: #c0392b;")
-        root.addWidget(self._state_label)
+        self._state_label.setStyleSheet("color: #d32f2f; background: transparent;")
+        card_layout.addWidget(self._state_label)
 
+        root.addWidget(self._card)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(1000)
         self._tick()
+
+    def scale_layouts(self, df: float) -> None:
+        """Scale standby card dimensions, layout margins, and typography with DPI factor."""
+        self._card.setMinimumSize(int(420 * df), int(200 * df))
+        self._card.setMaximumSize(int(500 * df), int(240 * df))
+        
+        card_layout = self._card.layout()
+        if card_layout:
+            card_layout.setSpacing(int(16 * df))
+            card_layout.setContentsMargins(int(24 * df), int(24 * df), int(24 * df), int(24 * df))
+        
+        font_clock = QFont("DM Sans", -1, QFont.Weight.Light)
+        font_clock.setPixelSize(int(48 * df))
+        font_clock.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 4.0 * df)
+        self._clock_label.setFont(font_clock)
+        
+        font_state = QFont("DM Sans", -1)
+        font_state.setPixelSize(int(13 * df))
+        self._state_label.setFont(font_state)
 
     def _tick(self) -> None:
         self._clock_label.setText(datetime.now().strftime("%H:%M:%S"))
@@ -525,7 +565,7 @@ class _PlaceholderWidget(QWidget):
 
     @pyqtSlot(str, str)
     def set_conn_state(self, color: str, text: str) -> None:
-        self._state_label.setStyleSheet(f"color: {color};")
+        self._state_label.setStyleSheet(f"color: {color}; background: transparent;")
         self._state_label.setText(text)
         if _window is not None:
             _window.render_to_shm()
@@ -572,6 +612,10 @@ class VideoWidget(QWidget):
         self._stack.addWidget(self._placeholder)   # index 0
 
         self._init_gstreamer()
+
+    def scale_layouts(self, df: float) -> None:
+        """Propagate dynamic DPI scaling to sub-widgets."""
+        self._placeholder.scale_layouts(df)
 
     # ------------------------------------------------------------------
     # GStreamer setup
@@ -808,6 +852,7 @@ class _VideoWindow(QMainWindow):
             )
         else:
             self._shm_engine.resize(w, h)
+        self._video.scale_layouts(_dpi_factor)
         self.render_to_shm()
 
     @pyqtSlot(bool)
@@ -909,11 +954,14 @@ def on_ui_shell_ready(topic: str, payload: dict) -> None:
 
 
 def on_widget_geometry(topic: str, payload: dict) -> None:
-    global _geometry_set
+    global _geometry_set, _dpi_factor
     if payload.get("name") != MODULE_NAME:
         return
+    df = float(payload.get("dpi_factor", 1.0))
+    if df > 0:
+        _dpi_factor = df
     x, y, w, h = int(payload["x"]), int(payload["y"]), int(payload["w"]), int(payload["h"])
-    log.info(f"Geometry received: x={x} y={y} w={w} h={h}")
+    log.info(f"Geometry received: x={x} y={y} w={w} h={h} dpi={df}")
     _geometry_set = True
 
     if _window is not None:

@@ -275,6 +275,7 @@ def on_widget_geometry(topic: str, payload: dict) -> None:
     global _geometry_set, _dpi_factor, _screen_h, _navbar_h
     name = payload.get("name", "")
     df = float(payload.get("dpi_factor", 1.0))
+    old_df = _dpi_factor
     if df > 0:
         _dpi_factor = df
 
@@ -294,6 +295,12 @@ def on_widget_geometry(topic: str, payload: dict) -> None:
                 global _pending_geometry  # noqa: PLW0603
                 _pending_geometry = (x, y, w, h)
                 log.debug("Geometry queued (Qt not ready yet)")
+
+    if old_df != _dpi_factor and _shell_ready:
+        if _menu_visible:
+            _update_geometry(_bounding_w(), _bounding_h())
+        else:
+            _update_geometry(0, 0)
 
 
 def _qt_invoke_geometry(x: int, y: int, w: int, h: int) -> None:
@@ -385,9 +392,16 @@ def _close_active_module() -> None:
 
 
 def _open_module(name: str) -> None:
-    global _active_module
+    global _menu_visible, _active_module
+    _menu_visible  = False
+    if _qt_window is not None:
+        _invoke(_qt_window, "set_visible_slot", False)
+    else:
+        _update_geometry(0, 0)
     if _active_module == name:
         return
+    # Close the previously-active module BEFORE updating _active_module,
+    # so _close_active_module publishes close for the right target.
     _close_active_module()
     _active_module = name
     bus.publish("ui.module.open", {"name": name})
@@ -492,6 +506,7 @@ def _run_qt() -> None:
                     self._shm_engine.cleanup()
                     self._shm_engine = None
 
+        @pyqtSlot()
         def render_to_shm(self) -> None:
             if self._shm_engine is None:
                 return
@@ -601,13 +616,16 @@ def _run_qt() -> None:
                 return
             p = QPainter(self)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.setFont(FONT_ICON)
+            icon_sz = int(float(_config.get("icon_size", 52)) * _dpi_factor)
+            scaled_font = QFont("DM Sans", -1)
+            scaled_font.setPixelSize(int(icon_sz * 0.35))
+            p.setFont(scaled_font)
 
             opacity_val = int(self._opacity * 255)
-            COLOR_ICON_with_opacity = QColor(240, 236, 228, opacity_val)
-            COLOR_ICON_BG_with_opacity = QColor(50, 50, 50, int(0.78 * opacity_val))
-            COLOR_ACTIVE_BG_with_opacity = QColor(240, 236, 228, int(0.94 * opacity_val))
-            COLOR_ACTIVE_ICON_with_opacity = QColor(28, 28, 28, opacity_val)
+            COLOR_ICON_with_opacity = QColor(18, 18, 18, opacity_val)
+            COLOR_ICON_BG_with_opacity = QColor(224, 224, 224, int(0.78 * opacity_val))
+            COLOR_ACTIVE_BG_with_opacity = QColor(25, 118, 210, int(0.94 * opacity_val))
+            COLOR_ACTIVE_ICON_with_opacity = QColor(255, 255, 255, opacity_val)
 
             entries = _sorted_entries()
             vis     = _visible_count()
@@ -635,16 +653,17 @@ def _run_qt() -> None:
                 self._draw_scroll_hint(p, len(entries), vis, opacity_val)
 
         def _draw_scroll_hint(self, p: "QPainter", total: int, vis: int, opacity_val: int) -> None:
-            dot_r   = 3
-            dot_gap = 8
+            df      = _dpi_factor
+            dot_r   = int(3 * df)
+            dot_gap = int(8 * df)
             dots    = min(total, 5)
-            start_x = self.width() - 12
+            start_x = self.width() - int(12 * df)
             start_y = self.height() // 2 - (dots * (dot_r * 2 + dot_gap)) // 2
             for i in range(dots):
                 frac   = (self._scroll_offset + vis / 2) / max(total - vis, 1)
                 active = abs(i / (dots - 1) - frac) < 0.3 if dots > 1 else True
                 alpha  = int((0.78 if active else 0.31) * opacity_val)
-                clr    = QColor(240, 236, 228, alpha)
+                clr    = QColor(18, 18, 18, alpha)
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(clr)
                 iy = start_y + i * (dot_r * 2 + dot_gap)
@@ -697,6 +716,13 @@ def _on_config_changed(key: str, value) -> None:
         return
     _config[key] = value
     log.info(f"Config changed: {key} = {value!r}")
+    if _shell_ready:
+        if _menu_visible:
+            _update_geometry(_bounding_w(), _bounding_h())
+        else:
+            _update_geometry(0, 0)
+    if _qt_window is not None:
+        _invoke(_qt_window, "render_to_shm")
 
 
 # ---------------------------------------------------------------------------

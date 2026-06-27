@@ -58,6 +58,7 @@ def _make_stubs():
     stubs["shared.config_schema"] = MagicMock(
         field_int=MagicMock(side_effect=lambda default=0, **kw: MagicMock(default=default)),
     )
+    stubs["shared.touch_widgets"] = MagicMock()
     def _make_shm_engine(**kwargs):
         m = MagicMock()
         m.max_width  = kwargs.get("max_width", 1024)
@@ -167,6 +168,14 @@ def _make_stubs():
             pass
         def setMinimumHeight(self, *args, **kwargs):
             pass
+        def setMinimumWidth(self, *args, **kwargs):
+            pass
+        def setObjectName(self, *args, **kwargs):
+            pass
+        def setStyleSheet(self, *args, **kwargs):
+            pass
+        def centralWidget(self, *args, **kwargs):
+            return None
         @property
         def clicked(self):             return MagicMock()
         def showMessage(self, *args, **kwargs):
@@ -338,24 +347,24 @@ class TestLevelColors:
             assert level in lv._LEVEL_COLORS
 
     def test_info_color_is_text_token(self, lv):
-        """INFO must use --color-text (#f0ece4)."""
-        assert lv._LEVEL_COLORS["INFO"] == "#f0ece4"
+        """INFO must use --color-text (#121212)."""
+        assert lv._LEVEL_COLORS["INFO"] == "#121212"
 
     def test_warning_color_is_accent_token(self, lv):
-        """WARNING must use --color-accent (#c8b89a)."""
-        assert lv._LEVEL_COLORS["WARNING"] == "#c8b89a"
+        """WARNING must use --color-accent (#b26a00)."""
+        assert lv._LEVEL_COLORS["WARNING"] == "#b26a00"
 
     def test_error_color_is_danger_token(self, lv):
-        """ERROR must use --color-danger (#c0392b)."""
-        assert lv._LEVEL_COLORS["ERROR"] == "#c0392b"
+        """ERROR must use --color-danger (#d32f2f)."""
+        assert lv._LEVEL_COLORS["ERROR"] == "#d32f2f"
 
     def test_critical_color_is_danger_token(self, lv):
-        """CRITICAL must use --color-danger (#c0392b)."""
-        assert lv._LEVEL_COLORS["CRITICAL"] == "#c0392b"
+        """CRITICAL must use --color-danger (#d32f2f)."""
+        assert lv._LEVEL_COLORS["CRITICAL"] == "#d32f2f"
 
     def test_debug_color_is_faint_token(self, lv):
-        """DEBUG must use --color-text-faint (#4a4844)."""
-        assert lv._LEVEL_COLORS["DEBUG"] == "#4a4844"
+        """DEBUG must use --color-text-faint (#757575)."""
+        assert lv._LEVEL_COLORS["DEBUG"] == "#757575"
 
     def test_no_raw_green_or_bright_red(self, lv):
         """Ensures old off-token colors are gone (#f0c040, #e05050, etc.)."""
@@ -503,23 +512,22 @@ class TestConfigCallbacks:
 @pytest.mark.unit
 class TestDesignSystemCompliance:
     def test_log_area_background_token(self, lv):
-        """log_area must use --color-surface (#1c1c1c)."""
-        # Verify the constant is visible in module source via inspection
+        """log_area must use white background (#ffffff) inside stylesheet."""
         import inspect
         src = inspect.getsource(lv)
-        assert "#1c1c1c" in src, "Log area background must use --color-surface (#1c1c1c)"
+        assert "#ffffff" in src, "Log area background must use #ffffff"
 
     def test_log_area_text_token(self, lv):
-        """log_area text must use --color-text (#f0ece4)."""
+        """log_area text must use --color-text (#121212)."""
         import inspect
         src = inspect.getsource(lv)
-        assert "#f0ece4" in src, "Log area text must use --color-text (#f0ece4)"
+        assert "#121212" in src, "Log area text must use --color-text (#121212)"
 
     def test_log_area_border_token(self, lv):
         """log_area border must use --color-border rgba token."""
         import inspect
         src = inspect.getsource(lv)
-        assert "rgba(255,255,255,0.06)" in src, \
+        assert "rgba(0,0,0,0.12)" in src, \
             "Log area border must use --color-border token"
 
     def test_font_is_dm_mono(self, lv):

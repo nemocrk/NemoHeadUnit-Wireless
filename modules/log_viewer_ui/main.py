@@ -64,8 +64,9 @@ from PyQt6.QtGui import QColor, QTextCharFormat, QTextCursor, QFont, QPainter, Q
 
 from PyQt6.QtWidgets import (                                         # noqa: E402
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QComboBox, QTextEdit, QStatusBar,
+    QPushButton, QLabel, QTextEdit, QStatusBar, QFrame,
 )
+from shared.touch_widgets import TouchComboBox
 
 from shared.bus_client import BusClient        # noqa: E402
 from shared.config_client import ConfigClient  # noqa: E402
@@ -105,11 +106,11 @@ _config: dict = {k: v.default for k, v in _SCHEMA.items()}
 # Design system tokens (UI_DESIGN_SYSTEM.md) — applied to level indicators
 # Using exact token hex values from the palette table.
 _LEVEL_COLORS: dict[str, str] = {
-    "DEBUG":    "#4a4844",   # --color-text-faint  (inactive/disabled)
-    "INFO":     "#f0ece4",   # --color-text        (primary warm-white)
-    "WARNING":  "#c8b89a",   # --color-accent      (warm sand)
-    "ERROR":    "#c0392b",   # --color-danger      (errors, critical alerts)
-    "CRITICAL": "#c0392b",   # --color-danger      (same; no brighter override)
+    "DEBUG":    "#757575",   # Muted gray
+    "INFO":     "#121212",   # Black-ish text
+    "WARNING":  "#b26a00",   # Dark sand/orange for high contrast
+    "ERROR":    "#d32f2f",   # Danger red
+    "CRITICAL": "#d32f2f",   # Danger red
 }
 
 _LEVEL_ORDER = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -153,6 +154,7 @@ def _on_config_changed(key: str, value) -> None:
         return
     _config[key] = value
     log.info(f"Config changed: {key} = {value!r}")
+    _invoke("render_to_shm")
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +175,7 @@ class LogViewerWindow(QMainWindow):
         self._line_count  = 0
         self._filter_level = "ALL"
         self._build_ui()
+        self._apply_design_tokens()
         self.hide()  # hidden until geometry is applied
 
         self._shm_engine = None
@@ -203,6 +206,7 @@ class LogViewerWindow(QMainWindow):
             )
         else:
             self._shm_engine.resize(w, h)
+        self._apply_design_tokens()
         self.render_to_shm()
 
     @pyqtSlot(bool)
@@ -214,6 +218,7 @@ class LogViewerWindow(QMainWindow):
             self.hide()
         self.render_to_shm()
 
+    @pyqtSlot()
     def render_to_shm(self) -> None:
         if self._shm_engine is None:
             return
@@ -238,6 +243,173 @@ class LogViewerWindow(QMainWindow):
             self._shm_engine.cleanup()
         super().closeEvent(event)
 
+    def _apply_design_tokens(self) -> None:
+        """Apply dynamic design tokens stylesheet scaling for inputs, card panels, and console."""
+        df = _dpi_factor
+        font_size = int(14 * df)
+        font_size_mono = int(10 * df)
+        card_radius = int(12 * df)
+        console_radius = int(16 * df)
+        input_radius = int(8 * df)
+        btn_radius = int(20 * df)
+
+        # Scrollbar tokens
+        scrollbar_w = int(12 * df)
+        scrollbar_r = int(6 * df)
+        scrollbar_h_min = int(24 * df)
+
+        # ComboBox tokens
+        combo_arrow_w = int(24 * df)
+        arrow_size = int(5 * df)
+        arrow_size_h = int(7 * df)
+        arrow_margin = int(8 * df)
+        item_h = int(32 * df)
+        
+        self.setStyleSheet(f"""
+            QMainWindow, QWidget {{
+                font-family: 'DM Sans', sans-serif;
+                font-size: {font_size}px;
+                background-color: #f5f5f5; /* --color-surface */
+                color: #121212;            /* --color-text */
+            }}
+            QFrame#toolbar_card {{
+                background-color: #ffffff; /* Elevated white card background */
+                border: 1px solid rgba(0,0,0,0.12);
+                border-radius: {card_radius}px;
+            }}
+            QFrame#toolbar_card QLabel {{
+                background-color: transparent;
+            }}
+            QTextEdit {{
+                background-color: #ffffff; /* White background for maximum log contrast */
+                color: #121212;
+                border: 1px solid rgba(0,0,0,0.12);
+                border-radius: {console_radius}px;
+                font-family: 'DM Mono', monospace;
+                font-size: {font_size_mono}px;
+                padding: {int(6 * df)}px;
+            }}
+            TouchComboBox, QComboBox {{
+                background-color: #ffffff; /* White combobox background */
+                border: 1px solid rgba(0,0,0,0.12);
+                border-radius: {input_radius}px;
+                color: #121212;
+                padding: {int(6 * df)}px {int(12 * df)}px;
+                min-height: {int(32 * df)}px;
+                text-align: left;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: {combo_arrow_w}px;
+                border-left: none;
+            }}
+            QComboBox::down-arrow {{
+                width: 0;
+                height: 0;
+                border-left: {arrow_size}px solid transparent;
+                border-right: {arrow_size}px solid transparent;
+                border-top: {arrow_size_h}px solid #1976d2;
+                margin-right: {arrow_margin}px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: #f5f5f5;
+                border: 1px solid rgba(0, 0, 0, 0.12);
+                border-radius: {input_radius}px;
+                selection-background-color: #1976d2;
+                selection-color: #ffffff;
+                padding: {int(4 * df)}px;
+            }}
+            QComboBox QAbstractItemView::item {{
+                min-height: {item_h}px;
+                padding: {int(4 * df)}px;
+            }}
+            QPushButton {{
+                background-color: #e9e9e9;
+                color: #121212;
+                border: 1px solid rgba(0,0,0,0.12);
+                border-radius: {btn_radius}px;
+                padding: {int(5 * df)}px {int(12 * df)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #1976d2;
+                color: #ffffff;
+            }}
+            QScrollBar:vertical {{
+                border: none;
+                background: transparent;
+                width: {scrollbar_w}px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: #b0b0b0;
+                border-radius: {scrollbar_r}px;
+                min-height: {scrollbar_h_min}px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: #1976d2;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                border: none;
+                background: none;
+                height: 0px;
+            }}
+            QScrollBar::up-arrow:vertical, QScrollBar::down-arrow:vertical {{
+                border: none;
+                background: none;
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+            QScrollBar:horizontal {{
+                border: none;
+                background: transparent;
+                height: {scrollbar_w}px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: #b0b0b0;
+                border-radius: {scrollbar_r}px;
+                min-width: {scrollbar_h_min}px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: #1976d2;
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                border: none;
+                background: none;
+                width: 0px;
+            }}
+            QScrollBar::left-arrow:horizontal, QScrollBar::right-arrow:horizontal {{
+                border: none;
+                background: none;
+                width: 0px;
+            }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background: none;
+            }}
+            QStatusBar {{
+                background-color: #f5f5f5;
+                color: #5f6368;
+            }}
+        """)
+
+        # Scale layout spacing and margins
+        if self.centralWidget() and self.centralWidget().layout():
+            layout = self.centralWidget().layout()
+            layout.setContentsMargins(int(10 * df), int(10 * df), int(10 * df), int(10 * df))
+            layout.setSpacing(int(8 * df))
+            
+        if hasattr(self, "_toolbar_layout"):
+            self._toolbar_layout.setContentsMargins(int(12 * df), int(8 * df), int(12 * df), int(8 * df))
+            self._toolbar_layout.setSpacing(int(12 * df))
+            
+        if hasattr(self, "_btn_clear"):
+            self._btn_clear.setMinimumHeight(int(34 * df))
+        if hasattr(self, "_combo_level"):
+            self._combo_level.setMinimumWidth(int(110 * df))
+
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -245,34 +417,31 @@ class LogViewerWindow(QMainWindow):
         root.setSpacing(6)
         root.setContentsMargins(10, 10, 10, 10)
 
-        toolbar = QHBoxLayout()
+        # Toolbar Card container
+        self._toolbar_card = QFrame()
+        self._toolbar_card.setObjectName("toolbar_card")
+        self._toolbar_layout = QHBoxLayout(self._toolbar_card)
+        self._toolbar_layout.setContentsMargins(12, 8, 12, 8)
+        self._toolbar_layout.setSpacing(12)
 
-        toolbar.addWidget(QLabel("Filtro livello:"))
-        self._combo_level = QComboBox()
+        self._toolbar_layout.addWidget(QLabel("Filtro livello:"))
+        self._combo_level = TouchComboBox()
         self._combo_level.addItems(["ALL", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
         self._combo_level.currentTextChanged.connect(self._on_filter_changed)
         self._combo_level.setMinimumWidth(110)
-        toolbar.addWidget(self._combo_level)
+        self._toolbar_layout.addWidget(self._combo_level)
 
-        toolbar.addStretch()
+        self._toolbar_layout.addStretch()
 
         self._btn_clear = QPushButton("🗑  Clear")
         self._btn_clear.setMinimumHeight(34)
         self._btn_clear.clicked.connect(self._on_clear_clicked)
-        toolbar.addWidget(self._btn_clear)
+        self._toolbar_layout.addWidget(self._btn_clear)
 
-        root.addLayout(toolbar)
+        root.addWidget(self._toolbar_card)
 
         self._log_area = QTextEdit()
         self._log_area.setReadOnly(True)
-        # DM Mono (--font-mono) for log readability; 10px matches --text-sm
-        self._log_area.setFont(QFont("DM Mono", 10))
-        # Design system surface/border tokens (UI_DESIGN_SYSTEM.md)
-        self._log_area.setStyleSheet(
-            "background-color: #1c1c1c;"
-            " color: #f0ece4;"
-            " border: 1px solid rgba(255,255,255,0.06);"
-        )
         root.addWidget(self._log_area, stretch=1)
 
         self._status = QStatusBar()
@@ -370,6 +539,7 @@ _system_start_event = threading.Event()
 
 _shell_ready = False
 _geometry_set = False
+_dpi_factor: float = 1.0
 _pending_geometry: tuple[int, int, int, int] | None = None
 _pending_geometry_lock = threading.Lock()
 
@@ -415,11 +585,14 @@ def on_ui_shell_ready(topic: str, payload: dict) -> None:
 
 
 def on_widget_geometry(topic: str, payload: dict) -> None:
-    global _geometry_set
+    global _geometry_set, _dpi_factor
     if payload.get("name") != MODULE_NAME:
         return
+    df = float(payload.get("dpi_factor", 1.0))
+    if df > 0:
+        _dpi_factor = df
     x, y, w, h = int(payload["x"]), int(payload["y"]), int(payload["w"]), int(payload["h"])
-    log.info(f"Geometry received: x={x} y={y} w={w} h={h}")
+    log.info(f"Geometry received: x={x} y={y} w={w} h={h} dpi={df}")
     _geometry_set = True
 
     with _pending_geometry_lock:
