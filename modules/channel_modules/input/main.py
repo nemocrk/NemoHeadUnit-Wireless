@@ -1,0 +1,376 @@
+"""
+NemoHeadUnit-Wireless v2 — channel_modules/input
+
+Module contract:
+  Name        : input  (overridden by --module-name)
+  Priority    : 1
+  Channel ID  : supplied via --channel-id CLI arg (parsed by BaseChannelModule)
+  SDR bytes   : supplied via --sdr-bytes-hex CLI arg, parsed by base into
+                self.channel_config.
+  Subscribes  : channel_manager.module_start
+                channel_manager.module_stop
+                aa.channel.open          {channel_id, ...}
+                aa.channel.close         {channel_id}
+                aa.frame.ch<channel_id>  {channel_id, message_id, encrypted, payload_hex}
+                aa.session.active         {}
+                aa.session.shutdown       {}
+                input.touch               {action, pointers, action_index?, disp_channel_id?}
+                input.key                 {keycode, down, metastate?, longpress?, disp_channel_id?}
+  Publishes   : channel_manager.module_ready       {name, priority}
+                aa.frame.send             bytes  (via BaseChannelModule.send_frame)
+                input.state               {state}  IDLE | OPEN | BOUND
+"""
+
+from __future__ import annotations
+
+import struct
+import sys
+import time
+from pathlib import Path
+from typing import List, Tuple
+
+# ---------------------------------------------------------------------------
+# sys.path bootstrap
+# ---------------------------------------------------------------------------
+_HERE         = Path(__file__).parent
+_CHANNEL_MODS = _HERE.parent
+_MODULES      = _CHANNEL_MODS.parent
+_REPO_ROOT    = _MODULES.parent         # root
+_PROTO_ROOT   = _REPO_ROOT / "protos"  # root/protos
+
+for _p in (_REPO_ROOT, _MODULES, _CHANNEL_MODS, _PROTO_ROOT):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+from channel_modules.base_channel_module import BaseChannelModule  # noqa: E402
+
+# Proto — control
+from oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse   # noqa: E402
+from oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage             # noqa: E402
+from oaa.common.StatusEnum_pb2 import Status                                 # noqa: E402
+
+# Proto — input
+from oaa.input.InputChannelMessageIdsEnum_pb2 import InputChannelMessage             # noqa: E402
+from oaa.input.InputBindingResponseMessage_pb2 import InputBindingResponse           # noqa: E402
+
+# ---------------------------------------------------------------------------
+# AA message IDs
+# ---------------------------------------------------------------------------
+
+_MSG_CHANNEL_OPEN_REQUEST   = ControlMessage.CHANNEL_OPEN_REQUEST
+_MSG_CHANNEL_OPEN_RESPONSE  = ControlMessage.CHANNEL_OPEN_RESPONSE
+
+_MSG_KEY_BINDING_REQUEST    = InputChannelMessage.BINDING_REQUEST
+_MSG_KEY_BINDING_RESPONSE   = InputChannelMessage.BINDING_RESPONSE
+_MSG_INPUT_REPORT           = InputChannelMessage.INPUT_EVENT_INDICATION
+
+# ---------------------------------------------------------------------------
+# Keycodes
+# ---------------------------------------------------------------------------
+
+KEYCODE_HOME            = 3
+KEYCODE_BACK            = 4
+KEYCODE_CALL            = 5
+KEYCODE_ENDCALL         = 6
+KEYCODE_DPAD_UP         = 19
+KEYCODE_DPAD_DOWN       = 20
+KEYCODE_DPAD_LEFT       = 21
+KEYCODE_DPAD_RIGHT      = 22
+KEYCODE_DPAD_CENTER     = 23
+KEYCODE_ENTER           = 66
+KEYCODE_MENU            = 82
+KEYCODE_MEDIA_PLAY_PAUSE = 85
+KEYCODE_MEDIA_NEXT      = 87
+KEYCODE_MEDIA_PREVIOUS  = 88
+KEYCODE_VOLUME_UP       = 24
+KEYCODE_VOLUME_DOWN     = 25
+KEYCODE_VOLUME_MUTE     = 164
+KEYCODE_VOICE_ASSIST    = 231
+
+_DEFAULT_KEYCODES: List[int] = [
+    KEYCODE_HOME, KEYCODE_BACK, KEYCODE_CALL, KEYCODE_ENDCALL,
+    KEYCODE_DPAD_UP, KEYCODE_DPAD_DOWN, KEYCODE_DPAD_LEFT,
+    KEYCODE_DPAD_RIGHT, KEYCODE_DPAD_CENTER, KEYCODE_ENTER,
+    KEYCODE_MENU, KEYCODE_MEDIA_PLAY_PAUSE, KEYCODE_MEDIA_NEXT,
+    KEYCODE_MEDIA_PREVIOUS, KEYCODE_VOLUME_UP, KEYCODE_VOLUME_DOWN,
+    KEYCODE_VOLUME_MUTE, KEYCODE_VOICE_ASSIST,
+]
+
+ACTION_DOWN   = 0
+ACTION_UP     = 1
+ACTION_MOVED  = 2
+
+
+# ---------------------------------------------------------------------------
+# InputModule
+# ---------------------------------------------------------------------------
+
+class InputModule(BaseChannelModule):
+    MODULE_NAME = "input"
+    CHANNEL_ID  = -1
+    PRIORITY    = 1
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._state            = "IDLE"
+        self._bound_keycodes: set = set()
+        self._channel_open_flag  = False
+
+    def _init(self) -> None:
+        self.log.info(
+            "InputModule _init: channel_id=%d channel_config=%s",
+            self.CHANNEL_ID, self.channel_config,
+        )
+
+    def _cleanup(self) -> None:
+        self._set_state("IDLE")
+        self._bound_keycodes.clear()
+        self._channel_open_flag = False
+
+    def on_aa_session_active(self, topic: str, payload: dict) -> None:
+        self._bound_keycodes.clear()
+        self._channel_open_flag = False
+        self._set_state("IDLE")
+        self.log.info("AA session active — input ready")
+
+    def on_aa_session_shutdown(self, topic: str, payload: dict) -> None:
+        self._bound_keycodes.clear()
+        self._channel_open_flag = False
+        self._set_state("IDLE")
+        self.log.info("AA session shutdown — input reset")
+
+    def on_channel_open(self, channel_id: int, descriptor: dict) -> None:
+        self._channel_open_flag = True
+        self.log.info("Input channel %d open (descriptor: %s)", channel_id, descriptor)
+
+    def on_channel_close(self, channel_id: int) -> None:
+        self._channel_open_flag = False
+        self._set_state("IDLE")
+        self.log.info("Input channel %d closed", channel_id)
+
+    def on_frame(self, channel_id: int, message_id: int, encrypted: bool, data: bytes) -> None:
+        """Dispatch incoming frame by AA message_id (already extracted by tcp_server)."""
+        if message_id == _MSG_CHANNEL_OPEN_REQUEST:
+            self._handle_open_request(data)
+        elif message_id == _MSG_KEY_BINDING_REQUEST:
+            self._handle_key_binding_request(data)
+        else:
+            self.log.debug(
+                "Unhandled input msg_id=0x%04x len=%d", message_id, len(data)
+            )
+
+    def _handle_open_request(self, body: bytes) -> None:
+        resp = ChannelOpenResponse()
+        resp.status = Status.OK
+        self.send_frame(_MSG_CHANNEL_OPEN_RESPONSE, resp.SerializeToString())
+        self._set_state("OPEN")
+        self.log.info("ChannelOpenRequest → ChannelOpenResponse sent (STATUS_SUCCESS)")
+
+    def _handle_key_binding_request(self, body: bytes) -> None:
+        requested = _parse_key_binding_request(body)
+        supported = set(_DEFAULT_KEYCODES)
+        if requested:
+            accepted = requested & supported
+            rejected = requested - supported
+            self._bound_keycodes = accepted
+            if rejected:
+                self.log.warning(
+                    "KeyBindingRequest: %d unsupported keycode(s) rejected: %s",
+                    len(rejected), sorted(rejected),
+                )
+        else:
+            self._bound_keycodes = supported
+        resp = InputBindingResponse()
+        resp.status = Status.OK
+        self.send_frame(_MSG_KEY_BINDING_RESPONSE, resp.SerializeToString())
+        self._set_state("BOUND")
+        self.log.info(
+            "KeyBindingRequest → InputBindingResponse sent (%d keycodes bound)",
+            len(self._bound_keycodes),
+        )
+
+    def on_input_touch(self, topic: str, payload: dict) -> None:
+        if self._state not in ("OPEN", "BOUND"):
+            self.log.debug("on_input_touch: channel not open — dropping")
+            return
+        action          = int(payload.get("action", ACTION_DOWN))
+        raw_pointers    = payload.get("pointers", [])
+        action_index    = int(payload.get("action_index", 0))
+        disp_channel_id = int(payload.get("disp_channel_id", 0))
+        pointers: List[Tuple[int, int, int]] = [
+            (int(p[0]), int(p[1]), int(p[2])) for p in raw_pointers
+        ]
+        if not pointers:
+            self.log.warning("on_input_touch: empty pointers list — dropping")
+            return
+        report_bytes = _build_input_report_touch(action, pointers, action_index, disp_channel_id)
+        self.send_frame(_MSG_INPUT_REPORT, report_bytes)
+        self.log.debug("TouchEvent sent action=%d pointers=%s", action, pointers)
+
+    def on_input_key(self, topic: str, payload: dict) -> None:
+        if self._state not in ("OPEN", "BOUND"):
+            self.log.debug("on_input_key: channel not open — dropping")
+            return
+        keycode         = int(payload.get("keycode", 0))
+        down            = bool(payload.get("down", True))
+        metastate       = int(payload.get("metastate", 0))
+        longpress       = bool(payload.get("longpress", False))
+        disp_channel_id = int(payload.get("disp_channel_id", 0))
+        if self._bound_keycodes and keycode not in self._bound_keycodes:
+            self.log.debug("on_input_key: keycode=%d not bound — dropping", keycode)
+            return
+        report_bytes = _build_input_report_key(keycode, down, metastate, longpress, disp_channel_id)
+        self.send_frame(_MSG_INPUT_REPORT, report_bytes)
+        self.log.debug("KeyEvent sent keycode=%d down=%s", keycode, down)
+
+    def send_touch_down(self, x: int, y: int, pointer_id: int = 0, disp_channel_id: int = 0) -> None:
+        self.on_input_touch("", {"action": ACTION_DOWN, "pointers": [[x, y, pointer_id]], "disp_channel_id": disp_channel_id})
+
+    def send_touch_up(self, x: int, y: int, pointer_id: int = 0, disp_channel_id: int = 0) -> None:
+        self.on_input_touch("", {"action": ACTION_UP, "pointers": [[x, y, pointer_id]], "disp_channel_id": disp_channel_id})
+
+    def send_touch_move(self, x: int, y: int, pointer_id: int = 0, disp_channel_id: int = 0) -> None:
+        self.on_input_touch("", {"action": ACTION_MOVED, "pointers": [[x, y, pointer_id]], "disp_channel_id": disp_channel_id})
+
+    def send_key_down(self, keycode: int, metastate: int = 0, disp_channel_id: int = 0) -> None:
+        self.on_input_key("", {"keycode": keycode, "down": True, "metastate": metastate, "disp_channel_id": disp_channel_id})
+
+    def send_key_up(self, keycode: int, metastate: int = 0, disp_channel_id: int = 0) -> None:
+        self.on_input_key("", {"keycode": keycode, "down": False, "metastate": metastate, "disp_channel_id": disp_channel_id})
+
+    def _set_state(self, new_state: str) -> None:
+        self._state = new_state
+        self.bus.publish("input.state", {"state": new_state})
+        self.log.info("input.state → %s", new_state)
+
+    def run(self) -> None:
+        self.bus.subscribe("aa.session.active",   self.on_aa_session_active)
+        self.bus.subscribe("aa.session.shutdown", self.on_aa_session_shutdown)
+        self.bus.subscribe("input.touch",         self.on_input_touch)
+        self.bus.subscribe("input.key",           self.on_input_key)
+        super().run()
+
+
+# ---------------------------------------------------------------------------
+# Minimal hand-rolled protobuf helpers
+# ---------------------------------------------------------------------------
+
+def _read_varint(buf: bytes, pos: int) -> tuple[int | None, int]:
+    result = 0
+    shift  = 0
+    while pos < len(buf):
+        b = buf[pos]; pos += 1
+        result |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return result, pos
+        shift += 7
+        if shift >= 64:
+            return None, pos
+    return None, pos
+
+
+def _encode_varint(value: int) -> bytes:
+    if value < 0:
+        value += 1 << 64
+    out = []
+    while value > 0x7F:
+        out.append((value & 0x7F) | 0x80)
+        value >>= 7
+    out.append(value)
+    return bytes(out)
+
+
+def _field(field_number: int, wire_type: int, value_bytes: bytes) -> bytes:
+    tag = (field_number << 3) | wire_type
+    return _encode_varint(tag) + value_bytes
+
+
+def _varint_field(field_number: int, value: int) -> bytes:
+    return _field(field_number, 0, _encode_varint(value))
+
+
+def _bytes_field(field_number: int, data: bytes) -> bytes:
+    return _field(field_number, 2, _encode_varint(len(data)) + data)
+
+
+def _bool_field(field_number: int, value: bool) -> bytes:
+    return _varint_field(field_number, 1 if value else 0)
+
+
+def _now_us() -> int:
+    return int(time.time_ns() // 1000)
+
+
+def _build_touch_event(action: int, pointers: List[Tuple[int, int, int]], action_index: int = 0) -> bytes:
+    body = _varint_field(1, action) + _varint_field(2, action_index)
+    for x, y, pid in pointers:
+        pd = _varint_field(1, x) + _varint_field(2, y) + _varint_field(3, pid)
+        body += _bytes_field(3, pd)
+    return body
+
+
+def _build_key_event(keycode: int, down: bool, metastate: int = 0, longpress: bool = False) -> bytes:
+    key = (
+        _varint_field(1, keycode)
+        + _bool_field(2, down)
+        + _varint_field(3, metastate)
+        + _bool_field(4, longpress)
+    )
+    return _bytes_field(1, key)
+
+
+def _build_input_report_touch(action: int, pointers: List[Tuple[int, int, int]], action_index: int = 0, disp_channel_id: int = 0) -> bytes:
+    ts    = _now_us()
+    touch = _build_touch_event(action, pointers, action_index)
+    body  = _field(1, 1, struct.pack("<Q", ts))
+    body += _bytes_field(2, touch)
+    if disp_channel_id:
+        body += _varint_field(5, disp_channel_id)
+    return body
+
+
+def _build_input_report_key(keycode: int, down: bool, metastate: int = 0, longpress: bool = False, disp_channel_id: int = 0) -> bytes:
+    ts  = _now_us()
+    key = _build_key_event(keycode, down, metastate, longpress)
+    body  = _field(1, 1, struct.pack("<Q", ts))
+    body += _bytes_field(3, key)
+    if disp_channel_id:
+        body += _varint_field(5, disp_channel_id)
+    return body
+
+
+def _parse_key_binding_request(body: bytes) -> set:
+    result = set()
+    pos = 0
+    while pos < len(body):
+        if pos >= len(body):
+            break
+        tag_byte     = body[pos]; pos += 1
+        field_number = tag_byte >> 3
+        wire_type    = tag_byte & 0x07
+        if field_number == 1 and wire_type == 0:
+            val, pos = _read_varint(body, pos)
+            if val is not None:
+                result.add(val)
+        else:
+            if wire_type == 0:
+                _, pos = _read_varint(body, pos)
+            elif wire_type == 1:
+                pos += 8
+            elif wire_type == 2:
+                length, pos = _read_varint(body, pos)
+                if length is not None:
+                    pos += length
+            elif wire_type == 5:
+                pos += 4
+            else:
+                break
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    InputModule().run()

@@ -1,0 +1,28 @@
+// /etc/polkit-1/rules.d/org.nemo.bluetooth.rules
+//
+// PolicyKit JavaScript rules for NemoHeadUnit.
+//
+// Rule 1 — BlueZ Bluetooth Agent
+//   Grants members of the 'bluetooth' group permission to register
+//   as the default Bluetooth agent without an authentication prompt.
+//
+// Rule 2 — AP Manager
+//   Grants members of the 'ap_manager' group unconditional YES for
+//   all org.nemo.apmanager.* actions (start / stop / status).
+//   This is required because the app runs without a logind seat session
+//   (polkitd 127 classifies the subject as 'inactive' and the .policy
+//   <defaults> alone are not sufficient in that case).
+
+polkit.addRule(function(action, subject) {
+    if (action.id === "org.bluez.request-default-agent" &&
+        subject.isInGroup("bluetooth")) {
+        return polkit.Result.YES;
+    }
+});
+
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.nemo.apmanager.") === 0 &&
+        subject.isInGroup("ap_manager")) {
+        return polkit.Result.YES;
+    }
+});

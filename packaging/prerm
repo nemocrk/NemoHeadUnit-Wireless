@@ -11,6 +11,10 @@
 set -euo pipefail
 
 SERVICE_NAME="org.nemo.APManager.service"
+GROUP_NAME="ap_manager"
+BLUETOOTH_GROUP_NAME="bluetooth"
+APP_DIR="/opt/nemo-headunit"
+CONDA_ENV_DIR="${APP_DIR}/env"
 
 log() { echo "[nemo-headunit prerm] $*"; }
 
@@ -20,7 +24,37 @@ remove)
     log "Stopping and disabling ${SERVICE_NAME}"
     systemctl stop    "${SERVICE_NAME}" 2>/dev/null || true
     systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
-    log "Done."
+
+    log "Cleaning up system resources"
+    # Remove system groups
+    if getent group "${GROUP_NAME}" &>/dev/null; then
+        log "Removing group '${GROUP_NAME}'"
+        groupdel "${GROUP_NAME}" || true
+    fi
+    if getent group "${BLUETOOTH_GROUP_NAME}" &>/dev/null; then
+        log "Removing group '${BLUETOOTH_GROUP_NAME}'"
+        groupdel "${BLUETOOTH_GROUP_NAME}" || true
+    fi
+
+    # Remove Conda environment
+    if [ -d "${CONDA_ENV_DIR}" ]; then
+        log "Removing Conda env: ${CONDA_ENV_DIR}"
+        rm -rf "${CONDA_ENV_DIR}"
+    fi
+
+    # Remove desktop shortcuts for human users
+    log "Removing desktop shortcuts for human users"
+    while IFS=: read -r username _ uid _ _ homedir _; do
+        if [ "${uid}" -ge 1000 ] && [ "${uid}" -lt 60000 ] && [ -d "${homedir}/Desktop" ]; then
+            DEST="${homedir}/Desktop/nemo-headunit.desktop"
+            if [ -f "${DEST}" ]; then
+                rm "${DEST}"
+                log "Removed: ${DEST}"
+            fi
+        fi
+    done < <(getent passwd)
+
+    log "Cleanup complete."
     ;;
 
 upgrade)

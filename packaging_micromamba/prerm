@@ -1,0 +1,77 @@
+#!/bin/bash
+# packaging/prerm
+#
+# dpkg pre-removal script for nemo-headunit.
+# Called before dpkg removes any files.
+#
+# Arguments:
+#   $1 = "remove"   (package being removed)
+#   $1 = "upgrade"  (being replaced by a newer version)
+
+set -euo pipefail
+
+SERVICE_NAME="org.nemo.APManager.service"
+GROUP_NAME="ap_manager"
+BLUETOOTH_GROUP_NAME="bluetooth"
+APP_DIR="/opt/nemo-headunit"
+ENV_PREFIX="${APP_DIR}/env"
+
+log() { echo "[nemo-headunit prerm] $*"; }
+
+case "$1" in
+
+remove)
+    log "Stopping and disabling ${SERVICE_NAME}"
+    systemctl stop    "${SERVICE_NAME}" 2>/dev/null || true
+    systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
+
+    log "Cleaning up system resources"
+    if getent group "${GROUP_NAME}" &>/dev/null; then
+        log "Removing group '${GROUP_NAME}'"
+        groupdel "${GROUP_NAME}" || true
+    fi
+    if getent group "${BLUETOOTH_GROUP_NAME}" &>/dev/null; then
+        log "Removing group '${BLUETOOTH_GROUP_NAME}'"
+        groupdel "${BLUETOOTH_GROUP_NAME}" || true
+    fi
+
+    if [ -d "${ENV_PREFIX}" ]; then
+        log "Removing Micromamba env: ${ENV_PREFIX}"
+        rm -rf "${ENV_PREFIX}"
+    fi
+
+    log "Removing desktop shortcuts for human users"
+    while IFS=: read -r username _ uid _ _ homedir _; do
+        if [ "${uid}" -ge 1000 ] && [ "${uid}" -lt 60000 ] && [ -d "${homedir}/Desktop" ]; then
+            DEST="${homedir}/Desktop/nemo-headunit.desktop"
+            if [ -f "${DEST}" ]; then
+                rm "${DEST}"
+                log "Removed: ${DEST}"
+            fi
+        fi
+    done < <(getent passwd)
+
+    log "Cleanup complete."
+    ;;
+>>>>
+<task_progress>
+- [x] List files in packaging_micromamba
+- [x] Read prerm script
+- [x] Read postrm script (if exists)
+- [x] Analyze removal process
+- [x] Add unhandled cleanup to prerm
+</task_progress>
+
+upgrade)
+    # During upgrade dpkg installs the new version first, then calls
+    # old-version's prerm upgrade. Just stop — postinst will restart.
+    log "Upgrade: stopping ${SERVICE_NAME} before replacement"
+    systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+    ;;
+
+*)
+    ;;
+
+esac
+
+exit 0

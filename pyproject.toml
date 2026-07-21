@@ -1,0 +1,100 @@
+# ===========================================================================
+# NemoHeadUnit-Wireless — pyproject.toml
+# Rif: docs/TEST_SUITE_ARCHITECTURE.md, docs/project-vision.md
+# ===========================================================================
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ---------------------------------------------------------------------------
+# Project metadata
+# ---------------------------------------------------------------------------
+[project]
+name = "nemo-head-unit"
+version = "2.0.0"
+description = "NemoHeadUnit-Wireless — wireless Android Auto head unit"
+requires-python = ">=3.14"
+
+# ---------------------------------------------------------------------------
+# Dev / test dependencies
+# ---------------------------------------------------------------------------
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.23",
+    "hypothesis>=6.100",
+    "dbus-python>=1.3",
+    "pyyaml>=6.0",
+]
+
+# ---------------------------------------------------------------------------
+# Package discovery
+# Nessun package da installare: il progetto usa PYTHONPATH diretto.
+# Senza questa dichiarazione esplicita setuptools fallisce con
+# "Multiple top-level packages discovered in a flat-layout".
+# ---------------------------------------------------------------------------
+[tool.setuptools]
+packages = []
+
+# ---------------------------------------------------------------------------
+# pytest
+# Rif: docs/TEST_SUITE_ARCHITECTURE.md §5
+# Note: addopts deve essere una stringa unica, non una lista,
+#       per evitare che pytest-xdist riceva ' auto' con spazio iniziale.
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths  = ["tests"]
+python_files   = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+markers = [
+    "unit: test isolato, nessun I/O reale (< 1s per test)",
+    "integration: più moduli reali con bus in-process (< 10s per test)",
+    "e2e: flusso end-to-end con stack completo o phone mock",
+    "e2e_smoke: subset e2e veloci (< 30s totali) — run in CI standard",
+    "e2e_full: sessione AA completa, > 60s — run separato nightly/on-demand",
+    "performance: benchmark informativi, non falliscono per soglie",
+    "hardware: richiede hardware fisico (audio, BT, display)",
+    "qt: richiede QApplication offscreen",
+    "dbus: richiede sessione D-Bus di test",
+    "slow: atteso > 10s",
+    "fuzz: property-based con Hypothesis",
+]
+
+filterwarnings = [
+    "ignore::DeprecationWarning:zmq.*",
+    "ignore::ResourceWarning",
+]
+
+addopts = "--strict-markers --tb=short -q -n auto"
+
+timeout = 60
+timeout_method = "thread"
+timeout_func_only = true
+
+# ---------------------------------------------------------------------------
+# coverage
+# relative_files = true: i path negli omit sono relativi alla CWD del runner
+# (root del repo), così "protos/*" matcha correttamente.
+# source usa il path relativo alla CWD, non il nome del package installato.
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+relative_files = true
+source = ["."]
+omit = [
+    "*/protos/*",
+    "*/services/*",
+    "*/tests/*",
+    "packaging/*",
+    "scripts/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered  = false
+fail_under    = 80

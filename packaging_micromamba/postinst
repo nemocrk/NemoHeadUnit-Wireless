@@ -1,0 +1,210 @@
+#!/bin/bash
+# packaging_micromamba/postinst
+#
+# dpkg post-installation script for nemo-headunit (micromamba version).
+# Called by dpkg automatically after all files are unpacked.
+#
+
+set -euo pipefail
+
+APP_DIR="/opt/nemo-headunit"
+ENV_PREFIX="${APP_DIR}/env"
+ENV_YML="${APP_DIR}/environment.yml"
+BOOTSTRAP_MICROMAMBA="${APP_DIR}/bootstrap_micromamba.sh"
+MICROMAMBA_BIN="/opt/micromamba/micromamba"
+SERVICE_NAME="org.nemo.APManager.service"
+GROUP_NAME="ap_manager"
+BLUETOOTH_GROUP_NAME="bluetooth"
+HW_FIX_RUNNER="${APP_DIR}/hardware_fixes/run_hardware_fixes.sh"
+LAUNCHER_SRC="${APP_DIR}/bin/nemo-headunit"
+LAUNCHER_LINK="/usr/local/bin/nemo-headunit"
+DESKTOP_SRC="/usr/share/applications/nemo-headunit.desktop"
+
+log() { echo "[nemo-headunit postinst (micromamba)] $*"; }
+
+# Trova micromamba nel PATH o in /opt/micromamba
+find_micromamba() {
+    if command -v micromamba &>/dev/null; then
+        command -v micromamba
+        return 0
+    fi
+    if [ -x "${MICROMAMBA_BIN}" ]; then
+        echo "${MICROMAMBA_BIN}"
+        return 0
+    fi
+    return 1
+}
+
+case "$1" in
+
+configure)
+    # ------------------------------------------------------------------
+    # 1. Create system groups and add standard human users automatically
+    # ------------------------------------------------------------------
+    if ! getent group "${GROUP_NAME}" &>/dev/null; then
+        log "Creating system group '${GROUP_NAME}'"
+        groupadd --system "${GROUP_NAME}"
+    else
+        log "Group '${GROUP_NAME}' already exists — skipped."
+    fi
+
+    if ! getent group "${BLUETOOTH_GROUP_NAME}" &>/dev/null; then
+        log "Creating system group '${BLUETOOTH_GROUP_NAME}'"
+        groupadd --system "${BLUETOOTH_GROUP_NAME}"
+    else
+        log "Group '${BLUETOOTH_GROUP_NAME}' already exists — skipped."
+    fi
+
+    # Automatically add existing standard human users to groups for out-of-the-box D-Bus access
+    while IFS=: read -r username _ uid _ _ homedir _; do
+        if [ "${uid}" -ge 1000 ] && [ "${uid}" -lt 60000 ]; then
+            log "Adding user '${username}' to group '${GROUP_NAME}'"
+            usermod -aG "${GROUP_NAME}" "${username}" || true
+            log "Adding user '${username}' to group '${BLUETOOTH_GROUP_NAME}'"
+            usermod -aG "${BLUETOOTH_GROUP_NAME}" "${username}" || true
+        fi
+    done < <(getent passwd)
+
+    # ------------------------------------------------------------------
+    # 2. Bootstrap micromamba if missing
+    # ------------------------------------------------------------------
+    if ! find_micromamba &>/dev/null; then
+        if [ -f "${BOOTSTRAP_MICROMAMBA}" ]; then
+            log "micromamba non trovato — eseguo bootstrap_micromamba.sh"
+            chmod +x "${BOOTSTRAP_MICROMAMBA}"
+            bash "${BOOTSTRAP_MICROMAMBA}"
+        else
+            log "WARNING: micromamba non trovato e bootstrap_micromamba.sh assente."
+            log "         Installa micromamba manualmente e ri-esegui:"
+            log "           micromamba create -p ${ENV_PREFIX} -f ${ENV_YML}"
+        fi
+    else
+        log "micromamba trovato: $(find_micromamba)"
+    fi
+
+    # ------------------------------------------------------------------
+    # 3. Build Micromamba env on target (idempotent)
+    # ------------------------------------------------------------------
+    MM_BIN="$(find_micromamba || true)"
+
+    if [ -n "${MM_BIN}" ]; then
+        if [ -d "${ENV_PREFIX}" ]; then
+            log "Micromamba env già presente in ${ENV_PREFIX} — aggiornamento"
+            "${MM_BIN}" install -y -p "${ENV_PREFIX}" -f "${ENV_YML}"
+        else
+            log "Creazione Micromamba env in ${ENV_PREFIX} (potrebbe richiedere qualche minuto)"
+            "${MM_BIN}" create -y -p "${ENV_PREFIX}" -f "${ENV_YML}"
+        fi
+        log "Micromamba env pronto."
+    else
+        log "WARNING: impossibile creare l'env Micromamba — micromamba non disponibile."
+        log "         Il servizio non si avvierà finché l'env non è presente."
+    fi
+
+    # ------------------------------------------------------------------
+    # 4. Fix permissions on the installed app directory
+    # ------------------------------------------------------------------
+    log "Setting permissions on ${APP_DIR}"
+    chown -R root:root "${APP_DIR}"
+    chmod -R a+rX,u+w "${APP_DIR}"
+    chmod -R a+rwX,u+w "${APP_DIR}/config"
+    if [ -x "${ENV_PREFIX}/bin/python" ]; then
+        chmod +x "${ENV_PREFIX}/bin/python"
+    fi
+
+    # ------------------------------------------------------------------
+    # 5. Fix permissions on privileged service script
+    # ------------------------------------------------------------------
+    chmod 700 "${APP_DIR}/services/ap_manager_service/ap_manager_service.py"
+
+    # ------------------------------------------------------------------
+    # 6. Reload D-Bus so it picks up the new policy
+    # ------------------------------------------------------------------
+    log "Reloading D-Bus configuration"
+    sudo systemctl restart polkit || true
+    systemctl reload dbus 2>/dev/null || true
+
+    # ------------------------------------------------------------------
+    # 7. Reload systemd and enable + start the AP manager service
+    # ------------------------------------------------------------------
+    log "Reloading systemd daemon"
+    systemctl daemon-reload
+
+    log "Enabling ${SERVICE_NAME}"
+    systemctl enable "${SERVICE_NAME}"
+
+    log "Starting ${SERVICE_NAME}"
+    systemctl start "${SERVICE_NAME}" || {
+        log "WARNING: service failed to start — check: journalctl -u ${SERVICE_NAME} -n 50"
+    }
+
+    # ------------------------------------------------------------------
+    # 8. Platform-specific hardware fixes
+    # ------------------------------------------------------------------
+    if [ -f "${HW_FIX_RUNNER}" ]; then
+        log "Running platform hardware fixes"
+        chmod +x "${HW_FIX_RUNNER}"
+        bash "${HW_FIX_RUNNER}" || log "WARNING: hardware fix runner exited with errors — check output above."
+    else
+        log "No hardware fix runner found at ${HW_FIX_RUNNER} — skipped."
+    fi
+
+    # ------------------------------------------------------------------
+    # 9. Create /usr/local/bin symlink for CLI access
+    # ------------------------------------------------------------------
+    if [ -f "${LAUNCHER_SRC}" ]; then
+        log "Creating symlink: ${LAUNCHER_LINK} -> ${LAUNCHER_SRC}"
+        ln -sf "${LAUNCHER_SRC}" "${LAUNCHER_LINK}"
+    else
+        log "WARNING: launcher not found at ${LAUNCHER_SRC} — CLI symlink skipped."
+    fi
+
+    # ------------------------------------------------------------------
+    # 10. Add desktop shortcut to all existing human users' Desktops
+    # ------------------------------------------------------------------
+    if [ -f "${DESKTOP_SRC}" ]; then
+        # getent passwd: iterate UIDs 1000-59999 (standard human users)
+        while IFS=: read -r username _ uid _ _ homedir _; do
+            if [ "${uid}" -ge 1000 ] && [ "${uid}" -lt 60000 ] && [ -d "${homedir}/Desktop" ]; then
+                DEST="${homedir}/Desktop/nemo-headunit.desktop"
+                cp "${DESKTOP_SRC}" "${DEST}"
+                # Mark as trusted so GNOME/KDE show it without the security warning
+                chmod +x "${DEST}"
+                chown "${username}:${username}" "${DEST}" 2>/dev/null || true
+                log "Desktop shortcut created for user '${username}' at ${DEST}"
+            fi
+        done < <(getent passwd)
+    else
+        log "WARNING: .desktop file not found at ${DESKTOP_SRC} — desktop shortcut skipped."
+    fi
+
+    # Update the application menu database
+    if command -v update-desktop-database &>/dev/null; then
+        log "Updating desktop database"
+        update-desktop-database /usr/share/applications/ 2>/dev/null || true
+    fi
+
+    log "Installation complete."
+    log "  To add a user to the '${GROUP_NAME}' group:"
+    log "    sudo usermod -aG ${GROUP_NAME} <username>"
+    log "  To add a user to the '${BLUETOOTH_GROUP_NAME}' group:"
+    log "    sudo usermod -aG ${BLUETOOTH_GROUP_NAME} <username>"
+    log "  (user must log out and back in for the group to take effect)"
+    ;;
+
+upgrade)
+    log "Upgrade detected — restarting ${SERVICE_NAME}"
+    systemctl restart "${SERVICE_NAME}" || true
+    ;;
+
+abort-upgrade | abort-install | abort-remove)
+    log "Aborting installation / upgrade. No cleanup performed."
+    ;;
+
+*)
+    log "Unknown argument: $1 — ignoring."
+    ;;
+
+esac
+
+exit 0

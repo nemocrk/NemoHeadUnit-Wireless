@@ -1,0 +1,806 @@
+"""
+NemoHeadUnit-Wireless — floating_menu_ui
+
+Arc-shaped floating menu anchored at bottom-right corner.
+Discovers on_request modules via ui.widget.register, manages mutual
+exclusivity, and routes open/close commands.
+
+  Name        : floating_menu_ui
+  Priority    : 3   (after ui_shell=2, before on_request widgets=4)
+  Subscribes  : system.readytostart
+                system.start
+                system.stop
+                ui.shell.ready          → {} (triggers registration)
+                ui.widget.register      → {name, on_request, menu_order, icon, ...}
+                ui.widget.geometry      → {name, x, y, w, h, dpi_factor}
+                input.event.floating_menu_ui → {type, x, y, ...}
+                ui.settings.toggle      → {} (show/hide menu)
+                ui.home.pressed         → {} (close all + hide menu)
+  Publishes   : system.module_ready     → {name, priority}
+                system.ready            → {name, priority}
+                ui.widget.register      → registration payload
+                ui.widget.update        → {name, width, height} when visible
+                ui.widget.unregister    → {name}
+                ui.module.open          → {name}
+                ui.module.close         → {name}
+
+  Arc geometry:
+    Anchored at bottom-right corner.
+    Arc sweeps from bottom-right (270°) to top-right (0°), i.e. 90° quarter-circle.
+    Radius base : 120px * dpi_factor
+    Icon size   : 52px * dpi_factor
+    Gap         : 8px  * dpi_factor
+    Max visible : 8 icons (swipe/drag tangentially to scroll when N > 8)
+    Icon active : inverted color scheme
+
+  Z-order  : 3  (always above navbar=2 and on_request modules=2)
+  Dock     : bottom-right
+
+  Config keys : radius_base   int   120   base arc radius in logical px
+                icon_size     int   52    icon diameter in logical px
+                icon_gap      int   8     gap between icons in logical px
+
+Path layout:
+  root/
+  ├── shared/
+  └── modules/
+      └── floating_menu_ui/
+          └── main.py
+"""
+
+import math
+import signal
+import sys
+import time
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+# ---------------------------------------------------------------------------
+# sys.path bootstrap
+# ---------------------------------------------------------------------------
+_HERE      = Path(__file__).parent
+_MODULES   = _HERE.parent
+_REPO_ROOT = _MODULES.parent
+_PROTO_ROOT   = _REPO_ROOT / "protos"  # root/protos
+
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+if str(_MODULES) not in sys.path:
+    sys.path.insert(0, str(_MODULES))
+if str(_PROTO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROTO_ROOT))
+
+from shared.bus_client import BusClient        # noqa: E402
+from shared.config_client import ConfigClient  # noqa: E402
+from shared.logger import get_logger           # noqa: E402
+from shared.config_schema import field_int     # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Module identity
+# ---------------------------------------------------------------------------
+
+MODULE_NAME = "floating_menu_ui"
+PRIORITY: int = 3
+
+bus = BusClient(module_name=MODULE_NAME)
+log = get_logger(MODULE_NAME, bus=bus)
+cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
+
+# ---------------------------------------------------------------------------
+# Config schema
+# ---------------------------------------------------------------------------
+
+_SCHEMA = {
+    "radius_base": field_int(default=120, min=60,  max=300),
+    "icon_size":   field_int(default=52,  min=32,  max=96),
+    "icon_gap":    field_int(default=8,   min=0,   max=32),
+}
+
+_config: dict = {k: v.default for k, v in _SCHEMA.items()}
+
+# ---------------------------------------------------------------------------
+# On-request module registry
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OnRequestEntry:
+    name: str
+    menu_order: int
+    icon: str
+
+
+_on_request_modules: dict[str, OnRequestEntry] = {}  # name → entry
+_on_request_lock = threading.Lock()
+
+_active_module: Optional[str] = None
+_dpi_factor: float = 1.0
+_screen_h: int = 600
+_navbar_h: int = 60
+
+# ---------------------------------------------------------------------------
+# Menu visibility state
+# ---------------------------------------------------------------------------
+
+_menu_visible: bool = False
+
+# ---------------------------------------------------------------------------
+# PyQt6 window
+# ---------------------------------------------------------------------------
+
+_qt_app    = None
+_qt_window = None
+_system_start_event = threading.Event()
+
+# Geometry received before Qt window is ready is stored here and applied
+# via QTimer.singleShot(0) inside _run_qt.
+_pending_geometry: Optional[tuple[int, int, int, int]] = None  # (x, y, w, h)
+_pending_geometry_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Shell readiness gate
+# ---------------------------------------------------------------------------
+
+_shell_ready: bool  = False
+_geometry_set: bool = False
+
+
+def _register() -> None:
+    """Register as a hidden widget at bottom-right; dimensions are 0,0 until visible."""
+    bus.publish("ui.widget.register", {
+        "name":          MODULE_NAME,
+        "z_order":       3,
+        "dock":          "bottom-right",
+        "width":         0,
+        "min_width":     None,
+        "max_width":     None,
+        "height":        0,
+        "min_height":    None,
+        "max_height":    None,
+        "aspect_ratio":  None,
+        "on_request":    False,
+        "menu_order":    99,
+        "icon":          "",
+    })
+    log.info("ui.widget.register published (hidden)")
+
+
+def _update_geometry(width: int, height: int) -> None:
+    """Notify ui_shell of current bounding-box size."""
+    bus.publish("ui.widget.update", {
+        "name":   MODULE_NAME,
+        "width":  width,
+        "height": height,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Arc geometry helpers
+# ---------------------------------------------------------------------------
+
+def _arc_params() -> tuple[float, float, float, float]:
+    radius   = float(_config.get("radius_base", 120)) * _dpi_factor
+    icon_sz  = float(_config.get("icon_size",   52))  * _dpi_factor
+    gap      = float(_config.get("icon_gap",    8))   * _dpi_factor
+    arc_len  = (math.pi / 2) * radius
+    return radius, icon_sz, gap, arc_len
+
+
+def _visible_count() -> int:
+    radius, icon_sz, gap, arc_len = _arc_params()
+    slots = int(arc_len / (icon_sz + gap))
+    with _on_request_lock:
+        total = len(_on_request_modules)
+    return min(slots, 8, total)
+
+
+def _icon_center(index: int, total_visible: int) -> tuple[float, float]:
+    radius, icon_sz, gap, arc_len = _arc_params()
+    angle  = (math.pi / 2) * (index / max(total_visible - 1, 1))
+    pad = icon_sz / 2
+    pivot_x = radius + pad
+    pivot_y = _bounding_h() - pad
+    cx = pivot_x - radius * math.cos(angle)
+    cy = pivot_y - radius * math.sin(angle)
+    return cx, cy
+
+
+def _bounding_w() -> int:
+    radius, icon_sz, _, _ = _arc_params()
+    return int(math.ceil(radius + icon_sz))
+
+
+def _bounding_h() -> int:
+    radius, icon_sz, _, _ = _arc_params()
+    available = _screen_h - _navbar_h
+    return int(min(math.ceil(radius + icon_sz), available))
+
+
+# ---------------------------------------------------------------------------
+# Sorted icon list
+# ---------------------------------------------------------------------------
+
+def _sorted_entries() -> list[OnRequestEntry]:
+    with _on_request_lock:
+        entries = list(_on_request_modules.values())
+    return sorted(entries, key=lambda e: (e.menu_order, e.name))
+
+
+# ---------------------------------------------------------------------------
+# Bus handlers
+# ---------------------------------------------------------------------------
+
+def on_ui_shell_ready(topic: str, payload: dict) -> None:
+    global _shell_ready
+    _shell_ready = True
+    log.info("ui.shell.ready received — registering floating_menu_ui")
+    _register()
+
+
+def on_widget_register(topic: str, payload: dict) -> None:
+    if not payload.get("on_request", False):
+        return
+    name = payload.get("name")
+    if not name or name == MODULE_NAME:
+        return
+
+    entry = OnRequestEntry(
+        name       = name,
+        menu_order = int(payload.get("menu_order", 99)),
+        icon       = str(payload.get("icon", "")),
+    )
+    with _on_request_lock:
+        _on_request_modules[name] = entry
+    log.info(f"on_request module discovered: '{name}' icon='{entry.icon}' order={entry.menu_order}")
+
+    if _qt_window is not None:
+        _qt_invoke_refresh()
+
+
+def on_widget_unregister(topic: str, payload: dict) -> None:
+    name = payload.get("name")
+    if not name:
+        return
+    with _on_request_lock:
+        removed = _on_request_modules.pop(name, None)
+    if removed:
+        log.info(f"on_request module removed: '{name}'")
+        if _qt_window is not None:
+            _qt_invoke_refresh()
+
+
+def on_widget_geometry(topic: str, payload: dict) -> None:
+    """Called from the bus thread — must NOT touch Qt objects directly."""
+    global _geometry_set, _dpi_factor, _screen_h, _navbar_h
+    name = payload.get("name", "")
+    df = float(payload.get("dpi_factor", 1.0))
+    old_df = _dpi_factor
+    if df > 0:
+        _dpi_factor = df
+
+    if name == "navbar_ui":
+        _navbar_h = int(payload.get("h", 60))
+
+    if name == MODULE_NAME:
+        _geometry_set = True
+        x = int(payload["x"])
+        y = int(payload["y"])
+        w = int(payload["w"])
+        h = int(payload["h"])
+        if _qt_window is not None:
+            _qt_invoke_geometry(x, y, w, h)
+        else:
+            with _pending_geometry_lock:
+                global _pending_geometry  # noqa: PLW0603
+                _pending_geometry = (x, y, w, h)
+                log.debug("Geometry queued (Qt not ready yet)")
+
+    if old_df != _dpi_factor and _shell_ready:
+        if _menu_visible:
+            _update_geometry(_bounding_w(), _bounding_h())
+        else:
+            _update_geometry(0, 0)
+
+
+def _qt_invoke_geometry(x: int, y: int, w: int, h: int) -> None:
+    """Thread-safe geometry dispatch: store args, then poke the Qt event loop."""
+    with _pending_geometry_lock:
+        global _pending_geometry  # noqa: PLW0603
+        _pending_geometry = (x, y, w, h)
+    if _qt_window is not None:
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_qt_window, "apply_pending_geometry",
+                                     Qt.ConnectionType.QueuedConnection)
+        except Exception as exc:
+            log.warning(f"_qt_invoke_geometry failed: {exc}")
+
+
+def _qt_invoke_refresh() -> None:
+    """Schedule a repaint on the Qt thread."""
+    try:
+        from PyQt6.QtCore import QMetaObject, Qt
+        QMetaObject.invokeMethod(
+            _qt_window,
+            "refresh",
+            Qt.ConnectionType.QueuedConnection,
+        )
+    except Exception:
+        try:
+            _qt_window.refresh()
+        except Exception:
+            pass
+
+
+def _invoke(obj, slot: str, *args):
+    if obj is None:
+        return
+    try:
+        from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+        q_args = [Q_ARG(type(a), a) for a in args]
+        QMetaObject.invokeMethod(obj, slot, Qt.ConnectionType.QueuedConnection, *q_args)
+    except Exception as exc:
+        log.warning(f"_invoke({slot}) failed: {exc}")
+
+
+def on_input_event(topic: str, payload: dict) -> None:
+    if _qt_window is None:
+        return
+    _invoke(_qt_window, "handle_input", payload)
+
+
+def on_settings_toggle(topic: str, payload: dict) -> None:
+    global _menu_visible
+    _menu_visible = not _menu_visible
+    log.info(f"settings.toggle — menu_visible={_menu_visible}")
+    if _qt_window is not None:
+        _invoke(_qt_window, "set_visible_slot", _menu_visible)
+    else:
+        if _menu_visible:
+            _update_geometry(_bounding_w(), _bounding_h())
+        else:
+            _update_geometry(0, 0)
+        return
+
+    if _menu_visible:
+        _update_geometry(_bounding_w(), _bounding_h())
+
+
+def on_home_pressed(topic: str, payload: dict) -> None:
+    global _menu_visible, _active_module
+    log.info("ui.home.pressed — closing all modules and hiding menu")
+    _close_active_module()
+    _active_module = None
+    _menu_visible  = False
+    if _qt_window is not None:
+        _invoke(_qt_window, "set_visible_slot", False)
+    else:
+        _update_geometry(0, 0)
+
+
+# ---------------------------------------------------------------------------
+# Module open/close logic
+# ---------------------------------------------------------------------------
+
+def _close_active_module() -> None:
+    global _active_module
+    if _active_module:
+        bus.publish("ui.module.close", {"name": _active_module})
+        log.info(f"ui.module.close → {_active_module}")
+        _active_module = None
+
+
+def _open_module(name: str) -> None:
+    global _menu_visible, _active_module
+    _menu_visible  = False
+    if _qt_window is not None:
+        _invoke(_qt_window, "set_visible_slot", False)
+    else:
+        _update_geometry(0, 0)
+    if _active_module == name:
+        return
+    # Close the previously-active module BEFORE updating _active_module,
+    # so _close_active_module publishes close for the right target.
+    _close_active_module()
+    _active_module = name
+    bus.publish("ui.module.open", {"name": name})
+    log.info(f"ui.module.open → {name}")
+
+
+# ---------------------------------------------------------------------------
+# PyQt6 window implementation
+# ---------------------------------------------------------------------------
+
+def _run_qt() -> None:
+    try:
+        from PyQt6.QtWidgets import QApplication, QWidget
+        from PyQt6.QtCore import (
+            Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtSlot, pyqtProperty,
+        )
+        from PyQt6.QtGui import QColor, QPainter, QFont
+    except ImportError:
+        log.warning("PyQt6 not available — floating_menu_ui running in headless mode")
+        return
+
+    global _qt_app, _qt_window
+
+    _qt_app = QApplication.instance() or QApplication(sys.argv)
+
+    FONT_ICON = QFont("DM Sans", -1)
+    FONT_ICON.setPixelSize(18)
+
+    class ArcMenuWindow(QWidget):
+        def __init__(self):
+            super().__init__()
+            # Z-order managed exclusively by ui_shell via ui.widget.register
+            # z_order=3 field — never set WindowStaysOnTopHint directly.
+            self.setWindowFlags(
+                Qt.WindowType.FramelessWindowHint |
+                Qt.WindowType.Tool
+            )
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            if hasattr(Qt.WidgetAttribute, "WA_DontShowOnScreen"):
+                self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            self.hide()
+
+            self._is_visible    = False
+            self._scroll_offset = 0
+            self._drag_start_y: Optional[int] = None
+            self._drag_start_offset: int = 0
+            self._anim: Optional[QPropertyAnimation] = None
+            self._opacity = 0.0
+            self._shm_engine = None
+
+        def get_opacity(self) -> float:
+            return self._opacity
+
+        def set_opacity(self, val: float) -> None:
+            self._opacity = val
+            self.render_to_shm()
+
+        opacity = pyqtProperty(float, fget=get_opacity, fset=set_opacity)
+
+        # ---- thread-safe public API ----
+
+        @pyqtSlot()
+        def apply_pending_geometry(self) -> None:
+            """No-arg slot: reads latest geometry from _pending_geometry and applies it."""
+            with _pending_geometry_lock:
+                pending = _pending_geometry
+            if pending is not None:
+                self.apply_geometry(*pending)
+
+        @pyqtSlot(int, int, int, int)
+        def apply_geometry_slot(self, x: int, y: int, w: int, h: int) -> None:
+            self.apply_geometry(x, y, w, h)
+
+        @pyqtSlot(bool)
+        def set_visible_slot(self, visible: bool) -> None:
+            self.set_visible(visible)
+
+        @pyqtSlot()
+        def refresh(self) -> None:
+            self.update()
+
+        def apply_geometry(self, x: int, y: int, w: int, h: int) -> None:
+            if w > 0 and h > 0:
+                self.setGeometry(x, y, w, h)
+                needs_rebuild = (
+                    self._shm_engine is None
+                    or w > self._shm_engine.max_width
+                    or h > self._shm_engine.max_height
+                )
+                if needs_rebuild:
+                    if self._shm_engine is not None:
+                        self._shm_engine.cleanup()
+                    from shared.shm_helper import OffscreenWidgetEngine
+                    self._shm_engine = OffscreenWidgetEngine(
+                        MODULE_NAME, w, h, bus=bus, max_width=w, max_height=h
+                    )
+                else:
+                    self._shm_engine.resize(w, h)
+                self.render_to_shm()
+            else:
+                if self._shm_engine is not None:
+                    self._shm_engine.cleanup()
+                    self._shm_engine = None
+
+        @pyqtSlot()
+        def render_to_shm(self) -> None:
+            if self._shm_engine is None:
+                return
+            self._shm_engine.render_and_swap(self)
+
+        @pyqtSlot()
+        def handle_frame_ack(self) -> None:
+            if self._shm_engine is not None:
+                self._shm_engine.on_swap_ack()
+                if self._shm_engine.needs_redraw:
+                    self.render_to_shm()
+
+        def set_visible(self, visible: bool) -> None:
+            self._is_visible = visible
+            if visible:
+                self._animate_in()
+            else:
+                self._animate_out()
+
+        @pyqtSlot(dict)
+        def handle_input(self, payload: dict) -> None:
+            from shared.shm_helper import inject_input_event
+            inject_input_event(self, payload)
+
+        def mousePressEvent(self, ev) -> None:
+            y = int(ev.position().y())
+            self._drag_start_y      = y
+            self._drag_start_offset = self._scroll_offset
+            self.render_to_shm()
+
+        def mouseMoveEvent(self, ev) -> None:
+            y = int(ev.position().y())
+            if self._drag_start_y is not None:
+                delta   = y - self._drag_start_y
+                icon_sz = float(_config.get("icon_size", 52)) * _dpi_factor
+                gap     = float(_config.get("icon_gap", 8))   * _dpi_factor
+                step    = icon_sz + gap
+                total   = len(_on_request_modules)
+                vis     = _visible_count()
+                new_off = self._drag_start_offset - int(delta / step)
+                self._scroll_offset = max(0, min(new_off, total - vis))
+                self.render_to_shm()
+
+        def mouseReleaseEvent(self, ev) -> None:
+            x = int(ev.position().x())
+            y = int(ev.position().y())
+            if self._drag_start_y is not None:
+                if abs(y - self._drag_start_y) < 8:
+                    hit = self._hit_icon(x, y)
+                    if hit is not None:
+                        _open_module(hit)
+                        self.render_to_shm()
+            self._drag_start_y = None
+            self.render_to_shm()
+
+        # ---- animation ----
+
+        def _animate_in(self) -> None:
+            if self._anim:
+                self._anim.stop()
+            self._anim = QPropertyAnimation(self, b"opacity")
+            self._anim.setDuration(220)
+            self._anim.setStartValue(0.0)
+            self._anim.setEndValue(1.0)
+            self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._anim.start()
+
+        def _animate_out(self) -> None:
+            if self._anim:
+                self._anim.stop()
+            self._anim = QPropertyAnimation(self, b"opacity")
+            self._anim.setDuration(180)
+            self._anim.setStartValue(1.0)
+            self._anim.setEndValue(0.0)
+            self._anim.setEasingCurve(QEasingCurve.Type.InCubic)
+            self._anim.finished.connect(self._on_animate_out_finished)
+            self._anim.start()
+
+        def _on_animate_out_finished(self) -> None:
+            _update_geometry(0, 0)
+
+        # ---- hit testing ----
+
+        def _icon_rects(self) -> list[tuple[str, int, int, int, int]]:
+            entries = _sorted_entries()
+            vis     = _visible_count()
+            start   = self._scroll_offset
+            visible = entries[start:start + vis]
+            icon_sz = int(float(_config.get("icon_size", 52)) * _dpi_factor)
+            rects   = []
+            for i, entry in enumerate(visible):
+                cx, cy = _icon_center(i, vis)
+                r = icon_sz // 2
+                rects.append((entry.name, int(cx) - r, int(cy) - r, icon_sz, icon_sz))
+            return rects
+
+        def _hit_icon(self, x: int, y: int) -> Optional[str]:
+            for name, rx, ry, rw, rh in self._icon_rects():
+                if rx <= x < rx + rw and ry <= y < ry + rh:
+                    return name
+            return None
+
+        # ---- painting ----
+
+        def paintEvent(self, _event) -> None:
+            if not self._is_visible:
+                return
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            icon_sz = int(float(_config.get("icon_size", 52)) * _dpi_factor)
+            scaled_font = QFont("DM Sans", -1)
+            scaled_font.setPixelSize(int(icon_sz * 0.35))
+            p.setFont(scaled_font)
+
+            opacity_val = int(self._opacity * 255)
+            COLOR_ICON_with_opacity = QColor(18, 18, 18, opacity_val)
+            COLOR_ICON_BG_with_opacity = QColor(224, 224, 224, int(0.78 * opacity_val))
+            COLOR_ACTIVE_BG_with_opacity = QColor(25, 118, 210, int(0.94 * opacity_val))
+            COLOR_ACTIVE_ICON_with_opacity = QColor(255, 255, 255, opacity_val)
+
+            entries = _sorted_entries()
+            vis     = _visible_count()
+            start   = self._scroll_offset
+            visible = entries[start:start + vis]
+
+            for i, entry in enumerate(visible):
+                cx, cy  = _icon_center(i, vis)
+                icon_sz = int(float(_config.get("icon_size", 52)) * _dpi_factor)
+                r       = icon_sz // 2
+                is_active = (entry.name == _active_module)
+
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(COLOR_ACTIVE_BG_with_opacity if is_active else COLOR_ICON_BG_with_opacity)
+                p.drawEllipse(int(cx) - r, int(cy) - r, icon_sz, icon_sz)
+
+                p.setPen(COLOR_ACTIVE_ICON_with_opacity if is_active else COLOR_ICON_with_opacity)
+                p.drawText(
+                    int(cx) - r, int(cy) - r, icon_sz, icon_sz,
+                    Qt.AlignmentFlag.AlignCenter,
+                    entry.icon or "?",
+                )
+
+            if len(entries) > vis:
+                self._draw_scroll_hint(p, len(entries), vis, opacity_val)
+
+        def _draw_scroll_hint(self, p: "QPainter", total: int, vis: int, opacity_val: int) -> None:
+            df      = _dpi_factor
+            dot_r   = int(3 * df)
+            dot_gap = int(8 * df)
+            dots    = min(total, 5)
+            start_x = self.width() - int(12 * df)
+            start_y = self.height() // 2 - (dots * (dot_r * 2 + dot_gap)) // 2
+            for i in range(dots):
+                frac   = (self._scroll_offset + vis / 2) / max(total - vis, 1)
+                active = abs(i / (dots - 1) - frac) < 0.3 if dots > 1 else True
+                alpha  = int((0.78 if active else 0.31) * opacity_val)
+                clr    = QColor(18, 18, 18, alpha)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(clr)
+                iy = start_y + i * (dot_r * 2 + dot_gap)
+                p.drawEllipse(start_x - dot_r, iy, dot_r * 2, dot_r * 2)
+
+    # Instantiate BEFORE exec() so bus thread can invokeMethod immediately.
+    _qt_window = ArcMenuWindow()
+
+    # Apply any geometry that arrived before this thread was ready.
+    def _apply_pending() -> None:
+        with _pending_geometry_lock:
+            pending = _pending_geometry
+        if pending is not None:
+            log.debug(f"Applying pending geometry: {pending}")
+            _qt_window.apply_geometry(*pending)
+
+    QTimer.singleShot(0, _apply_pending)
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _qt_app.exec()
+
+    log.info("Qt event loop exited, cleaning up floating menu UI resources...")
+    if _qt_window is not None:
+        if _qt_window._shm_engine is not None:
+            _qt_window._shm_engine.cleanup()
+        _qt_window.close()
+        _qt_window = None
+    _qt_app = None
+
+
+# ---------------------------------------------------------------------------
+# Config callbacks
+# ---------------------------------------------------------------------------
+
+def _on_config_loaded(config: dict) -> None:
+    global _config
+    if not config:
+        return
+    merged = {k: v.default for k, v in _SCHEMA.items()}
+    merged.update({
+        k: v for k, v in config.items()
+        if k in _SCHEMA and not isinstance(v, (dict, list))
+    })
+    _config = merged
+    log.info(f"Config loaded: {_config}")
+
+
+def _on_config_changed(key: str, value) -> None:
+    if key not in _SCHEMA or isinstance(value, (dict, list)):
+        return
+    _config[key] = value
+    log.info(f"Config changed: {key} = {value!r}")
+    if _shell_ready:
+        if _menu_visible:
+            _update_geometry(_bounding_w(), _bounding_h())
+        else:
+            _update_geometry(0, 0)
+    if _qt_window is not None:
+        _invoke(_qt_window, "render_to_shm")
+
+
+# ---------------------------------------------------------------------------
+# Boot protocol
+# ---------------------------------------------------------------------------
+
+def on_system_readytostart() -> None:
+    log.info(f"system.readytostart — announcing priority {PRIORITY}")
+    bus.publish("system.module_ready", {"name": MODULE_NAME, "priority": PRIORITY})
+
+
+def on_system_start(topic: str, payload: dict) -> None:
+    if payload.get("priority") != PRIORITY:
+        return
+    log.info(f"system.start priority={PRIORITY} — launching floating_menu_ui")
+    cfg.get(schema=_SCHEMA)
+
+    _system_start_event.set()
+
+    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
+    log.info(f"system.ready published (priority={PRIORITY})")
+
+    if _shell_ready:
+        log.info("ui.shell.ready already received — registering immediately")
+        _register()
+
+
+def on_system_stop(topic: str, payload: dict) -> None:
+    log.info("system.stop — shutting down floating_menu_ui")
+    bus.publish("ui.widget.unregister", {"name": MODULE_NAME})
+    if _qt_app is not None:
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_qt_app, "quit", Qt.ConnectionType.QueuedConnection)
+        except Exception:
+            pass
+    bus.stop()
+
+
+def on_widget_frame_ack(topic: str, payload: dict) -> None:
+    if _qt_window is not None:
+        _invoke(_qt_window, "handle_frame_ack")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def run() -> None:
+    cfg.on_config_loaded  = _on_config_loaded
+    cfg.on_config_changed = _on_config_changed
+    cfg.register()
+
+    bus.subscribe("system.readytostart",          on_system_readytostart)
+    bus.subscribe("system.start",                 on_system_start)
+    bus.subscribe("system.stop",                  on_system_stop)
+
+    bus.subscribe("ui.shell.ready",               on_ui_shell_ready)
+    bus.subscribe("ui.widget.register",           on_widget_register)
+    bus.subscribe("ui.widget.unregister",         on_widget_unregister)
+    bus.subscribe("ui.widget.geometry",           on_widget_geometry)
+    bus.subscribe(f"input.event.{MODULE_NAME}",   on_input_event)
+    bus.subscribe("ui.settings.toggle",           on_settings_toggle)
+    bus.subscribe("ui.home.pressed",              on_home_pressed)
+    bus.subscribe(f"ui.widget.frame_ack.{MODULE_NAME}", on_widget_frame_ack)
+
+    log.info("floating_menu_ui started, waiting for messages...")
+    bus_thread = bus.start(blocking=False)
+    time.sleep(0.05)
+    on_system_readytostart()
+    try:
+        _system_start_event.wait()
+        _run_qt()
+        if bus_thread is not None:
+            bus_thread.join()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    run()

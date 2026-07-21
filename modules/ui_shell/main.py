@@ -1,0 +1,926 @@
+"""
+NemoHeadUnit-Wireless — ui_shell
+
+Layout engine, widget geometry orchestrator and input_trap co-process.
+
+  Name        : ui_shell
+  Priority    : 2
+  Subscribes  : system.readytostart
+                system.start
+                system.stop
+                ui.widget.register  → {name, z_order, dock, width, min_width,
+                                        max_width, height, min_height, max_height,
+                                        aspect_ratio, on_request, menu_order, icon}
+                ui.widget.update    → {name, [height], [width], ...}
+                ui.widget.unregister→ {name}
+                input.raw           → {type, x_global, y_global, timestamp}
+  Publishes   : system.module_ready → {name, priority}
+                system.ready       → {name, priority}
+                ui.shell.ready     → {}
+                ui.widget.geometry → {name, x, y, w, h, dpi_factor}
+                ui.focus.changed   → {name}
+                input.event.<name> → {type, x, y, x_global, y_global, ...}
+  Config keys : fullscreen  bool    True      start in fullscreen mode
+                screen_w    int     1024      logical screen width  (ignored in fullscreen)
+                screen_h    int     600       logical screen height (ignored in fullscreen)
+                dpi_factor  float   1.0       DPI scaling factor (1.0 = 160dpi base)
+  State       : private
+
+Path layout:
+  root/
+  ├── shared/
+  └── modules/
+      └── ui_shell/
+          └── main.py
+"""
+
+import signal
+import sys
+import time
+import threading
+from multiprocessing import shared_memory
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional, Any
+
+# ---------------------------------------------------------------------------
+# sys.path bootstrap
+# ---------------------------------------------------------------------------
+_HERE      = Path(__file__).parent   # modules/ui_shell/
+_MODULES   = _HERE.parent            # modules/
+_REPO_ROOT    = _MODULES.parent         # root
+_PROTO_ROOT   = _REPO_ROOT / "protos"  # root/protos
+
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+if str(_PROTO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROTO_ROOT))
+if str(_MODULES) not in sys.path:
+    sys.path.insert(0, str(_MODULES))
+
+from shared.bus_client import BusClient        # noqa: E402
+from shared.config_client import ConfigClient  # noqa: E402
+from shared.logger import get_logger           # noqa: E402
+from shared.config_schema import field_bool, field_int, field_float  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Module identity
+# ---------------------------------------------------------------------------
+
+MODULE_NAME = "ui_shell"
+PRIORITY: int = 2
+
+bus = BusClient(module_name=MODULE_NAME)
+log = get_logger(MODULE_NAME, bus=bus)
+cfg = ConfigClient(bus=bus, module_name=MODULE_NAME)
+
+# ---------------------------------------------------------------------------
+# Config schema
+# ---------------------------------------------------------------------------
+
+_SCHEMA = {
+    "fullscreen": field_bool(default=True),
+    "screen_w":   field_int(default=1024, min=320, max=7680),
+    "screen_h":   field_int(default=600,  min=240, max=4320),
+    "dpi_factor": field_float(default=1.0, min=0.5, max=4.0),
+}
+
+_config: dict = {k: v.default for k, v in _SCHEMA.items()}
+
+# ---------------------------------------------------------------------------
+# Layout engine data model
+# ---------------------------------------------------------------------------
+
+VALID_DOCKS = {
+    "top", "bottom", "left", "right",
+    "top-left", "top-right", "bottom-left", "bottom-right",
+    "center",
+}
+
+
+@dataclass
+class WidgetConstraints:
+    """Registration constraints for a single widget process."""
+
+    name: str
+    z_order: int
+    dock: str
+    width: Optional[int] = None
+    min_width: Optional[int] = None
+    max_width: Optional[int] = None
+    height: Optional[int] = None
+    min_height: Optional[int] = None
+    max_height: Optional[int] = None
+    aspect_ratio: Optional[float] = None
+    on_request: bool = False
+    menu_order: int = 99
+    icon: str = ""
+
+
+@dataclass
+class WidgetGeometry:
+    """Last computed absolute geometry for a widget."""
+
+    x: int = 0
+    y: int = 0
+    w: int = 0
+    h: int = 0
+
+
+@dataclass
+class WidgetRecord:
+    constraints: WidgetConstraints
+    geometry: WidgetGeometry = field(default_factory=WidgetGeometry)
+    shm_buffer: Optional[Any] = None
+    qimage: Optional["QImage"] = None
+    visible: bool = True
+    pending_ack: bool = False
+
+
+# Active widget registry: name → WidgetRecord
+_registry: dict[str, WidgetRecord] = {}
+_registry_lock = threading.Lock()
+
+# Screen dimensions (updated when ui_shell window resizes)
+_screen_w: int = 1024
+_screen_h: int = 600
+
+# Input routing state. Mouse/touch streams keep going to the widget that
+# received the press so drags and releases are not stolen by overlapping panes.
+_focused_widget: Optional[str] = None
+_pointer_target: Optional[str] = None
+
+# ---------------------------------------------------------------------------
+# Layout engine
+# ---------------------------------------------------------------------------
+
+def _clamp(value: int, lo: Optional[int], hi: Optional[int]) -> int:
+    if lo is not None:
+        value = max(value, lo)
+    if hi is not None:
+        value = min(value, hi)
+    return value
+
+
+def _resolve_size(
+    available: int,
+    fixed: Optional[int],
+    min_v: Optional[int],
+    max_v: Optional[int],
+) -> int:
+    """Return the resolved dimension respecting fixed/min/max constraints."""
+    base = fixed if fixed is not None else available
+    return _clamp(base, min_v, max_v)
+
+
+def _compute_geometry(record: WidgetRecord, sw: int, sh: int) -> WidgetGeometry:
+    """Compute absolute geometry for a widget given screen dimensions."""
+    c = record.constraints
+    w = _resolve_size(sw, c.width, c.min_width, c.max_width)
+    h = _resolve_size(sh, c.height, c.min_height, c.max_height)
+
+    if c.aspect_ratio is not None:
+        if c.width is None and c.height is not None:
+            w = int(h * c.aspect_ratio)
+        elif c.height is None and c.width is not None:
+            h = int(w / c.aspect_ratio)
+
+    w = max(1, w)
+    h = max(1, h)
+
+    dock = c.dock
+    x = 0
+    y = 0
+
+    if dock == "bottom":
+        x = 0
+        y = sh - h
+        w = sw
+    elif dock == "top":
+        x = 0
+        y = 0
+        w = sw
+    elif dock == "left":
+        x = 0
+        y = 0
+        h = sh
+    elif dock == "right":
+        x = sw - w
+        y = 0
+        h = sh
+    elif dock == "top-left":
+        x = 0
+        y = 0
+    elif dock == "top-right":
+        x = sw - w
+        y = 0
+    elif dock == "bottom-left":
+        x = 0
+        y = sh - h
+    elif dock == "bottom-right":
+        x = sw - w
+        y = sh - h
+    elif dock == "center":
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+
+    return WidgetGeometry(x=x, y=y, w=w, h=h)
+
+
+def _reflow() -> dict[str, WidgetGeometry]:
+    """Recompute geometry for ALL registered widgets."""
+    sw = _screen_w
+    sh = _screen_h
+
+    layers: dict[int, list[WidgetRecord]] = {}
+    for rec in _registry.values():
+        z = rec.constraints.z_order
+        layers.setdefault(z, []).append(rec)
+
+    new_geometries: dict[str, WidgetGeometry] = {}
+
+    top_offset    = 0
+    bottom_offset = 0
+    left_offset   = 0
+    right_offset  = 0
+
+    for z in sorted(layers):
+        layer_records = layers[z]
+
+        by_dock: dict[str, list[WidgetRecord]] = {}
+        for rec in layer_records:
+            by_dock.setdefault(rec.constraints.dock, []).append(rec)
+
+        for rec in by_dock.get("top", []):
+            c = rec.constraints
+            h = _resolve_size(sh, c.height, c.min_height, c.max_height)
+            w = sw - left_offset - right_offset
+            g = WidgetGeometry(x=left_offset, y=top_offset, w=w, h=h)
+            new_geometries[c.name] = g
+            top_offset += h
+
+        for rec in by_dock.get("bottom", []):
+            c = rec.constraints
+            h = _resolve_size(sh, c.height, c.min_height, c.max_height)
+            w = sw - left_offset - right_offset
+            y = sh - bottom_offset - h
+            g = WidgetGeometry(x=left_offset, y=y, w=w, h=h)
+            new_geometries[c.name] = g
+            bottom_offset += h
+
+        for rec in by_dock.get("left", []):
+            c = rec.constraints
+            w = _resolve_size(sw, c.width, c.min_width, c.max_width)
+            h = sh - top_offset - bottom_offset
+            g = WidgetGeometry(x=left_offset, y=top_offset, w=w, h=h)
+            new_geometries[c.name] = g
+            left_offset += w
+
+        for rec in by_dock.get("right", []):
+            c = rec.constraints
+            w = _resolve_size(sw, c.width, c.min_width, c.max_width)
+            h = sh - top_offset - bottom_offset
+            x = sw - right_offset - w
+            g = WidgetGeometry(x=x, y=top_offset, w=w, h=h)
+            new_geometries[c.name] = g
+            right_offset += w
+
+        for dock in ("top-left", "top-right", "bottom-left", "bottom-right"):
+            for rec in by_dock.get(dock, []):
+                g = _compute_geometry(rec, sw, sh)
+                new_geometries[rec.constraints.name] = g
+
+        for rec in by_dock.get("center", []):
+            c = rec.constraints
+            avail_w = sw - left_offset - right_offset
+            avail_h = sh - top_offset - bottom_offset
+            w = _resolve_size(avail_w, c.width, c.min_width, c.max_width)
+            h = _resolve_size(avail_h, c.height, c.min_height, c.max_height)
+            x = left_offset + (avail_w - w) // 2
+            y = top_offset  + (avail_h - h) // 2
+            new_geometries[c.name] = WidgetGeometry(x=x, y=y, w=w, h=h)
+
+    return new_geometries
+
+
+def _publish_geometries(new_geometries: dict[str, WidgetGeometry]) -> None:
+    """Publish ui.widget.geometry for every changed widget and update registry."""
+    dpi_factor = float(_config.get("dpi_factor", 1.0))
+    with _registry_lock:
+        for name, geom in new_geometries.items():
+            if name not in _registry:
+                continue
+            old = _registry[name].geometry
+            if (old.x, old.y, old.w, old.h) != (geom.x, geom.y, geom.w, geom.h):
+                _registry[name].geometry = geom
+                bus.publish(
+                    "ui.widget.geometry",
+                    {
+                        "name": name,
+                        "x": geom.x,
+                        "y": geom.y,
+                        "w": geom.w,
+                        "h": geom.h,
+                        "dpi_factor": dpi_factor,
+                    },
+                )
+                log.debug(
+                    f"ui.widget.geometry → {name}: "
+                    f"x={geom.x} y={geom.y} w={geom.w} h={geom.h} dpi={dpi_factor}"
+                )
+
+
+# ---------------------------------------------------------------------------
+# Input routing
+# ---------------------------------------------------------------------------
+
+def _hit_test(x_global: int, y_global: int) -> Optional[str]:
+    with _registry_lock:
+        sorted_names = sorted(
+            _registry.keys(),
+            key=lambda n: (_registry[n].constraints.z_order, list(_registry.keys()).index(n)),
+            reverse=True,
+        )
+        for name in sorted_names:
+            rec = _registry[name]
+            if not rec.visible:
+                continue
+            g = _registry[name].geometry
+            if g.w <= 0 or g.h <= 0:
+                continue
+            if g.x <= x_global < g.x + g.w and g.y <= y_global < g.y + g.h:
+                return name
+    return None
+
+
+def on_input_raw(topic: str, payload: dict) -> None:
+    global _focused_widget, _pointer_target
+
+    event_type = payload.get("type")
+    x_global = int(payload.get("x_global", 0))
+    y_global = int(payload.get("y_global", 0))
+
+    if event_type in ("key", "key_press", "key_release"):
+        target = _focused_widget
+    elif event_type == "press":
+        target = _hit_test(x_global, y_global)
+        _pointer_target = target
+        _focused_widget = target
+        if target is not None:
+            bus.publish("ui.focus.changed", {"name": target})
+    elif event_type in ("move", "release"):
+        target = _pointer_target or _hit_test(x_global, y_global)
+        if event_type == "release":
+            _pointer_target = None
+    else:
+        target = _hit_test(x_global, y_global)
+
+    if target is None:
+        return
+
+    with _registry_lock:
+        rec = _registry.get(target)
+        g = rec.geometry if rec is not None and rec.visible else None
+    if g is None:
+        return
+
+    routed = dict(payload)
+    routed["x"] = max(0, min(x_global - g.x, g.w))
+    routed["y"] = max(0, min(y_global - g.y, g.h))
+    bus.publish(f"input.event.{target}", routed)
+
+
+# ---------------------------------------------------------------------------
+# Widget lifecycle handlers
+# ---------------------------------------------------------------------------
+
+def on_widget_register(topic: str, payload: dict) -> None:
+    name = payload.get("name")
+    if not name:
+        log.warning("ui.widget.register: missing 'name' field — ignored")
+        return
+
+    dock = payload.get("dock", "center")
+    if dock not in VALID_DOCKS:
+        log.warning(f"ui.widget.register: invalid dock '{dock}' for '{name}' — ignored")
+        return
+
+    constraints = WidgetConstraints(
+        name         = name,
+        z_order      = int(payload.get("z_order", 2)),
+        dock         = dock,
+        width        = payload.get("width"),
+        min_width    = payload.get("min_width"),
+        max_width    = payload.get("max_width"),
+        height       = payload.get("height"),
+        min_height   = payload.get("min_height"),
+        max_height   = payload.get("max_height"),
+        aspect_ratio = payload.get("aspect_ratio"),
+        on_request   = bool(payload.get("on_request", False)),
+        menu_order   = int(payload.get("menu_order", 99)),
+        icon         = str(payload.get("icon", "")),
+    )
+
+    with _registry_lock:
+        record = WidgetRecord(constraints=constraints)
+        record.visible = not constraints.on_request
+        _registry[name] = record
+
+    log.info(f"Widget registered: '{name}' dock={dock} z={constraints.z_order} on_request={constraints.on_request}")
+    new_geometries = _reflow()
+    _publish_geometries(new_geometries)
+
+
+def on_widget_update(topic: str, payload: dict) -> None:
+    name = payload.get("name")
+    if not name:
+        log.warning("ui.widget.update: missing 'name' — ignored")
+        return
+
+    with _registry_lock:
+        if name not in _registry:
+            log.warning(f"ui.widget.update: unknown widget '{name}' — ignored")
+            return
+        c = _registry[name].constraints
+        for attr in ("width", "min_width", "max_width", "height", "min_height", "max_height", "aspect_ratio"):
+            if attr in payload:
+                setattr(c, attr, payload[attr])
+
+    log.debug(f"Widget updated: '{name}'")
+    new_geometries = _reflow()
+    _publish_geometries(new_geometries)
+
+
+def on_widget_unregister(topic: str, payload: dict) -> None:
+    name = payload.get("name")
+    if not name:
+        log.warning("ui.widget.unregister: missing 'name' — ignored")
+        return
+
+    with _registry_lock:
+        removed = _registry.pop(name, None)
+
+    if removed:
+        if removed.shm_buffer is not None:
+            try:
+                removed.shm_buffer.cleanup()
+            except Exception:
+                pass
+        log.info(f"Widget unregistered: '{name}'")
+        new_geometries = _reflow()
+        _publish_geometries(new_geometries)
+    else:
+        log.warning(f"ui.widget.unregister: unknown widget '{name}' — ignored")
+
+
+def _invoke(obj, slot: str, *args) -> None:
+    """Schedule a slot call on the Qt thread via QTimer.singleShot."""
+    if obj is None:
+        return
+    try:
+        from PyQt6.QtCore import QTimer
+        fn = getattr(obj, slot, None)
+        if fn is not None:
+            QTimer.singleShot(0, lambda: fn(*args))
+    except Exception as exc:
+        log.warning(f"_invoke({slot}) failed: {exc}")
+
+
+def on_widget_frame_ready(topic: str, payload: dict) -> None:
+    name = payload.get("name")
+    w = int(payload.get("w", 0))
+    h = int(payload.get("h", 0))
+    buffer_index = int(payload.get("buffer_index", payload.get("active_slot", 0)))
+    max_width = int(payload.get("max_width", 1024))
+    max_height = int(payload.get("max_height", 600))
+
+    if _window is not None:
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt, Q_ARG
+            QMetaObject.invokeMethod(
+                _window,
+                "update_widget_frame",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(str, name),
+                Q_ARG(int, buffer_index),
+                Q_ARG(int, w),
+                Q_ARG(int, h),
+                Q_ARG(int, max_width),
+                Q_ARG(int, max_height)
+            )
+        except Exception as exc:
+            log.warning(f"on_widget_frame_ready dispatch failed for {name}: {exc}")
+
+
+def on_module_open(topic: str, payload: dict) -> None:
+    name = payload.get("name")
+    if not name:
+        return
+    with _registry_lock:
+        if name in _registry:
+            _registry[name].visible = True
+            log.info(f"Module open: set '{name}' visible=True")
+    if _window is not None:
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_window, "update", Qt.ConnectionType.QueuedConnection)
+        except Exception:
+            pass
+
+
+def on_module_close(topic: str, payload: dict) -> None:
+    name = payload.get("name")
+    if not name:
+        return
+    with _registry_lock:
+        if name in _registry:
+            _registry[name].visible = False
+            log.info(f"Module close: set '{name}' visible=False")
+    if _window is not None:
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_window, "update", Qt.ConnectionType.QueuedConnection)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Screen resize
+# ---------------------------------------------------------------------------
+
+def on_screen_resize(new_w: int, new_h: int) -> None:
+    if new_w <= 0 or new_h <= 0:
+        log.debug(f"Ignoring transient zero screen resize → {new_w}×{new_h}")
+        return
+    global _screen_w, _screen_h
+    _screen_w = new_w
+    _screen_h = new_h
+    log.info(f"Screen resized → {new_w}×{new_h}")
+    new_geometries = _reflow()
+    _publish_geometries(new_geometries)
+
+
+# ---------------------------------------------------------------------------
+# PyQt6 UI — ui_shell window + input_trap
+# ---------------------------------------------------------------------------
+
+_window: Optional["QWidget"] = None
+_qt_app = None
+_system_start_event = threading.Event()
+
+
+def _run_qt() -> None:
+    try:
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt, QTimer, QRect, pyqtSlot, QMetaObject, QEvent
+        from PyQt6.QtGui import QPainter, QColor, QImage
+        try:
+            from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+            BaseShellClass = QOpenGLWidget
+            log.info("Using QOpenGLWidget for hardware-accelerated composition")
+        except ImportError:
+            from PyQt6.QtWidgets import QWidget
+            BaseShellClass = QWidget
+            log.info("Using software-rendered QWidget for composition")
+    except ImportError:
+        log.warning("PyQt6 not available — ui_shell running in headless mode")
+        return
+
+    global _qt_app, _window
+
+    _qt_app = QApplication.instance() or QApplication(sys.argv)
+
+    class ShellWindow(BaseShellClass):
+        def __init__(self):
+            super().__init__()
+            self.setWindowTitle("NemoHeadUnit")
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self.setMouseTracking(True)
+            if _config.get("fullscreen", True):
+                self.showFullScreen()
+            else:
+                w = _config.get("screen_w", 1024)
+                h = _config.get("screen_h", 600)
+                self.setGeometry(0, 0, w, h)
+                self.show()
+
+            # Prevent any size propagation up to parent layout
+            from PyQt6.QtWidgets import QSizePolicy
+            self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+
+            # Input Move throttling state
+            self._last_move_time = 0.0
+            self._pending_move_data = None
+            self._move_throttle_timer = QTimer(self)
+            self._move_throttle_timer.setSingleShot(True)
+            self._move_throttle_timer.timeout.connect(self._send_pending_move)
+
+            # Refresh timer for GPU compositing to prevent delayed paint flushes on legacy drivers
+            if BaseShellClass.__name__ == "QOpenGLWidget":
+                self._refresh_timer = QTimer(self)
+                self._refresh_timer.timeout.connect(self.update)
+                self._refresh_timer.start(33)  # ~30 FPS
+
+        def sizeHint(self):
+            from PyQt6.QtCore import QSize
+            return QSize(0, 0)
+
+        def minimumSizeHint(self):
+            from PyQt6.QtCore import QSize
+            return QSize(0, 0)
+
+        def event(self, event):
+            if event.type() == QEvent.Type.LayoutRequest:
+                # Swallow bottom-up layout requests to prevent feedback loops
+                return True
+            return super().event(event)
+
+        def updateGeometry(self):
+            # Swallow layout updates on the main window
+            pass
+
+        def resizeEvent(self, event):
+            super().resizeEvent(event)
+            on_screen_resize(self.width(), self.height())
+
+        @pyqtSlot(str, int, int, int, int, int)
+        def update_widget_frame(self, name: str, buffer_index: int, w: int, h: int, max_width: int, max_height: int) -> None:
+            with _registry_lock:
+                record = _registry.get(name)
+                if not record:
+                    return
+
+                if record.shm_buffer is None or record.shm_buffer.max_width != max_width or record.shm_buffer.max_height != max_height:
+                    if record.shm_buffer is not None:
+                        try:
+                            record.shm_buffer.cleanup()
+                        except Exception:
+                            pass
+                    try:
+                        from shared.shm_helper import DoubleSharedBuffer
+                        record.shm_buffer = DoubleSharedBuffer(name, max_width, max_height, create=False)
+                        log.info(f"[COMPOSITOR] Attached to DoubleSharedBuffer for {name} ({max_width}x{max_height})")
+                    except Exception as exc:
+                        log.warning(f"Failed to attach DoubleSharedBuffer for {name}: {exc}")
+                        record.shm_buffer = None
+                        record.qimage = None  # prevent paintEvent from using stale freed-memory pointer
+                        return
+
+                try:
+                    record.qimage = record.shm_buffer.get_image(buffer_index, w, h)
+                    record.pending_ack = True
+                except Exception as exc:
+                    log.warning(f"Failed to get QImage for {name} from DoubleSharedBuffer: {exc}")
+                    return
+
+            self.update()
+
+        def paintEvent(self, event):
+            p = QPainter(self)
+            p.fillRect(self.rect(), QColor(0xe0, 0xe0, 0xe0))
+            acks_to_send = []
+
+            with _registry_lock:
+                sorted_records = sorted(
+                    _registry.values(),
+                    key=lambda r: (r.constraints.z_order, r.constraints.name)
+                )
+                for rec in sorted_records:
+                    if getattr(rec, "visible", True) and getattr(rec, "qimage", None) is not None:
+                        x, y, w, h = rec.geometry.x, rec.geometry.y, rec.geometry.w, rec.geometry.h
+                        if rec.constraints.on_request:
+                            p.fillRect(QRect(x, y, w, h), QColor(0xe0, 0xe0, 0xe0))
+                        img = rec.qimage
+                        iw, ih = img.width(), img.height()
+                        if iw == w and ih == h:
+                            p.drawImage(x, y, img)
+                        else:
+                            # Scale-to-fit preserving aspect ratio; background fills letterbox bars
+                            scale = min(w / iw, h / ih) if iw > 0 and ih > 0 else 1.0
+                            sw = int(iw * scale)
+                            sh = int(ih * scale)
+                            ox = x + (w - sw) // 2
+                            oy = y + (h - sh) // 2
+                            p.drawImage(QRect(ox, oy, sw, sh), img)
+                        if getattr(rec, "pending_ack", False):
+                            acks_to_send.append(rec.constraints.name)
+                            rec.pending_ack = False
+            p.end()
+
+            for name in acks_to_send:
+                bus.publish(f"ui.widget.frame_ack.{name}", {})
+
+        @staticmethod
+        def _qt_int(value) -> int:
+            return value.value if hasattr(value, "value") else int(value)
+
+        def _send_pending_move(self):
+            if self._pending_move_data is not None:
+                x, y, btn, btns, mods = self._pending_move_data
+                self._pending_move_data = None
+                self._last_move_time = time.time()
+                bus.publish("input.raw", {
+                    "type":      "move",
+                    "x_global":  x,
+                    "y_global":  y,
+                    "button":    btn,
+                    "buttons":   btns,
+                    "modifiers": mods,
+                    "timestamp": int(self._last_move_time * 1000),
+                })
+
+        def _publish_raw(self, event_type: str, ev) -> None:
+            bus.publish("input.raw", {
+                "type":      event_type,
+                "x_global":  int(ev.position().x()),
+                "y_global":  int(ev.position().y()),
+                "button":    self._qt_int(ev.button()),
+                "buttons":   self._qt_int(ev.buttons()),
+                "modifiers": self._qt_int(ev.modifiers()),
+                "timestamp": int(time.time() * 1000),
+            })
+
+        def mousePressEvent(self, ev):
+            self.setFocus()
+            self._publish_raw("press", ev)
+            ev.accept()
+
+        def mouseMoveEvent(self, ev):
+            x = int(ev.position().x())
+            y = int(ev.position().y())
+            btn = self._qt_int(ev.button())
+            btns = self._qt_int(ev.buttons())
+            mods = self._qt_int(ev.modifiers())
+            
+            now = time.time()
+            self._pending_move_data = (x, y, btn, btns, mods)
+            
+            # Limit move rate to 50 Hz (20ms interval) to offload ZMQ bus
+            if now - self._last_move_time >= 0.020:
+                self._move_throttle_timer.stop()
+                self._send_pending_move()
+            else:
+                if not self._move_throttle_timer.isActive():
+                    delay = max(1, int((0.020 - (now - self._last_move_time)) * 1000))
+                    self._move_throttle_timer.start(delay)
+            ev.accept()
+
+        def mouseReleaseEvent(self, ev):
+            self._publish_raw("release", ev)
+            ev.accept()
+
+        def keyPressEvent(self, ev):
+            bus.publish("input.raw", {
+                "type":           "key_press",
+                "key":            ev.key(),
+                "text":           ev.text(),
+                "modifiers":      self._qt_int(ev.modifiers()),
+                "is_auto_repeat": ev.isAutoRepeat(),
+                "x_global":       0,
+                "y_global":       0,
+                "timestamp":      int(time.time() * 1000),
+            })
+            ev.accept()
+
+        def keyReleaseEvent(self, ev):
+            bus.publish("input.raw", {
+                "type":           "key_release",
+                "key":            ev.key(),
+                "text":           ev.text(),
+                "modifiers":      self._qt_int(ev.modifiers()),
+                "is_auto_repeat": ev.isAutoRepeat(),
+                "x_global":       0,
+                "y_global":       0,
+                "timestamp":      int(time.time() * 1000),
+            })
+            ev.accept()
+
+    _window = ShellWindow()
+
+    bus.publish("ui.shell.ready", {})
+    log.info("ui.shell.ready published — shell window active")
+
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _qt_app.exec()
+
+    log.info("Qt event loop exited, cleaning up ui_shell resources...")
+    if _window is not None:
+        try:
+            _window.close()
+        except RuntimeError:
+            pass
+        _window = None
+    with _registry_lock:
+        for rec in _registry.values():
+            if rec.shm_buffer is not None:
+                try:
+                    rec.shm_buffer.cleanup()
+                except Exception:
+                    pass
+                rec.shm_buffer = None
+    _qt_app = None
+
+
+# ---------------------------------------------------------------------------
+# Config callbacks
+# ---------------------------------------------------------------------------
+
+def _on_config_loaded(config: dict) -> None:
+    global _config, _screen_w, _screen_h
+    if not config:
+        log.info("No persisted config — using defaults.")
+        return
+    merged = {k: v.default for k, v in _SCHEMA.items()}
+    merged.update({k: v for k, v in config.items() if k in _SCHEMA and not isinstance(v, (dict, list))})
+    _config = merged
+    _screen_w = _config.get("screen_w", 1024)
+    _screen_h = _config.get("screen_h", 600)
+    log.info(f"Config loaded: {_config}")
+
+
+def _on_config_changed(key: str, value) -> None:
+    if key not in _SCHEMA:
+        log.warning(f"config.changed: unknown key '{key}' — ignoring")
+        return
+    if isinstance(value, (dict, list)):
+        log.warning(f"config.changed: structural value for '{key}' rejected")
+        return
+    _config[key] = value
+    log.info(f"Config changed: {key} = {value!r}")
+
+
+# ---------------------------------------------------------------------------
+# Boot protocol handlers
+# ---------------------------------------------------------------------------
+
+def on_system_readytostart() -> None:
+    log.info(f"system.readytostart — announcing priority {PRIORITY}")
+    bus.publish("system.module_ready", {"name": MODULE_NAME, "priority": PRIORITY})
+
+
+def on_system_start(topic: str, payload: dict) -> None:
+    if payload.get("priority") != PRIORITY:
+        return
+    log.info(f"system.start priority={PRIORITY} — launching ui_shell")
+    cfg.get(schema=_SCHEMA)
+
+    global _screen_w, _screen_h
+    _screen_w = _config.get("screen_w", 1024)
+    _screen_h = _config.get("screen_h", 600)
+
+    _system_start_event.set()
+
+    bus.publish("system.ready", {"name": MODULE_NAME, "priority": PRIORITY})
+    log.info(f"system.ready published (priority={PRIORITY})")
+
+
+def on_system_stop(topic: str, payload: dict) -> None:
+    log.info("system.stop — shutting down ui_shell")
+    if _qt_app is not None:
+        try:
+            from PyQt6.QtCore import QMetaObject, Qt
+            QMetaObject.invokeMethod(_qt_app, "quit", Qt.ConnectionType.QueuedConnection)
+        except Exception:
+            pass
+    bus.stop()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def run() -> None:
+    cfg.on_config_loaded  = _on_config_loaded
+    cfg.on_config_changed = _on_config_changed
+    cfg.register()
+
+    bus.subscribe("system.readytostart", on_system_readytostart)
+    bus.subscribe("system.start",        on_system_start)
+    bus.subscribe("system.stop",         on_system_stop)
+
+    bus.subscribe("ui.widget.register",   on_widget_register)
+    bus.subscribe("ui.widget.update",     on_widget_update)
+    bus.subscribe("ui.widget.unregister", on_widget_unregister)
+    bus.subscribe("ui.widget.frame_ready", on_widget_frame_ready)
+    bus.subscribe("ui.module.open",        on_module_open)
+    bus.subscribe("ui.module.close",       on_module_close)
+    bus.subscribe("input.raw",            on_input_raw)
+
+    log.info("ui_shell started, waiting for messages...")
+    bus_thread = bus.start(blocking=False)
+    time.sleep(0.05)
+    on_system_readytostart()
+    try:
+        _system_start_event.wait()
+        import gc
+        gc.collect()
+        gc.set_threshold(50000, 10, 10)
+        _run_qt()
+        if bus_thread is not None:
+            bus_thread.join()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    run()

@@ -20,16 +20,15 @@ from pathlib import Path
 
 # Add paths
 _REPO_ROOT = Path(__file__).parent.parent
-_V2 = _REPO_ROOT / "v2"
-_MODULES = _V2 / "modules"
+_MODULES = _REPO_ROOT / "modules"
+_PROTO_ROOT   = _REPO_ROOT / "protos"  # root/protos
 
-for p in (_REPO_ROOT, _V2, _MODULES):
+for p in (_REPO_ROOT, _PROTO_ROOT, _MODULES):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
 from shared.bus_client import BusClient
 from shared.logger import get_logger
-from shared.proto_utils import encode_proto
 from modules.channel_manager.registry import resolve_module_type, module_name, SkipChannel
 from modules.channel_manager.launcher import Launcher
 from modules.oaa_control_channel.service_discovery import build_from_schema_cfg, channels_from_sdr_bytes, SEMANTIC_DEFAULTS
@@ -50,7 +49,7 @@ def main() -> None:
     # Generate SDR
     log.info("Generating ServiceDiscoveryResponse...")
     sdr_bytes = build_from_schema_cfg(SEMANTIC_DEFAULTS, bt_mac="", wifi_bssid="")
-    sdr_hex = encode_proto(sdr_bytes).hex()
+    sdr_hex = sdr_bytes.hex()
 
     # Get channels
     channels = channels_from_sdr_bytes(sdr_bytes)

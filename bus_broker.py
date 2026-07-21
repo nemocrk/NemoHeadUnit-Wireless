@@ -2,64 +2,82 @@
 NemoHeadUnit-Wireless — Bus Broker
 Central IPC message broker using ZeroMQ XPUB/XSUB pattern.
 
-Must be started before any other process:
-    python bus_broker.py
+Started automatically by main.py — do not run manually in production.
 
 Sockets:
-    XSUB  ipc:///tmp/nemobus.pub  — receives from publishers
-    XPUB  ipc:///tmp/nemobus.sub  — forwards to subscribers
+    XSUB  ipc:///tmp/nemobus_v2.pub  — receives from publishers
+    XPUB  ipc:///tmp/nemobus_v2.sub  — forwards to subscribers
 
-The broker is intentionally dumb: it routes by topic prefix only,
-never deserialises frame [1] (header) or frame [2] (payload).
+Shutdown strategy:
+    zmq.proxy() is blocking and lives in a daemon thread.
+    SIGINT/SIGTERM set a stop_event that closes the context from the main
+    thread, which unblocks the proxy thread with a ZMQError — clean exit.
+
+HWM note:
+    HWM here must be >= BUS_HWM in shared/bus_client.py so the broker
+    never becomes the bottleneck before client sockets saturate.
 """
 
 import signal
 import sys
-import logging
+import threading
 import zmq
+from pathlib import Path
 
-BROKER_PUB_ADDR = "ipc:///tmp/nemobus.pub"
-BROKER_SUB_ADDR = "ipc:///tmp/nemobus.sub"
+sys.path.insert(0, str(Path(__file__).parent))
+from shared.logger import get_logger  # noqa: E402
 
-# High-water marks — large enough to absorb H.264 IDR burst (~400 KB each)
-HWM = 200
+BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
+BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="[bus_broker] %(asctime)s %(levelname)s %(message)s",
-)
-log = logging.getLogger("bus_broker")
+# Must be >= BUS_HWM in shared/bus_client.py
+HWM = 5000
+
+log = get_logger("bus_broker")
 
 
 def run():
+    stop_event = threading.Event()
     context = zmq.Context()
 
-    # Publishers connect here and send frames
     xsub = context.socket(zmq.XSUB)
     xsub.setsockopt(zmq.RCVHWM, HWM)
+    xsub.setsockopt(zmq.LINGER, 0)
     xsub.bind(BROKER_PUB_ADDR)
 
-    # Subscribers connect here and receive frames
     xpub = context.socket(zmq.XPUB)
     xpub.setsockopt(zmq.SNDHWM, HWM)
+    xpub.setsockopt(zmq.LINGER, 0)
     xpub.bind(BROKER_SUB_ADDR)
 
     log.info(f"XSUB listening on {BROKER_PUB_ADDR}")
     log.info(f"XPUB listening on {BROKER_SUB_ADDR}")
     log.info("Broker ready — forwarding messages (zmq.proxy)")
 
+    def _proxy_thread():
+        try:
+            zmq.proxy(xsub, xpub)
+        except zmq.ZMQError:
+            pass
+
+    t = threading.Thread(target=_proxy_thread, daemon=True)
+    t.start()
+
     def _shutdown(signum, frame):
         log.info("Shutdown signal received, closing broker...")
-        xsub.close()
-        xpub.close()
-        context.term()
-        sys.exit(0)
+        stop_event.set()
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # Blocking native C proxy — zero Python overhead per message
-    zmq.proxy(xsub, xpub)
+    stop_event.wait()
+
+    log.info("Broker shutting down...")
+    xsub.close(linger=0)
+    xpub.close(linger=0)
+    context.term()
+    t.join(timeout=2)
+    log.info("Broker stopped.")
 
 
 if __name__ == "__main__":

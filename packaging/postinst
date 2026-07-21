@@ -53,7 +53,7 @@ case "$1" in
 
 configure)
     # ------------------------------------------------------------------
-    # 1. Create system group if absent
+    # 1. Create system groups and add standard human users automatically
     # ------------------------------------------------------------------
     if ! getent group "${GROUP_NAME}" &>/dev/null; then
         log "Creating system group '${GROUP_NAME}'"
@@ -68,6 +68,16 @@ configure)
     else
         log "Group '${BLUETOOTH_GROUP_NAME}' already exists — skipped."
     fi
+
+    # Automatically add existing standard human users to groups for out-of-the-box D-Bus access
+    while IFS=: read -r username _ uid _ _ homedir _; do
+        if [ "${uid}" -ge 1000 ] && [ "${uid}" -lt 60000 ]; then
+            log "Adding user '${username}' to group '${GROUP_NAME}'"
+            usermod -aG "${GROUP_NAME}" "${username}" || true
+            log "Adding user '${username}' to group '${BLUETOOTH_GROUP_NAME}'"
+            usermod -aG "${BLUETOOTH_GROUP_NAME}" "${username}" || true
+        fi
+    done < <(getent passwd)
 
     # ------------------------------------------------------------------
     # 2. Bootstrap conda if missing
@@ -118,7 +128,7 @@ configure)
     log "Setting permissions on ${APP_DIR}"
     chown -R root:root "${APP_DIR}"
     chmod -R a+rX,u+w "${APP_DIR}"
-    chmod -R a+rwX,u+w "${APP_DIR}/v2/config"
+    chmod -R a+rwX,u+w "${APP_DIR}/config"
     if [ -x "${CONDA_ENV_DIR}/bin/python" ]; then
         chmod +x "${CONDA_ENV_DIR}/bin/python"
     fi
@@ -132,6 +142,7 @@ configure)
     # 6. Reload D-Bus so it picks up the new policy
     # ------------------------------------------------------------------
     log "Reloading D-Bus configuration"
+    sudo systemctl restart polkit || true
     systemctl reload dbus 2>/dev/null || true
 
     # ------------------------------------------------------------------

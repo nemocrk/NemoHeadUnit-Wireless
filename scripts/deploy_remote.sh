@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy_remote.sh
-# Deploys NemoHeadUnit-Wireless v2 to a remote Linux machine via SSH/rsync,
+# Deploys NemoHeadUnit-Wireless to a remote Linux machine via SSH/rsync,
 # then avvia automaticamente main.py con log rotation e output live.
 #
 # Usage:
@@ -107,7 +107,7 @@ echo ""
 # Step 1: Crea directory remota
 # ---------------------------------------------------------------------------
 echo "[1/6] Preparing remote directory..."
-ssh "$REMOTE" "mkdir -p /home/$REMOTE_USER/$REMOTE_DIR/v2"
+ssh "$REMOTE" "mkdir -p /home/$REMOTE_USER/$REMOTE_DIR"
 echo "[OK] Remote directory ready."
 echo ""
 
@@ -164,15 +164,18 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 3: Sync v2/ + environment.yml
+# Step 3: Sync source + environment.yml
 # ---------------------------------------------------------------------------
-echo "[3/6] Syncing v2/ to remote..."
-rm "$REPO_ROOT"/v2/config/*.yaml 2>/dev/null || true
+echo "[3/6] Syncing source to remote..."
 rsync -avz --delete \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
+  --exclude='.git' \
+  --exclude='tests' \
+  --exclude='build' \
+  --exclude='dist' \
   -e ssh \
-  "$REPO_ROOT/v2/" "$REMOTE:/home/$REMOTE_USER/$REMOTE_DIR/v2/"
+  "$REPO_ROOT/" "$REMOTE:/home/$REMOTE_USER/$REMOTE_DIR/"
 echo ""
 
 if [ "$SYNC_ENV_FLAG" = "1" ]; then
@@ -267,7 +270,7 @@ echo ""
 exec ssh -t "$REMOTE" '
   source ~/miniconda3/etc/profile.d/conda.sh &&
   conda activate py314 &&
-  cd ~/NemoHeadUnit-Wireless/v2 &&
+  cd ~/NemoHeadUnit-Wireless &&
   export DEBUG=1 DISPLAY=:0 DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket &&
   
   # 1. Start Python fully in the background, safe from disconnections

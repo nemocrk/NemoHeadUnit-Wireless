@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # packaging/build_deb.sh
 #
-# Build a self-contained .deb for NemoHeadUnit-Wireless v2.
+# Build a self-contained .deb for NemoHeadUnit-Wireless.
 #
 # Usage:
 #   bash packaging/build_deb.sh [--arch amd64|arm64] [--output-dir /path]
@@ -12,7 +12,11 @@
 #   3.  Assembles a staging directory (build/stage/) mirroring the
 #       final filesystem layout:
 #         /opt/nemo-headunit/
-#           v2/               ← application source (v2/)
+#           main.py           ← application entry point
+#           modules/          ← application modules
+#           shared/           ← shared utilities
+#           protos/           ← protobuf generated files
+#           config/           ← configuration files
 #           services/         ← ap_manager_service
 #           hardware_fixes/   ← platform-specific fix scripts + registry
 #           bus_broker.py     ← ZMQ bus broker entry point
@@ -26,7 +30,7 @@
 #         /usr/share/dbus-1/system-services/
 #           org.nemo.APManager.service  (D-Bus activation file)
 #         /usr/share/polkit-1/actions/
-#           org.nemo.apmanager.policy   (lowercase — polkitd 127 case-sensitive)
+#           org.nemo.APManager.policy   (lowercase — polkitd 127 case-sensitive)
 #         /etc/polkit-1/rules.d/
 #           org.nemo.bluetooth.rules
 #         /usr/share/applications/
@@ -151,15 +155,17 @@ mkdir -p "${APP_OPT}"
 log "  Copying environment.yml (Conda env will be built on target)"
 cp "${ENV_YML}" "${APP_OPT}/environment.yml"
 
-log "  Copying v2/ source"
-cp -a "${REPO_ROOT}/v2" "${APP_OPT}/v2"
+log "  Copying application source"
+cp "${REPO_ROOT}/main.py"      "${APP_OPT}/main.py"
+cp "${REPO_ROOT}/bus_broker.py" "${APP_OPT}/bus_broker.py"
+cp -a "${REPO_ROOT}/modules"   "${APP_OPT}/modules"
+cp -a "${REPO_ROOT}/shared"    "${APP_OPT}/shared"
+cp -a "${REPO_ROOT}/protos"    "${APP_OPT}/protos"
+mkdir "${APP_OPT}/config"
 
 log "  Copying services/"
 mkdir -p "${APP_OPT}/services"
 cp -a "${SERVICES_SRC}" "${APP_OPT}/services/ap_manager_service"
-
-log "  Copying bus_broker.py"
-cp "${REPO_ROOT}/bus_broker.py" "${APP_OPT}/bus_broker.py"
 
 log "  Copying hardware_fixes/"
 cp -a "${HW_FIXES_SRC}" "${APP_OPT}/hardware_fixes"
@@ -180,10 +186,10 @@ chmod 755 "${APP_OPT}/bin/nemo-headunit"
 
 # Prune bytecode / tests
 log "  Pruning bytecode and test files"
-find "${APP_OPT}/v2" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
-find "${APP_OPT}/v2" -name '*.pyc' -delete 2>/dev/null || true
-find "${APP_OPT}/v2" -name '*.pyo' -delete 2>/dev/null || true
-rm -rf "${APP_OPT}/v2/tests" 2>/dev/null || true
+find "${APP_OPT}" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+find "${APP_OPT}" -name '*.pyc' -delete 2>/dev/null || true
+find "${APP_OPT}" -name '*.pyo' -delete 2>/dev/null || true
+rm -rf "${APP_OPT}/tests" 2>/dev/null || true
 
 # —— /usr/lib/systemd/system/ ——
 SYSTEMD_STAGE="${STAGE_DIR}/usr/lib/systemd/system"
@@ -256,7 +262,7 @@ fpm \
     --name        "${PACKAGE_NAME}" \
     --version     "${VERSION}" \
     --architecture "${ARCH}" \
-    --description "NemoHeadUnit-Wireless v2 — Android Auto wireless head unit" \
+    --description "NemoHeadUnit-Wireless — Android Auto wireless head unit" \
     --url         "https://github.com/nemocrk/NemoHeadUnit-Wireless" \
     --maintainer  "nemocrk <nemocrk@users.noreply.github.com>" \
     --license     "GPL-2.0-only" \

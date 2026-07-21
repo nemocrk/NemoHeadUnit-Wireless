@@ -2,14 +2,16 @@
     "python-envs.defaultEnvManager": "ms-python.python:conda",
     "python-envs.defaultPackageManager": "ms-python.python:conda",
     "python.testing.pytestArgs": [
-        "v2/tests"
+        "tests"
     ],
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true,
     "git.autoStash": true,
     "git.postCommitCommand": "sync",
     "python.analysis.extraPaths": [
-        "./v2/protos",
-        "./v2/modules"
-    ]
+        "./protos",
+        "./modules"
+    ],
+    "python.analysis.typeCheckingMode": "standard",
+    "chatgpt.runCodexInWindowsSubsystemForLinux": true
 }

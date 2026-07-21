@@ -1,1 +1,0 @@
-# Standalone service daemons
