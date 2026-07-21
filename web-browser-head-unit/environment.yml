@@ -1,0 +1,35 @@
+# NemoHeadUnit-Wireless — Micromamba Environment Specification
+#
+# Create:   micromamba create -f environment.yml
+# Activate: micromamba activate NemoHeadUnit-Wireless
+# Update:   micromamba update -f environment.yml --prune
+
+name: NemoHeadUnit-Wireless
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.13
+  - pyzmq>=26.0
+  - msgpack-python>=1.0
+  - aiohttp>=3.9.0
+  - websockets>=12.0
+  - pyqt6>=6.7
+  - pyopengl
+  - libxcb
+  - dbus-python
+  - gst-python
+  - gst-libav
+  - gst-plugins-bad
+  - openh264
+  - gst-plugins-base
+  - gst-plugins-good
+  - av>=12.0
+  - pyyaml>=6.0
+  - pip
+  - pip:
+    - loguru>=0.7.3
+    - protobuf>=4.25
+    - grpcio-tools>=1.62
