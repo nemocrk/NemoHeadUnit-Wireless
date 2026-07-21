@@ -98,7 +98,7 @@ OUTPUT_DIR="${REPO_ROOT}/${OUTPUT_DIR}"
 
 VERSION_FILE="${REPO_ROOT}/VERSION"
 ENV_YML="${REPO_ROOT}/environment.yml"
-SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps.txt"
+SYS_DEPS_FILE="${REPO_ROOT}/packaging_micromamba/system-deps.txt"
 POSTINST="${REPO_ROOT}/packaging_micromamba/postinst"
 PRERM="${REPO_ROOT}/packaging/prerm"
 BT_RULES="${REPO_ROOT}/packaging/org.nemo.bluetooth.rules"

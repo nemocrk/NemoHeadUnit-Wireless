@@ -134,6 +134,7 @@ class WidgetRecord:
     shm_buffer: Optional[Any] = None
     qimage: Optional["QImage"] = None
     visible: bool = True
+    pending_ack: bool = False
 
 
 # Active widget registry: name → WidgetRecord
@@ -548,6 +549,9 @@ def on_module_close(topic: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def on_screen_resize(new_w: int, new_h: int) -> None:
+    if new_w <= 0 or new_h <= 0:
+        log.debug(f"Ignoring transient zero screen resize → {new_w}×{new_h}")
+        return
     global _screen_w, _screen_h
     _screen_w = new_w
     _screen_h = new_h
@@ -567,9 +571,17 @@ _system_start_event = threading.Event()
 
 def _run_qt() -> None:
     try:
-        from PyQt6.QtWidgets import QApplication, QWidget
+        from PyQt6.QtWidgets import QApplication
         from PyQt6.QtCore import Qt, QTimer, QRect, pyqtSlot, QMetaObject, QEvent
         from PyQt6.QtGui import QPainter, QColor, QImage
+        try:
+            from PyQt6.QtOpenGLWidgets import QOpenGLWidget
+            BaseShellClass = QOpenGLWidget
+            log.info("Using QOpenGLWidget for hardware-accelerated composition")
+        except ImportError:
+            from PyQt6.QtWidgets import QWidget
+            BaseShellClass = QWidget
+            log.info("Using software-rendered QWidget for composition")
     except ImportError:
         log.warning("PyQt6 not available — ui_shell running in headless mode")
         return
@@ -578,7 +590,7 @@ def _run_qt() -> None:
 
     _qt_app = QApplication.instance() or QApplication(sys.argv)
 
-    class ShellWindow(QWidget):
+    class ShellWindow(BaseShellClass):
         def __init__(self):
             super().__init__()
             self.setWindowTitle("NemoHeadUnit")
@@ -595,6 +607,19 @@ def _run_qt() -> None:
             # Prevent any size propagation up to parent layout
             from PyQt6.QtWidgets import QSizePolicy
             self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+
+            # Input Move throttling state
+            self._last_move_time = 0.0
+            self._pending_move_data = None
+            self._move_throttle_timer = QTimer(self)
+            self._move_throttle_timer.setSingleShot(True)
+            self._move_throttle_timer.timeout.connect(self._send_pending_move)
+
+            # Refresh timer for GPU compositing to prevent delayed paint flushes on legacy drivers
+            if BaseShellClass.__name__ == "QOpenGLWidget":
+                self._refresh_timer = QTimer(self)
+                self._refresh_timer.timeout.connect(self.update)
+                self._refresh_timer.start(33)  # ~30 FPS
 
         def sizeHint(self):
             from PyQt6.QtCore import QSize
@@ -643,17 +668,17 @@ def _run_qt() -> None:
 
                 try:
                     record.qimage = record.shm_buffer.get_image(buffer_index, w, h)
+                    record.pending_ack = True
                 except Exception as exc:
                     log.warning(f"Failed to get QImage for {name} from DoubleSharedBuffer: {exc}")
                     return
 
-            # Acknowledge frame consumption to release the backbuffer to the widget
-            bus.publish(f"ui.widget.frame_ack.{name}", {})
             self.update()
 
         def paintEvent(self, event):
             p = QPainter(self)
             p.fillRect(self.rect(), QColor(0xe0, 0xe0, 0xe0))
+            acks_to_send = []
 
             with _registry_lock:
                 sorted_records = sorted(
@@ -677,11 +702,32 @@ def _run_qt() -> None:
                             ox = x + (w - sw) // 2
                             oy = y + (h - sh) // 2
                             p.drawImage(QRect(ox, oy, sw, sh), img)
+                        if getattr(rec, "pending_ack", False):
+                            acks_to_send.append(rec.constraints.name)
+                            rec.pending_ack = False
             p.end()
+
+            for name in acks_to_send:
+                bus.publish(f"ui.widget.frame_ack.{name}", {})
 
         @staticmethod
         def _qt_int(value) -> int:
             return value.value if hasattr(value, "value") else int(value)
+
+        def _send_pending_move(self):
+            if self._pending_move_data is not None:
+                x, y, btn, btns, mods = self._pending_move_data
+                self._pending_move_data = None
+                self._last_move_time = time.time()
+                bus.publish("input.raw", {
+                    "type":      "move",
+                    "x_global":  x,
+                    "y_global":  y,
+                    "button":    btn,
+                    "buttons":   btns,
+                    "modifiers": mods,
+                    "timestamp": int(self._last_move_time * 1000),
+                })
 
         def _publish_raw(self, event_type: str, ev) -> None:
             bus.publish("input.raw", {
@@ -700,7 +746,23 @@ def _run_qt() -> None:
             ev.accept()
 
         def mouseMoveEvent(self, ev):
-            self._publish_raw("move", ev)
+            x = int(ev.position().x())
+            y = int(ev.position().y())
+            btn = self._qt_int(ev.button())
+            btns = self._qt_int(ev.buttons())
+            mods = self._qt_int(ev.modifiers())
+            
+            now = time.time()
+            self._pending_move_data = (x, y, btn, btns, mods)
+            
+            # Limit move rate to 50 Hz (20ms interval) to offload ZMQ bus
+            if now - self._last_move_time >= 0.020:
+                self._move_throttle_timer.stop()
+                self._send_pending_move()
+            else:
+                if not self._move_throttle_timer.isActive():
+                    delay = max(1, int((0.020 - (now - self._last_move_time)) * 1000))
+                    self._move_throttle_timer.start(delay)
             ev.accept()
 
         def mouseReleaseEvent(self, ev):
@@ -850,6 +912,9 @@ def run() -> None:
     on_system_readytostart()
     try:
         _system_start_event.wait()
+        import gc
+        gc.collect()
+        gc.set_threshold(50000, 10, 10)
         _run_qt()
         if bus_thread is not None:
             bus_thread.join()

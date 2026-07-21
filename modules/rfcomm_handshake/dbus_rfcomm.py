@@ -121,6 +121,17 @@ class DbusRfcommListener:
         try:
             setup_glib_mainloop()
             self._bus = dbus.SystemBus()
+            # Skip check or fail gracefully if bus is mocked in unit tests
+            if hasattr(self._bus, "list_names"):
+                try:
+                    names = self._bus.list_names()
+                    if isinstance(names, (list, tuple)):
+                        if "org.bluez" not in names:
+                            log.warning("BlueZ service 'org.bluez' is not registered on D-Bus — skipping listener startup")
+                            return False
+                except Exception:
+                    pass
+
             self._profile_obj = _RfcommProfileService(
                 conn=self._bus,
                 object_path=PROFILE_PATH,

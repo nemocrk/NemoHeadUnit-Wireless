@@ -84,6 +84,9 @@ class PairingAgent:
     # ------------------------------------------------------------------
 
     def register(self) -> bool:
+        if not self._adapter or not getattr(self._adapter, "_initialized", False):
+            log.warning("Bluetooth adapter not initialized — skipping agent registration")
+            return False
         try:
             import dbus.service
 
@@ -109,6 +112,8 @@ class PairingAgent:
 
     def unregister(self) -> None:
         if not self._registered:
+            return
+        if not self._adapter or not getattr(self._adapter, "_initialized", False):
             return
         try:
             import dbus

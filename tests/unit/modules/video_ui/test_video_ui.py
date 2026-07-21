@@ -603,7 +603,8 @@ class TestTryLoadSystemVaapi:
         with patch.object(mod, "Gst", mock_gst, create=True), \
              patch("pathlib.Path.exists", return_value=True):
             result = mod._try_load_system_vaapi()
-        registry.scan_path.assert_called()
+        mock_gst.Plugin.load_file.assert_called()
+        registry.add_plugin.assert_called()
         assert result is not None
 
 

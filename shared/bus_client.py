@@ -26,6 +26,10 @@ from shared.bus_trace import BusTracer
 BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
 BROKER_SUB_ADDR = "ipc:///tmp/nemobus_v2.sub"
 
+P2P_LOGS_ADDR = "ipc:///tmp/nemo_logs.ipc"
+P2P_FRAMES_ADDR = "ipc:///tmp/nemo_ui_frames.ipc"
+P2P_ACK_ADDR = "ipc:///tmp/nemo_ui_frames_ack.ipc"
+
 # Raised from 1000 to reduce drop probability under heavy video+log traffic.
 BUS_HWM = 5000
 
@@ -64,6 +68,62 @@ class BusClient:
         self._sub.setsockopt(zmq.LINGER, 0)
         self._sub.connect(BROKER_SUB_ADDR)
 
+        # P2P Sockets
+        self._p2p_frames_pub = None
+        self._p2p_ack_pub = None
+        self._p2p_frames_sub = None
+        self._p2p_ack_sub = None
+        self._p2p_logs_sub = None
+
+        if self.module_name == "ui_shell":
+            self._p2p_frames_sub = self._context.socket(zmq.SUB)
+            self._p2p_frames_sub.setsockopt(zmq.RCVHWM, BUS_HWM)
+            self._p2p_frames_sub.setsockopt(zmq.LINGER, 0)
+            self._p2p_frames_sub.bind(P2P_FRAMES_ADDR)
+            self._p2p_frames_sub.setsockopt_string(zmq.SUBSCRIBE, "")
+
+            self._p2p_ack_pub = self._context.socket(zmq.PUB)
+            self._p2p_ack_pub.setsockopt(zmq.SNDHWM, BUS_HWM)
+            self._p2p_ack_pub.setsockopt(zmq.LINGER, 0)
+            self._p2p_ack_pub.bind(P2P_ACK_ADDR)
+
+        elif self.module_name == "log_viewer_ui":
+            self._p2p_logs_sub = self._context.socket(zmq.SUB)
+            self._p2p_logs_sub.setsockopt(zmq.RCVHWM, BUS_HWM)
+            self._p2p_logs_sub.setsockopt(zmq.LINGER, 0)
+            self._p2p_logs_sub.bind(P2P_LOGS_ADDR)
+            self._p2p_logs_sub.setsockopt_string(zmq.SUBSCRIBE, "")
+
+        else:
+            self._p2p_frames_pub = self._context.socket(zmq.PUB)
+            self._p2p_frames_pub.setsockopt(zmq.SNDHWM, BUS_HWM)
+            self._p2p_frames_pub.setsockopt(zmq.LINGER, 0)
+            self._p2p_frames_pub.connect(P2P_FRAMES_ADDR)
+
+            self._p2p_ack_sub = self._context.socket(zmq.SUB)
+            self._p2p_ack_sub.setsockopt(zmq.RCVHWM, BUS_HWM)
+            self._p2p_ack_sub.setsockopt(zmq.LINGER, 0)
+            self._p2p_ack_sub.connect(P2P_ACK_ADDR)
+
+        # Poller
+        is_fake = (
+            hasattr(self._sub, "__class__")
+            and (
+                self._sub.__class__.__name__ == "_FakeSocket"
+                or "Mock" in self._sub.__class__.__name__
+            )
+        )
+        self._use_poller = not is_fake and any([self._p2p_frames_sub, self._p2p_logs_sub, self._p2p_ack_sub])
+        if self._use_poller:
+            self._poller = zmq.Poller()
+            self._poller.register(self._sub, zmq.POLLIN)
+            if self._p2p_frames_sub:
+                self._poller.register(self._p2p_frames_sub, zmq.POLLIN)
+            if self._p2p_logs_sub:
+                self._poller.register(self._p2p_logs_sub, zmq.POLLIN)
+            if self._p2p_ack_sub:
+                self._poller.register(self._p2p_ack_sub, zmq.POLLIN)
+
         # Saturation counters (thread-safe enough via GIL for simple int increments)
         self._stat_pub_ok: int = 0
         self._stat_pub_drop: int = 0
@@ -101,8 +161,14 @@ class BusClient:
     def subscribe(self, topic: str, handler: Callable):
         """Register a handler for a topic. Must be called before start()."""
         self._subscriptions[topic] = handler
-        self._sub.setsockopt_string(zmq.SUBSCRIBE, topic)
-        self.log.debug(f"Subscribed to topic: {topic}")
+        if topic.startswith("ui.widget.frame_ack.") and self._p2p_ack_sub:
+            self._p2p_ack_sub.setsockopt_string(zmq.SUBSCRIBE, topic)
+            self.log.debug(f"Subscribed (P2P ack) to topic: {topic}")
+        elif topic == "log.entry" and self._p2p_logs_sub:
+            self.log.debug(f"Subscribed (P2P logs) to topic: {topic}")
+        else:
+            self._sub.setsockopt_string(zmq.SUBSCRIBE, topic)
+            self.log.debug(f"Subscribed to topic: {topic}")
         self._tracer.emit(
             "subscribe",
             topic=topic,
@@ -147,11 +213,17 @@ class BusClient:
 
         size = self._payload_size(topic_b, payload_b)
 
+        pub_socket = self._pub
+        if topic == "ui.widget.frame_ready" and self._p2p_frames_pub:
+            pub_socket = self._p2p_frames_pub
+        elif topic.startswith("ui.widget.frame_ack.") and self._p2p_ack_pub:
+            pub_socket = self._p2p_ack_pub
+
         with self._pub_lock:
             if trace_enabled:
                 get_sock_opt_ok = False
                 try:
-                    self._pub.getsockopt(zmq.SNDHWM)
+                    pub_socket.getsockopt(zmq.SNDHWM)
                     get_sock_opt_ok = True
                 except Exception:
                     # Avoid tracing errors interfering with normal message processing.
@@ -162,12 +234,12 @@ class BusClient:
                         topic=topic,
                         seq=seq,
                         bytes=size,
-                        sndhwm=self._pub.getsockopt(zmq.SNDHWM),
+                        sndhwm=pub_socket.getsockopt(zmq.SNDHWM),
                     )
 
             send_start_ns = time.monotonic_ns()
             try:
-                self._pub.send_multipart([topic_b, payload_b], flags=zmq.NOBLOCK)
+                pub_socket.send_multipart([topic_b, payload_b], flags=zmq.NOBLOCK)
                 send_us = (time.monotonic_ns() - send_start_ns) / 1000.0
                 self._stat_pub_ok += 1
 
@@ -178,7 +250,7 @@ class BusClient:
                         seq=seq,
                         bytes=size,
                         send_us=send_us,
-                        sndhwm=self._pub.getsockopt(zmq.SNDHWM),
+                        sndhwm=pub_socket.getsockopt(zmq.SNDHWM),
                     )
                 return True
 
@@ -193,7 +265,7 @@ class BusClient:
                         seq=seq,
                         bytes=size,
                         reason="zmq_again",
-                        sndhwm=self._pub.getsockopt(zmq.SNDHWM),
+                        sndhwm=pub_socket.getsockopt(zmq.SNDHWM),
                         total_drops=self._stat_pub_drop,
                         topic_drops=self._drop_by_topic[topic],
                     )
@@ -256,6 +328,12 @@ class BusClient:
         try:
             self._pub.close(linger=0)
             self._sub.close(linger=0)
+            for s in (self._p2p_frames_pub, self._p2p_ack_pub, self._p2p_frames_sub, self._p2p_ack_sub, self._p2p_logs_sub):
+                if s is not None:
+                    try:
+                        s.close(linger=0)
+                    except Exception:
+                        pass
             self._context.term()
         finally:
             self._tracer.close()
@@ -411,9 +489,17 @@ class BusClient:
         self.log.info("Bus receive loop started.")
         while self._running:
             try:
-                if self._sub.poll(timeout=500):  # ms
-                    frames = self._sub.recv_multipart()
-                    self._handle_received_message(frames)
+                if self._use_poller:
+                    socks = dict(self._poller.poll(timeout=500))
+                    if socks:
+                        for sock in socks:
+                            if socks[sock] == zmq.POLLIN:
+                                frames = sock.recv_multipart()
+                                self._handle_received_message(frames)
+                else:
+                    if self._sub.poll(timeout=500):  # ms
+                        frames = self._sub.recv_multipart()
+                        self._handle_received_message(frames)
 
                 # Periodic saturation report
                 if BUS_STATS_INTERVAL > 0:

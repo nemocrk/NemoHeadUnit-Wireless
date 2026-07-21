@@ -214,15 +214,13 @@ _SYSTEM_GST_PLUGIN_PATHS = [
 
 def _try_load_system_vaapi() -> str | None:
     """
-    Prova a caricare vaapih264dec dai plugin GStreamer di sistema via
-    Gst.Registry.scan_path(), senza modificare variabili d'ambiente globali.
+    Prova a caricare vaapih264dec dai plugin GStreamer di sistema caricando
+    direttamente il plugin libgstvaapi.so, evitando conflitti ABI con altri
+    plugin non utilizzati nel sistema.
 
     Ritorna il path di sistema usato se vaapih264dec è ora disponibile,
     None altrimenti (fallisce silenziosamente — la probe continua con
     i candidati SW successivi).
-
-    Chiamata una sola volta all'avvio di _build_pipeline, prima della
-    selezione del decoder.
     """
     if not _GST_AVAILABLE:
         return None
@@ -233,11 +231,17 @@ def _try_load_system_vaapi() -> str | None:
 
     registry = Gst.Registry.get()
     for path in _SYSTEM_GST_PLUGIN_PATHS:
-        if not Path(path).exists():
+        plugin_file = Path(path) / "libgstvaapi.so"
+        if not plugin_file.exists():
             continue
-        registry.scan_path(path)
-        if Gst.ElementFactory.find("vaapih264dec"):
-            return path
+        try:
+            p = Gst.Plugin.load_file(str(plugin_file))
+            if p is not None:
+                registry.add_plugin(p)
+                if Gst.ElementFactory.find("vaapih264dec"):
+                    return str(plugin_file)
+        except Exception as e:
+            log.debug("Failed to load system plugin %s: %s", plugin_file, e)
 
     return None
 
@@ -822,12 +826,15 @@ class _VideoWindow(QMainWindow):
             Qt.WindowType.Tool                 # hidden from taskbar
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        if hasattr(Qt.WidgetAttribute, "WA_DontShowOnScreen"):
-            self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+        if hasattr(Qt.WidgetAttribute, "WA_ShowWithoutActivating"):
+            self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setWindowTitle("NemoHeadUnit v2 — Video")
         self._video = VideoWidget()
         self.setCentralWidget(self._video)
-        self.hide()  # hidden until geometry is applied
+        
+        # Position offscreen and show immediately to keep OpenGL context mapped and active
+        self.setGeometry(-3000, -3000, 960, 540)
+        self.show()
 
         self._shm_engine = None
 
@@ -837,7 +844,8 @@ class _VideoWindow(QMainWindow):
 
     @pyqtSlot(int, int, int, int)
     def apply_geometry_slot(self, x: int, y: int, w: int, h: int) -> None:
-        self.setGeometry(x, y, w, h)
+        # Size window to target dimensions but keep it physically offscreen
+        self.setGeometry(-3000, -3000, w, h)
         needs_rebuild = (
             self._shm_engine is None
             or w > self._shm_engine.max_width
@@ -857,17 +865,42 @@ class _VideoWindow(QMainWindow):
 
     @pyqtSlot(bool)
     def set_visible_slot(self, visible: bool) -> None:
-        if visible:
-            self.show()
-            self.raise_()
-        else:
-            self.hide()
+        # Maintain offscreen window state to preserve GL context and render
         self.render_to_shm()
 
     def render_to_shm(self) -> None:
         if self._shm_engine is None:
             return
-        self._shm_engine.render_and_swap(self)
+
+        if self._shm_engine.pending_ack:
+            self._shm_engine.needs_redraw = True
+            return
+
+        img = self._shm_engine.get_write_image()
+        if img is None:
+            return
+
+        from PyQt6.QtGui import QPainter
+        from PyQt6.QtCore import Qt
+        img.fill(Qt.GlobalColor.transparent)
+
+        if (
+            self._video._use_gl
+            and self._video._gl_widget is not None
+            and self._video._stack.currentWidget() == self._video._gl_widget
+        ):
+            gl_img = self._video._gl_widget.grabFramebuffer()
+            painter = QPainter(img)
+            painter.drawImage(0, 0, gl_img.scaled(
+                img.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+            painter.end()
+        else:
+            self.render(img)
+
+        self._shm_engine.swap_and_notify()
 
     @pyqtSlot()
     def handle_frame_ack(self) -> None:
@@ -1152,6 +1185,9 @@ def run() -> None:
     on_system_readytostart()
     try:
         _system_start_event.wait()
+        import gc
+        gc.collect()
+        gc.set_threshold(50000, 10, 10)
         _run_qt()
         if bus_thread is not None:
             bus_thread.join()

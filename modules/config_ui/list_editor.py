@@ -39,20 +39,25 @@ class _AccordionItem(QWidget):
     A collapsible row in the accordion list editor.
 
     header_text : displayed in the toggle button
-    body_widget  : the mini form rendered by form_builder
+    body_factory : callable that returns the body widget
     on_delete    : callable called when the user clicks "× Rimuovi"
+    initial_value: raw initial value to return if never expanded
     """
 
     def __init__(
         self,
         header_text: str,
-        body_widget: QWidget,
+        body_factory,
         on_delete,
+        initial_value=None,
         parent: "QWidget | None" = None,
     ):
         super().__init__(parent)
-        self._body = body_widget
-        self._expanded = True
+        self._body_factory = body_factory
+        self._body = None
+        self._expanded = False
+        self._initial_value = initial_value
+        self._dpi_factor = 1.0
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 4)
@@ -67,7 +72,7 @@ class _AccordionItem(QWidget):
         self._hbox.setContentsMargins(6, 4, 6, 4)
         self._hbox.setSpacing(4)
 
-        self._toggle_btn = QPushButton(f"▼  {header_text}")
+        self._toggle_btn = QPushButton(f"▶  {header_text}")
         self._toggle_btn.setStyleSheet(
             "QPushButton { background: transparent;"
             " border: none; text-align: left; font-size: 12px; }"
@@ -98,8 +103,8 @@ class _AccordionItem(QWidget):
         )
         self._fl = QVBoxLayout(frame)
         self._fl.setContentsMargins(8, 6, 8, 6)
-        self._fl.addWidget(body_widget)
         self._frame = frame
+        self._frame.setVisible(False)
         root.addWidget(frame)
 
     # ------------------------------------------------------------------
@@ -108,6 +113,12 @@ class _AccordionItem(QWidget):
 
     def _toggle(self) -> None:
         self._expanded = not self._expanded
+        if self._expanded and self._body is None and self._body_factory is not None:
+            self._body = self._body_factory()
+            self._fl.addWidget(self._body)
+            if hasattr(self, "_dpi_factor") and hasattr(self._body, "scale_layouts"):
+                self._body.scale_layouts(self._dpi_factor)
+
         self._frame.setVisible(self._expanded)
         arrow = "▼" if self._expanded else "▶"
         current = self._toggle_btn.text()
@@ -120,14 +131,17 @@ class _AccordionItem(QWidget):
 
     def get_value(self):
         """
-        Delegate to the body widget's get_value().
-        form_builder forms expose get_value() -> dict or scalar.
+        Delegate to the body widget's get_value() if active.
+        Otherwise return the unedited initial_value.
         """
-        if hasattr(self._body, "get_value"):
-            return self._body.get_value()
-        return {}
+        if self._body is not None:
+            if hasattr(self._body, "get_value"):
+                return self._body.get_value()
+            return {}
+        return self._initial_value
 
     def scale_layouts(self, df: float) -> None:
+        self._dpi_factor = df
         if self.layout():
             self.layout().setContentsMargins(0, 0, 0, int(4 * df))
         if hasattr(self, "_hbox"):
@@ -150,7 +164,7 @@ class _AccordionItem(QWidget):
             )
         if hasattr(self, "_fl"):
             self._fl.setContentsMargins(int(8 * df), int(6 * df), int(8 * df), int(6 * df))
-        if hasattr(self._body, "scale_layouts"):
+        if self._body is not None and hasattr(self._body, "scale_layouts"):
             self._body.scale_layouts(df)
 
 
@@ -226,13 +240,14 @@ class _ListEditor(QWidget):
         self._item_count += 1
         idx    = self._item_count
         schema = self._item_schema()
-        body   = build_form_for_schema(schema, value)
+        body_factory = lambda: build_form_for_schema(schema, value)
 
         # Placeholder on_delete — will be replaced by _rewire_delete
         item = _AccordionItem(
             header_text=f"Elemento {idx}",
-            body_widget=body,
+            body_factory=body_factory,
             on_delete=lambda: None,
+            initial_value=value,
         )
         self._rewire_delete(item)
 

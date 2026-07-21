@@ -747,6 +747,9 @@ def run() -> None:
     on_system_readytostart()
     try:
         _system_start_event.wait()
+        import gc
+        gc.collect()
+        gc.set_threshold(50000, 10, 10)
         _run_qt()
         if bus_thread is not None:
             bus_thread.join()

@@ -88,9 +88,9 @@ class DoubleSharedBuffer:
 
     def __init__(self, name: str, max_width: int = 1024, max_height: int = 600, create: bool = False):
         self.name = name
-        self.max_width = max_width
-        self.max_height = max_height
-        self.buffer_size = max_width * max_height * 4  # 4 bytes per pixel (ARGB32)
+        self.max_width = max(1, max_width)
+        self.max_height = max(1, max_height)
+        self.buffer_size = self.max_width * self.max_height * 4  # 4 bytes per pixel (ARGB32)
         self.create = create
 
         self.shm_names = [
@@ -196,11 +196,11 @@ class OffscreenWidgetEngine:
     def __init__(self, name: str, w: int, h: int, bus=None,
                  max_width: int = 1024, max_height: int = 600):
         self.name = name
-        self.w = w
-        self.h = h
+        self.w = max(1, w)
+        self.h = max(1, h)
         self.bus = bus
-        self.max_width = max_width
-        self.max_height = max_height
+        self.max_width = max(1, max_width)
+        self.max_height = max(1, max_height)
 
         # Double-buffered shared memory (creator side)
         self.shm_buffer = DoubleSharedBuffer(name, max_width, max_height, create=True)

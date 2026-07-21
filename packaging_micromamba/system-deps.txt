@@ -90,4 +90,6 @@ libglib2.0-0
 libgl1
 libegl1
 
-i965-va-driver vainfo
+i965-va-driver
+intel-media-va-driver
+vainfo

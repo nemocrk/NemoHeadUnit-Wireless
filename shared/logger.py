@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from shared.bus_client import BusClient
 
 BROKER_PUB_ADDR = "ipc:///tmp/nemobus_v2.pub"
+P2P_LOGS_ADDR = "ipc:///tmp/nemo_logs.ipc"
 
 # ---------------------------------------------------------------------------
 # Global level — honoured by DEBUG env var
@@ -152,6 +153,11 @@ def _atexit_cleanup() -> None:
 
     # Stop bus drain thread
     _bus_running = False
+    if _bus_queue is not None:
+        try:
+            _bus_queue.put(None)
+        except Exception:
+            pass
 
     # Close ZMQ resources
     if _bus_zmq_pub is not None:
@@ -217,6 +223,11 @@ def attach_bus(bus: "BusClient") -> None:  # noqa: ARG001  (bus param kept for A
 
     if _bus_running:
         _bus_running = False
+        if _bus_queue is not None:
+            try:
+                _bus_queue.put(None)
+            except Exception:
+                pass
         if _bus_drain_thread is not None:
             _bus_drain_thread.join(timeout=1.0)
         if _bus_zmq_pub is not None:
@@ -233,14 +244,16 @@ def attach_bus(bus: "BusClient") -> None:  # noqa: ARG001  (bus param kept for A
     _bus_zmq_pub  = _bus_zmq_ctx.socket(zmq.PUB)
     _bus_zmq_pub.setsockopt(zmq.SNDHWM, 5000)
     _bus_zmq_pub.setsockopt(zmq.LINGER, 0)
-    _bus_zmq_pub.connect(BROKER_PUB_ADDR)
+    _bus_zmq_pub.connect(P2P_LOGS_ADDR)
 
     def _drain() -> None:
         """Sole owner of _bus_zmq_pub — never races with any other thread."""
         while _bus_running:
             try:
-                payload = _bus_queue.get(timeout=0.2)
-            except queue.Empty:
+                payload = _bus_queue.get()
+                if payload is None:
+                    break
+            except Exception:
                 continue
             try:
                 _bus_zmq_pub.send_multipart(
