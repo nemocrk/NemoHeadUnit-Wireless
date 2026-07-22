@@ -62,8 +62,10 @@ class BusClient:
 
         def _listen():
             while self._running:
-                if self._sub.poll(timeout=200):
-                    try:
+                try:
+                    if not self._running:
+                        break
+                    if self._sub.poll(timeout=200):
                         frames = self._sub.recv_multipart(flags=zmq.NOBLOCK)
                         if len(frames) < 2:
                             continue
@@ -73,8 +75,10 @@ class BusClient:
                         for sub_topic, cb in list(self._subscriptions.items()):
                             if topic == sub_topic or topic.startswith(sub_topic.rstrip("*")):
                                 cb(topic, payload)
-                    except (zmq.ZMQError, json.JSONDecodeError, zmq.Again):
-                        continue
+                except (zmq.ZMQError, json.JSONDecodeError, zmq.Again, Exception):
+                    if not self._running:
+                        break
+                    continue
 
         if blocking:
             _listen()
@@ -90,3 +94,5 @@ class BusClient:
             self._context.term()
         except Exception:
             pass
+        if self._sub_thread and self._sub_thread.is_alive() and threading.current_thread() != self._sub_thread:
+            self._sub_thread.join(timeout=0.5)

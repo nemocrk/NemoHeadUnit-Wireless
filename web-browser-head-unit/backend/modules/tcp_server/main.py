@@ -25,6 +25,7 @@ from aiohttp import web
 
 from shared.base_module import BaseBackendModule, run_module
 from shared.config_schema import field_bool, field_int, field_string
+from shared.media_shm import BidirectionalMediaSHM
 from modules.tcp_server.aa_cryptor import AACryptor
 from modules.tcp_server.frame_codec import FrameAssembler, encode
 from modules.tcp_server.frame_relay import FrameRelay
@@ -49,6 +50,7 @@ class TCPServerModule(BaseBackendModule):
         self._cryptor: Optional[AACryptor] = None
         self._assembler: Optional[FrameAssembler] = None
         self._server_thread: Optional[threading.Thread] = None
+        self._shm = BidirectionalMediaSHM(create=True)
 
         self._server_starting = False
         self._server_lock = threading.Lock()
@@ -68,7 +70,7 @@ class TCPServerModule(BaseBackendModule):
         return {
             "host": "0.0.0.0",
             "port": 5288,
-            "autostart": False,
+            "autostart": True,
             "publish_full_frame": False,
         }
 
@@ -76,7 +78,7 @@ class TCPServerModule(BaseBackendModule):
         return {
             "host": field_string(default="0.0.0.0"),
             "port": field_int(default=5288, min=1024, max=65535),
-            "autostart": field_bool(default=False),
+            "autostart": field_bool(default=True),
             "publish_full_frame": field_bool(default=False),
         }
 
@@ -85,7 +87,6 @@ class TCPServerModule(BaseBackendModule):
         self.add_http_route("GET", "/api/tcp/status", self.handle_get_status)
         self.add_http_route("POST", "/api/tcp/restart", self.handle_post_restart)
 
-        self.subscribe("rfcomm.handshake.completed", self.on_handshake_completed)
         self.subscribe("aa.frame.send", self.on_frame_send)
         self.subscribe("aa.handshake.start_tls", self.on_handshake_start_tls)
         self.subscribe("aa.handshake.feed_input", self.on_handshake_feed_input)
@@ -94,7 +95,7 @@ class TCPServerModule(BaseBackendModule):
 
     async def run(self) -> None:
         """Main module execution loop. Handles optional autostart mode."""
-        if self.config.get("autostart", False):
+        if self.config.get("autostart", True):
             self.log.info("Autostart configured — initializing TCP server listener...")
             self.start_tcp_server()
 
@@ -145,6 +146,9 @@ class TCPServerModule(BaseBackendModule):
         self.log.info(f"Phone client connected: {address}")
         self.publish("tcp.session.connected", {"address": address})
 
+        with self._crypto_lock:
+            self._cryptor = None
+
         self._assembler = FrameAssembler()
         self._relay = FrameRelay(
             sock=conn,
@@ -185,6 +189,21 @@ class TCPServerModule(BaseBackendModule):
             message_id = struct.unpack_from(">H", assembled, 0)[0]
             body = assembled[2:]
             self._frames_received_count += 1
+
+            # Write media channel frames (Video ch 2, Audio ch 3/4) to SHM zero-copy
+            if channel_id in (2, 3, 4):
+                stream_type = 0 if channel_id == 2 else 1
+                shm_offset = self._shm.downstream.write_frame(stream_type, 0, body)
+                self.publish(
+                    "aa.frame.shm",
+                    {
+                        "channel_id": channel_id,
+                        "message_id": message_id,
+                        "encrypted": encrypted,
+                        "shm_offset": shm_offset,
+                        "payload_len": len(body),
+                    },
+                )
 
             frame_data = {
                 "channel_id": channel_id,

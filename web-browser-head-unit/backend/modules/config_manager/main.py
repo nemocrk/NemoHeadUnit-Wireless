@@ -193,11 +193,20 @@ class ConfigManagerModule(BaseBackendModule):
     async def handle_get_all(self, request: web.Request) -> web.Response:
         """REST API: GET /api/config/all"""
         modules_data = {}
+        # Collect modules with registered schemas or active config files
+        active_modules = set(self.schemas.keys())
         for path in self.config_dir.glob("*.yaml"):
-            mod_name = path.stem
+            active_modules.add(path.stem)
+
+        for mod_name in sorted(active_modules):
+            # Skip obsolete standalone modules
+            if mod_name in ("bluetooth_manager", "hostapd_helper", "audio_channel", "video_channel", "oaa_control_channel"):
+                continue
+            config = self._load_config(mod_name)
+            schema = schema_to_dict(self.schemas[mod_name]) if mod_name in self.schemas else None
             modules_data[mod_name] = {
-                "config": self._load_config(mod_name),
-                "schema": schema_to_dict(self.schemas[mod_name]) if mod_name in self.schemas else None,
+                "config": config,
+                "schema": schema,
             }
         return web.json_response(modules_data)
 

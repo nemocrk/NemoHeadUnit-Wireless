@@ -1,0 +1,440 @@
+/* NemoHeadUnit — Automotive Glassmorphism Design System */
+:root {
+    --bg-dark: #0b0f19;
+    --card-glass: rgba(15, 23, 42, 0.82);
+    --glass-border: rgba(255, 255, 255, 0.12);
+    --accent-color: #00e676;
+    --accent-blue: #00b0ff;
+    --accent-orange: #ff9100;
+    --text-primary: #f8fafc;
+    --text-secondary: #94a3b8;
+    --danger-color: #ff5252;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+body, html {
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background-color: var(--bg-dark);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: var(--text-primary);
+}
+
+#app-container {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: #000;
+}
+
+/* Video Canvas Viewport */
+#video-canvas {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+    z-index: 1;
+}
+
+/* Default Disconnected Screen (Analog Clock & Connection Workflow) */
+#disconnected-screen {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    background: radial-gradient(circle at center, #1e293b 0%, #090d16 100%);
+    z-index: 2;
+    transition: opacity 0.5s ease;
+}
+
+#disconnected-screen.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.clock-container {
+    position: relative;
+    width: 260px;
+    height: 260px;
+    margin-bottom: 24px;
+}
+
+#analog-clock {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    box-shadow: 0 0 40px rgba(0, 230, 118, 0.15), inset 0 0 20px rgba(0, 0, 0, 0.8);
+}
+
+.date-display {
+    text-align: center;
+    font-size: 18px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-top: 8px;
+    letter-spacing: 1px;
+}
+
+/* Workflow Status Banner */
+.workflow-card {
+    background: var(--card-glass);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--glass-border);
+    border-radius: 16px;
+    padding: 16px 28px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+    max-width: 480px;
+}
+
+.status-spinner {
+    width: 16px;
+    height: 16px;
+    border: 3px solid rgba(0, 230, 118, 0.2);
+    border-top: 3px solid var(--accent-color);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+#workflow-text {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+/* Always-Visible Command Bar */
+#command-bar {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--card-glass);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--glass-border);
+    border-radius: 30px;
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+    z-index: 100;
+}
+
+.cmd-btn {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+    font-size: 22px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.cmd-btn:active {
+    transform: scale(0.92);
+    background: rgba(0, 230, 118, 0.2);
+}
+
+.cmd-btn.active {
+    background: var(--accent-color);
+    color: #000;
+    box-shadow: 0 0 16px rgba(0, 230, 118, 0.4);
+}
+
+/* Arc Radial Floating Action Button (FAB) Menu */
+#arc-radial-menu {
+    position: absolute;
+    bottom: 90px;
+    right: calc(50% - 130px);
+    width: 240px;
+    height: 240px;
+    pointer-events: none;
+    z-index: 150;
+}
+
+.arc-fab-item {
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: var(--card-glass);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--glass-border);
+    color: var(--text-primary);
+    font-size: 20px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    cursor: pointer;
+    opacity: 0;
+    transform: scale(0.5) translate(0, 0);
+    transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
+    touch-action: manipulation;
+    z-index: 160;
+}
+
+#arc-radial-menu.open .arc-fab-item {
+    pointer-events: auto;
+}
+
+#arc-radial-menu.open .arc-fab-item:nth-child(1) {
+    opacity: 1;
+    transform: translate(-140px, 0px) scale(1);
+}
+
+#arc-radial-menu.open .arc-fab-item:nth-child(2) {
+    opacity: 1;
+    transform: translate(-110px, -85px) scale(1);
+}
+
+#arc-radial-menu.open .arc-fab-item:nth-child(3) {
+    opacity: 1;
+    transform: translate(-50px, -135px) scale(1);
+}
+
+#arc-radial-menu.open .arc-fab-item:nth-child(4) {
+    opacity: 1;
+    transform: translate(15px, -145px) scale(1);
+}
+
+.arc-fab-item:active {
+    transform: scale(0.9) !important;
+    background: var(--accent-color);
+    color: #000;
+}
+
+/* Slide-Over Settings Drawer & Log Modal */
+.drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 420px;
+    height: 100%;
+    background: var(--card-glass);
+    backdrop-filter: blur(24px);
+    border-left: 1px solid var(--glass-border);
+    z-index: 200;
+    transform: translateX(100%);
+    transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    display: flex;
+    flex-direction: column;
+    padding: 24px;
+    box-shadow: -12px 0 40px rgba(0, 0, 0, 0.6);
+}
+
+.drawer.open {
+    transform: translateX(0);
+}
+
+.drawer-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.drawer-title {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.close-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 24px;
+    cursor: pointer;
+}
+
+.log-console {
+    flex: 1;
+    background: #050811;
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
+    padding: 12px;
+    font-family: "Courier New", Courier, monospace;
+    font-size: 13px;
+    color: var(--accent-color);
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* Settings Module Tabs & Widgets */
+.settings-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+}
+
+.tab-btn {
+    padding: 8px 16px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--glass-border);
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.2s ease;
+}
+
+.tab-btn.active {
+    background: var(--accent-color);
+    color: #000;
+    font-weight: 600;
+    box-shadow: 0 0 12px rgba(0, 230, 118, 0.3);
+}
+
+.settings-form-container {
+    flex: 1;
+    overflow-y: auto;
+    padding-right: 8px;
+}
+
+.form-group {
+    margin-bottom: 18px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 12px;
+    padding: 12px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.form-label {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.styled-input, .styled-select {
+    background: rgba(15, 23, 42, 0.9);
+    border: 1px solid var(--glass-border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: var(--text-primary);
+    font-size: 13px;
+    outline: none;
+}
+
+.range-widget {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.styled-range {
+    accent-color: var(--accent-color);
+    width: 120px;
+}
+
+.range-val {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent-color);
+    min-width: 30px;
+}
+
+/* Glassmorphism Toggle Switch */
+.toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 26px;
+}
+
+.toggle-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: rgba(255, 255, 255, 0.15);
+    transition: .3s;
+    border-radius: 34px;
+}
+
+.slider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 4px;
+    bottom: 4px;
+    background-color: white;
+    transition: .3s;
+    border-radius: 50%;
+}
+
+input:checked + .slider {
+    background-color: var(--accent-color);
+}
+
+input:checked + .slider:before {
+    transform: translateX(22px);
+}
+
+.settings-actions {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--glass-border);
+}
+
+.save-btn {
+    width: 100%;
+    padding: 12px;
+    border-radius: 12px;
+    background: var(--accent-color);
+    border: none;
+    color: #000;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.3s ease;
+}
+
+.save-btn:active {
+    opacity: 0.85;
+}

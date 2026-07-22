@@ -1,0 +1,20 @@
+# D-Bus system service activation file for org.nemo.APManager
+#
+# Install to: /usr/share/dbus-1/system-services/org.nemo.APManager.service
+#
+# This file tells the D-Bus daemon that org.nemo.APManager is a legitimate
+# system service owned by root.  Without it, polkitd rejects
+# CheckAuthorization calls from the service with AccessDenied because
+# the bus daemon cannot verify the sender as a trusted service owner.
+#
+# Note: this is NOT the systemd unit file (org.nemo.APManager.service).
+# They are different files installed to different locations.
+#
+# After installing, reload dbus:
+#   sudo systemctl reload dbus
+
+[D-BUS Service]
+Name=org.nemo.APManager
+Exec=/opt/nemo-headunit/services/ap_manager_service/ap_manager_service.py
+User=root
+SystemdService=nemo-ap-manager.service

@@ -1,0 +1,277 @@
+/**
+ * UI Controls Manager: Arc Radial FAB Menu, Workflow Status Polling, Settings & Logs
+ */
+
+import { SettingsWidgets } from './settings_widgets.js';
+
+export class UIControls {
+    constructor() {
+        this.menuOpen = false;
+        this.logWs = null;
+
+        this.initElements();
+        this.bindEvents();
+        this.startWorkflowPolling();
+    }
+
+    initElements() {
+        this.arcMenu = document.getElementById('arc-radial-menu');
+        this.btnMenu = document.getElementById('btn-menu');
+        this.btnHome = document.getElementById('btn-home');
+        this.btnLogs = document.getElementById('fab-logs');
+        this.btnSettings = document.getElementById('fab-settings');
+        this.btnWifi = document.getElementById('fab-wifi');
+        this.btnFullscreen = document.getElementById('fab-fullscreen');
+        this.btnReconnect = document.getElementById('fab-reconnect');
+
+        this.drawerSettings = document.getElementById('settings-drawer');
+        this.drawerLogs = document.getElementById('logs-drawer');
+        this.btnCloseSettings = document.getElementById('close-settings');
+        this.btnCloseLogs = document.getElementById('close-logs');
+
+        this.workflowText = document.getElementById('workflow-text');
+        this.disconnectedScreen = document.getElementById('disconnected-screen');
+        this.logConsole = document.getElementById('log-console');
+    }
+
+    bindEvents() {
+        const bindFab = (btn, action) => {
+            if (!btn) return;
+            let lastTrigger = 0;
+            const handler = (e) => {
+                const now = Date.now();
+                if (now - lastTrigger < 300) return;
+                lastTrigger = now;
+                if (e) {
+                    e.stopPropagation();
+                }
+                action();
+            };
+            btn.addEventListener('pointerdown', handler);
+            btn.addEventListener('click', handler);
+        };
+
+        // Toggle Arc Radial Menu
+        bindFab(this.btnMenu, () => this.toggleArcMenu());
+
+        // Home Button (Show Disconnected Screen / Clock)
+        bindFab(this.btnHome, () => this.disconnectedScreen.classList.toggle('hidden'));
+
+        // Arc FAB Menu Actions
+        bindFab(this.btnSettings, () => {
+            this.closeArcMenu();
+            this.openDrawer(this.drawerSettings);
+            this.loadConfigSettings();
+        });
+
+        bindFab(this.btnLogs, () => {
+            this.closeArcMenu();
+            this.openDrawer(this.drawerLogs);
+            this.connectLogStream();
+        });
+
+        bindFab(this.btnWifi, () => {
+            this.closeArcMenu();
+            this.toggleWifiAp();
+        });
+
+        bindFab(this.btnFullscreen, () => {
+            this.closeArcMenu();
+            this.toggleFullscreen();
+        });
+
+        bindFab(this.btnReconnect, () => {
+            this.closeArcMenu();
+            this.triggerReconnect();
+        });
+
+        // Close Drawers
+        if (this.btnCloseSettings) {
+            this.btnCloseSettings.addEventListener('click', () => this.closeDrawer(this.drawerSettings));
+        }
+        if (this.btnCloseLogs) {
+            this.btnCloseLogs.addEventListener('click', () => this.closeDrawer(this.drawerLogs));
+        }
+    }
+
+    toggleArcMenu() {
+        this.menuOpen = !this.menuOpen;
+        if (this.menuOpen) {
+            this.arcMenu.classList.add('open');
+            this.btnMenu.classList.add('active');
+        } else {
+            this.closeArcMenu();
+        }
+    }
+
+    closeArcMenu() {
+        this.menuOpen = false;
+        if (this.arcMenu) this.arcMenu.classList.remove('open');
+        if (this.btnMenu) this.btnMenu.classList.remove('active');
+    }
+
+    openDrawer(drawer) {
+        if (drawer) drawer.classList.add('open');
+    }
+
+    closeDrawer(drawer) {
+        if (drawer) drawer.classList.remove('open');
+    }
+
+    toggleFullscreen() {
+        if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen().catch((err) => console.warn(err));
+        } else {
+            document.exitFullscreen().catch((err) => console.warn(err));
+        }
+    }
+
+    startWorkflowPolling() {
+        const updateWorkflow = () => {
+            fetch('/api/connectivity/status')
+                .then((res) => res.json())
+                .then((data) => {
+                    if (data.wifi_ap && data.wifi_ap.active) {
+                        this.workflowText.textContent = `WiFi Hotspot Active: ${data.wifi_ap.ssid || 'NemoTestAP'} — Awaiting Phone Connection...`;
+                    } else if (data.bluetooth && data.bluetooth.discovering) {
+                        this.workflowText.textContent = 'Scanning Bluetooth for Phone Pair...';
+                    } else {
+                        this.workflowText.textContent = 'Initializing NemoHeadUnit Adapters...';
+                    }
+                })
+                .catch(() => {
+                    this.workflowText.textContent = 'Awaiting NemoHeadUnit Backend Service...';
+                });
+        };
+
+        updateWorkflow();
+        setInterval(updateWorkflow, 3000);
+    }
+
+    loadConfigSettings() {
+        const container = document.getElementById('config-editor');
+        if (!container) return;
+        if (!this.settingsEngine) {
+            this.settingsEngine = new SettingsWidgets(container);
+        }
+        this.settingsEngine.loadAndRender();
+    }
+
+    async connectLogStream() {
+        if (!this.logSockets) this.logSockets = [];
+        if (!this.availableModules) this.availableModules = {};
+
+        const selectModule = document.getElementById('log-module-select');
+        const selectLevel = document.getElementById('log-level-select');
+
+        if (selectModule && !selectModule.dataset.bound) {
+            selectModule.dataset.bound = 'true';
+            selectModule.addEventListener('change', () => this.reconnectLogStream());
+        }
+
+        if (selectLevel && !selectLevel.dataset.bound) {
+            selectLevel.dataset.bound = 'true';
+            selectLevel.addEventListener('change', () => this.reconnectLogStream());
+        }
+
+        await this.fetchLogModules();
+        this.reconnectLogStream();
+    }
+
+    async fetchLogModules() {
+        try {
+            const res = await fetch('/api/system/modules');
+            const data = await res.json();
+            const select = document.getElementById('log-module-select');
+            if (!select || !data.modules) return;
+
+            this.availableModules = data.modules;
+            const currentVal = select.value;
+            let html = `<option value="all">📋 All Modules</option>`;
+
+            Object.values(data.modules).forEach((mod) => {
+                const icon = mod.name.includes('connectivity') ? '📶' :
+                             (mod.name.includes('tcp') ? '⚡' :
+                             (mod.name.includes('channel') ? '🎥' :
+                             (mod.name.includes('config') ? '⚙' : '🌐')));
+                const url = mod.log_ws_url || `/api/${mod.name}/logs`;
+                html += `<option value="${url}">${icon} ${mod.name}</option>`;
+            });
+
+            select.innerHTML = html;
+            if (currentVal && select.querySelector(`option[value="${CSS.escape(currentVal)}"]`)) {
+                select.value = currentVal;
+            }
+        } catch (err) {
+            console.warn('Failed to fetch modules for log stream:', err);
+        }
+    }
+
+    reconnectLogStream() {
+        if (this.logSockets && this.logSockets.length > 0) {
+            this.logSockets.forEach((ws) => {
+                try { ws.close(); } catch (e) {}
+            });
+            this.logSockets = [];
+        }
+
+        const selectModule = document.getElementById('log-module-select');
+        const selectLevel = document.getElementById('log-level-select');
+
+        const selectedVal = selectModule ? selectModule.value : 'all';
+        const level = selectLevel ? selectLevel.value : 'INFO';
+
+        const host = window.location.host || '127.0.0.1:8000';
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+
+        const urlsToConnect = [];
+
+        if (selectedVal !== 'all') {
+            urlsToConnect.push(selectedVal);
+        } else {
+            const modules = Object.values(this.availableModules);
+            if (modules.length > 0) {
+                modules.forEach((m) => {
+                    if (m.log_ws_url) urlsToConnect.push(m.log_ws_url);
+                });
+            } else {
+                urlsToConnect.push('/api/logs');
+            }
+        }
+
+        if (this.logConsole) {
+            this.logConsole.textContent = `Connecting to ${urlsToConnect.length} log stream(s) [level=${level}]...\n`;
+        }
+
+        urlsToConnect.forEach((relPath) => {
+            const separator = relPath.includes('?') ? '&' : '?';
+            const fullUrl = `${protocol}//${host}${relPath}${separator}level=${level}`;
+
+            try {
+                const ws = new WebSocket(fullUrl);
+                ws.onmessage = (event) => {
+                    if (this.logConsole) {
+                        this.logConsole.textContent += event.data + '\n';
+                        this.logConsole.scrollTop = this.logConsole.scrollHeight;
+                    }
+                };
+                this.logSockets.push(ws);
+            } catch (err) {
+                console.error('Failed to open log WebSocket:', fullUrl, err);
+            }
+        });
+    }
+
+    toggleWifiAp() {
+        fetch('/api/connectivity/wifi/start', { method: 'POST' })
+            .then((res) => res.json())
+            .then((data) => alert('WiFi AP Started: ' + JSON.stringify(data)))
+            .catch((err) => console.error('WiFi AP error:', err));
+    }
+
+    triggerReconnect() {
+        fetch('/api/tcp/restart', { method: 'POST' })
+            .then(() => alert('Session restart requested.'))
+            .catch((err) => console.error('Restart error:', err));
+    }
+}

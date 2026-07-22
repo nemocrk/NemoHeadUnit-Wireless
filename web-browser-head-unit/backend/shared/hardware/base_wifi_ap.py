@@ -1,0 +1,31 @@
+import abc
+
+class BaseWifiApAdapter(abc.ABC):
+    """
+    Abstract Hardware Adapter Interface for Wifi Access Point.
+    """
+
+    @abc.abstractmethod
+    async def setup(self) -> None:
+        """Initialize WiFi AP configurations."""
+        pass
+
+    @abc.abstractmethod
+    async def start_ap(self, config: dict) -> tuple[bool, dict]:
+        """
+        Starts the WiFi Access Point.
+        Returns:
+            (success_boolean, active_credentials_dict)
+            active_credentials_dict should contain: ssid, key, bssid, interface, gateway_ip
+        """
+        pass
+
+    @abc.abstractmethod
+    async def stop_ap(self) -> bool:
+        """Stops the Access Point."""
+        pass
+
+    @abc.abstractmethod
+    async def teardown(self) -> None:
+        """Clean up Wifi AP resources."""
+        pass

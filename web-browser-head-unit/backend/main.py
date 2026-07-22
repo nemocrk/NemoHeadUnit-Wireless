@@ -53,8 +53,9 @@ def discover_modules() -> list[Path]:
 def _start_process(script: Path, label: str) -> subprocess.Popen:
     env = os.environ.copy()
     pythonpath = env.get("PYTHONPATH", "")
-    proto_dir = BASE_DIR.parent.parent / "protos"
-    env["PYTHONPATH"] = f"{BASE_DIR}{os.pathsep}{proto_dir}{os.pathsep}{pythonpath}".rstrip(os.pathsep)
+    repo_root = BASE_DIR.parent.parent
+    proto_dir = repo_root / "protos"
+    env["PYTHONPATH"] = f"{BASE_DIR}{os.pathsep}{repo_root}{os.pathsep}{proto_dir}{os.pathsep}{pythonpath}".rstrip(os.pathsep)
 
     proc = subprocess.Popen([sys.executable, str(script)], stdout=sys.stdout, stderr=sys.stderr, env=env)
     log.info(f"Started process '{label}' (PID {proc.pid})")
@@ -74,16 +75,20 @@ def _terminate_all(processes: list[tuple[str, subprocess.Popen]]) -> None:
 
     for label, proc in reversed(processes):
         if proc.poll() is None:
-            log.info(f"Terminating module '{label}' (PID {proc.pid})...")
+            log.info(f"Sending SIGTERM to module '{label}' (PID {proc.pid})...")
             proc.terminate()
 
     for label, proc in processes:
         if proc.poll() is None:
+            log.info(f"Waiting for module '{label}' (PID {proc.pid}) to exit...")
             try:
                 proc.wait(timeout=3.0)
+                log.info(f"Module '{label}' (PID {proc.pid}) exited gracefully.")
             except subprocess.TimeoutExpired:
-                log.warning(f"Module '{label}' force killing...")
+                log.warning(f"Module '{label}' (PID {proc.pid}) did not exit in 3.0s — force killing (SIGKILL)...")
                 proc.kill()
+        else:
+            log.info(f"Module '{label}' (PID {proc.pid}) already exited with code {proc.poll()}.")
 
 
 def _collect_module_ready(
@@ -185,9 +190,11 @@ def run():
     # Setup orchestrator ZMQ sockets
     ctx = zmq.Context()
     pub_sock = ctx.socket(zmq.PUB)
+    pub_sock.setsockopt(zmq.LINGER, 0)
     pub_sock.connect(get_bus_address("main_orchestrator", "sub"))
 
     sub_sock = ctx.socket(zmq.SUB)
+    sub_sock.setsockopt(zmq.LINGER, 0)
     sub_sock.connect(get_bus_address("main_orchestrator", "pub"))
     sub_sock.setsockopt_string(zmq.SUBSCRIBE, "system.module_ready")
     sub_sock.setsockopt_string(zmq.SUBSCRIBE, "system.ready")

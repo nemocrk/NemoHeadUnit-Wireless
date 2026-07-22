@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<policyconfig>
+
+  <vendor>NemoHeadUnit</vendor>
+
+  <action id="org.nemo.apmanager.start">
+    <description>Start the WiFi Access Point</description>
+    <message>Authentication is required to start the WiFi Access Point.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.nemo.apmanager.stop">
+    <description>Stop the WiFi Access Point</description>
+    <message>Authentication is required to stop the WiFi Access Point.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.nemo.apmanager.status">
+    <description>Query WiFi Access Point status</description>
+    <message>Authentication is required to read AP status.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>

@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NemoHeadUnit — Wireless Android Auto</title>
+    <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+
+    <div id="app-container">
+
+        <!-- Full-Screen H.264 WebCodecs Video Viewport -->
+        <canvas id="video-canvas"></canvas>
+
+        <!-- Default Disconnected Screen (Analog Clock & Connection Workflow) -->
+        <div id="disconnected-screen">
+            <div class="clock-container">
+                <canvas id="analog-clock"></canvas>
+            </div>
+            <div class="date-display" id="clock-date">WED, JUL 22</div>
+
+            <div class="workflow-card">
+                <div class="status-spinner"></div>
+                <span id="workflow-text">Initializing NemoHeadUnit...</span>
+            </div>
+        </div>
+
+        <!-- Arc Radial Floating Action Button (FAB) Menu -->
+        <div id="arc-radial-menu">
+            <button class="arc-fab-item" id="fab-settings" title="Settings">⚙️</button>
+            <button class="arc-fab-item" id="fab-wifi" title="WiFi Hotspot">📶</button>
+            <button class="arc-fab-item" id="fab-logs" title="Live Logs">📋</button>
+            <button class="arc-fab-item" id="fab-fullscreen" title="Fullscreen">⛶</button>
+        </div>
+
+        <!-- Always-Visible Floating Command Bar -->
+        <div id="command-bar">
+            <button class="cmd-btn" id="btn-home" title="Home / Clock">🏠</button>
+            <button class="cmd-btn" id="btn-audio" title="Audio Controls">🎵</button>
+            <button class="cmd-btn" id="fab-reconnect" title="Reconnect Session">🔄</button>
+            <button class="cmd-btn" id="btn-menu" title="Menu">☸</button>
+        </div>
+
+        <!-- Slide-Over Settings Drawer -->
+        <div class="drawer" id="settings-drawer">
+            <div class="drawer-header">
+                <span class="drawer-title">System Settings</span>
+                <button class="close-btn" id="close-settings">&times;</button>
+            </div>
+            <div id="config-editor" style="flex: 1; overflow-y: auto;">
+                Loading configuration...
+            </div>
+        </div>
+
+        <!-- Slide-Over Live Log Viewer Drawer -->
+        <div class="drawer" id="logs-drawer">
+            <div class="drawer-header">
+                <span class="drawer-title">Live System Logs</span>
+                <button class="close-btn" id="close-logs">&times;</button>
+            </div>
+            <div class="log-controls-bar" style="display: flex; gap: 8px; margin-bottom: 12px;">
+                <select id="log-module-select" class="styled-select" style="flex: 1;">
+                    <option value="/api/logs?module=all">📋 All Modules</option>
+                </select>
+                <select id="log-level-select" class="styled-select" style="width: 100px;">
+                    <option value="DEBUG">DEBUG</option>
+                    <option value="INFO" selected>INFO</option>
+                    <option value="WARNING">WARN</option>
+                    <option value="ERROR">ERROR</option>
+                </select>
+            </div>
+            <div class="log-console" id="log-console">Connecting to live log stream...</div>
+        </div>
+
+    </div>
+
+    <script type="module">
+        import { WebCodecsPlayer } from './js/webcodecs_player.js';
+        import { AnalogClock } from './js/analog_clock.js';
+        import { TouchHandler } from './js/touch_handler.js';
+        import { UIControls } from './js/ui_controls.js';
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('video-canvas');
+            const clockCanvas = document.getElementById('analog-clock');
+            const dateEl = document.getElementById('clock-date');
+            const disconnectedScreen = document.getElementById('disconnected-screen');
+
+            // 1. Initialize Analog Clock
+            const clock = new AnalogClock(clockCanvas, dateEl);
+
+            // 2. Initialize UI Controls & Arc Radial FAB Menu
+            const ui = new UIControls();
+
+            // 3. Initialize Multi-Touch & Gesture Handler
+            const touch = new TouchHandler(canvas);
+
+            // 4. Initialize WebCodecs Player
+            const player = new WebCodecsPlayer(canvas, null);
+
+            // Hide disconnected clock screen when first video frame is rendered
+            player.handleVideoFrame = function(frame) {
+                if (!disconnectedScreen.classList.contains('hidden')) {
+                    disconnectedScreen.classList.add('hidden');
+                }
+                WebCodecsPlayer.prototype.handleVideoFrame.call(this, frame);
+            };
+
+            // Connect WebSocket via Gateway Proxy route at ws://localhost:8000/api/stream
+            const host = window.location.host || '127.0.0.1:8000';
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${host}/api/channels/stream`;
+
+            player.connect(wsUrl);
+        });
+    </script>
+</body>
+</html>

@@ -23,7 +23,7 @@ from typing import Any, Callable, Optional
 import aiohttp
 from aiohttp import web
 
-from shared.logger import get_logger
+from shared.logger import get_logger, add_log_listener, remove_log_listener
 from shared.bus_client import BusClient
 from shared.config_client import ConfigClient
 
@@ -52,6 +52,12 @@ class BaseBackendModule(ABC):
         self.site: web.TCPSite | None = None
         self.port: int = 0
         self.target_url: str = ""
+
+        # Automatically register standard module WebSocket log stream routes
+        self.add_ws_route("/logs", self._handle_ws_logs)
+        self.add_ws_route("/api/logs", self._handle_ws_logs)
+        if self.path_prefix in ("/", None):
+            self.add_ws_route("/api/proxy/logs", self._handle_ws_logs)
 
         self.module_registry: dict[str, dict] = {}
         self.client_session: aiohttp.ClientSession | None = None
@@ -84,6 +90,54 @@ class BaseBackendModule(ABC):
             full_path = f"{self.path_prefix.rstrip('/')}/{full_path.lstrip('/')}"
         self.web_app.router.add_get(full_path, handler)
         self.log.info(f"Registered WebSocket route: {full_path}")
+
+    async def _handle_ws_logs(self, request: web.Request) -> web.WebSocketResponse:
+        """Standard module WebSocket log stream handler with module and level filtering."""
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        filter_module = request.query.get("module", "").lower()
+        min_level_str = request.query.get("level", "INFO").upper()
+
+        level_weights = {"DEBUG": 0, "INFO": 1, "WARNING": 2, "ERROR": 3, "CRITICAL": 4}
+        min_weight = level_weights.get(min_level_str, 1)
+
+        def on_log(log_dict: dict):
+            # Log level filtering
+            log_level = log_dict.get("level", "INFO").upper()
+            if level_weights.get(log_level, 1) < min_weight:
+                return
+
+            # Module filtering
+            log_mod = log_dict.get("module", "").lower()
+            if filter_module and filter_module not in ("all", "*") and log_mod != filter_module:
+                return
+
+            formatted = f"{log_dict['timestamp']} | {log_dict['level']:<8} | {log_dict['module']} - {log_dict['message']}"
+            loop.call_soon_threadsafe(queue.put_nowait, formatted)
+
+        add_log_listener(on_log)
+        self.log.info(f"Client connected to live log stream (filter: module={filter_module or 'all'}, level={min_level_str})")
+
+        async def send_loop():
+            try:
+                while True:
+                    log_line = await queue.get()
+                    await ws.send_str(log_line)
+            except Exception:
+                pass
+
+        send_task = asyncio.create_task(send_loop())
+        try:
+            async for msg in ws:
+                pass
+        finally:
+            send_task.cancel()
+            remove_log_listener(on_log)
+            self.log.info("Client disconnected from live log stream")
+        return ws
 
     def publish(self, topic: str, payload: dict) -> None:
         """Shortcut to publish message on ZMQ bus."""
@@ -235,13 +289,41 @@ class BaseBackendModule(ABC):
 
     async def _cleanup(self) -> None:
         self.log.info(f"Teardown module '{self.name}'...")
-        await self.teardown()
+        self._running = False
+        try:
+            await self.teardown()
+        except Exception as e:
+            self.log.error(f"Error in module '{self.name}' teardown: {e}")
+
         if self.client_session:
-            await self.client_session.close()
+            try:
+                await self.client_session.close()
+            except Exception:
+                pass
+
+        if self.site:
+            try:
+                await self.site.stop()
+            except Exception:
+                pass
+
         if self.runner:
-            await self.runner.cleanup()
+            try:
+                await asyncio.wait_for(self.runner.shutdown(), timeout=0.5)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(self.runner.cleanup(), timeout=0.5)
+            except Exception:
+                pass
+
         self.bus.stop()
         self.log.info(f"Module '{self.name}' stopped.")
+        try:
+            from loguru import logger as _root_logger
+            _root_logger.complete()
+        except Exception:
+            pass
 
     def run_main(self) -> None:
         """Entry point launcher for module main.py scripts."""
@@ -265,7 +347,17 @@ class BaseBackendModule(ABC):
         except (KeyboardInterrupt, asyncio.CancelledError):
             pass
         finally:
-            loop.close()
+            try:
+                pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
+            finally:
+                loop.close()
+                sys.exit(0)
 
 
 def run_module(module_cls: type[BaseBackendModule]) -> None:

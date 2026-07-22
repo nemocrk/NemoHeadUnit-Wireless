@@ -81,7 +81,7 @@ class TCPServer:
     # Accept
     # ------------------------------------------------------------------
 
-    def accept(self, timeout: int = ACCEPT_TIMEOUT) -> Optional[Tuple[socket.socket, str]]:
+    def accept(self, timeout: Optional[int] = None) -> Optional[Tuple[socket.socket, str]]:
         """
         Block until a client connects or timeout expires.
         Returns (socket, address_str) or None on timeout/error.
