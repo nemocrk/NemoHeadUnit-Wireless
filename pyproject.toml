@@ -98,3 +98,9 @@ omit = [
 show_missing = true
 skip_covered  = false
 fail_under    = 80
+
+[tool.pyrefly]
+search-path = [
+  "web-browser-head-unit",
+  "web-browser-head-unit/backend"
+]

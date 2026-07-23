@@ -109,8 +109,8 @@ web-browser-head-unit/
 ## Hardware Abstraction Layer (HAL)
 
 To guarantee universal cross-platform execution across Linux and Windows without hardcoded OS assumptions:
-* **Bluetooth**: `connectivity_manager` attempts Linux BlueZ D-Bus initialization via `BlueZBluetoothAdapter`. If system D-Bus is unavailable, it gracefully falls back to `WindowsBluetoothAdapter` (supporting Windows Winsock RFCOMM and mock loopback sockets for VM testing).
-* **WiFi Access Point**: `connectivity_manager` attempts Linux APManager D-Bus initialization (`org.nemo.APManager`). If unavailable, it falls back to `WindowsWifiApAdapter` (communicating with `NemoAPManager` background service on port `15288` or WinRT API).
+* **Bluetooth**: `connectivity_manager` attempts Linux BlueZ D-Bus initialization via `BlueZBluetoothAdapter`. If system D-Bus is unavailable, it gracefully falls back to `WindowsBluetoothAdapter` (supporting Windows Winsock `WSASetServiceW` SDP registration for Android Auto UUID `0000fcef-0000-1000-8000-00805f9b34fb` and mock loopback RFCOMM sockets for VM testing).
+* **WiFi Access Point**: `connectivity_manager` attempts Linux APManager D-Bus initialization (`org.nemo.APManager`). If unavailable, it falls back to `WindowsWifiApAdapter` (communicating with `nemo_ap_manager_win_service.py` background service on port `15288` or direct WinRT `winrt.windows.networking` API).
 
 ---
 
@@ -160,12 +160,19 @@ Persistent YAML configuration files are stored in the cross-platform OS standard
 
 ## Running the Application
 
-To launch the full backend system orchestrator:
+### Launching Backend Subprocess Orchestrator
 
+**On Linux (Bash):**
 ```bash
-# From workspace root or web-browser-head-unit directory:
 micromamba run -n NemoHeadUnit-Wireless python3 web-browser-head-unit/backend/main.py
 ```
+
+**On Windows (PowerShell):**
+```powershell
+micromamba run -n NemoHeadUnit-Wireless python web-browser-head-unit/backend/main.py
+```
+
+---
 
 ### Primary Endpoints (via Gateway Proxy at http://127.0.0.1:8000):
 * **`GET /api/config/`**: View system-wide configuration parameters and schema descriptors.

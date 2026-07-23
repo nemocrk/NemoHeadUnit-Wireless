@@ -10,7 +10,9 @@
     "git.postCommitCommand": "sync",
     "python.analysis.extraPaths": [
         "./protos",
-        "./modules"
+        "./modules",
+        "./web-browser-head-unit",
+        "./web-browser-head-unit/backend"
     ],
     "python.analysis.typeCheckingMode": "standard",
     "chatgpt.runCodexInWindowsSubsystemForLinux": true

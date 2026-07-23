@@ -60,8 +60,8 @@ class WindowsWifiApAdapter(BaseWifiApAdapter):
 
         # WinRT direct method if permissions allow, or mock simulation fallback
         try:
-            import winsdk.windows.networking.connectivity as connectivity
-            import winsdk.windows.networking.networkoperators as netops
+            import winrt.windows.networking.connectivity as connectivity
+            import winrt.windows.networking.networkoperators as netops
 
             profile = connectivity.NetworkInformation.get_internet_connection_profile()
             if profile:

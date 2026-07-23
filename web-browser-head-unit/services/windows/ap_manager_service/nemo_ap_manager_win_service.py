@@ -57,8 +57,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 async def start_windows_hotspot(ssid: str, key: str) -> tuple[bool, str]:
     try:
-        import winsdk.windows.networking.connectivity as connectivity
-        import winsdk.windows.networking.networkoperators as netops
+        import winrt.windows.networking.connectivity as connectivity
+        import winrt.windows.networking.networkoperators as netops
 
         profile = connectivity.NetworkInformation.get_internet_connection_profile()
         if not profile:
@@ -82,8 +82,8 @@ async def start_windows_hotspot(ssid: str, key: str) -> tuple[bool, str]:
 
 async def stop_windows_hotspot() -> tuple[bool, str]:
     try:
-        import winsdk.windows.networking.connectivity as connectivity
-        import winsdk.windows.networking.networkoperators as netops
+        import winrt.windows.networking.connectivity as connectivity
+        import winrt.windows.networking.networkoperators as netops
 
         profile = connectivity.NetworkInformation.get_internet_connection_profile()
         if not profile:

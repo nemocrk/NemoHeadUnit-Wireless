@@ -1,0 +1,34 @@
+# NemoHeadUnit-Wireless — Micromamba Environment Specification
+#
+# Create:   micromamba create -f environment.yml
+# Activate: micromamba activate NemoHeadUnit-Wireless
+# Update:   micromamba update -f environment.yml --prune
+
+name: NemoHeadUnit-Wireless
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.13
+  - pyzmq>=26.0
+  - msgpack-python>=1.0
+  - aiohttp>=3.9.0
+  - websockets>=12.0
+  - pyyaml>=6.0
+  - pip
+  - pip:
+    - loguru>=0.7.3
+    - protobuf>=4.25
+    - grpcio-tools>=1.62
+    - winrt-runtime>=3.2.1
+    - winrt-Windows.Networking.Connectivity>=3.2.1
+    - winrt-Windows.Networking.NetworkOperators>=3.2.1
+    - winrt-Windows.Foundation>=3.2.1
+    - winrt-Windows.Devices.Bluetooth>=3.2.1
+    - winrt-Windows.Devices.Enumeration>=3.2.1
+    - winrt-Windows.Devices.Radios>=3.2.1
+    - winrt-Windows.Devices.Bluetooth.Rfcomm>=3.2.1
+    - winrt-Windows.Devices.Bluetooth.Advertisement>=3.2.1
+    - winrt-Windows.Foundation.Collections>=3.2.1

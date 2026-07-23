@@ -3,55 +3,65 @@
  */
 
 import { SettingsWidgets } from './settings_widgets.js';
+import { BluetoothWidget } from './bluetooth_widget.js';
 
 export class UIControls {
     constructor() {
         this.menuOpen = false;
         this.logWs = null;
 
-        this.initElements();
-        this.bindEvents();
+        // Command Bar Elements
+        this.btnHome = document.getElementById('btn-home');
+        this.btnAudio = document.getElementById('btn-audio');
+        this.btnMenu = document.getElementById('btn-menu');
+        this.btnReconnect = document.getElementById('fab-reconnect');
+
+        // Arc FAB Menu Elements
+        this.arcMenu = document.getElementById('arc-radial-menu');
+        this.btnSettings = document.getElementById('fab-settings');
+        this.btnBluetooth = document.getElementById('fab-bluetooth');
+        this.btnWifi = document.getElementById('fab-wifi');
+        this.btnLogs = document.getElementById('fab-logs');
+        this.btnFullscreen = document.getElementById('fab-fullscreen');
+
+        // Drawers
+        this.drawerSettings = document.getElementById('settings-drawer');
+        this.drawerBluetooth = document.getElementById('bluetooth-drawer');
+        this.drawerLogs = document.getElementById('logs-drawer');
+        this.btnCloseSettings = document.getElementById('close-settings');
+        this.btnCloseBluetooth = document.getElementById('close-bluetooth');
+        this.btnCloseLogs = document.getElementById('close-logs');
+
+        // Workflow Status Card
+        this.disconnectedScreen = document.getElementById('disconnected-screen');
+        this.workflowText = document.getElementById('workflow-text');
+        this.logConsole = document.getElementById('log-console');
+
+        this.bluetoothWidget = null;
+
+        this.initEventListeners();
         this.startWorkflowPolling();
     }
 
-    initElements() {
-        this.arcMenu = document.getElementById('arc-radial-menu');
-        this.btnMenu = document.getElementById('btn-menu');
-        this.btnHome = document.getElementById('btn-home');
-        this.btnLogs = document.getElementById('fab-logs');
-        this.btnSettings = document.getElementById('fab-settings');
-        this.btnWifi = document.getElementById('fab-wifi');
-        this.btnFullscreen = document.getElementById('fab-fullscreen');
-        this.btnReconnect = document.getElementById('fab-reconnect');
-
-        this.drawerSettings = document.getElementById('settings-drawer');
-        this.drawerLogs = document.getElementById('logs-drawer');
-        this.btnCloseSettings = document.getElementById('close-settings');
-        this.btnCloseLogs = document.getElementById('close-logs');
-
-        this.workflowText = document.getElementById('workflow-text');
-        this.disconnectedScreen = document.getElementById('disconnected-screen');
-        this.logConsole = document.getElementById('log-console');
-    }
-
-    bindEvents() {
-        const bindFab = (btn, action) => {
-            if (!btn) return;
+    initEventListeners() {
+        const bindFab = (el, callback) => {
+            if (!el) return;
             let lastTrigger = 0;
             const handler = (e) => {
                 const now = Date.now();
-                if (now - lastTrigger < 300) return;
+                if (now - lastTrigger < 250) return;
                 lastTrigger = now;
                 if (e) {
                     e.stopPropagation();
+                    if (e.cancelable && e.type === 'touchend') e.preventDefault();
                 }
-                action();
+                callback(e);
             };
-            btn.addEventListener('pointerdown', handler);
-            btn.addEventListener('click', handler);
+            el.addEventListener('click', handler);
+            el.addEventListener('touchend', handler);
         };
 
-        // Toggle Arc Radial Menu
+        // Main Menu Toggle
         bindFab(this.btnMenu, () => this.toggleArcMenu());
 
         // Home Button (Show Disconnected Screen / Clock)
@@ -62,6 +72,12 @@ export class UIControls {
             this.closeArcMenu();
             this.openDrawer(this.drawerSettings);
             this.loadConfigSettings();
+        });
+
+        bindFab(this.btnBluetooth, () => {
+            this.closeArcMenu();
+            this.openDrawer(this.drawerBluetooth);
+            this.loadBluetoothWidget();
         });
 
         bindFab(this.btnLogs, () => {
@@ -89,9 +105,21 @@ export class UIControls {
         if (this.btnCloseSettings) {
             this.btnCloseSettings.addEventListener('click', () => this.closeDrawer(this.drawerSettings));
         }
+        if (this.btnCloseBluetooth) {
+            this.btnCloseBluetooth.addEventListener('click', () => this.closeDrawer(this.drawerBluetooth));
+        }
         if (this.btnCloseLogs) {
             this.btnCloseLogs.addEventListener('click', () => this.closeDrawer(this.drawerLogs));
         }
+    }
+
+    loadBluetoothWidget() {
+        const container = document.getElementById('bluetooth-widget-container');
+        if (!container) return;
+        if (!this.bluetoothWidget) {
+            this.bluetoothWidget = new BluetoothWidget(container);
+        }
+        this.bluetoothWidget.renderShell();
     }
 
     toggleArcMenu() {

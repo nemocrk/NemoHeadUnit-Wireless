@@ -34,7 +34,7 @@ from shared.ipc_utils import get_bus_address
 
 MODULES_DIR = BASE_DIR / "modules"
 GRACE_PERIOD = 10.0
-READYTOSTART_WINDOW = 0.5   # seconds to collect system.module_ready replies
+READYTOSTART_WINDOW = 3.0   # max seconds to collect system.module_ready replies (exits early once all modules reply)
 MODULE_READY_TIMEOUT = 1.0  # seconds per level wait
 
 log = get_logger("main")
@@ -211,7 +211,7 @@ def run():
 
     # 3. Multi-step priority boot sequence
     time.sleep(0.5)
-    priority_map = _collect_module_ready(pub_sock, sub_sock, module_names, READYTOSTART_WINDOW)
+    priority_map = _collect_module_ready(pub_sock, sub_sock, module_names, 5.0)
     log.info(f"Boot priority map → {priority_map}")
 
     for level in sorted(priority_map.keys()):

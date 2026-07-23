@@ -29,7 +29,8 @@
         <!-- Arc Radial Floating Action Button (FAB) Menu -->
         <div id="arc-radial-menu">
             <button class="arc-fab-item" id="fab-settings" title="Settings">⚙️</button>
-            <button class="arc-fab-item" id="fab-wifi" title="WiFi Hotspot">📶</button>
+            <button class="arc-fab-item" id="fab-bluetooth" title="Bluetooth Connections">📲</button>
+            <button class="arc-fab-item" id="fab-wifi" title="WiFi Hotspot">📡</button>
             <button class="arc-fab-item" id="fab-logs" title="Live Logs">📋</button>
             <button class="arc-fab-item" id="fab-fullscreen" title="Fullscreen">⛶</button>
         </div>
@@ -39,7 +40,18 @@
             <button class="cmd-btn" id="btn-home" title="Home / Clock">🏠</button>
             <button class="cmd-btn" id="btn-audio" title="Audio Controls">🎵</button>
             <button class="cmd-btn" id="fab-reconnect" title="Reconnect Session">🔄</button>
-            <button class="cmd-btn" id="btn-menu" title="Menu">☸</button>
+            <button class="cmd-btn" id="btn-menu" title="Menu">☰</button>
+        </div>
+
+        <!-- Slide-Over Bluetooth Drawer -->
+        <div class="drawer" id="bluetooth-drawer">
+            <div class="drawer-header">
+                <span class="drawer-title">Bluetooth Connections</span>
+                <button class="close-btn" id="close-bluetooth">&times;</button>
+            </div>
+            <div id="bluetooth-widget-container" style="flex: 1; overflow-y: auto;">
+                Loading Bluetooth manager...
+            </div>
         </div>
 
         <!-- Slide-Over Settings Drawer -->
@@ -80,6 +92,7 @@
         import { AnalogClock } from './js/analog_clock.js';
         import { TouchHandler } from './js/touch_handler.js';
         import { UIControls } from './js/ui_controls.js';
+        import { BluetoothWidget } from './js/bluetooth_widget.js';
 
         document.addEventListener('DOMContentLoaded', () => {
             const canvas = document.getElementById('video-canvas');

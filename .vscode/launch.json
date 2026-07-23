@@ -22,6 +22,17 @@
             }
         },
         {
+            "name": "Web Browser Version",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/web-browser-head-unit/backend/main.py",
+            "cwd": "${workspaceFolder}/web-browser-head-unit/backend",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/web-browser-head-unit/backend"
+            },
+            "python": "${command:python.interpreterPath}"
+        },
+        {
             "name": "Explore Protocol",
             "type": "debugpy",
             "request": "launch",

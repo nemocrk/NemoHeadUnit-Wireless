@@ -211,26 +211,55 @@ body, html {
 
 #arc-radial-menu.open .arc-fab-item:nth-child(1) {
     opacity: 1;
-    transform: translate(-140px, 0px) scale(1);
+    transform: translate(-160px, 0px) scale(1);
 }
 
 #arc-radial-menu.open .arc-fab-item:nth-child(2) {
     opacity: 1;
-    transform: translate(-110px, -85px) scale(1);
+    transform: translate(-130px, -70px) scale(1);
 }
 
 #arc-radial-menu.open .arc-fab-item:nth-child(3) {
     opacity: 1;
-    transform: translate(-50px, -135px) scale(1);
+    transform: translate(-80px, -125px) scale(1);
 }
 
 #arc-radial-menu.open .arc-fab-item:nth-child(4) {
     opacity: 1;
-    transform: translate(15px, -145px) scale(1);
+    transform: translate(-10px, -155px) scale(1);
 }
 
-.arc-fab-item:active {
-    transform: scale(0.9) !important;
+#arc-radial-menu.open .arc-fab-item:nth-child(5) {
+    opacity: 1;
+    transform: translate(55px, -150px) scale(1);
+}
+
+#arc-radial-menu.open .arc-fab-item:nth-child(1):active {
+    transform: translate(-160px, 0px) scale(0.9);
+    background: var(--accent-color);
+    color: #000;
+}
+
+#arc-radial-menu.open .arc-fab-item:nth-child(2):active {
+    transform: translate(-130px, -70px) scale(0.9);
+    background: var(--accent-color);
+    color: #000;
+}
+
+#arc-radial-menu.open .arc-fab-item:nth-child(3):active {
+    transform: translate(-80px, -125px) scale(0.9);
+    background: var(--accent-color);
+    color: #000;
+}
+
+#arc-radial-menu.open .arc-fab-item:nth-child(4):active {
+    transform: translate(-10px, -155px) scale(0.9);
+    background: var(--accent-color);
+    color: #000;
+}
+
+#arc-radial-menu.open .arc-fab-item:nth-child(5):active {
+    transform: translate(55px, -150px) scale(0.9);
     background: var(--accent-color);
     color: #000;
 }
@@ -438,3 +467,255 @@ input:checked + .slider:before {
 .save-btn:active {
     opacity: 0.85;
 }
+
+/* Bluetooth Connection Widget & Drawer Styles */
+.bt-widget-container {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding-bottom: 24px;
+}
+
+.bt-header-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--glass-border);
+    border-radius: 14px;
+    padding: 12px 16px;
+}
+
+.bt-status-badge {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.bt-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: #94a3b8;
+    box-shadow: 0 0 8px rgba(148, 163, 184, 0.4);
+}
+
+.bt-dot.connected {
+    background-color: var(--accent-color);
+    box-shadow: 0 0 10px rgba(0, 230, 118, 0.8);
+}
+
+.bt-dot.scanning {
+    background-color: #38bdf8;
+    animation: pulse 1.2s infinite alternate;
+}
+
+@keyframes pulse {
+    0% { opacity: 0.4; transform: scale(0.9); }
+    100% { opacity: 1; transform: scale(1.2); }
+}
+
+.bt-scan-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(0, 230, 118, 0.15);
+    border: 1px solid var(--accent-color);
+    color: var(--accent-color);
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.bt-scan-btn:hover {
+    background: var(--accent-color);
+    color: #000;
+}
+
+.bt-scan-btn.scanning {
+    background: rgba(56, 189, 248, 0.2);
+    border-color: #38bdf8;
+    color: #38bdf8;
+}
+
+.bt-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-secondary);
+    letter-spacing: 1.2px;
+    margin-top: 8px;
+}
+
+.bt-device-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.bt-device-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    padding: 12px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: all 0.2s ease;
+}
+
+.bt-device-card.connected {
+    border-color: rgba(0, 230, 118, 0.4);
+    background: rgba(0, 230, 118, 0.05);
+}
+
+.bt-device-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.bt-device-icon {
+    font-size: 20px;
+}
+
+.bt-device-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.bt-device-mac {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.bt-device-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.bt-action-btn {
+    border: none;
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+
+.bt-action-btn.connect {
+    background: var(--accent-color);
+    color: #000;
+}
+
+.bt-action-btn.disconnect {
+    background: rgba(239, 68, 68, 0.2);
+    color: #f87171;
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.bt-action-btn.remove {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-secondary);
+    padding: 6px 8px;
+}
+
+.bt-empty-state {
+    text-align: center;
+    padding: 18px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px dashed rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+}
+
+/* Pairing Dialog Modal */
+.bt-modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(8px);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 300;
+}
+
+.bt-modal-overlay.hidden {
+    display: none;
+}
+
+.bt-modal-card {
+    background: #0f172a;
+    border: 1px solid var(--glass-border);
+    border-radius: 20px;
+    padding: 24px;
+    width: 320px;
+    text-align: center;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.8);
+}
+
+.bt-modal-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.bt-modal-subtitle {
+    font-size: 14px;
+    color: var(--accent-color);
+    margin: 4px 0 16px 0;
+}
+
+.bt-pin-display {
+    font-size: 32px;
+    font-weight: 800;
+    letter-spacing: 6px;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.1);
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 16px;
+}
+
+.bt-modal-text {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 20px;
+}
+
+.bt-modal-actions {
+    display: flex;
+    gap: 12px;
+}
+
+.bt-modal-btn {
+    flex: 1;
+    padding: 10px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    border: none;
+    cursor: pointer;
+}
+
+.bt-modal-btn.accept {
+    background: var(--accent-color);
+    color: #000;
+}
+
+.bt-modal-btn.reject {
+    background: rgba(239, 68, 68, 0.2);
+    color: #f87171;
+}
+
