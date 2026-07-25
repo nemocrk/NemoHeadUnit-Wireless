@@ -143,9 +143,38 @@ class BaseBackendModule(ABC):
         """Shortcut to publish message on ZMQ bus."""
         self.bus.publish(topic, payload)
 
-    def subscribe(self, topic: str, callback: Callable[[str, dict], None]) -> None:
-        """Shortcut to subscribe to ZMQ bus topic."""
-        self.bus.subscribe(topic, callback)
+    def subscribe(self, topic: str, callback: Callable) -> None:
+        """Shortcut to subscribe to ZMQ bus topic, supporting both sync callbacks and async coroutine functions thread-safely."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if asyncio.iscoroutinefunction(callback):
+            import inspect
+            sig = inspect.signature(callback)
+            num_params = len(sig.parameters)
+
+            def _async_wrapper(top: str, pay: dict) -> None:
+                try:
+                    target_loop = loop
+                    if target_loop is None or not target_loop.is_running():
+                        try:
+                            target_loop = asyncio.get_event_loop()
+                        except Exception:
+                            target_loop = None
+
+                    if target_loop and target_loop.is_running():
+                        if num_params == 1:
+                            asyncio.run_coroutine_threadsafe(callback(pay), target_loop)
+                        else:
+                            asyncio.run_coroutine_threadsafe(callback(top, pay), target_loop)
+                except Exception as exc:
+                    self.log.error(f"Error dispatching async callback for '{top}': {exc}")
+
+            self.bus.subscribe(topic, _async_wrapper)
+        else:
+            self.bus.subscribe(topic, callback)
 
     async def call_module(
         self,

@@ -719,3 +719,248 @@ input:checked + .slider:before {
     color: #f87171;
 }
 
+/* Advanced Settings UI Styles */
+.card-section {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 16px;
+}
+
+.card-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--accent-color);
+    margin-bottom: 12px;
+}
+
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+}
+
+.mode-btn {
+    padding: 6px 12px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--glass-border);
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.mode-btn.active {
+    background: var(--accent-color);
+    color: #000;
+    font-weight: 600;
+}
+
+.json-textarea {
+    width: 100%;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--glass-border);
+    border-radius: 8px;
+    color: #38bdf8;
+    font-family: monospace;
+    font-size: 12px;
+    padding: 8px;
+    box-sizing: border-box;
+    resize: vertical;
+}
+
+/* Touch-First In-Car Head Unit UI Styles */
+.touch-card-section {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--glass-border);
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.touch-card-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--accent-color);
+    margin-bottom: 14px;
+}
+
+.touch-field-group {
+    margin-bottom: 14px;
+}
+
+.touch-field-group.flex-between {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.touch-label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 6px;
+}
+
+.touch-input {
+    width: 100%;
+    height: 48px;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--glass-border);
+    border-radius: 10px;
+    color: #fff;
+    font-size: 15px;
+    padding: 0 14px;
+    box-sizing: border-box;
+}
+
+.pill-group {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.pill-btn {
+    height: 44px;
+    padding: 0 16px;
+    border-radius: 22px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--glass-border);
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.pill-btn.active {
+    background: var(--accent-color);
+    color: #000;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 12px rgba(0, 230, 118, 0.3);
+}
+
+.pill-btn:active {
+    transform: scale(0.95);
+}
+
+.accordion-card {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
+    margin-bottom: 10px;
+    overflow: hidden;
+}
+
+.accordion-header {
+    height: 52px;
+    padding: 0 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+    touch-action: manipulation;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.accordion-header:active {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.accordion-title {
+    flex: 1;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.accordion-body {
+    padding: 14px;
+    border-top: 1px solid var(--glass-border);
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.touch-delete-btn {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: rgba(239, 68, 68, 0.15);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #f87171;
+    font-size: 20px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    cursor: pointer;
+}
+
+.stepper-widget {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
+    padding: 4px 8px;
+}
+
+.stepper-btn {
+    width: 42px;
+    height: 42px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    color: #fff;
+    font-size: 20px;
+    font-weight: 700;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+
+.stepper-btn:active {
+    background: var(--accent-color);
+    color: #000;
+}
+
+.stepper-val {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--accent-color);
+    min-width: 60px;
+    text-align: center;
+}
+
+.touch-save-btn {
+    width: 100%;
+    height: 54px;
+    border-radius: 27px;
+    background: var(--accent-color);
+    color: #000;
+    font-size: 16px;
+    font-weight: 700;
+    border: none;
+    cursor: pointer;
+    box-shadow: 0 4px 20px rgba(0, 230, 118, 0.4);
+    touch-action: manipulation;
+}
+
+.touch-add-btn {
+    width: 100%;
+    height: 48px;
+    border-radius: 12px;
+    background: rgba(56, 189, 248, 0.15);
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    color: #38bdf8;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+
+
+

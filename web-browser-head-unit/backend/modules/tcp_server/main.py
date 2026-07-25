@@ -26,6 +26,7 @@ from aiohttp import web
 from shared.base_module import BaseBackendModule, run_module
 from shared.config_schema import field_bool, field_int, field_string
 from shared.media_shm import BidirectionalMediaSHM
+from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
 from modules.tcp_server.aa_cryptor import AACryptor
 from modules.tcp_server.frame_codec import FrameAssembler, encode
 from modules.tcp_server.frame_relay import FrameRelay
@@ -33,8 +34,8 @@ from modules.tcp_server.message_to_proto import frame_data_to_dict
 from modules.tcp_server.server import TCPServer
 
 _FLAG_ENCRYPTED = 0x08
-_MSG_SHUTDOWN_REQUEST = 0x000D
-_MSG_SHUTDOWN_RESPONSE = 0x000E
+_MSG_SHUTDOWN_REQUEST = ControlMessage.Enum.SHUTDOWN_REQUEST
+_MSG_SHUTDOWN_RESPONSE = ControlMessage.Enum.SHUTDOWN_RESPONSE
 _SHUTDOWN_ACK_TIMEOUT = 3.0
 
 
@@ -199,6 +200,10 @@ class TCPServerModule(BaseBackendModule):
             body = assembled[2:]
             self._frames_received_count += 1
 
+            # Log all non-media data frames (exclude high-frequency AV_MEDIA indications on channel 3/4)
+            if not (channel_id in (3, 4) and message_id in (0x0001, 0x0002)):
+                self.log.info(f"📥 [TCP Recv] Inbound frame from phone: ch={channel_id}, msgId=0x{message_id:04x}, len={len(body)}, encrypted={encrypted}")
+
             if channel_id in (2, 3, 4):
                 stream_type = 0 if channel_id == 2 else 1
                 shm_offset = self._shm.downstream.write_frame(stream_type, 0, body)
@@ -254,6 +259,9 @@ class TCPServerModule(BaseBackendModule):
             self.log.error(f"on_frame_send: Malformed payload — {exc}")
             return
 
+        if not (channel_id in (3, 4) and message_id in (0x0001, 0x0002)):
+            self.log.info(f"📤 [TCP Send] Transmitting frame to phone: ch={channel_id}, msgId=0x{message_id:04x}, len={len(body)}, encrypted={ssl_active}")
+
         with self._multi_frame_lock:
             try:
                 with self._crypto_lock:
@@ -290,7 +298,12 @@ class TCPServerModule(BaseBackendModule):
             outgoing = self._cryptor.drive_handshake()
         if outgoing:
             self.log.info(f"🔒 [TLS Stage 5/5] Generated TLS ClientHello ({len(outgoing)} bytes) — sending to phone on Channel 0...")
-            self.publish("tcp.server.tls_handshake", {"outgoing_hex": outgoing.hex()})
+            self.on_frame_send("aa.frame.send", {
+                "channel_id": 0,
+                "message_id": 0x0003,
+                "payload_hex": outgoing.hex(),
+                "encrypted": False,
+            })
 
     def on_handshake_feed_input(self, topic: str, payload: dict) -> None:
         if self._cryptor is None:
@@ -310,11 +323,18 @@ class TCPServerModule(BaseBackendModule):
                 self.log.info("🔒 [TLS Stage 5/5] 🎉 TLS HANDSHAKE COMPLETED SUCCESSFULLY! Cryptographic session active.")
             active = self._cryptor.is_active()
 
+        if outgoing:
+            self.log.info(f"🔒 [TLS Stage 5/5] Sending TLS handshake response ({len(outgoing)} bytes) to phone on Channel 0...")
+            self.on_frame_send("aa.frame.send", {
+                "channel_id": 0,
+                "message_id": 0x0003,
+                "payload_hex": outgoing.hex(),
+                "encrypted": False,
+            })
+
         if active:
-            self.log.info("TLS handshake complete — publishing tcp.server.tls_handshake_completed")
+            self.log.info("🔒 [TLS Stage 5/5] 🎉 TLS handshake complete — session encrypted!")
             self.publish("tcp.server.tls_handshake_completed", {})
-        elif outgoing:
-            self.publish("tcp.server.tls_handshake", {"outgoing_hex": outgoing.hex()})
 
     def on_aa_session_restart(self, topic: str, payload: dict) -> None:
         if self._relay is None:

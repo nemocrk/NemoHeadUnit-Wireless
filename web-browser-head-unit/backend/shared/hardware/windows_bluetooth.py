@@ -494,7 +494,11 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
                                     connected_successfully = True
                                     break
                                 except Exception as e:
-                                    log.warning(f"WinRT StreamSocket connection to {address} ({svc_uuid}) failed: {e}")
+                                    if "-2147014848" in str(e) or "10048" in str(e) or "0x80072740" in str(e).lower():
+                                        log.info(f"WinRT StreamSocket profile ({svc_uuid}) already active via Windows OS — trying next profile...")
+                                        continue
+                                    else:
+                                        log.warning(f"WinRT StreamSocket connection to {address} ({svc_uuid}) failed: {e}")
 
                 if connected_successfully:
                     # Mark device as connected in our local state
@@ -651,30 +655,49 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
         """Register the Android Auto RFCOMM profile with Winsock SDP and listen for connections."""
         self._on_connection_cb = on_connection_cb
         try:
-            # Try native Bluetooth RFCOMM socket on Windows (BDADDR_ANY is "00:00:00:00:00:00")
+            # Try native Winsock Bluetooth RFCOMM socket on Windows
             self._server_sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
-            try:
-                self._server_sock.bind(("00:00:00:00:00:00", RFCOMM_CHANNEL))
-            except Exception:
-                self._server_sock.bind(("", RFCOMM_CHANNEL))
+            bound = False
+            for bind_addr in ("", "00:00:00:00:00:00", self.get_adapter_address()):
+                if not bind_addr and bind_addr != "":
+                    continue
+                try:
+                    self._server_sock.bind((bind_addr, RFCOMM_CHANNEL))
+                    bound = True
+                    log.info(f"Windows RFCOMM socket successfully bound to '{bind_addr}' channel {RFCOMM_CHANNEL}")
+                    break
+                except Exception:
+                    pass
+
+            if not bound:
+                raise OSError("All Winsock AF_BLUETOOTH bind attempts failed")
 
             self._server_sock.listen(1)
             self._running = True
-            log.info(f"Windows RFCOMM socket bound to channel {RFCOMM_CHANNEL}")
 
             # SDP service registration via Winsock WSASetServiceW (non-blocking thread)
             threading.Thread(target=self._register_sdp_service, daemon=True, name="windows-sdp-register").start()
         except Exception as e:
-            # Fallback for VM / desktop testing environments without active Bluetooth hardware
-            log.warning(f"AF_BLUETOOTH binding failed ({e}) — falling back to mock loopback RFCOMM server socket for VM testing")
-            self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self._server_sock.bind(("127.0.0.1", 15289))
-            self._server_sock.listen(1)
-            self._running = True
+            log.warning(f"AF_BLUETOOTH binding failed ({e}) — attempting WinRT RfcommServiceProvider real Bluetooth listener fallback...")
+            winrt_ok = False
+            try:
+                self._try_winrt_sdp_publish()
+                winrt_ok = True
+                self._running = True
+                log.info("Successfully published Android Auto UUID via WinRT RfcommServiceProvider fallback")
+            except Exception as winrt_err:
+                log.warning(f"WinRT fallback failed ({winrt_err}) — falling back to mock loopback RFCOMM server socket for VM testing")
 
-        self._thread = threading.Thread(target=self._accept_loop, daemon=True, name="windows-rfcomm-accept")
-        self._thread.start()
+            if not winrt_ok:
+                self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self._server_sock.bind(("127.0.0.1", 15289))
+                self._server_sock.listen(1)
+                self._running = True
+
+        if self._server_sock:
+            self._thread = threading.Thread(target=self._accept_loop, daemon=True, name="windows-rfcomm-accept")
+            self._thread.start()
         return True
 
     def _register_sdp_service(self) -> None:
@@ -761,7 +784,7 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
                                 remote_host = args.socket.information.remote_host_name.raw_name
                             except Exception:
                                 remote_host = "Unknown"
-                            log.info(f"🔵 [BT Stage 1/5] Incoming Bluetooth RFCOMM connection received from phone ({remote_host})")
+                            log.info(f"🔵 [BT Stage 1/5] 🎉 RFCOMM Profile Connection accepted from {remote_host}!")
 
                             # Bridge WinRT StreamSocket to native Python socket interface
                             class WinRTSocketAdapter:
@@ -853,7 +876,7 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
                 self._server_sock.settimeout(2.0)
                 client_sock, client_info = self._server_sock.accept()
                 client_mac = client_info[0].upper()
-                log.info(f"Windows RFCOMM Connection accepted from {client_mac}")
+                log.info(f"🔵 [BT Stage 1/5] 🎉 RFCOMM Profile Connection accepted from {client_mac}!")
                 threading.Thread(
                     target=self._on_connection_cb,
                     args=(client_sock, client_mac),

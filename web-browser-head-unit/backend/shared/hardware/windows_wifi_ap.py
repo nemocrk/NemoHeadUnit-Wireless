@@ -9,30 +9,38 @@ log = get_logger("hardware.windows_wifi_ap")
 # Port for our UAC-free LocalSystem background service NemoAPManager
 NEMO_AP_MANAGER_PORT = 15288
 
-def _get_hotspot_virtual_bssid() -> str:
+def _get_hotspot_virtual_bssid(gateway_ip: str = "192.168.137.1") -> str:
+    # 1. Query interface holding the hotspot Gateway IP (e.g. 192.168.137.1)
     try:
         import subprocess
-        cmd = 'powershell -Command "Get-NetAdapter | Where-Object { $_.InterfaceDescription -like \'*Wi-Fi Direct*\' -or $_.InterfaceDescription -like \'*Virtual*\' -or $_.Name -like \'*Hotspot*\' } | Select-Object -ExpandProperty MacAddress"'
+        cmd = f'powershell -NoProfile -Command "Get-NetIPAddress -IPAddress \'{gateway_ip}\' -ErrorAction SilentlyContinue | ForEach-Object {{ Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue }} | Select-Object -ExpandProperty MacAddress"'
         out = subprocess.check_output(cmd, shell=True, text=True, errors="ignore").strip()
         if out:
             lines = [l.strip() for l in out.splitlines() if l.strip()]
-            if lines:
-                mac = lines[0].replace("-", ":").upper()
+            for line in lines:
+                mac = line.replace("-", ":").upper()
                 if len(mac) == 17:
-                    log.info(f"Resolved Windows Wi-Fi Direct Virtual Adapter MAC: {mac}")
+                    log.info(f"Resolved active Hotspot Gateway ({gateway_ip}) Interface MAC: {mac}")
                     return mac
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug(f"IP-to-adapter MAC lookup notice: {e}")
+
+    # 2. Secondary search: Wi-Fi Direct Virtual Adapter
     try:
-        import uuid
-        mac_num = uuid.getnode()
-        mac_bytes = bytearray((mac_num >> (8 * i)) & 0xFF for i in range(5, -1, -1))
-        mac_bytes[0] |= 0x02  # IEEE locally administered bit
-        mac = ":".join(f"{b:02X}" for b in mac_bytes)
-        log.info(f"Derived IEEE SoftAP Virtual BSSID MAC: {mac}")
-        return mac
-    except Exception:
-        return "52:BB:B5:B3:90:83"
+        import subprocess
+        cmd = 'powershell -NoProfile -Command "Get-NetAdapter | Where-Object { ($_.InterfaceDescription -like \'*Wi-Fi Direct*\' -or $_.Name -like \'*Wi-Fi*\') -and $_.InterfaceDescription -notlike \'*Hyper-V*\' -and $_.InterfaceDescription -notlike \'*WSL*\' -and $_.InterfaceDescription -notlike \'*VirtualBox*\' -and $_.InterfaceDescription -notlike \'*VMware*\' } | Select-Object -ExpandProperty MacAddress"'
+        out = subprocess.check_output(cmd, shell=True, text=True, errors="ignore").strip()
+        if out:
+            lines = [l.strip() for l in out.splitlines() if l.strip()]
+            for line in lines:
+                mac = line.replace("-", ":").upper()
+                if len(mac) == 17 and not mac.startswith("00:15:5D"):
+                    log.info(f"Resolved Windows Wi-Fi Adapter MAC: {mac}")
+                    return mac
+    except Exception as e:
+        log.debug(f"Wi-Fi adapter MAC lookup notice: {e}")
+
+    return ""
 
 class WindowsWifiApAdapter(BaseWifiApAdapter):
     def __init__(self):
@@ -50,7 +58,7 @@ class WindowsWifiApAdapter(BaseWifiApAdapter):
             self._key = "12345678"
 
         bssid = _get_hotspot_virtual_bssid()
-        log.info(f"Starting Windows Mobile Hotspot (SSID={self._ssid}, Virtual BSSID={bssid})...")
+        log.info(f"📶 [WiFi Stage 2/5] Initiating Windows Mobile Hotspot launch (SSID='{self._ssid}', Virtual BSSID='{bssid}')...")
 
         # WinRT direct method
         try:
@@ -67,7 +75,7 @@ class WindowsWifiApAdapter(BaseWifiApAdapter):
                     if curr_conf and curr_conf.ssid:
                         self._ssid = curr_conf.ssid
                         self._key = curr_conf.passphrase or self._key
-                        log.info(f"Retrieved active Windows Mobile Hotspot configuration: SSID='{self._ssid}'")
+                        log.info(f"📶 [WiFi Stage 2/5] Retrieved active Windows Mobile Hotspot configuration: SSID='{self._ssid}'")
                 except Exception:
                     pass
 
@@ -82,28 +90,22 @@ class WindowsWifiApAdapter(BaseWifiApAdapter):
                 
                 # Start tethering
                 result = await tethering_mgr.start_tethering_async()
-                if result.status in (netops.TetheringOperationStatus.SUCCESS, netops.TetheringOperationStatus.ALREADY_STARTED):
+                success_val = getattr(netops.TetheringOperationStatus, "SUCCESS", 0)
+                already_val = getattr(netops.TetheringOperationStatus, "ALREADY_STARTED", -1)
+                if result.status in (success_val, already_val) or "success" in str(result.status).lower():
                     self._active = True
-                    log.info("Windows Mobile Hotspot active via WinRT successfully")
-                    return True, {
-                        "ssid": self._ssid,
-                        "key": self._key,
-                        "bssid": bssid,
-                        "interface": "Wi-Fi",
-                        "gateway_ip": "192.168.137.1"
-                    }
-                else:
-                    log.warning(f"Direct WinRT start tethering returned status: {result.status}")
+                    log.info(f"📶 [WiFi Stage 2/5] Windows Mobile Hotspot active via WinRT successfully! (SSID='{self._ssid}')")
         except Exception as e:
             log.warning(f"WinRT Hotspot configuration notice: {e}")
 
-        # Hotspot active / debug fallback credentials
-        log.info(f"Mobile Hotspot active — returning WiFi AP connection parameters (SSID='{self._ssid}')")
+        # Dynamically query active Hotspot Gateway IP interface for exact BSSID
+        resolved_bssid = _get_hotspot_virtual_bssid("192.168.137.1")
+        log.info(f"📶 [WiFi Stage 2/5] Windows Mobile Hotspot active! Credentials: SSID='{self._ssid}', BSSID='{resolved_bssid}', Gateway=192.168.137.1")
         self._active = True
         return True, {
             "ssid": self._ssid,
             "key": self._key,
-            "bssid": bssid,
+            "bssid": resolved_bssid,
             "interface": "Wi-Fi",
             "gateway_ip": "192.168.137.1"
         }

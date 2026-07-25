@@ -22,79 +22,30 @@ from shared.media_shm import BidirectionalMediaSHM
 from shared.nal_utils import pack_media_frame, STREAM_TYPE_VIDEO, STREAM_TYPE_AUDIO
 from shared.proto_utils import channels_from_sdr_bytes, parse_media_with_timestamp
 
-AV_MEDIA_WITH_TIMESTAMP_INDICATION = 0x0001
-AV_MEDIA_INDICATION = 0x0002
+try:
+    from modules.channel_manager.handlers import (
+        ControlChannelHandler,
+        VideoChannelHandler,
+        AudioChannelHandler,
+        InputChannelHandler,
+        SensorChannelHandler,
+        BluetoothChannelHandler,
+        WifiChannelHandler,
+    )
+except ImportError:
+    from handlers import (
+        ControlChannelHandler,
+        VideoChannelHandler,
+        AudioChannelHandler,
+        InputChannelHandler,
+        SensorChannelHandler,
+        BluetoothChannelHandler,
+        WifiChannelHandler,
+    )
 
+from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
 
-class ControlChannelHandler:
-    def __init__(self, manager: "ChannelManagerModule"):
-        self.manager = manager
-        self.log = manager.log
-
-    async def handle_frame(self, message_id: int, body: bytes) -> None:
-        self.log.debug("ControlChannel (ch0) msgId=0x%04x len=%d", message_id, len(body))
-        if message_id == 0x0001:  # Version Request
-            # Respond with Version Response (0x0002)
-            resp = struct.pack(">H H H", 0x0002, 1, 1)  # Version 1.1 OK
-            await self.manager.send_wire_frame(0, 0x0002, resp)
-        elif message_id == 0x0005:  # Service Discovery Request
-            self.log.info("Received Service Discovery Request from phone")
-
-
-class VideoChannelHandler:
-    def __init__(self, manager: "ChannelManagerModule"):
-        self.manager = manager
-
-    async def process_shm_frame(self, message_id: int, payload: bytes) -> None:
-        ts_us = 0
-        codec_payload = b""
-
-        if message_id == AV_MEDIA_WITH_TIMESTAMP_INDICATION:
-            ts_us, codec_payload = parse_media_with_timestamp(payload)
-        elif message_id == AV_MEDIA_INDICATION:
-            codec_payload = payload
-        else:
-            return
-
-        if not codec_payload:
-            return
-
-        binary_frame = pack_media_frame(STREAM_TYPE_VIDEO, ts_us, codec_payload)
-        await self.manager.broadcast_ws_media(binary_frame)
-
-
-class AudioChannelHandler:
-    def __init__(self, manager: "ChannelManagerModule"):
-        self.manager = manager
-
-    async def process_shm_frame(self, message_id: int, payload: bytes) -> None:
-        ts_us = 0
-        audio_payload = b""
-
-        if message_id == AV_MEDIA_WITH_TIMESTAMP_INDICATION:
-            ts_us, audio_payload = parse_media_with_timestamp(payload)
-        elif message_id == AV_MEDIA_INDICATION:
-            audio_payload = payload
-        else:
-            return
-
-        if not audio_payload:
-            return
-
-        binary_frame = pack_media_frame(STREAM_TYPE_AUDIO, ts_us, audio_payload)
-        await self.manager.broadcast_ws_media(binary_frame)
-
-
-class InputChannelHandler:
-    def __init__(self, manager: "ChannelManagerModule"):
-        self.manager = manager
-
-    async def handle_touch_event(self, x: int, y: int, action: int) -> None:
-        """Encode AA Input Event message and send via channel 4."""
-        # Simple InputReport payload
-        payload = struct.pack(">H H H", action, x, y)
-        await self.manager.send_wire_frame(4, 0x0001, payload)
-
+MSG = ControlMessage.Enum
 
 class ChannelManagerModule(BaseBackendModule):
     def __init__(self):
@@ -112,11 +63,33 @@ class ChannelManagerModule(BaseBackendModule):
         self.video_handler = VideoChannelHandler(self)
         self.audio_handler = AudioChannelHandler(self)
         self.input_handler = InputChannelHandler(self)
+        self.sensor_handler = SensorChannelHandler(self)
+        self.bluetooth_handler = BluetoothChannelHandler(self)
+        self.wifi_handler = WifiChannelHandler(self)
 
     def get_default_config(self) -> dict[str, Any]:
-        return {
-            "autoclose_on_shutdown": True,
-        }
+        try:
+            try:
+                from modules.channel_manager.service_discovery import SEMANTIC_DEFAULTS
+            except ImportError:
+                from service_discovery import SEMANTIC_DEFAULTS
+            cfg = dict(SEMANTIC_DEFAULTS)
+        except Exception as exc:
+            self.log.error(f"Failed to load SEMANTIC_DEFAULTS: {exc}")
+            cfg = {}
+        cfg["autoclose_on_shutdown"] = True
+        return cfg
+
+    def get_schema(self) -> dict[str, Any]:
+        try:
+            try:
+                from modules.channel_manager.service_discovery import _SCHEMA
+            except ImportError:
+                from service_discovery import _SCHEMA
+            return _SCHEMA
+        except Exception as exc:
+            self.log.error(f"Failed to load _SCHEMA: {exc}")
+            return {}
 
     async def setup(self) -> None:
         """Register REST and WebSocket endpoints, ZMQ topic subscriptions."""
@@ -127,7 +100,10 @@ class ChannelManagerModule(BaseBackendModule):
         # Bus subscriptions
         self.subscribe("aa.frame.shm", self.on_frame_shm)
         self.subscribe("aa.frame.ch0", self.on_ch0_frame)
+        self.subscribe("aa.frame.received", self.on_frame_received)
         self.subscribe("aa.sdr.response", self.on_sdr_response)
+        self.subscribe("tcp.session.connected", self.on_tcp_session_connected)
+        self.subscribe("tcp.server.tls_handshake_completed", self.on_tls_handshake_completed)
 
     async def run(self) -> None:
         self.log.info("ChannelManager active (SHM zero-copy & unified WebCodecs stream ready)")
@@ -143,6 +119,20 @@ class ChannelManagerModule(BaseBackendModule):
     # ------------------------------------------------------------------
     # SHM & Bus Callbacks
     # ------------------------------------------------------------------
+
+    async def on_tcp_session_connected(self, data: dict) -> None:
+        """HU speaks first: send Version Request (VERSION_REQUEST) on Channel 0 immediately when phone TCP connects."""
+        address = data.get("address", "")
+        self.control_handler.tls_started = False
+        self.log.info(f"🌐 [TCP Stage 4/5] Phone TCP session connected from {address} — HU sending VERSION_REQUEST...")
+        version_payload = struct.pack(">H H", 1, 1)  # Major=1, Minor=1
+        await self.send_wire_frame(0, MSG.VERSION_REQUEST, version_payload)
+
+    async def on_tls_handshake_completed(self, data: dict) -> None:
+        """Send AUTH_COMPLETE to phone upon TLS completion, then await SERVICE_DISCOVERY_REQUEST."""
+        self.log.info("🔒 [TLS Stage 5/5] TLS handshake complete — HU sending AUTH_COMPLETE to phone...")
+        auth_payload = b"\x08\x00"  # AuthCompleteIndication (status = STATUS_OK)
+        await self.send_wire_frame(0, MSG.AUTH_COMPLETE, auth_payload, encrypted=False)
 
     async def on_frame_shm(self, data: dict) -> None:
         """Received lightweight notification for media frame written to SHM."""
@@ -169,6 +159,20 @@ class ChannelManagerModule(BaseBackendModule):
         body = bytes.fromhex(payload_hex) if payload_hex else b""
         await self.control_handler.handle_frame(msg_id, body)
 
+    async def on_frame_received(self, data: dict) -> None:
+        """Handle non-Channel 0 frames (Sensor, Bluetooth, WiFi, etc.)."""
+        ch_id = data.get("channel_id", 0)
+        msg_id = data.get("message_id", 0)
+        payload_hex = data.get("payload_hex", "")
+        body = bytes.fromhex(payload_hex) if payload_hex else b""
+
+        if ch_id == 2:
+            await self.sensor_handler.handle_frame(ch_id, msg_id, body)
+        elif ch_id == 8:
+            await self.bluetooth_handler.handle_frame(ch_id, msg_id, body)
+        elif ch_id == 14:
+            await self.wifi_handler.handle_frame(ch_id, msg_id, body)
+
     async def on_sdr_response(self, data: dict) -> None:
         sdr_hex = data.get("sdr_hex", "")
         if sdr_hex:
@@ -176,15 +180,16 @@ class ChannelManagerModule(BaseBackendModule):
             self.active_channels = {ch["channel_id"]: ch for ch in parsed if "channel_id" in ch}
             self.log.info("SDR registered %d channels", len(self.active_channels))
 
-    async def send_wire_frame(self, channel_id: int, message_id: int, body: bytes) -> None:
+    async def send_wire_frame(self, channel_id: int, message_id: int, body: bytes, encrypted: bool = False) -> None:
         """Publish outgoing frame to aa.frame.send."""
-        payload = struct.pack(">H", message_id) + body
         frame_dict = {
             "channel_id": channel_id,
+            "message_id": message_id,
             "flags": 0x0B,
-            "payload_hex": payload.hex(),
+            "payload_hex": body.hex(),
+            "encrypted": encrypted,
         }
-        await self.publish("aa.frame.send", frame_dict)
+        self.publish("aa.frame.send", frame_dict)
 
     async def broadcast_ws_media(self, binary_frame: bytes) -> None:
         if not self.ws_clients:

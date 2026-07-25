@@ -85,11 +85,22 @@ _MT_CONTROL  = 0x04
 _ET_PLAIN     = 0x00
 _ET_ENCRYPTED = 0x08
 
+from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
+
+MSG = ControlMessage.Enum
+
 # The only non-ch0 message that uses CONTROL message-type
-_MSG_CHANNEL_OPEN_RESPONSE = 0x0008
+_MSG_CHANNEL_OPEN_RESPONSE = MSG.CHANNEL_OPEN_RESPONSE
 
 # ch0 messages that stay plain even after TLS is active
-_CH0_PLAIN_IDS = frozenset({0x0001, 0x0002, 0x0003, 0x0004, 0x000B, 0x000C})
+_CH0_PLAIN_IDS = frozenset({
+    MSG.VERSION_REQUEST,
+    MSG.VERSION_RESPONSE,
+    MSG.SSL_HANDSHAKE,
+    MSG.AUTH_COMPLETE,
+    MSG.PING_REQUEST,
+    MSG.PING_RESPONSE,
+})
 
 
 # ---------------------------------------------------------------------------

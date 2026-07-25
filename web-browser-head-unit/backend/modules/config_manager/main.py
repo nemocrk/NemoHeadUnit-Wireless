@@ -141,6 +141,15 @@ class ConfigManagerModule(BaseBackendModule):
                 if self._save_config(module, seed):
                     config = seed
                     self.log.info(f"Seeded initial config for '{module}' ({len(seed)} keys)")
+        elif isinstance(defaults, dict) and defaults:
+            updated = False
+            for k, v in defaults.items():
+                if k not in config:
+                    config[k] = v
+                    updated = True
+            if updated:
+                self._save_config(module, config)
+                self.log.info(f"Updated config for '{module}' with new default keys ({len(config)} total keys)")
 
         schema_payload = schema_to_dict(self.schemas[module]) if module in self.schemas else None
 

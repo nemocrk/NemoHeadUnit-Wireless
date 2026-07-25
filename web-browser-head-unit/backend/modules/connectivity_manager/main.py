@@ -277,7 +277,9 @@ class ConnectivityManagerModule(BaseBackendModule):
             })
         finally:
             if res_success:
-                time.sleep(10.0)  # Grace period for phone to establish TCP connection on 5288 before tearing down RFCOMM
+                self.log.info("🤝 [Handshake Stage 3/5] Keeping RFCOMM socket alive for active Android Auto session...")
+                while self._rfcomm_connected and self._running:
+                    time.sleep(1.0)
             try:
                 sock.close()
             except Exception:
