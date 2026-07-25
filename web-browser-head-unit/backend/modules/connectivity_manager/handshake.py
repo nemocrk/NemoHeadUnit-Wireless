@@ -117,6 +117,7 @@ class RfcommHandshake:
                     return HandshakeResult(False, error="Socket closed or recv error")
 
                 log.debug(f"Event loop: received msg_id={pkt.msg_id}")
+                log.info(f"🤝 [Handshake Stage 3/5] Rx Hex: {pkt.payload[:128].hex()}")
 
                 if pkt.msg_id == MSG_WIFI_START_RESPONSE:
                     # Optional ack from phone
@@ -163,6 +164,7 @@ class RfcommHandshake:
         ok = send_packet(self._sock, MSG_WIFI_START_REQUEST, payload)
         if ok:
             log.info(f"🤝 [Handshake Stage 3/5] Sent WifiStartRequest to phone (target TCP {ip_address}:{port})")
+            log.info(f"🤝 [Handshake Stage 3/5] Tx Hex (WifiStartRequest): {payload[:128].hex()}")
         return ok
 
     def _send_info_response(self) -> bool:
@@ -191,6 +193,7 @@ class RfcommHandshake:
         ok = send_packet(self._sock, MSG_WIFI_INFO_RESPONSE, payload)
         if ok:
             log.info(f"🤝 [Handshake Stage 3/5] Sent WifiInfoResponse (credentials: SSID='{ssid}', BSSID='{bssid}')")
+            log.info(f"🤝 [Handshake Stage 3/5] Tx Hex (WifiInfoResponse): {payload[:128].hex()}")
         return ok
 
     # ------------------------------------------------------------------

@@ -58,7 +58,7 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
             raise e
 
     def _on_ap_started(self, config_dict: dict) -> None:
-        log.info(f"APStarted signal received from D-Bus: {config_dict}")
+        log.info(f"📶 [WiFi Stage 2/5] APStarted signal received from D-Bus: {config_dict}")
         # Convert DBus types to standard Python types
         self._started_credentials = {
             "ssid": str(config_dict.get("ssid", "AndroidAutoAP")),
@@ -73,7 +73,7 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
         asyncio.get_event_loop().call_soon_threadsafe(self._ready_event.set)
 
     def _on_ap_failed(self, error: str) -> None:
-        log.error(f"APFailed signal received from D-Bus: {error}")
+        log.error(f"❌ [WiFi Stage 2/5] APFailed signal received from D-Bus: {error}")
         self._started_credentials = None
         asyncio.get_event_loop().call_soon_threadsafe(self._ready_event.set)
 
@@ -82,7 +82,7 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
         self._ready_event.clear()
         self._started_credentials = None
 
-        log.info(f"Invoking Start() on APManager D-Bus service...")
+        log.info(f"📶 [WiFi Stage 2/5] Invoking Start() on APManager D-Bus service. Config: {config}")
         dbus_config = dbus.Dictionary(
             {
                 k: dbus.String(str(v)) if not isinstance(v, int) else dbus.Int32(v)

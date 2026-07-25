@@ -144,6 +144,7 @@ class TCPServerModule(BaseBackendModule):
         conn, address = result
         self._client_address = str(address)
         self._logged_first_encrypted = False
+        self._logged_first_tcp_bytes = False
         self.log.info(f"🌐 [TCP Stage 4/5] 🎉 Phone client connected successfully from {address}!")
         self.publish("tcp.session.connected", {"address": address})
 
@@ -160,6 +161,10 @@ class TCPServerModule(BaseBackendModule):
 
     def _on_raw_frame(self, channel_id: int, flags: int, payload: bytes, total_size: int) -> None:
         """Callback from FrameRelay for every raw frame read off socket."""
+        if not getattr(self, "_logged_first_tcp_bytes", False):
+            self._logged_first_tcp_bytes = True
+            self.log.info(f"🌐 [TCP Stage 5/5] First raw bytes received (hex): {payload[:128].hex()}")
+
         frame_type = flags & 0x03
 
         if frame_type != 0x03:
