@@ -68,6 +68,11 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         try:
             import dbus.mainloop.glib
             dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+            from gi.repository import GLib
+            if self._glib_loop is None:
+                self._glib_loop = GLib.MainLoop()
+                threading.Thread(target=self._glib_loop.run, daemon=True, name="glib-main").start()
+                log.info("GLib D-Bus mainloop started successfully in background thread")
         except Exception as e:
             log.warning(f"GLib D-Bus mainloop setup failed: {e}")
 
@@ -156,15 +161,32 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
 
             @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
             def RequestPasskey(self, device):
+                mac = str(device).split("dev_")[-1].replace("_", ":").upper()
+                log.info(f"RequestPasskey from {mac}")
                 return dbus.UInt32(0)
+
+            @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
+            def DisplayPinCode(self, device, pincode):
+                mac = str(device).split("dev_")[-1].replace("_", ":").upper()
+                log.info(f"DisplayPinCode device={mac} pin={pincode}")
+
+            @dbus.service.method("org.bluez.Agent1", in_signature="ou", out_signature="")
+            def DisplayPasskey(self, device, passkey):
+                mac = str(device).split("dev_")[-1].replace("_", ":").upper()
+                log.info(f"DisplayPasskey device={mac} passkey={passkey:06d}")
+
+            @dbus.service.method("org.bluez.Agent1", in_signature="os", out_signature="")
+            def AuthorizeService(self, device, uuid):
+                mac = str(device).split("dev_")[-1].replace("_", ":").upper()
+                log.info(f"AuthorizeService device={mac} uuid={uuid}")
 
             @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
             def Release(self):
-                log.info("Agent Release")
+                log.info("Agent Release signal received")
 
             @dbus.service.method("org.bluez.Agent1", in_signature="", out_signature="")
             def Cancel(self):
-                log.info("Agent Cancel")
+                log.info("Agent Cancel signal received")
 
         try:
             self._agent = Agent(self._bus, "/org/nemo/agent", self)
@@ -347,14 +369,6 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
 
         self._active_rfcomm_cb = on_connection_cb
 
-        # Setup GLib loop in a background thread if not already running
-        try:
-            from gi.repository import GLib
-            self._glib_loop = GLib.MainLoop()
-            threading.Thread(target=self._glib_loop.run, daemon=True, name="glib-main").start()
-        except Exception as e:
-            log.warning(f"Could not initialize GLib event loop: {e}")
-
         class Profile(dbus.service.Object):
             def __init__(self, conn, path, callback):
                 super().__init__(conn, path)
@@ -367,22 +381,28 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             @dbus.service.method("org.bluez.Profile1", in_signature="oha{sv}", out_signature="")
             def NewConnection(self, device, fd, fd_properties):
                 raw_fd = fd.take() if hasattr(fd, "take") else int(fd)
-                sock = socket.fromfd(raw_fd, socket.AF_UNIX, socket.SOCK_STREAM)
+                family = getattr(socket, "AF_BLUETOOTH", socket.AF_UNIX)
+                proto = getattr(socket, "BTPROTO_RFCOMM", 0) if family != socket.AF_UNIX else 0
+                sock = socket.fromfd(raw_fd, family, socket.SOCK_STREAM, proto)
                 os.close(raw_fd)
 
                 device_mac = str(device).split("dev_")[-1].replace("_", ":").upper()
-                log.info(f"RFCOMM Profile Connection accepted from {device_mac}")
+                log.info(f"🔵 [BT Stage 1/5] 🎉 RFCOMM Profile Connection accepted from {device_mac}!")
                 self._cb(sock, device_mac)
 
         try:
             self._profile = Profile(self._bus, PROFILE_PATH, self._active_rfcomm_cb)
             opts = dbus.Dictionary({
-                "AutoConnect": dbus.Boolean(True),
-                "ServiceRecord": dbus.String(SERVICE_RECORD),
+                "Channel": dbus.UInt16(RFCOMM_CHANNEL),
                 "Role": dbus.String("server"),
+                "Name": dbus.String("NemoHeadUnit AA"),
+                "ServiceRecord": dbus.String(SERVICE_RECORD),
+                "RequireAuthentication": dbus.Boolean(False),
+                "RequireAuthorization": dbus.Boolean(False),
+                "AutoConnect": dbus.Boolean(False),
             }, signature="sv")
             self._profile_mgr.RegisterProfile(PROFILE_PATH, AA_UUID, opts)
-            log.info("Android Auto RFCOMM service profile registered successfully with BlueZ")
+            log.info(f"Android Auto RFCOMM service profile registered with BlueZ on channel {RFCOMM_CHANNEL}")
             return True
         except Exception as e:
             log.error(f"Failed to register Android Auto RFCOMM profile: {e}")
