@@ -27,6 +27,13 @@ class SensorChannelHandler:
         elif message_id == _MSG_SENSOR_START_REQUEST:
             status_ok = b"\x08\x00"
             await self.manager.send_wire_frame(channel_id, _MSG_SENSOR_START_RESPONSE, status_ok, encrypted=True)
-            # Default driving status unrestricted event payload
-            event_payload = b"\x0a\x04\x08\x00\x10\x00"
-            await self.manager.send_wire_frame(channel_id, _MSG_SENSOR_EVENT, event_payload, encrypted=True)
+            # Send valid driving status unrestricted event payload (field 13 driving_status)
+            try:
+                from protos.oaa.sensor.SensorEventIndicationMessage_pb2 import SensorEventIndication
+                event = SensorEventIndication()
+                d_status = event.driving_status.add()
+                d_status.status = 0  # UNRESTRICTED
+                event_bytes = event.SerializeToString()
+            except Exception:
+                event_bytes = b"\x6a\x02\x08\x00"  # Valid driving_status field 13 wire bytes
+            await self.manager.send_wire_frame(channel_id, _MSG_SENSOR_EVENT, event_bytes, encrypted=True)

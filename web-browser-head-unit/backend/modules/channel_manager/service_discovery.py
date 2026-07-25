@@ -111,34 +111,34 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
                 ],
             },
         },
-        # ch 5 — SpeechAudio (PCM 48kHz mono)
+        # ch 5 — SpeechAudio (PCM 16kHz mono)
         {
             "channel_id": 5,
             "av_channel": {
                 "codec": "MEDIA_CODEC_AUDIO_PCM",
                 "audio_type":  "SPEECH",
                 "audio_configs": [
-                    {"sample_rate": 48000, "bit_depth": 16, "channel_count": 1},
+                    {"sample_rate": 16000, "bit_depth": 16, "channel_count": 1},
                 ],
             },
         },
-        # ch 6 — SystemAudio (PCM 48kHz mono)
+        # ch 6 — SystemAudio (PCM 16kHz mono)
         {
             "channel_id": 6,
             "av_channel": {
                 "codec": "MEDIA_CODEC_AUDIO_PCM",
                 "audio_type":  "SYSTEM",
                 "audio_configs": [
-                    {"sample_rate": 48000, "bit_depth": 16, "channel_count": 1},
+                    {"sample_rate": 16000, "bit_depth": 16, "channel_count": 1},
                 ],
             },
         },
-        # ch 7 — AVInput (PCM 48kHz mono)
+        # ch 7 — AVInput (PCM 16kHz mono)
         {
             "channel_id": 7,
             "av_input_channel": {
                 "codec": "MEDIA_CODEC_AUDIO_PCM",
-                "audio_config": {"sample_rate": 48000, "bit_depth": 16, "channel_count": 1},
+                "audio_config": {"sample_rate": 16000, "bit_depth": 16, "channel_count": 1},
             },
         },
     ],
