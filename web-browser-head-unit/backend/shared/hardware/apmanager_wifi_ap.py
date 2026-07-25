@@ -21,10 +21,13 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
         self._running = False
         self._started_credentials = None
         self._ready_event = asyncio.Event()
+        self._loop = None
 
     async def setup(self) -> None:
         import dbus
         import dbus.mainloop.glib
+
+        self._loop = asyncio.get_running_loop()
 
         try:
             dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
@@ -70,12 +73,14 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
             "ap_type": int(config_dict.get("ap_type", 1)),
         }
         # Run thread-safe event setting in loop
-        asyncio.get_event_loop().call_soon_threadsafe(self._ready_event.set)
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._ready_event.set)
 
     def _on_ap_failed(self, error: str) -> None:
         log.error(f"❌ [WiFi Stage 2/5] APFailed signal received from D-Bus: {error}")
         self._started_credentials = None
-        asyncio.get_event_loop().call_soon_threadsafe(self._ready_event.set)
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._ready_event.set)
 
     async def start_ap(self, config: dict) -> tuple[bool, dict]:
         import dbus
@@ -95,15 +100,46 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
             success, msg = self._proxy.Start(dbus_config, dbus_interface=_DBUS_INTERFACE, signature="a{sv}")
             if not success:
                 log.error(f"APManager Start method failed: {msg}")
+                if "AlreadyRunning" in str(msg):
+                    return self._fetch_running_status(config)
                 return False, {}
 
             # Wait for the async APStarted D-Bus signal
-            await self._ready_event.wait()
+            try:
+                await asyncio.wait_for(self._ready_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                log.warning("Timeout waiting for APStarted D-Bus signal — checking Status()")
+                return self._fetch_running_status(config)
+
             if self._started_credentials:
                 return True, self._started_credentials
-            return False, {}
+            return self._fetch_running_status(config)
         except Exception as e:
+            if "AlreadyRunning" in str(e):
+                log.info("APManager AP is already running — retrieving active status credentials...")
+                return self._fetch_running_status(config)
             log.error(f"Error calling APManager.Start(): {e}")
+            return False, {}
+
+    def _fetch_running_status(self, config: dict) -> tuple[bool, dict]:
+        try:
+            state, ssid, bssid, gateway_ip, key, dhcp_clients = self._proxy.Status(
+                dbus_interface=_DBUS_INTERFACE, signature=""
+            )
+            creds = {
+                "ssid": str(ssid),
+                "key": str(key),
+                "bssid": str(bssid),
+                "interface": str(config.get("interface", "wlan0")),
+                "gateway_ip": str(gateway_ip),
+                "security_mode": 8,
+                "ap_type": 1,
+            }
+            self._started_credentials = creds
+            log.info(f"📶 [WiFi Stage 2/5] AP is active. Credentials: {creds}")
+            return True, creds
+        except Exception as err:
+            log.error(f"Failed to query APManager.Status(): {err}")
             return False, {}
 
     async def stop_ap(self) -> bool:
