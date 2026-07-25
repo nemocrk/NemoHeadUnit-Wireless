@@ -55,8 +55,24 @@ export class BluetoothWidget {
         `;
 
         this.bindEvents();
-        this.refreshStatus();
-        this.refreshPairedDevices();
+        this.refreshAll();
+        this.startPolling(3000);
+    }
+
+    startPolling(intervalMs = 3000) {
+        this.stopPolling();
+        this.pollTimer = setInterval(() => {
+            if (!this.isScanning) {
+                this.refreshAll();
+            }
+        }, intervalMs);
+    }
+
+    stopPolling() {
+        if (this.pollTimer) {
+            clearInterval(this.pollTimer);
+            this.pollTimer = null;
+        }
     }
 
     bindEvents() {
@@ -79,9 +95,10 @@ export class BluetoothWidget {
     async refreshStatus() {
         try {
             const res = await fetch('/api/connectivity/status');
-            if (!res.ok) return;
+            const contentType = res.headers.get('content-type') || '';
+            if (!res.ok || !contentType.includes('application/json')) return;
             const data = await res.json();
-            
+
             const dot = this.container.querySelector('.bt-dot');
             const statusText = this.container.querySelector('#bt-status-text');
             const scanBtn = this.container.querySelector('#bt-scan-btn');
@@ -102,17 +119,61 @@ export class BluetoothWidget {
                 if (scanBtn) scanBtn.classList.remove('scanning');
                 if (scanLabel) scanLabel.textContent = 'Scan Devices';
             }
+
+            // Auto-trigger PIN modal if incoming/outgoing pairing request has a PIN
+            if (data.pairing_pin && (!this.pairingPendingDevice || this.pairingPendingDevice.address !== data.pairing_device)) {
+                this.showPairingModal(data.pairing_device, data.pairing_pin);
+            }
         } catch (err) {
             console.warn('Failed to fetch Bluetooth status:', err);
+        }
+    }
+
+    showPairingModal(address, pin, name) {
+        this.pairingPendingDevice = { address, name: name || address };
+        const modal = this.container.querySelector('#bt-pairing-modal');
+        const nameEl = this.container.querySelector('#bt-modal-device-name');
+        const pinEl = this.container.querySelector('#bt-modal-pin');
+
+        if (nameEl) nameEl.textContent = name || address;
+        if (pinEl) pinEl.textContent = pin || '------';
+        if (modal) modal.classList.remove('hidden');
+    }
+
+    async pairDevice(address, name) {
+        try {
+            this.showPairingModal(address, 'Initiating...', name);
+
+            const res = await fetch('/api/connectivity/pair', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ device_address: address })
+            });
+
+            const data = await res.json();
+            if (res.ok) {
+                if (data.pin) {
+                    const pinEl = this.container.querySelector('#bt-modal-pin');
+                    if (pinEl) pinEl.textContent = data.pin;
+                }
+            } else {
+                alert(`Pairing failed: ${data.message || 'Error'}`);
+                const modal = this.container.querySelector('#bt-pairing-modal');
+                if (modal) modal.classList.add('hidden');
+                this.pairingPendingDevice = null;
+            }
+        } catch (err) {
+            console.error('Pairing call error:', err);
         }
     }
 
     async refreshPairedDevices() {
         try {
             const res = await fetch('/api/connectivity/paired');
-            if (!res.ok) return;
+            const contentType = res.headers.get('content-type') || '';
+            if (!res.ok || !contentType.includes('application/json')) return;
             const data = await res.json();
-            
+
             const container = this.container.querySelector('#bt-paired-list');
             if (!container) return;
 
@@ -135,10 +196,10 @@ export class BluetoothWidget {
                             </div>
                         </div>
                         <div class="bt-device-actions">
-                            ${isConnected 
-                                ? `<button class="bt-action-btn disconnect" data-addr="${dev.address}">Disconnect</button>`
-                                : `<button class="bt-action-btn connect" data-addr="${dev.address}">Connect</button>`
-                            }
+                            ${isConnected
+                        ? `<button class="bt-action-btn disconnect" data-addr="${dev.address}">Disconnect</button>`
+                        : `<button class="bt-action-btn connect" data-addr="${dev.address}">Connect</button>`
+                    }
                             <button class="bt-action-btn remove" data-addr="${dev.address}" title="Forget Device">🗑️</button>
                         </div>
                     </div>
@@ -166,6 +227,63 @@ export class BluetoothWidget {
         });
     }
 
+    renderDiscoveredDevices(devices = []) {
+        const container = this.container.querySelector('#bt-discovered-list');
+        if (!container) return;
+
+        if (devices.length === 0) {
+            container.innerHTML = `<div class="bt-empty-state">No devices found. Tap 'Scan Devices' to retry.</div>`;
+            return;
+        }
+
+        let html = '';
+        devices.forEach((dev) => {
+            html += `
+                <div class="bt-device-card">
+                    <div class="bt-device-info">
+                        <span class="bt-device-icon">📲</span>
+                        <div>
+                            <div class="bt-device-name">${this.escapeHtml(dev.name || dev.address)}</div>
+                            <div class="bt-device-mac">${dev.address}</div>
+                        </div>
+                    </div>
+                    <div class="bt-device-actions">
+                        <button class="bt-action-btn connect" data-addr="${dev.address}" data-name="${this.escapeHtml(dev.name || '')}">Pair</button>
+                    </div>
+                </div>
+            `;
+        });
+
+        container.innerHTML = html;
+        container.querySelectorAll('.bt-action-btn.connect').forEach((btn) => {
+            btn.addEventListener('click', (e) => this.pairDevice(e.target.dataset.addr, e.target.dataset.name));
+        });
+    }
+
+    async refreshDiscoveredDevices() {
+        try {
+            const res = await fetch('/api/connectivity/discovered');
+            const contentType = res.headers.get('content-type') || '';
+            if (!res.ok || !contentType.includes('application/json')) return;
+            const data = await res.json();
+            this.renderDiscoveredDevices(data.devices || []);
+        } catch (err) {
+            console.warn('Failed to fetch discovered devices:', err);
+        }
+    }
+
+    async refreshAll() {
+        try {
+            await Promise.all([
+                this.refreshStatus(),
+                this.refreshPairedDevices(),
+                this.refreshDiscoveredDevices(),
+            ]);
+        } catch (err) {
+            console.warn('Error refreshing Bluetooth widget:', err);
+        }
+    }
+
     async toggleScan() {
         if (this.isScanning) {
             this.isScanning = false;
@@ -189,56 +307,21 @@ export class BluetoothWidget {
             });
 
             if (res.ok) {
-                // Poll for discovered devices during scan duration
-                let elapsed = 0;
-                const pollInterval = setInterval(async () => {
-                    elapsed += 2;
-                    await this.refreshPairedDevices();
-                    if (elapsed >= 12 || !this.isScanning) {
-                        clearInterval(pollInterval);
-                        this.isScanning = false;
-                        this.refreshStatus();
-                    }
-                }, 2000);
+                const data = await res.json();
+                this.renderDiscoveredDevices(data.devices || []);
             }
         } catch (err) {
             console.error('Scan request error:', err);
+        } finally {
             this.isScanning = false;
-            this.refreshStatus();
-        }
-    }
-
-    async pairDevice(address, name) {
-        try {
-            this.pairingPendingDevice = { address, name };
-            const modal = this.container.querySelector('#bt-pairing-modal');
-            const nameEl = this.container.querySelector('#bt-modal-device-name');
-            const pinEl = this.container.querySelector('#bt-modal-pin');
-
-            if (nameEl) nameEl.textContent = name || address;
-            if (pinEl) pinEl.textContent = 'Initiating...';
-            if (modal) modal.classList.remove('hidden');
-
-            const res = await fetch('/api/connectivity/pair', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ device_address: address })
-            });
-
-            const data = await res.json();
-            if (!res.ok) {
-                alert(`Pairing failed: ${data.message || 'Error'}`);
-                if (modal) modal.classList.add('hidden');
-            }
-        } catch (err) {
-            console.error('Pairing call error:', err);
+            await this.refreshAll();
         }
     }
 
     async confirmPairing(accept) {
         if (!this.pairingPendingDevice) return;
         const endpoint = accept ? '/api/connectivity/pair/confirm' : '/api/connectivity/pair/reject';
-        
+
         try {
             await fetch(endpoint, {
                 method: 'POST',
@@ -251,7 +334,7 @@ export class BluetoothWidget {
             const modal = this.container.querySelector('#bt-pairing-modal');
             if (modal) modal.classList.add('hidden');
             this.pairingPendingDevice = null;
-            this.refreshPairedDevices();
+            await this.refreshAll();
         }
     }
 
@@ -264,10 +347,10 @@ export class BluetoothWidget {
             });
             const data = await res.json();
             if (!res.ok) alert(`Connection error: ${data.message}`);
-            this.refreshPairedDevices();
-            this.refreshStatus();
         } catch (err) {
             console.error('Connect call failed:', err);
+        } finally {
+            await this.refreshAll();
         }
     }
 
@@ -278,24 +361,25 @@ export class BluetoothWidget {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ device_address: address })
             });
-            this.refreshPairedDevices();
-            this.refreshStatus();
         } catch (err) {
             console.error('Disconnect call failed:', err);
+        } finally {
+            await this.refreshAll();
         }
     }
 
     async removeDevice(address) {
         if (!confirm(`Forget Bluetooth device ${address}?`)) return;
         try {
-            await fetch('/api/connectivity/remove', {
+            await fetch('/api/connectivity/paired/remove', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ device_address: address })
             });
-            this.refreshPairedDevices();
         } catch (err) {
             console.error('Remove paired device call failed:', err);
+        } finally {
+            await this.refreshAll();
         }
     }
 

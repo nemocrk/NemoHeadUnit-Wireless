@@ -153,7 +153,7 @@ class ProxyModule(BaseBackendModule):
                 if request.query_string:
                     target_url += f"?{request.query_string}"
 
-                self.log.info(f"Proxying [{request.method}] {path} → {target_url}")
+                self.log.debug(f"Proxying [{request.method}] {path} → {target_url}")
                 return await self._proxy_http(request, target_url)
 
         # Fallback: Serve static assets from frontend/
@@ -233,7 +233,14 @@ class ProxyModule(BaseBackendModule):
         return ws_server
 
     async def _serve_static(self, request: web.Request) -> web.StreamResponse:
-        rel_path = request.path.lstrip("/")
+        path = request.path
+        if path.startswith("/api/"):
+            return web.json_response(
+                {"status": "error", "message": f"API route '{path}' not found or module offline"},
+                status=502
+            )
+
+        rel_path = path.lstrip("/")
         if not rel_path:
             rel_path = "index.html"
 

@@ -259,8 +259,8 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
         self._thread: Optional[threading.Thread] = None
         self._mock_paired: list[dict] = []
         self._active_device_handles: dict[str, Any] = {}
+        self._active_outbound_sockets: dict[str, Any] = {}
         self._disconnected_override_addrs: set[str] = set()
-
 
     async def setup(self, adapter_name: str, discoverable: bool, discoverable_timeout: int) -> None:
         self._adapter_name = adapter_name
@@ -442,22 +442,69 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
 
         if bt_mod is not None:
             try:
+                import uuid
+                import winrt.windows.networking.sockets as sockets
+
                 bt_addr = self._parse_bt_address(address)
                 bt_device = await bt_mod.BluetoothDevice.from_bluetooth_address_async(bt_addr)
                 if bt_device is None:
                     return False, f"Device {address} not found"
 
-                # Save active WinRT device object reference
                 self._active_device_handles[address] = bt_device
 
-                # Accessing RFCOMM services triggers SDP inquiry + profile connect
-                from winrt.windows.devices.bluetooth.rfcomm import RfcommDeviceServicesResult
-                services_result = await bt_device.get_rfcomm_services_async()
-                if services_result is not None and services_result.services is not None:
-                    count = len(list(services_result.services))
-                    log.info(f"WinRT connect: found {count} RFCOMM service(s) on {address}")
+                # Connect to phone's Bluetooth profiles to wake up phone's Android Auto service
+                # Android Auto service wakes up upon ANY RFCOMM connection from a device with AA_UUID in SDP.
+                # Windows often holds HFP (Hands-Free) exclusively, so we fallback to PBAP, MAP, OPP, etc.
+                TARGET_UUIDS = [
+                    AA_UUID.lower().replace("-", ""),
+                    "0000111f00001000800000805f9b34fb", # HFP
+                    "0000111200001000800000805f9b34fb", # HFP AG
+                    "0000112f00001000800000805f9b34fb", # PBAP
+                    "0000113200001000800000805f9b34fb", # MAP
+                    "0000110500001000800000805f9b34fb", # OPP
+                ]
 
-                # Mark as connected in our local paired list
+                services_result = await bt_device.get_rfcomm_services_async()
+                
+                connected_successfully = False
+                if services_result is not None and services_result.services is not None:
+                    services_list = list(services_result.services)
+                    log.info(f"WinRT connect: found {len(services_list)} RFCOMM service(s) on {address}")
+                    
+                    import winrt.windows.networking as networking
+                    import winrt.windows.networking.sockets as sockets
+
+                    # Try connecting to services in order of preference
+                    for preferred_uuid in TARGET_UUIDS:
+                        if connected_successfully:
+                            break
+                            
+                        for svc in services_list:
+                            svc_uuid = str(svc.service_id.uuid).lower().replace("-", "").replace("{", "").replace("}", "")
+                            if svc_uuid == preferred_uuid:
+                                log.info(f"Attempting WinRT StreamSocket connect to service ({svc_uuid}) on {address}...")
+                                stream_sock = sockets.StreamSocket()
+                                try:
+                                    await stream_sock.connect_async(
+                                        svc.connection_host_name,
+                                        svc.connection_service_name
+                                    )
+                                    log.info(f"Successfully established WinRT StreamSocket RFCOMM connection to {address} ({svc_uuid})")
+                                    self._active_outbound_sockets[address] = stream_sock
+                                    connected_successfully = True
+                                    break
+                                except Exception as e:
+                                    log.warning(f"WinRT StreamSocket connection to {address} ({svc_uuid}) failed: {e}")
+
+                if connected_successfully:
+                    # Mark device as connected in our local state
+                    for dev in self._mock_paired:
+                        if dev["address"] == address:
+                            dev["connected"] = True
+                            break
+                    return True, ""
+
+                # 2. Fallback: Mark connected in local paired list
                 for dev in self._mock_paired:
                     if dev["address"] == address:
                         dev["connected"] = True
@@ -477,15 +524,22 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
     async def disconnect_device(self, address: str) -> bool:
         log.info(f"Disconnecting {address} on Windows")
         self._disconnected_override_addrs.add(address)
-
-        # 1. Close and release existing active WinRT handle if present
-        bt_handle = self._active_device_handles.pop(address, None)
-        if bt_handle is not None:
+        
+        # Close outbound socket if we hold it
+        if address in self._active_outbound_sockets:
             try:
-                bt_handle.close()
-                log.info(f"WinRT held device handle for {address} closed (disconnect)")
-            except Exception as e:
-                log.debug(f"Error closing held WinRT device handle: {e}")
+                self._active_outbound_sockets[address].close()
+            except Exception:
+                pass
+            del self._active_outbound_sockets[address]
+
+        # In WinRT, disposing the BluetoothDevice object drops the connection
+        if address in self._active_device_handles:
+            try:
+                self._active_device_handles[address].close()
+            except Exception:
+                pass
+            del self._active_device_handles[address]
 
         # 2. Query fresh WinRT instance and call close()
         bt_mod, _ = _try_import_winrt()
@@ -633,18 +687,19 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
         try:
             AF_BTH = 32  # Ws2bth.h AF_BTH
             BTHPROTO_RFCOMM = 3
+            NS_BTH = 16  # Winsock Bluetooth Namespace ID (16)
+            RNRSERVICE_REGISTER = 2  # Winsock RNRSERVICE_REGISTER = 2 (0x00000002)
             SOCK_STREAM = socket.SOCK_STREAM
 
             ws2_32 = ctypes.windll.Ws2_32
             rnr_guid = GUID(AA_UUID)
 
             # Build SOCKADDR_BTH for the local listen address.
-            # serviceClassId must match lpServiceClassId in WSAQUERYSETW so the
-            # NS_BTH provider can locate and store the record.
+            # For WSASetServiceW registration in NS_BTH, serviceClassId inside SOCKADDR_BTH
+            # is zeroed while lpServiceClassId in WSAQUERYSETW identifies the service GUID.
             local_addr = SOCKADDR_BTH()
             local_addr.addressFamily = AF_BTH
             local_addr.btAddr = 0          # BDADDR_ANY — accept on any local adapter
-            local_addr.serviceClassId = GUID(AA_UUID)  # must match lpServiceClassId
             local_addr.port = RFCOMM_CHANNEL
 
             # Build CSADDR_INFO with LocalAddr pointing to the SOCKADDR_BTH
@@ -663,14 +718,13 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
             qs.dwSize = ctypes.sizeof(WSAQUERYSETW)
             qs.lpszServiceInstanceName = self._adapter_name + " AA"
             qs.lpServiceClassId = ctypes.pointer(rnr_guid)
-            qs.dwNameSpace = 10  # NS_BTH
+            qs.dwNameSpace = NS_BTH  # NS_BTH = 16
             qs.dwNumberOfCsAddrs = 1
             qs.lpcsaBuffer = ctypes.pointer(csa)
 
-            # RNRSERVICE_REGISTER = 0
-            ret = ws2_32.WSASetServiceW(ctypes.byref(qs), 0, 0)
+            # RNRSERVICE_REGISTER = 2
+            ret = ws2_32.WSASetServiceW(ctypes.byref(qs), RNRSERVICE_REGISTER, 0)
             if ret != 0:
-                # Fallback: try calling WSASetServiceW with RNRSERVICE_REGISTER (0) and null service class or try WinRT SDP publisher
                 err = ws2_32.WSAGetLastError()
                 log.warning(f"WSASetServiceW returned error code: {err} — trying WinRT RfcommServiceProvider fallback")
                 self._try_winrt_sdp_publish()
@@ -684,24 +738,105 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
         """Fallback to WinRT RfcommServiceProvider to advertise AA_UUID in SDP database."""
         try:
             import uuid
+            import winrt.windows.networking.sockets as sockets
             from winrt.windows.devices.bluetooth.rfcomm import RfcommServiceProvider, RfcommServiceId
             
-            # winrt-Windows.Devices.Bluetooth.Rfcomm accepts standard Python uuid.UUID or Guid
-            u = uuid.UUID(AA_UUID)
-            try:
-                service_id = RfcommServiceId.from_uuid(u)
-            except TypeError:
-                # If Guid object required from winrt.system:
-                import winrt.system as _wsys
-                service_id = RfcommServiceId.from_uuid(_wsys.Guid(str(u)))
-            
+            u = uuid.UUID(f"{{{AA_UUID.strip('{}')}}}")
+            service_id = RfcommServiceId.from_uuid(u)
+
             async def _publish():
                 try:
-                    provider = await RfcommServiceProvider.create_async(service_id)
-                    provider.start_advertising()
-                    log.info("Android Auto UUID successfully advertised via WinRT RfcommServiceProvider")
+                    provider_op = RfcommServiceProvider.create_async(service_id)
+                    provider = await provider_op
+                    if provider is not None:
+                        listener = sockets.StreamSocketListener()
+                        # Set socket options for shared Bluetooth adapter binding
+                        try:
+                            listener.control.quality_of_service = sockets.SocketQualityOfService.NORMAL
+                        except Exception:
+                            pass
+
+                        def on_connection(sender, args):
+                            try:
+                                remote_host = args.socket.information.remote_host_name.raw_name
+                            except Exception:
+                                remote_host = "Unknown"
+                            log.info(f"🔵 [BT Stage 1/5] Incoming Bluetooth RFCOMM connection received from phone ({remote_host})")
+
+                            # Bridge WinRT StreamSocket to native Python socket interface
+                            class WinRTSocketAdapter:
+                                def __init__(self, stream_sock):
+                                    import winrt.windows.storage.streams as streams
+                                    import asyncio
+                                    self.sock = stream_sock
+                                    self.reader = streams.DataReader(stream_sock.input_stream)
+                                    self.reader.input_stream_options = streams.InputStreamOptions.PARTIAL
+                                    self.writer = streams.DataWriter(stream_sock.output_stream)
+                                    self.loop = asyncio.new_event_loop()
+
+                                def setblocking(self, flag): pass
+                                def settimeout(self, timeout): pass
+
+                                def recv(self, bufsize: int) -> bytes:
+                                    async def _recv():
+                                        try:
+                                            await self.reader.load_async(bufsize)
+                                            length = self.reader.unconsumed_buffer_length
+                                            if length == 0:
+                                                return b""
+                                            import winrt.windows.security.cryptography as crypto
+                                            ibuffer = self.reader.read_buffer(length)
+                                            return bytes(crypto.CryptographicBuffer.copy_to_byte_array(ibuffer))
+                                        except Exception:
+                                            return b""
+                                    return self.loop.run_until_complete(_recv())
+
+                                def sendall(self, data: bytes) -> None:
+                                    async def _send():
+                                        self.writer.write_bytes(bytearray(data))
+                                        await self.writer.store_async()
+                                    self.loop.run_until_complete(_send())
+
+                                def close(self):
+                                    try:
+                                        self.sock.close()
+                                        self.loop.close()
+                                    except Exception:
+                                        pass
+
+                            cb = getattr(self, "_on_connection_cb", None) or getattr(self, "_server_sock_cb", None)
+                            if cb is not None:
+                                adapted_sock = WinRTSocketAdapter(args.socket)
+                                cb(adapted_sock, remote_host)
+                            else:
+                                args.socket.close()
+
+                        listener.add_connection_received(on_connection)
+                        await listener.bind_service_name_async(provider.service_id.as_string())
+                        
+                        # Add Service Name "AndroidAuto" to SDP records (Attribute 0x0100)
+                        # SDP Text String (Type 4, size index 5) -> (4 << 3) | 5 = 37 (0x25)
+                        # Length 11 (0x0b), followed by ASCII "AndroidAuto"
+                        try:
+                            import winrt.windows.security.cryptography as crypto
+                            sdp_name_bytes = b'\x25\x0bAndroidAuto'
+                            buf = crypto.CryptographicBuffer.create_from_byte_array(bytearray(sdp_name_bytes))
+                            provider.sdp_raw_attributes[0x0100] = buf
+                        except Exception as e:
+                            log.warning(f"Failed to add Service Name to WinRT SDP: {e}")
+
+                        # Start advertising with radio_discoverable=True
+                        try:
+                            provider.start_advertising(listener, True)
+                        except Exception:
+                            # Fallback if overload fails
+                            provider.start_advertising(listener)
+
+                        self._winrt_provider = provider
+                        self._winrt_listener = listener
+                        log.info("Android Auto UUID successfully advertised via WinRT RfcommServiceProvider")
                 except Exception as e:
-                    log.warning(f"WinRT RfcommServiceProvider advertising failed: {e}")
+                    log.warning(f"WinRT RfcommServiceProvider advertising failed: [{type(e).__name__}] {e}")
                 
             loop = getattr(self, "_loop", None)
             if loop and loop.is_running():
@@ -709,7 +844,7 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
             else:
                 asyncio.run(_publish())
         except Exception as e:
-            log.warning(f"WinRT SDP publisher fallback failed: {e}")
+            log.warning(f"WinRT SDP publisher fallback failed: [{type(e).__name__}] {e}")
 
     def _accept_loop(self) -> None:
         log.info("Windows RFCOMM connection accept loop started")

@@ -182,13 +182,8 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         if self._discovery_running:
             return
         self._discovery_running = True
-        self._discovery_thread = threading.Thread(
-            target=self._run_discovery,
-            args=(duration_sec, on_device_found_cb),
-            daemon=True,
-            name="bluez-discovery",
-        )
-        self._discovery_thread.start()
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._run_discovery, duration_sec, on_device_found_cb)
 
     def _run_discovery(self, duration_sec: int, on_device_found_cb: Callable[[dict], None]) -> None:
         try:

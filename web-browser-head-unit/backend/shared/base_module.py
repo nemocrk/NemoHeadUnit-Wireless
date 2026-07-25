@@ -242,6 +242,7 @@ class BaseBackendModule(ABC):
         self.log.info(f"Starting module '{self.name}' (Priority {self.priority})...")
         self.bus.start(blocking=False)
 
+        self.loop = asyncio.get_running_loop()
         # 1. Subscribe to system lifecycle and heartbeat topics immediately on bus start
         self.subscribe("system.heartbeat", self._handle_heartbeat)
 

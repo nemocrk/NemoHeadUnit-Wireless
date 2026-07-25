@@ -3,6 +3,7 @@ import asyncio
 import os
 import sys
 import threading
+import time
 from typing import Any, Optional
 
 from aiohttp import web
@@ -30,9 +31,12 @@ class ConnectivityManagerModule(BaseBackendModule):
         # State cache
         self._discoverable = True
         self._discovering = False
+        self._discovered_devices = []
         self._rfcomm_listening = False
         self._rfcomm_connected = False
         self._active_device = None
+        self._pairing_pin = None
+        self._pairing_device = None
 
         self._handshake_thread = None
         self._wifi_credentials = None
@@ -81,10 +85,12 @@ class ConnectivityManagerModule(BaseBackendModule):
         # Register REST Routes
         self.add_http_route("GET", "/status", self.handle_get_status)
         self.add_http_route("GET", "/paired", self.handle_get_paired)
+        self.add_http_route("GET", "/discovered", self.handle_get_discovered)
         self.add_http_route("POST", "/discover", self.handle_post_discover)
         self.add_http_route("POST", "/pair", self.handle_post_pair)
         self.add_http_route("POST", "/pair/confirm", self.handle_post_pair_confirm)
         self.add_http_route("POST", "/pair/reject", self.handle_post_pair_reject)
+        self.add_http_route("POST", "/remove", self.handle_post_remove)
         self.add_http_route("POST", "/paired/remove", self.handle_post_remove)
         self.add_http_route("POST", "/connect", self.handle_post_connect)
         self.add_http_route("POST", "/disconnect", self.handle_post_disconnect)
@@ -197,14 +203,14 @@ class ConnectivityManagerModule(BaseBackendModule):
 
     def _on_rfcomm_connection(self, sock: object, device_address: str) -> None:
         """Callback triggered when phone connects over RFCOMM."""
-        self.log.info(f"RFCOMM connection accepted from {device_address} — starting WiFi AP...")
+        self.log.info(f"🔵 [BT Stage 1/5] ConnectivityManager accepted RFCOMM from {device_address} — starting WiFi AP & Handshake thread...")
         self._rfcomm_connected = True
         self._active_device = device_address
 
         self.publish("rfcomm.handshake.started", {"device_address": device_address})
 
-        # Start Wifi Access Point asynchronously, then start Handshake
-        asyncio.run_coroutine_threadsafe(self._start_ap_and_handshake(sock, device_address), self.loop)
+        loop = getattr(self, "loop", None) or getattr(self, "_loop", None) or asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(self._start_ap_and_handshake(sock, device_address), loop)
 
     async def _start_ap_and_handshake(self, sock: object, device_address: str) -> None:
         ap_config = {
@@ -216,15 +222,16 @@ class ConnectivityManagerModule(BaseBackendModule):
             "country_code": self.config.get("wifi_country_code", "IT"),
         }
 
+        self.log.info(f"📶 [WiFi Stage 2/5] Initiating WiFi AP launch (SSID='{ap_config['ssid']}', Channel={ap_config['channel']}, Interface='{ap_config['interface']}')...")
         success, creds = await self._wifi_adapter.start_ap(ap_config)
         if not success:
-            self.log.error("Failed to start WiFi AP — aborting RFCOMM handshake")
+            self.log.error("❌ [WiFi Stage 2/5] Failed to start WiFi AP — aborting RFCOMM handshake")
             self.publish("rfcomm.handshake.failed", {"device_address": device_address, "error": "WiFi AP start failed"})
             self._rfcomm_connected = False
             return
 
         self._wifi_credentials = creds
-        self.log.info(f"WiFi AP active: {creds} — starting RFCOMM 5-stage handshake state machine...")
+        self.log.info(f"📶 [WiFi Stage 2/5] WiFi AP active! Credentials: SSID='{creds['ssid']}', BSSID='{creds['bssid']}', Gateway={creds['gateway_ip']}")
 
         # Handshake credentials dict
         handshake_creds = {
@@ -245,17 +252,19 @@ class ConnectivityManagerModule(BaseBackendModule):
         self._handshake_thread.start()
 
     def _run_handshake_thread(self, sock: Any, device_address: str, creds: dict) -> None:
+        res_success = False
         try:
             hs = RfcommHandshake(sock, creds)
             res = hs.run()
+            res_success = bool(res.success)
             if res.success:
-                self.log.info(f"RFCOMM Handshake completed successfully! Phone IP: {res.phone_ip}")
+                self.log.info(f"🤝 [Handshake Stage 3/5] 🎉 RFCOMM Handshake completed successfully! Phone IP: {res.phone_ip}")
                 self.publish("rfcomm.handshake.completed", {
                     "device_address": device_address,
                     "phone_ip": res.phone_ip
                 })
             else:
-                self.log.error(f"RFCOMM Handshake failed: {res.error}")
+                self.log.error(f"❌ [Handshake Stage 3/5] RFCOMM Handshake failed: {res.error}")
                 self.publish("rfcomm.handshake.failed", {
                     "device_address": device_address,
                     "error": res.error
@@ -267,6 +276,8 @@ class ConnectivityManagerModule(BaseBackendModule):
                 "error": str(e)
             })
         finally:
+            if res_success:
+                time.sleep(10.0)  # Grace period for phone to establish TCP connection on 5288 before tearing down RFCOMM
             try:
                 sock.close()
             except Exception:
@@ -288,6 +299,8 @@ class ConnectivityManagerModule(BaseBackendModule):
             "active_device": self._active_device,
             "wifi_ap_active": self._wifi_credentials is not None,
             "wifi_ap_credentials": self._wifi_credentials,
+            "pairing_pin": self._pairing_pin,
+            "pairing_device": self._pairing_device,
         })
 
     async def handle_get_paired(self, request: web.Request) -> web.Response:
@@ -302,48 +315,71 @@ class ConnectivityManagerModule(BaseBackendModule):
         duration = int(body.get("duration_sec", self.config.get("discovery_duration_sec", 10)))
 
         self._discovering = True
+        self._discovered_devices = []
         
         def on_dev(device):
+            if not any(d.get("address") == device.get("address") for d in self._discovered_devices):
+                self._discovered_devices.append(device)
             self.publish("bluetooth_manager.device.found", device)
 
         await self._bt_adapter.start_discovery(duration, on_dev)
         
-        async def auto_stop():
-            await asyncio.sleep(duration)
-            self._discovering = False
-            self.publish("bluetooth_manager.discovery.completed", {})
+        self._discovering = False
+        self.publish("bluetooth_manager.discovery.completed", {})
 
-        asyncio.create_task(auto_stop())
+        return web.json_response({
+            "status": "ok",
+            "message": f"Discovery scan completed ({len(self._discovered_devices)} devices found)",
+            "devices": self._discovered_devices
+        })
 
-        return web.json_response({"status": "ok", "message": f"Discovery scan started for {duration} seconds"})
+    async def handle_get_discovered(self, request: web.Request) -> web.Response:
+        return web.json_response({"devices": self._discovered_devices})
 
     async def handle_post_pair(self, request: web.Request) -> web.Response:
         body = await request.json()
         addr = body["device_address"]
+        self._pairing_device = addr
+        self._pairing_pin = None
         
         def on_pin(address, pin):
-            self.publish("bluetooth_manager.pairing.pin", {"device_address": address, "pin": pin})
+            self._pairing_pin = str(pin)
+            self._pairing_device = address
+            self.publish("bluetooth_manager.pairing.pin", {"device_address": address, "pin": str(pin)})
 
         success, err = await self._bt_adapter.pair_device(addr, on_pin)
         if success:
-            return web.json_response({"status": "ok", "message": "Pairing sequence initiated"})
+            return web.json_response({
+                "status": "ok",
+                "message": "Pairing sequence initiated",
+                "pin": self._pairing_pin,
+                "device_address": addr
+            })
+        self._pairing_pin = None
+        self._pairing_device = None
         return web.json_response({"status": "error", "message": err}, status=400)
 
     async def handle_post_pair_confirm(self, request: web.Request) -> web.Response:
         body = await request.json()
         addr = body["device_address"]
         res = await self._bt_adapter.confirm_pairing(addr, True)
+        self._pairing_pin = None
+        self._pairing_device = None
         return web.json_response({"status": "ok" if res else "error"})
 
     async def handle_post_pair_reject(self, request: web.Request) -> web.Response:
         body = await request.json()
         addr = body["device_address"]
         res = await self._bt_adapter.confirm_pairing(addr, False)
+        self._pairing_pin = None
+        self._pairing_device = None
         return web.json_response({"status": "ok" if res else "error"})
 
     async def handle_post_remove(self, request: web.Request) -> web.Response:
         body = await request.json()
-        addr = body["device_address"]
+        addr = body.get("address") or body.get("device_address")
+        if not addr:
+            return web.json_response({"status": "error", "message": "Missing 'address' parameter"}, status=400)
         res = await self._bt_adapter.remove_paired_device(addr)
         if res:
             self.publish("bluetooth_manager.paired.removed", {"device_address": addr})
@@ -352,7 +388,9 @@ class ConnectivityManagerModule(BaseBackendModule):
 
     async def handle_post_connect(self, request: web.Request) -> web.Response:
         body = await request.json()
-        addr = body["device_address"]
+        addr = body.get("address") or body.get("device_address")
+        if not addr:
+            return web.json_response({"status": "error", "message": "Missing 'address' parameter"}, status=400)
         success, err = await self._bt_adapter.connect_device(addr)
         if success:
             self.publish("bluetooth_manager.paired.connected", {"device_address": addr})
@@ -361,7 +399,9 @@ class ConnectivityManagerModule(BaseBackendModule):
 
     async def handle_post_disconnect(self, request: web.Request) -> web.Response:
         body = await request.json()
-        addr = body["device_address"]
+        addr = body.get("address") or body.get("device_address")
+        if not addr:
+            return web.json_response({"status": "error", "message": "Missing 'address' parameter"}, status=400)
         res = await self._bt_adapter.disconnect_device(addr)
         if res:
             self.publish("bluetooth_manager.paired.disconnected", {"device_address": addr})

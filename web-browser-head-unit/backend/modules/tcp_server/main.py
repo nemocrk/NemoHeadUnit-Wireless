@@ -132,7 +132,7 @@ class TCPServerModule(BaseBackendModule):
         with self._server_lock:
             self._server_starting = False
 
-        self.log.info(f"TCPServer listening on {server.host}:{server.port}")
+        self.log.info(f"🌐 [TCP Stage 4/5] TCPServer listening on {server.host}:{server.port} — awaiting phone connection...")
         self.publish("tcp.server.started", {"host": server.host, "port": server.port})
 
         result = server.accept()
@@ -143,7 +143,8 @@ class TCPServerModule(BaseBackendModule):
 
         conn, address = result
         self._client_address = str(address)
-        self.log.info(f"Phone client connected: {address}")
+        self._logged_first_encrypted = False
+        self.log.info(f"🌐 [TCP Stage 4/5] 🎉 Phone client connected successfully from {address}!")
         self.publish("tcp.session.connected", {"address": address})
 
         with self._crypto_lock:
@@ -161,8 +162,7 @@ class TCPServerModule(BaseBackendModule):
         """Callback from FrameRelay for every raw frame read off socket."""
         frame_type = flags & 0x03
 
-        # Acquire multi-frame lock for intermediate chunks to lock on_frame_send during multi-packet reception
-        if frame_type != 0x03:  # Not single bulk frame
+        if frame_type != 0x03:
             self._multi_frame_lock.acquire(timeout=2.0)
 
         try:
@@ -178,6 +178,10 @@ class TCPServerModule(BaseBackendModule):
                     with self._crypto_lock:
                         if self._cryptor is not None and self._cryptor.is_active():
                             assembled = self._cryptor.decrypt(assembled)
+                            if not getattr(self, "_logged_first_encrypted", False):
+                                self._logged_first_encrypted = True
+                                msg_id_preview = struct.unpack_from(">H", assembled, 0)[0] if len(assembled) >= 2 else 0
+                                self.log.info(f"🔑 [TLS Stage 5/5] 🔓 FIRST ENCRYPTED MESSAGE RECEIVED & DECRYPTED! (ch={channel_id}, msg=0x{msg_id_preview:04x}, len={len(assembled)} bytes)")
                 except Exception as exc:
                     self.log.error(f"_on_raw_frame: Decrypt failed ch={channel_id} — {exc}")
                     return
@@ -190,7 +194,6 @@ class TCPServerModule(BaseBackendModule):
             body = assembled[2:]
             self._frames_received_count += 1
 
-            # Write media channel frames (Video ch 2, Audio ch 3/4) to SHM zero-copy
             if channel_id in (2, 3, 4):
                 stream_type = 0 if channel_id == 2 else 1
                 shm_offset = self._shm.downstream.write_frame(stream_type, 0, body)
@@ -222,7 +225,6 @@ class TCPServerModule(BaseBackendModule):
                 received_data["payload_hex"] = frame_data["payload_hex"]
 
             self.publish("aa.frame.received", received_data)
-            # Targeted channel routing: aa.frame.ch<N>
             self.publish(f"aa.frame.ch{channel_id}", frame_data)
 
         finally:
@@ -247,7 +249,6 @@ class TCPServerModule(BaseBackendModule):
             self.log.error(f"on_frame_send: Malformed payload — {exc}")
             return
 
-        # Acquire multi-frame lock to ensure on_frame_send waits if inbound multi-frame reception is in progress
         with self._multi_frame_lock:
             try:
                 with self._crypto_lock:
@@ -273,16 +274,17 @@ class TCPServerModule(BaseBackendModule):
     def on_handshake_completed(self, topic: str, payload: dict) -> None:
         device_address = payload.get("device_address", "")
         phone_ip = payload.get("phone_ip", "")
-        self.log.info(f"Handshake completed from {device_address} (phone_ip={phone_ip}) — starting TCP server")
+        self.log.info(f"🤝 Handshake completed from {device_address} (phone_ip={phone_ip}) — initializing TCPServer listener...")
         self.start_tcp_server()
 
     def on_handshake_start_tls(self, topic: str, payload: dict) -> None:
-        self.log.info("aa.handshake.start_tls — initializing AACryptor")
+        self.log.info("🔒 [TLS Stage 5/5] Initializing AACryptor (TLS 1.2 client role, Client Certificate loaded)...")
         with self._crypto_lock:
             self._cryptor = AACryptor()
             self._cryptor.init()
             outgoing = self._cryptor.drive_handshake()
         if outgoing:
+            self.log.info(f"🔒 [TLS Stage 5/5] Generated TLS ClientHello ({len(outgoing)} bytes) — sending to phone on Channel 0...")
             self.publish("tcp.server.tls_handshake", {"outgoing_hex": outgoing.hex()})
 
     def on_handshake_feed_input(self, topic: str, payload: dict) -> None:
@@ -295,9 +297,12 @@ class TCPServerModule(BaseBackendModule):
             self.log.error(f"on_handshake_feed_input: Malformed payload — {exc}")
             return
 
+        self.log.info(f"🔒 [TLS Stage 5/5] Received TLS handshake input ({len(data)} bytes) from phone")
         with self._crypto_lock:
             self._cryptor.write_handshake_input(data)
             outgoing = self._cryptor.drive_handshake()
+            if self._cryptor.is_active():
+                self.log.info("🔒 [TLS Stage 5/5] 🎉 TLS HANDSHAKE COMPLETED SUCCESSFULLY! Cryptographic session active.")
             active = self._cryptor.is_active()
 
         if active:

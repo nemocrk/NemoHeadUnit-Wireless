@@ -102,6 +102,7 @@ class RfcommHandshake:
         """Send WifiStartRequest then enter event loop until WiFi joined."""
         try:
             self._sock.settimeout(15.0)
+            log.info("🤝 [Handshake Stage 3/5] RFCOMM Handshake state machine active — starting step 1...")
 
             # Step 1 — always proactive
             if not self._send_start_request():
@@ -124,7 +125,7 @@ class RfcommHandshake:
                 elif pkt.msg_id == MSG_WIFI_INFO_REQUEST:
                     # Phone wants credentials
                     self._on_stage("WifiInfoRequest")
-                    log.info("WifiInfoRequest received")
+                    log.info("🤝 [Handshake Stage 3/5] Received WifiInfoRequest from phone — preparing credentials...")
                     if not self._send_info_response():
                         return HandshakeResult(False, error="Failed to send WifiInfoResponse")
                     info_response_sent = True
@@ -133,9 +134,9 @@ class RfcommHandshake:
                     # Phone reports WiFi join result
                     self._on_stage("WifiConnectionStatus")
                     if not info_response_sent:
-                        log.warning("WifiConnectionStatus received before WifiInfoResponse was sent")
+                        log.warning("🤝 [Handshake Stage 3/5] WifiConnectionStatus received before WifiInfoResponse was sent")
                     self._handle_connect_status(pkt)
-                    log.info(f"Handshake completed. Phone IP: {self._phone_ip}")
+                    log.info(f"🤝 [Handshake Stage 3/5] 🎉 RFCOMM Handshake COMPLETED SUCCESSFULLY! Phone IP: {self._phone_ip}")
                     return HandshakeResult(True, phone_ip=self._phone_ip)
 
                 else:
@@ -161,7 +162,7 @@ class RfcommHandshake:
         ).SerializeToString()
         ok = send_packet(self._sock, MSG_WIFI_START_REQUEST, payload)
         if ok:
-            log.info(f"WifiStartRequest sent (ip={ip_address}, port={port})")
+            log.info(f"🤝 [Handshake Stage 3/5] Sent WifiStartRequest to phone (target TCP {ip_address}:{port})")
         return ok
 
     def _send_info_response(self) -> bool:
@@ -179,12 +180,6 @@ class RfcommHandshake:
         if not passphrase:
             log.warning("WifiInfoResponse: passphrase is EMPTY — phone will fail auth")
 
-        log.debug(
-            f"WifiInfoResponse: ssid={ssid!r} bssid={bssid!r} "
-            f"passphrase={'*' * len(passphrase) if passphrase else '(empty)'} "
-            f"security_mode={security_mode} ap_type={ap_type}"
-        )
-
         payload = WifiSecurityResponse(
             ssid               = ssid,
             bssid              = bssid,
@@ -195,7 +190,7 @@ class RfcommHandshake:
 
         ok = send_packet(self._sock, MSG_WIFI_INFO_RESPONSE, payload)
         if ok:
-            log.info(f"WifiInfoResponse sent (ssid={ssid!r}, bssid={bssid!r})")
+            log.info(f"🤝 [Handshake Stage 3/5] Sent WifiInfoResponse (credentials: SSID='{ssid}', BSSID='{bssid}')")
         return ok
 
     # ------------------------------------------------------------------
