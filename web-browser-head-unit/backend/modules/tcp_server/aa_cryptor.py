@@ -201,10 +201,10 @@ class AACryptor:
                 self._ssl_obj.do_handshake()
                 self._active = True
                 log.info("TLS handshake complete")
-            except ssl.SSLWantReadError:
-                pass  # normal: waiting for more data from phone
+            except (ssl.SSLWantReadError, ssl.SSLWantWriteError):
+                pass  # normal: waiting for more data from phone or BIO flush
             except ssl.SSLError as e:
-                log.error("TLS handshake error: %s", e)
+                log.error(f"TLS handshake error: {e}")
 
         return self._read_out_bio()
 

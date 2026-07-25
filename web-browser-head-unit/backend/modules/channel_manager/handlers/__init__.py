@@ -5,6 +5,7 @@ from .input_handler import InputChannelHandler
 from .sensor_handler import SensorChannelHandler
 from .bluetooth_handler import BluetoothChannelHandler
 from .wifi_handler import WifiChannelHandler
+from .av_input_handler import AVInputChannelHandler
 
 __all__ = [
     "ControlChannelHandler",
@@ -14,4 +15,5 @@ __all__ = [
     "SensorChannelHandler",
     "BluetoothChannelHandler",
     "WifiChannelHandler",
+    "AVInputChannelHandler",
 ]

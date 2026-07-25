@@ -33,6 +33,8 @@ from modules.tcp_server.frame_relay import FrameRelay
 from modules.tcp_server.message_to_proto import frame_data_to_dict
 from modules.tcp_server.server import TCPServer
 
+from protos.oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessage
+
 _FLAG_ENCRYPTED = 0x08
 _MSG_SHUTDOWN_REQUEST = ControlMessage.Enum.SHUTDOWN_REQUEST
 _MSG_SHUTDOWN_RESPONSE = ControlMessage.Enum.SHUTDOWN_RESPONSE
@@ -61,6 +63,9 @@ class TCPServerModule(BaseBackendModule):
 
         self._restart_pending = False
         self._shutdown_ack_event = threading.Event()
+
+        # Dynamic channel type mapping from SDR
+        self.channel_type_map: Dict[int, str] = {}
 
         # Telemetry counters
         self._client_address: Optional[str] = None
@@ -93,6 +98,11 @@ class TCPServerModule(BaseBackendModule):
         self.subscribe("aa.handshake.feed_input", self.on_handshake_feed_input)
         self.subscribe("aa.session.restart", self.on_aa_session_restart)
         self.subscribe("aa.frame.ch0", self.on_ch0_frame)
+        self.subscribe("aa.sdr.channels", self.on_sdr_channels)
+
+    async def on_sdr_channels(self, data: dict) -> None:
+        self.channel_type_map = data.get("type_map", {})
+        self.log.info(f"tcp_server: Received dynamic channel type map from SDR: {self.channel_type_map}")
 
     async def run(self) -> None:
         """Main module execution loop. Handles optional autostart mode."""
@@ -200,12 +210,15 @@ class TCPServerModule(BaseBackendModule):
             body = assembled[2:]
             self._frames_received_count += 1
 
-            # Log all non-media data frames (exclude high-frequency AV_MEDIA indications on channel 3/4)
-            if not (channel_id in (3, 4) and message_id in (0x0001, 0x0002)):
+            ch_type_name = self.channel_type_map.get(channel_id)
+            is_media_msg = message_id in (AVChannelMessage.Enum.AV_MEDIA_WITH_TIMESTAMP_INDICATION, AVChannelMessage.Enum.AV_MEDIA_INDICATION)
+
+            # Log all non-media data frames (exclude high-frequency AV_MEDIA indications)
+            if not (ch_type_name in ("VIDEO", "AUDIO") and is_media_msg):
                 self.log.info(f"📥 [TCP Recv] Inbound frame from phone: ch={channel_id}, msgId=0x{message_id:04x}, len={len(body)}, encrypted={encrypted}")
 
-            if channel_id in (2, 3, 4):
-                stream_type = 0 if channel_id == 2 else 1
+            if (ch_type_name in ("VIDEO", "AUDIO") or channel_id in (2, 3, 4)) and is_media_msg:
+                stream_type = 0 if (ch_type_name == "VIDEO" or channel_id in (2, 3)) else 1
                 shm_offset = self._shm.downstream.write_frame(stream_type, 0, body)
                 self.publish(
                     "aa.frame.shm",
@@ -228,11 +241,10 @@ class TCPServerModule(BaseBackendModule):
                 "channel_id": channel_id,
                 "message_id": message_id,
                 "encrypted": encrypted,
+                "payload_hex": body.hex(),
                 "payload_len": len(body),
                 "payload_head": body[:16].hex(),
             }
-            if self.config.get("publish_full_frame", False):
-                received_data["payload_hex"] = frame_data["payload_hex"]
 
             self.publish("aa.frame.received", received_data)
             self.publish(f"aa.frame.ch{channel_id}", frame_data)
@@ -259,7 +271,7 @@ class TCPServerModule(BaseBackendModule):
             self.log.error(f"on_frame_send: Malformed payload — {exc}")
             return
 
-        if not (channel_id in (3, 4) and message_id in (0x0001, 0x0002)):
+        if not (channel_id in (3, 4) and message_id in (AVChannelMessage.Enum.AV_MEDIA_WITH_TIMESTAMP_INDICATION, AVChannelMessage.Enum.AV_MEDIA_INDICATION)):
             self.log.info(f"📤 [TCP Send] Transmitting frame to phone: ch={channel_id}, msgId=0x{message_id:04x}, len={len(body)}, encrypted={ssl_active}")
 
         with self._multi_frame_lock:
@@ -300,7 +312,7 @@ class TCPServerModule(BaseBackendModule):
             self.log.info(f"🔒 [TLS Stage 5/5] Generated TLS ClientHello ({len(outgoing)} bytes) — sending to phone on Channel 0...")
             self.on_frame_send("aa.frame.send", {
                 "channel_id": 0,
-                "message_id": 0x0003,
+                "message_id": ControlMessage.Enum.SSL_HANDSHAKE,
                 "payload_hex": outgoing.hex(),
                 "encrypted": False,
             })
@@ -327,7 +339,7 @@ class TCPServerModule(BaseBackendModule):
             self.log.info(f"🔒 [TLS Stage 5/5] Sending TLS handshake response ({len(outgoing)} bytes) to phone on Channel 0...")
             self.on_frame_send("aa.frame.send", {
                 "channel_id": 0,
-                "message_id": 0x0003,
+                "message_id": ControlMessage.Enum.SSL_HANDSHAKE,
                 "payload_hex": outgoing.hex(),
                 "encrypted": False,
             })

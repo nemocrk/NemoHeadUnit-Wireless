@@ -294,7 +294,7 @@ def frame_data_to_dict(frame_data: dict) -> dict:
         message_name = message_id_to_proto_name(message_id)
         proto_class = proto_name_to_class(message_name)
         parsed_message = proto_class()
-        if not isinstance(parsed_message, bytes) or channel_id == 4:
+        if not isinstance(parsed_message, bytes):
             parsed_message.ParseFromString(bytes.fromhex(payload_hex))
             parsed_payload = MessageToDict(parsed_message)
         else:

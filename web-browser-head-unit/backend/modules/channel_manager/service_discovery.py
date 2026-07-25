@@ -145,12 +145,36 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
 }
 
 
+from shared.constants import ChannelType
+
+
+def classify_channel_descriptor(descriptor_dict: dict) -> ChannelType:
+    """Classify a channel descriptor dict into a ChannelType enum."""
+    if "input_channel" in descriptor_dict:
+        return ChannelType.INPUT
+    elif "sensor_channel" in descriptor_dict:
+        return ChannelType.SENSOR
+    elif "bluetooth_channel" in descriptor_dict:
+        return ChannelType.BLUETOOTH
+    elif "wifi_channel" in descriptor_dict:
+        return ChannelType.WIFI
+    elif "av_input_channel" in descriptor_dict:
+        return ChannelType.AUDIO_MIC
+    elif "av_channel" in descriptor_dict:
+        av = descriptor_dict["av_channel"]
+        if "video_configs" in av or av.get("stream_type") == "VIDEO":
+            return ChannelType.VIDEO
+        else:
+            return ChannelType.AUDIO
+    return ChannelType.UNKNOWN
+
+
 def build_service_discovery_response(
     cfg: dict | None = None,
     bt_mac: str = "00:00:00:00:00:00",
     wifi_bssid: str = "",
-) -> tuple[bytes, dict]:
-    """Build full binary ServiceDiscoveryResponse protobuf payload and return (bytes, dict)."""
+) -> tuple[bytes, dict, dict[int, str]]:
+    """Build full binary ServiceDiscoveryResponse protobuf payload and return (bytes, dict, channel_type_map)."""
     config_tree = dict(SEMANTIC_DEFAULTS)
     if cfg:
         config_tree.update(cfg)
@@ -165,4 +189,11 @@ def build_service_discovery_response(
             ch.wifi_channel.bssid = wifi_bssid
 
     sdr_dict = proto_to_dict(resp)
-    return encode_proto(resp), sdr_dict
+    channel_type_map: dict[int, str] = {0: ChannelType.CONTROL.name}
+    for ch_entry in sdr_dict.get("channels", []):
+        ch_id = ch_entry.get("channel_id")
+        if ch_id is not None:
+            c_type = classify_channel_descriptor(ch_entry)
+            channel_type_map[ch_id] = c_type.name
+
+    return encode_proto(resp), sdr_dict, channel_type_map

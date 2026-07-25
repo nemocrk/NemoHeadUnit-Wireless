@@ -31,6 +31,7 @@ try:
         SensorChannelHandler,
         BluetoothChannelHandler,
         WifiChannelHandler,
+        AVInputChannelHandler,
     )
 except ImportError:
     from handlers import (
@@ -41,11 +42,15 @@ except ImportError:
         SensorChannelHandler,
         BluetoothChannelHandler,
         WifiChannelHandler,
+        AVInputChannelHandler,
     )
 
 from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
 
 MSG = ControlMessage.Enum
+
+from shared.constants import ChannelType
+
 
 class ChannelManagerModule(BaseBackendModule):
     def __init__(self):
@@ -57,15 +62,42 @@ class ChannelManagerModule(BaseBackendModule):
         self.shm = BidirectionalMediaSHM(create=False)
         self.ws_clients: Set[web.WebSocketResponse] = set()
         self.active_channels: Dict[int, dict] = {}
+        self.channel_type_map: Dict[int, ChannelType] = {}
 
         # Sub-channel handlers
         self.control_handler = ControlChannelHandler(self)
         self.video_handler = VideoChannelHandler(self)
         self.audio_handler = AudioChannelHandler(self)
+        self.av_input_handler = AVInputChannelHandler(self)
         self.input_handler = InputChannelHandler(self)
         self.sensor_handler = SensorChannelHandler(self)
         self.bluetooth_handler = BluetoothChannelHandler(self)
         self.wifi_handler = WifiChannelHandler(self)
+
+    def set_channel_type_map(self, type_map: dict) -> None:
+        """Store dynamic channel_id -> ChannelType mapping from SDR."""
+        self.channel_type_map = {int(k): ChannelType[v] for k, v in type_map.items() if v in ChannelType.__members__}
+        self.log.info(f"ChannelManager: Dynamic channel classification registry populated: {self.channel_type_map}")
+
+    def get_channel_type(self, channel_id: int) -> ChannelType:
+        """Return the ChannelType for a given channel_id."""
+        return self.channel_type_map.get(channel_id, ChannelType.UNKNOWN)
+
+    def get_channel_id_for_type(self, target_type: ChannelType) -> int:
+        """Return the first channel_id matching the given ChannelType."""
+        for ch_id, c_type in self.channel_type_map.items():
+            if c_type == target_type:
+                return ch_id
+        fallback_map = {
+            ChannelType.CONTROL: 0,
+            ChannelType.INPUT: 1,
+            ChannelType.SENSOR: 2,
+            ChannelType.VIDEO: 3,
+            ChannelType.AUDIO: 4,
+            ChannelType.BLUETOOTH: 8,
+            ChannelType.WIFI: 14,
+        }
+        return fallback_map.get(target_type, 0)
 
     def get_default_config(self) -> dict[str, Any]:
         try:
@@ -131,7 +163,10 @@ class ChannelManagerModule(BaseBackendModule):
     async def on_tls_handshake_completed(self, data: dict) -> None:
         """Send AUTH_COMPLETE to phone upon TLS completion, then await SERVICE_DISCOVERY_REQUEST."""
         self.log.info("🔒 [TLS Stage 5/5] TLS handshake complete — HU sending AUTH_COMPLETE to phone...")
-        auth_payload = b"\x08\x00"  # AuthCompleteIndication (status = STATUS_OK)
+        from protos.oaa.control.AuthCompleteIndicationMessage_pb2 import AuthCompleteIndication
+        auth = AuthCompleteIndication()
+        auth.status = 0  # STATUS_OK
+        auth_payload = auth.SerializeToString()
         await self.send_wire_frame(0, MSG.AUTH_COMPLETE, auth_payload, encrypted=False)
 
     async def on_frame_shm(self, data: dict) -> None:
@@ -160,18 +195,32 @@ class ChannelManagerModule(BaseBackendModule):
         await self.control_handler.handle_frame(msg_id, body)
 
     async def on_frame_received(self, data: dict) -> None:
-        """Handle non-Channel 0 frames (Sensor, Bluetooth, WiFi, etc.)."""
+        """Handle incoming non-Channel 0 frames dynamically routed by ChannelType."""
         ch_id = data.get("channel_id", 0)
         msg_id = data.get("message_id", 0)
         payload_hex = data.get("payload_hex", "")
         body = bytes.fromhex(payload_hex) if payload_hex else b""
 
-        if ch_id == 2:
+        ch_type = self.get_channel_type(ch_id)
+
+        if ch_type == ChannelType.CONTROL or ch_id == 0:
+            return  # Handled by on_ch0_frame via aa.frame.ch0 subscription
+        elif ch_type == ChannelType.INPUT or ch_id == 1:
+            await self.input_handler.handle_frame(ch_id, msg_id, body)
+        elif ch_type == ChannelType.SENSOR or ch_id == 2:
             await self.sensor_handler.handle_frame(ch_id, msg_id, body)
-        elif ch_id == 8:
+        elif ch_type == ChannelType.VIDEO or ch_id == 3:
+            await self.video_handler.handle_frame(ch_id, msg_id, body)
+        elif ch_type == ChannelType.AUDIO or ch_id in (4, 5, 6):
+            await self.audio_handler.handle_frame(ch_id, msg_id, body)
+        elif ch_type == ChannelType.AUDIO_MIC or ch_id == 7:
+            await self.av_input_handler.handle_frame(ch_id, msg_id, body)
+        elif ch_type == ChannelType.BLUETOOTH or ch_id == 8:
             await self.bluetooth_handler.handle_frame(ch_id, msg_id, body)
-        elif ch_id == 14:
+        elif ch_type == ChannelType.WIFI or ch_id == 14:
             await self.wifi_handler.handle_frame(ch_id, msg_id, body)
+        else:
+            self.log.warning(f"⚠️ [Unhandled Channel Frame] Received frame on unhandled channel ch={ch_id} (type={ch_type.name}) msgId=0x{msg_id:04x} len={len(body)}")
 
     async def on_sdr_response(self, data: dict) -> None:
         sdr_hex = data.get("sdr_hex", "")
