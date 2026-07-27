@@ -56,9 +56,14 @@ class BaseBluetoothAdapter(abc.ABC):
         """Register the Android Auto RFCOMM service profile and listen for connections."""
         pass
 
+    def set_on_pin_callback(self, on_pin_cb: Callable[[str, str], None]) -> None:
+        """Register a persistent global callback for PIN/passkey pairing requests."""
+        pass
+
     def get_adapter_address(self) -> str:
         """Get the local Bluetooth adapter MAC address."""
         return ""
+
 
     @abc.abstractmethod
     async def teardown(self) -> None:

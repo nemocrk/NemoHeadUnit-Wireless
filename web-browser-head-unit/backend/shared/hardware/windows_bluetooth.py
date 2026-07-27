@@ -262,6 +262,11 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
         self._active_outbound_sockets: dict[str, Any] = {}
         self._disconnected_override_addrs: set[str] = set()
 
+    def set_on_pin_callback(self, on_pin_cb: Callable[[str, str], None]) -> None:
+        """Register a persistent global callback for PIN/passkey pairing requests."""
+        self._on_pin_requested_cb = on_pin_cb
+
+
     async def setup(self, adapter_name: str, discoverable: bool, discoverable_timeout: int) -> None:
         self._adapter_name = adapter_name
         self._discoverable = discoverable

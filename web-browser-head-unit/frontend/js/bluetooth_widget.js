@@ -120,14 +120,18 @@ export class BluetoothWidget {
                 if (scanLabel) scanLabel.textContent = 'Scan Devices';
             }
 
-            // Auto-trigger PIN modal if incoming/outgoing pairing request has a PIN
-            if (data.pairing_pin && (!this.pairingPendingDevice || this.pairingPendingDevice.address !== data.pairing_device)) {
-                this.showPairingModal(data.pairing_device, data.pairing_pin);
+            // Auto-trigger or update PIN modal if incoming/outgoing pairing request has a PIN
+            if (data.pairing_pin && data.pairing_device) {
+                const currentName = (this.pairingPendingDevice && this.pairingPendingDevice.address === data.pairing_device) 
+                    ? this.pairingPendingDevice.name 
+                    : data.pairing_device;
+                this.showPairingModal(data.pairing_device, data.pairing_pin, currentName);
             }
         } catch (err) {
             console.warn('Failed to fetch Bluetooth status:', err);
         }
     }
+
 
     showPairingModal(address, pin, name) {
         this.pairingPendingDevice = { address, name: name || address };

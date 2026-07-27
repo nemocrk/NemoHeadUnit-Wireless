@@ -65,9 +65,14 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         self._adapter_address = ""
         self._disconnected_override_addrs: set[str] = set()
 
+    def set_on_pin_callback(self, on_pin_cb: Callable[[str, str], None]) -> None:
+        """Register a persistent global callback for PIN/passkey pairing requests."""
+        self._on_pin_requested_cb = on_pin_cb
+
     def get_adapter_address(self) -> str:
         """Get the local BlueZ Bluetooth adapter MAC address."""
         return self._adapter_address
+
 
     async def setup(self, adapter_name: str, discoverable: bool, discoverable_timeout: int) -> None:
         import dbus

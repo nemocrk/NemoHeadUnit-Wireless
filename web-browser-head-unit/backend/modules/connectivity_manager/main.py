@@ -137,9 +137,18 @@ class ConnectivityManagerModule(BaseBackendModule):
             )
             await self._wifi_adapter.setup()
 
-        # Listen for incoming AA RFCOMM connections
+        # Listen for incoming AA RFCOMM connections and pairing PIN requests
+        self._bt_adapter.set_on_pin_callback(self._on_pin_requested)
         self._bt_adapter.register_rfcomm_server(self._on_rfcomm_connection)
         self._rfcomm_listening = True
+
+    def _on_pin_requested(self, address: str, pin: str) -> None:
+        """Callback when Bluetooth pairing PIN/passkey confirmation is requested."""
+        self.log.info(f"🔑 Bluetooth Pairing PIN Requested: Device={address}, PIN={pin}")
+        self._pairing_pin = str(pin)
+        self._pairing_device = address
+        self.publish("bluetooth_manager.pairing.pin", {"device_address": address, "pin": str(pin)})
+
 
         # Initialize Autoconnect loop
         if self.config.get("autoconnect_enabled", True):
