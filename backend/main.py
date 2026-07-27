@@ -53,7 +53,7 @@ def discover_modules() -> list[Path]:
 def _start_process(script: Path, label: str) -> subprocess.Popen:
     env = os.environ.copy()
     pythonpath = env.get("PYTHONPATH", "")
-    repo_root = BASE_DIR.parent.parent
+    repo_root = BASE_DIR.parent
     proto_dir = repo_root / "protos"
     env["PYTHONPATH"] = f"{BASE_DIR}{os.pathsep}{repo_root}{os.pathsep}{proto_dir}{os.pathsep}{pythonpath}".rstrip(os.pathsep)
 
