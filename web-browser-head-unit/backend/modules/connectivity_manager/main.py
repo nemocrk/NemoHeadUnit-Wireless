@@ -353,16 +353,20 @@ class ConnectivityManagerModule(BaseBackendModule):
                 self._discovered_devices.append(device)
             self.publish("bluetooth_manager.device.found", device)
 
-        await self._bt_adapter.start_discovery(duration, on_dev)
-        
-        self._discovering = False
-        self.publish("bluetooth_manager.discovery.completed", {})
+        try:
+            await self._bt_adapter.start_discovery(duration, on_dev)
+        except Exception as e:
+            self.log.error(f"Error during Bluetooth discovery: {e}")
+        finally:
+            self._discovering = False
+            self.publish("bluetooth_manager.discovery.completed", {})
 
         return web.json_response({
             "status": "ok",
             "message": f"Discovery scan completed ({len(self._discovered_devices)} devices found)",
             "devices": self._discovered_devices
         })
+
 
     async def handle_get_discovered(self, request: web.Request) -> web.Response:
         return web.json_response({"devices": self._discovered_devices})
