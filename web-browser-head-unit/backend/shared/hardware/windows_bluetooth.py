@@ -261,10 +261,17 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
         self._active_device_handles: dict[str, Any] = {}
         self._active_outbound_sockets: dict[str, Any] = {}
         self._disconnected_override_addrs: set[str] = set()
+        self._adapter_address: str = ""
+        self._pairing_args: dict[str, Any] = {}
+        self._pairing_deferrals: dict[str, Any] = {}
 
     def set_on_pin_callback(self, on_pin_cb: Callable[[str, str], None]) -> None:
         """Register a persistent global callback for PIN/passkey pairing requests."""
         self._on_pin_requested_cb = on_pin_cb
+
+    def get_adapter_address(self) -> str:
+        """Get the local Windows Bluetooth adapter MAC address."""
+        return self._adapter_address
 
 
     async def setup(self, adapter_name: str, discoverable: bool, discoverable_timeout: int) -> None:
@@ -278,13 +285,14 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
             try:
                 adapter = await asyncio.wait_for(bt_mod.BluetoothAdapter.get_default_async(), timeout=2.0)
                 if adapter is not None:
+                    self._adapter_address = self._format_bt_address(adapter.bluetooth_address)
                     radio = await asyncio.wait_for(adapter.get_radio_async(), timeout=2.0)
                     if radio is not None:
                         from winrt.windows.devices.radios import RadioState
                         if radio.state != RadioState.ON:
                             await asyncio.wait_for(radio.set_state_async(RadioState.ON), timeout=2.0)
                             log.info("Bluetooth radio turned ON via WinRT")
-                    log.info(f"Windows Bluetooth Adapter ready (address={adapter.bluetooth_address:#014x})")
+                    log.info(f"Windows Bluetooth Adapter ready (address={self._adapter_address})")
                 else:
                     log.warning("WinRT BluetoothAdapter.get_default_async() returned None — no adapter found")
             except Exception as e:
@@ -293,6 +301,7 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
             log.info("WinRT not available — running in mock Bluetooth mode")
 
         log.info(f"Windows Bluetooth Adapter setup alias: {adapter_name}")
+
 
     # ------------------------------------------------------------------
     # Discovery
@@ -400,8 +409,14 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
                     args.accept()
                 elif kind == DevicePairingKinds.CONFIRM_PIN_MATCH:
                     pin = args.pin or "000000"
-                    on_pin_cb(address, str(pin))
-                    args.accept()
+                    deferral = getattr(args, "get_deferral", lambda: None)()
+                    self._pairing_args[address] = args
+                    self._pairing_deferrals[address] = deferral
+                    cb = self._on_pin_requested_cb or on_pin_cb
+                    if cb:
+                        cb(address, str(pin))
+                    if not deferral:
+                        args.accept()
                 elif kind == DevicePairingKinds.PROVIDE_PIN:
                     args.accept("0000")
                 else:
@@ -433,8 +448,21 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
 
     async def confirm_pairing(self, address: str, confirm: bool) -> bool:
         log.info(f"Windows pairing confirm: {confirm} for {address}")
-        # WinRT custom pairing auto-accepts in the callback; this is a no-op here.
+        args = self._pairing_args.pop(address, None)
+        deferral = self._pairing_deferrals.pop(address, None)
+
+        if args and deferral:
+            if confirm:
+                args.accept()
+                log.info(f"WinRT custom pairing approved (args.accept) for {address}")
+            else:
+                log.info(f"WinRT custom pairing rejected for {address}")
+            try:
+                deferral.complete()
+            except Exception as e:
+                log.debug(f"WinRT deferral complete notice: {e}")
         return True
+
 
     # ------------------------------------------------------------------
     # Connect / Disconnect

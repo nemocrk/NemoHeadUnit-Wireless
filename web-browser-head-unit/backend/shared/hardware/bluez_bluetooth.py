@@ -62,8 +62,11 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         # State trackers for pairing and connection state
         self._dbus_reply_handler = None
         self._dbus_error_handler = None
+        self._dbus_reply_handlers: dict[str, Any] = {}
+        self._dbus_error_handlers: dict[str, Any] = {}
         self._adapter_address = ""
         self._disconnected_override_addrs: set[str] = set()
+
 
     def set_on_pin_callback(self, on_pin_cb: Callable[[str, str], None]) -> None:
         """Register a persistent global callback for PIN/passkey pairing requests."""
@@ -173,11 +176,14 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
                 pin_str = f"{passkey:06d}"
                 log.info(f"RequestConfirmation from {mac} passkey={pin_str}")
                 
+                self._adapter._dbus_reply_handlers[mac] = reply_handler
+                self._adapter._dbus_error_handlers[mac] = error_handler
                 self._adapter._dbus_reply_handler = reply_handler
                 self._adapter._dbus_error_handler = error_handler
 
                 if self._adapter._on_pin_requested_cb:
                     self._adapter._on_pin_requested_cb(mac, pin_str)
+
 
             @dbus.service.method("org.bluez.Agent1", in_signature="o", out_signature="u")
             def RequestPasskey(self, device):
@@ -275,7 +281,8 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
     async def pair_device(self, address: str, on_pin_cb: Callable[[str, str], None]) -> tuple[bool, str]:
         import dbus
         log.info(f"Triggering pairing with {address} on BlueZ")
-        self._on_pin_requested_cb = on_pin_cb
+        if on_pin_cb:
+            self._on_pin_requested_cb = on_pin_cb
         try:
             device_path = self._find_device_path(address)
             if not device_path:
@@ -287,12 +294,22 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
 
             device = dbus.Interface(self._bus.get_object("org.bluez", device_path), "org.bluez.Device1")
             
-            # Start pairing
-            device.Pair()
-            log.info(f"BlueZ pairing initiated with {address}")
+            def _on_pair_success():
+                log.info(f"🎉 BlueZ pairing sequence with {address} completed successfully!")
+
+            def _on_pair_error(err):
+                log.warning(f"BlueZ pairing sequence with {address} notice/error: {err}")
+
+            # Start non-blocking pairing call
+            device.Pair(
+                reply_handler=_on_pair_success,
+                error_handler=_on_pair_error,
+                timeout=60
+            )
+            log.info(f"BlueZ non-blocking pairing initiated with {address}")
             return True, ""
         except Exception as e:
-            log.warning(f"BlueZ pairing with {address} failed: {e}")
+            log.warning(f"BlueZ pairing with {address} failed to initiate: {e}")
             return False, str(e)
 
     def _find_device_path(self, address: str) -> Optional[str]:
@@ -319,22 +336,35 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
     async def confirm_pairing(self, address: str, confirm: bool) -> bool:
         import dbus.exceptions
         
-        reply = self._dbus_reply_handler
-        error = self._dbus_error_handler
+        reply = self._dbus_reply_handlers.pop(address, None) or self._dbus_reply_handler
+        error = self._dbus_error_handlers.pop(address, None) or self._dbus_error_handler
         self._dbus_reply_handler = None
         self._dbus_error_handler = None
 
         if confirm:
-            log.info(f"BlueZ pairing confirm: True for {address}")
+            log.info(f"BlueZ pairing confirm: True (approving) for {address}")
             self._trust_device(address)
             if reply:
-                reply()
+                try:
+                    reply()
+                    log.info(f"Invoked D-Bus reply callback (pairing approved) for {address}")
+                except Exception as e:
+                    log.warning(f"Error invoking D-Bus reply callback for {address}: {e}")
+            else:
+                log.warning(f"No active D-Bus reply handler registered for {address}")
             return True
         else:
             log.warning(f"BlueZ pairing confirm: False (rejecting) for {address}")
             if error:
-                error(dbus.exceptions.DBusException("org.bluez.Error.Rejected", "User rejected pairing"))
+                try:
+                    error(dbus.exceptions.DBusException("org.bluez.Error.Rejected", "User rejected pairing"))
+                    log.info(f"Invoked D-Bus error callback (pairing rejected) for {address}")
+                except Exception as e:
+                    log.warning(f"Error invoking D-Bus error callback for {address}: {e}")
+            else:
+                log.warning(f"No active D-Bus error handler registered for {address}")
             return True
+
 
     async def connect_device(self, address: str) -> tuple[bool, str]:
         import dbus
@@ -346,12 +376,24 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
                 log.warning(f"Connect device failed: {address} not found")
                 return False, "Device not found"
             device = dbus.Interface(self._bus.get_object("org.bluez", path), "org.bluez.Device1")
-            device.Connect()
-            log.info(f"Successfully invoked BlueZ Device1.Connect() for {address}")
+
+            def _on_conn_success():
+                log.info(f"🎉 BlueZ connection to {address} established!")
+
+            def _on_conn_error(err):
+                log.warning(f"BlueZ connection to {address} notice/error: {err}")
+
+            device.Connect(
+                reply_handler=_on_conn_success,
+                error_handler=_on_conn_error,
+                timeout=30
+            )
+            log.info(f"Successfully invoked BlueZ non-blocking Device1.Connect() for {address}")
             return True, ""
         except Exception as e:
             log.warning(f"BlueZ Device1.Connect() to {address} failed: {e}")
             return False, str(e)
+
 
     async def disconnect_device(self, address: str) -> bool:
         import dbus

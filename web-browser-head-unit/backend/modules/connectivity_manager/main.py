@@ -372,19 +372,30 @@ class ConnectivityManagerModule(BaseBackendModule):
 
     async def handle_post_pair_confirm(self, request: web.Request) -> web.Response:
         body = await request.json()
-        addr = body["device_address"]
+        addr = body.get("device_address") or body.get("address")
+        if not addr:
+            return web.json_response({"status": "error", "message": "Missing 'device_address'"}, status=400)
         res = await self._bt_adapter.confirm_pairing(addr, True)
         self._pairing_pin = None
         self._pairing_device = None
+        if res:
+            self.publish("bluetooth_manager.pairing.completed", {"device_address": addr, "success": True})
+            self.log.info(f"🎉 Bluetooth pairing confirmed by UI for device {addr}")
         return web.json_response({"status": "ok" if res else "error"})
 
     async def handle_post_pair_reject(self, request: web.Request) -> web.Response:
         body = await request.json()
-        addr = body["device_address"]
+        addr = body.get("device_address") or body.get("address")
+        if not addr:
+            return web.json_response({"status": "error", "message": "Missing 'device_address'"}, status=400)
         res = await self._bt_adapter.confirm_pairing(addr, False)
         self._pairing_pin = None
         self._pairing_device = None
+        if res:
+            self.publish("bluetooth_manager.pairing.completed", {"device_address": addr, "success": False})
+            self.log.info(f"❌ Bluetooth pairing rejected by UI for device {addr}")
         return web.json_response({"status": "ok" if res else "error"})
+
 
     async def handle_post_remove(self, request: web.Request) -> web.Response:
         body = await request.json()
