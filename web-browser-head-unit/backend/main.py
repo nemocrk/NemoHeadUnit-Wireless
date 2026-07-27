@@ -34,8 +34,8 @@ from shared.ipc_utils import get_bus_address
 
 MODULES_DIR = BASE_DIR / "modules"
 GRACE_PERIOD = 10.0
-READYTOSTART_WINDOW = 3.0   # max seconds to collect system.module_ready replies (exits early once all modules reply)
-MODULE_READY_TIMEOUT = 1.0  # seconds per level wait
+READYTOSTART_WINDOW = 15.0   # max seconds to collect system.module_ready replies (exits early once all modules reply)
+MODULE_READY_TIMEOUT = 10.0  # seconds per level wait
 
 log = get_logger("main")
 
