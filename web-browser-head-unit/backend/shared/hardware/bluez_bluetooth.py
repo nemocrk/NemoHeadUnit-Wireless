@@ -58,6 +58,7 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         self._glib_loop = None
         self._active_rfcomm_cb = None
         self._on_pin_requested_cb = None
+        self._on_connection_cb: Optional[Callable[[str, bool], None]] = None
         
         # State trackers for pairing and connection state
         self._dbus_reply_handler = None
@@ -67,15 +68,27 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         self._adapter_address = ""
         self._disconnected_override_addrs: set[str] = set()
 
-
     def set_on_pin_callback(self, on_pin_cb: Callable[[str, str], None]) -> None:
         """Register a persistent global callback for PIN/passkey pairing requests."""
         self._on_pin_requested_cb = on_pin_cb
+
+    def set_on_connection_callback(self, on_conn_cb: Callable[[str, bool], None]) -> None:
+        """Register a persistent global callback for device connection state changes."""
+        self._on_connection_cb = on_conn_cb
 
     def get_adapter_address(self) -> str:
         """Get the local BlueZ Bluetooth adapter MAC address."""
         return self._adapter_address
 
+    def _on_dbus_properties_changed(self, interface: str, changed: dict, invalidated: list, path: str) -> None:
+        if interface == "org.bluez.Device1" and "Connected" in changed:
+            is_conn = bool(changed["Connected"])
+            mac = path.split("dev_")[-1].replace("_", ":").upper()
+            log.info(f"🔵 D-Bus Device1 connection state changed: {mac} connected={is_conn}")
+            if is_conn:
+                self._disconnected_override_addrs.discard(mac)
+            if self._on_connection_cb:
+                self._on_connection_cb(mac, is_conn)
 
     async def setup(self, adapter_name: str, discoverable: bool, discoverable_timeout: int) -> None:
         import dbus
@@ -93,6 +106,19 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         self._bus = dbus.SystemBus()
         if "org.bluez" not in self._bus.list_names():
             raise RuntimeError("org.bluez is not registered on the system D-Bus")
+
+        # Subscribe to Device1 PropertiesChanged signals
+        try:
+            self._bus.add_signal_receiver(
+                self._on_dbus_properties_changed,
+                signal_name="PropertiesChanged",
+                dbus_interface="org.freedesktop.DBus.Properties",
+                path_keyword="path",
+            )
+            log.info("Subscribed to org.bluez.Device1 PropertiesChanged D-Bus signals")
+        except Exception as e:
+            log.warning(f"Failed to subscribe to D-Bus PropertiesChanged signals: {e}")
+
 
         manager = dbus.Interface(
             self._bus.get_object("org.bluez", "/"),

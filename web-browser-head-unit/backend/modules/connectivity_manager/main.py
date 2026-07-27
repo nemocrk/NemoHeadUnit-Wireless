@@ -137,10 +137,15 @@ class ConnectivityManagerModule(BaseBackendModule):
             )
             await self._wifi_adapter.setup()
 
-        # Listen for incoming AA RFCOMM connections and pairing PIN requests
+        # Listen for incoming AA RFCOMM connections, pairing PIN requests, and connection state changes
         self._bt_adapter.set_on_pin_callback(self._on_pin_requested)
+        self._bt_adapter.set_on_connection_callback(self._on_device_connection_changed)
         self._bt_adapter.register_rfcomm_server(self._on_rfcomm_connection)
         self._rfcomm_listening = True
+
+        # Initialize Autoconnect loop
+        if self.config.get("autoconnect_enabled", True):
+            self._autoconnect_task = asyncio.create_task(self._autoconnect_loop())
 
     def _on_pin_requested(self, address: str, pin: str) -> None:
         """Callback when Bluetooth pairing PIN/passkey confirmation is requested."""
@@ -149,12 +154,26 @@ class ConnectivityManagerModule(BaseBackendModule):
         self._pairing_device = address
         self.publish("bluetooth_manager.pairing.pin", {"device_address": address, "pin": str(pin)})
 
-
-        # Initialize Autoconnect loop
-        if self.config.get("autoconnect_enabled", True):
-            self._autoconnect_task = asyncio.create_task(self._autoconnect_loop())
+    def _on_device_connection_changed(self, address: str, is_connected: bool) -> None:
+        """Callback when a Bluetooth device connects or disconnects (inbound or outbound)."""
+        if is_connected:
+            self.log.info(f"🔵 Inbound/Outbound Bluetooth Connection detected for device {address}")
+            self.publish("bluetooth_manager.paired.connected", {"device_address": address})
+            if not self._rfcomm_connected:
+                self.log.info(f"Waking autoconnect loop for connected device {address} to verify Android Auto RFCOMM...")
+                self._autoconnect_event.set()
+        else:
+            self.log.info(f"⚪ Bluetooth device {address} disconnected")
+            self.publish("bluetooth_manager.paired.disconnected", {"device_address": address})
+            if self._active_device == address:
+                self._rfcomm_connected = False
+                self._active_device = None
 
     async def run(self) -> None:
+        # Trigger initial autoconnect scan immediately after startup completes
+        if self.config.get("autoconnect_enabled", True):
+            self.log.info("🚀 Post-boot startup complete — triggering initial paired device scan & connection check...")
+            self._autoconnect_event.set()
         while self._running:
             await asyncio.sleep(1.0)
 
@@ -173,7 +192,7 @@ class ConnectivityManagerModule(BaseBackendModule):
             try:
                 await asyncio.wait_for(self._autoconnect_event.wait(), timeout=backoff)
                 self._autoconnect_event.clear()
-                backoff = int(self.config.get("autoconnect_backoff_initial_s", 5))  # Reset backoff on manual trigger
+                backoff = int(self.config.get("autoconnect_backoff_initial_s", 5))  # Reset backoff on trigger
             except asyncio.TimeoutError:
                 pass
 
@@ -189,21 +208,22 @@ class ConnectivityManagerModule(BaseBackendModule):
                 for dev in devices:
                     if self._rfcomm_connected or self._wifi_credentials is not None:
                         break
-                    if dev.get("connected"):
-                        continue
                     
                     addr = dev["address"]
-                    self.log.info(f"Autoconnect: attempting connect to {addr} ({dev.get('name', 'Unknown')})")
+                    name = dev.get("name", "Unknown")
+                    is_already_connected = dev.get("connected", False)
+
+                    self.log.info(f"Autoconnect: checking paired device {addr} ({name}) [already_connected={is_already_connected}]")
                     
-                    # Connect to profiles (non-blocking async)
+                    # Connect to profiles / initiate RFCOMM trigger
                     success, err = await self._bt_adapter.connect_device(addr)
                     if success:
-                        self.log.info(f"Autoconnect: successfully connected to device profiles for {addr}")
-                        # Reset backoff on successful connect
+                        self.log.info(f"Autoconnect: successfully connected device profiles for {addr}")
+                        self.publish("bluetooth_manager.paired.connected", {"device_address": addr})
                         backoff = int(self.config.get("autoconnect_backoff_initial_s", 5))
                         break
                     else:
-                        self.log.debug(f"Autoconnect: failed to connect to {addr} — {err}")
+                        self.log.debug(f"Autoconnect: connect_device notice for {addr} — {err}")
             except Exception as e:
                 self.log.error(f"Error in autoconnect loop round: {e}")
 
@@ -381,7 +401,19 @@ class ConnectivityManagerModule(BaseBackendModule):
         if res:
             self.publish("bluetooth_manager.pairing.completed", {"device_address": addr, "success": True})
             self.log.info(f"🎉 Bluetooth pairing confirmed by UI for device {addr}")
+            asyncio.create_task(self._auto_connect_after_pairing(addr))
         return web.json_response({"status": "ok" if res else "error"})
+
+    async def _auto_connect_after_pairing(self, address: str) -> None:
+        await asyncio.sleep(1.0)
+        self.log.info(f"🔵 Initiating post-pairing auto-connection for device {address}...")
+        success, err = await self._bt_adapter.connect_device(address)
+        if success:
+            self.publish("bluetooth_manager.paired.connected", {"device_address": address})
+            self.log.info(f"🎉 Successfully auto-connected to newly paired device {address}")
+        else:
+            self.log.warning(f"Post-pairing auto-connect for {address} notice/result: {err}")
+
 
     async def handle_post_pair_reject(self, request: web.Request) -> web.Response:
         body = await request.json()

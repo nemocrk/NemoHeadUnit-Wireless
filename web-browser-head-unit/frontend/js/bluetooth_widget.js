@@ -110,7 +110,10 @@ export class BluetoothWidget {
                 if (dot) dot.className = 'bt-dot scanning';
                 if (scanBtn) scanBtn.classList.add('scanning');
                 if (scanLabel) scanLabel.textContent = 'Stop Scan';
+                // Periodically fetch and render intermediate discovered devices while scanning
+                this.refreshDiscoveredDevices();
             } else {
+
                 this.isScanning = false;
                 if (statusText) {
                     statusText.textContent = data.rfcomm_connected ? 'Connected (AA Active)' : 'Bluetooth Ready';

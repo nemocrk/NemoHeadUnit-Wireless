@@ -60,9 +60,14 @@ class BaseBluetoothAdapter(abc.ABC):
         """Register a persistent global callback for PIN/passkey pairing requests."""
         pass
 
+    def set_on_connection_callback(self, on_conn_cb: Callable[[str, bool], None]) -> None:
+        """Register a persistent global callback for device connection state changes."""
+        pass
+
     def get_adapter_address(self) -> str:
         """Get the local Bluetooth adapter MAC address."""
         return ""
+
 
 
     @abc.abstractmethod

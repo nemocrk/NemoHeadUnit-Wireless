@@ -138,6 +138,7 @@ def _win32_enumerate_devices(
     return_unknown: bool = False,
     issue_inquiry: bool = False,
     inquiry_timeout_multiplier: int = 4,
+    on_device_found_cb: Optional[Callable[[dict], None]] = None,
 ) -> list[dict]:
     """Enumerate Bluetooth devices using the Win32 BluetoothFindFirstDevice API.
 
@@ -150,6 +151,7 @@ def _win32_enumerate_devices(
         return_unknown: Include unknown/unpaired devices visible nearby.
         issue_inquiry: Perform an active Bluetooth inquiry scan.
         inquiry_timeout_multiplier: Inquiry duration = multiplier * 1.28 seconds.
+        on_device_found_cb: Callback invoked immediately as each device is found.
 
     Returns:
         List of device dicts with address, name, connected, paired keys.
@@ -196,23 +198,29 @@ def _win32_enumerate_devices(
         addr_str = ":".join(
             f"{(addr >> (8 * i)) & 0xFF:02X}" for i in range(5, -1, -1)
         )
-        return {
+        dev_dict = {
             "address": addr_str,
             "name": info.szName or "Unknown",
             "connected": bool(info.fConnected),
             "paired": bool(info.fRemembered),
             "trusted": bool(info.fAuthenticated),
         }
+        if on_device_found_cb:
+            try:
+                on_device_found_cb(dev_dict)
+            except Exception as e:
+                log.debug(f"Error in on_device_found_cb for {addr_str}: {e}")
+        return dev_dict
 
-    results.append(_extract_device(dev_info))
-
-    # Iterate remaining devices
-    bt_apis.BluetoothFindNextDevice.restype = ctypes.c_int
-    while bt_apis.BluetoothFindNextDevice(ctypes.c_void_p(h_find), ctypes.byref(dev_info)):
+    try:
         results.append(_extract_device(dev_info))
-
-    # Close the search handle
-    bt_apis.BluetoothFindDeviceClose(ctypes.c_void_p(h_find))
+        # Iterate remaining devices
+        bt_apis.BluetoothFindNextDevice.restype = ctypes.c_int
+        while bt_apis.BluetoothFindNextDevice(ctypes.c_void_p(h_find), ctypes.byref(dev_info)):
+            results.append(_extract_device(dev_info))
+    finally:
+        # Close the search handle
+        bt_apis.BluetoothFindDeviceClose(ctypes.c_void_p(h_find))
 
     return results
 
@@ -269,9 +277,14 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
         """Register a persistent global callback for PIN/passkey pairing requests."""
         self._on_pin_requested_cb = on_pin_cb
 
+    def set_on_connection_callback(self, on_conn_cb: Callable[[str, bool], None]) -> None:
+        """Register a persistent global callback for device connection state changes."""
+        self._on_connection_cb = on_conn_cb
+
     def get_adapter_address(self) -> str:
         """Get the local Windows Bluetooth adapter MAC address."""
         return self._adapter_address
+
 
 
     async def setup(self, adapter_name: str, discoverable: bool, discoverable_timeout: int) -> None:
@@ -325,23 +338,14 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
                     return_unknown=True,
                     issue_inquiry=True,
                     inquiry_timeout_multiplier=timeout_mult,
+                    on_device_found_cb=on_device_found_cb,
                 ),
             )
-
-            if devices:
-                for dev in devices:
-                    on_device_found_cb({
-                        "address": dev["address"],
-                        "name": dev["name"],
-                        "rssi": 0,  # Win32 Classic API doesn't expose RSSI
-                    })
-                log.info(f"Win32 Bluetooth discovery completed — found {len(devices)} device(s)")
-                return
-            else:
-                log.info("Win32 Bluetooth discovery completed — no devices found")
-                return
+            log.info(f"Win32 Bluetooth discovery completed — found {len(devices) if devices else 0} device(s)")
+            return
         except Exception as e:
             log.warning(f"Win32 discovery failed ({e}) — falling back to mock")
+
 
         # Mock fallback — emit a simulated device after a short delay
         await asyncio.sleep(0.5)
