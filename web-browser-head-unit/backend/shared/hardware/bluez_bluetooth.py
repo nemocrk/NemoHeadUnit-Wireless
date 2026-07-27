@@ -120,9 +120,10 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
 
         # Set adapter properties and retrieve address
         props = dbus.Interface(self._bus.get_object("org.bluez", adapter_path), "org.freedesktop.DBus.Properties")
-        props.Set("org.bluez.Adapter1", "Alias", dbus.String(adapter_name))
-        props.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(discoverable))
-        props.Set("org.bluez.Adapter1", "DiscoverableTimeout", dbus.UInt32(discoverable_timeout))
+        props.Set("org.bluez.Adapter1", "Alias", dbus.String(adapter_name, variant_level=1))
+        props.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(discoverable, variant_level=1))
+        props.Set("org.bluez.Adapter1", "DiscoverableTimeout", dbus.UInt32(discoverable_timeout, variant_level=1))
+
 
         try:
             addr_val = props.Get("org.bluez.Adapter1", "Address")
@@ -328,8 +329,9 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             path = self._find_device_path(address)
             if path:
                 props = dbus.Interface(self._bus.get_object("org.bluez", path), "org.freedesktop.DBus.Properties")
-                props.Set("org.bluez.Device1", "Trusted", dbus.Boolean(True))
+                props.Set("org.bluez.Device1", "Trusted", dbus.Boolean(True, variant_level=1))
                 log.info(f"Device {address} trusted")
+
         except Exception as e:
             log.warning(f"Failed to trust device {address}: {e}")
 
