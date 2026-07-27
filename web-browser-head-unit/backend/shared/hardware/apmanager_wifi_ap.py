@@ -19,6 +19,7 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
         self._glib_loop = None
         self._glib_thread = None
         self._running = False
+        self._active = False
         self._started_credentials = None
         self._ready_event = asyncio.Event()
         self._loop = None
@@ -55,13 +56,22 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
                 dbus_interface=_DBUS_INTERFACE
             )
 
-            log.info("APManager D-Bus client initialized successfully")
+            log.info("Linux APManager D-Bus client initialized successfully")
+            
+            # Check if AP is already running on startup
+            try:
+                success, creds = self._fetch_running_status({})
+                if success:
+                    log.info(f"Linux APManager active AP detected on startup: SSID='{creds.get('ssid')}'")
+            except Exception as e:
+                log.debug(f"Initial APManager status check notice: {e}")
         except Exception as e:
             log.error(f"Failed to connect to org.nemo.APManager: {e}")
             raise e
 
     def _on_ap_started(self, config_dict: dict) -> None:
         log.info(f"📶 [WiFi Stage 2/5] APStarted signal received from D-Bus: {config_dict}")
+        self._active = True
         # Convert DBus types to standard Python types
         self._started_credentials = {
             "ssid": str(config_dict.get("ssid", "AndroidAutoAP")),
@@ -78,6 +88,7 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
 
     def _on_ap_failed(self, error: str) -> None:
         log.error(f"❌ [WiFi Stage 2/5] APFailed signal received from D-Bus: {error}")
+        self._active = False
         self._started_credentials = None
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._ready_event.set)
@@ -87,7 +98,8 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
         self._ready_event.clear()
         self._started_credentials = None
 
-        log.info(f"📶 [WiFi Stage 2/5] Invoking Start() on APManager D-Bus service. Config: {config}")
+        ssid = config.get("ssid", "AndroidAutoAP")
+        log.info(f"📶 [WiFi Stage 2/5] Initiating Linux WiFi AP launch via APManager D-Bus (SSID='{ssid}'). Config: {config}")
         dbus_config = dbus.Dictionary(
             {
                 k: dbus.String(str(v)) if not isinstance(v, int) else dbus.Int32(v)
@@ -112,6 +124,8 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
                 return self._fetch_running_status(config)
 
             if self._started_credentials:
+                self._active = True
+                log.info(f"📶 [WiFi Stage 2/5] Linux WiFi AP active via APManager successfully! Credentials: SSID='{self._started_credentials.get('ssid')}', BSSID='{self._started_credentials.get('bssid')}', Gateway='{self._started_credentials.get('gateway_ip')}'")
                 return True, self._started_credentials
             return self._fetch_running_status(config)
         except Exception as e:
@@ -126,6 +140,7 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
             state, ssid, bssid, gateway_ip, key, dhcp_clients = self._proxy.Status(
                 dbus_interface=_DBUS_INTERFACE, signature=""
             )
+            is_active = bool(state == 1 or state == "running" or state == "active")
             creds = {
                 "ssid": str(ssid),
                 "key": str(key),
@@ -135,16 +150,23 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
                 "security_mode": 8,
                 "ap_type": 1,
             }
-            self._started_credentials = creds
-            log.info(f"📶 [WiFi Stage 2/5] AP is active. Credentials: {creds}")
-            return True, creds
+            if is_active or ssid:
+                self._active = True
+                self._started_credentials = creds
+                log.info(f"📶 [WiFi Stage 2/5] Linux WiFi AP active! Credentials: SSID='{ssid}', BSSID='{bssid}', Gateway='{gateway_ip}'")
+                return True, creds
+            else:
+                self._active = False
+                return False, {}
         except Exception as err:
             log.error(f"Failed to query APManager.Status(): {err}")
             return False, {}
 
     async def stop_ap(self) -> bool:
+        self._active = False
+        self._started_credentials = None
+        log.info("Stopping Linux WiFi AP...")
         try:
-            log.info("Invoking Stop() on APManager D-Bus service...")
             success, msg = self._proxy.Stop(dbus_interface=_DBUS_INTERFACE)
             return bool(success)
         except Exception as e:
@@ -155,3 +177,4 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
         await self.stop_ap()
         if self._glib_loop and self._glib_loop.is_running():
             self._glib_loop.quit()
+

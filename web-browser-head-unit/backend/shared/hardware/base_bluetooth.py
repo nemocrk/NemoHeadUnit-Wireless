@@ -56,7 +56,12 @@ class BaseBluetoothAdapter(abc.ABC):
         """Register the Android Auto RFCOMM service profile and listen for connections."""
         pass
 
+    def get_adapter_address(self) -> str:
+        """Get the local Bluetooth adapter MAC address."""
+        return ""
+
     @abc.abstractmethod
     async def teardown(self) -> None:
         """Clean up Bluetooth adapter resources."""
         pass
+

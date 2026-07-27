@@ -76,10 +76,11 @@ web-browser-head-unit/
 │   │   ├── bus_client.py     # Per-module ZMQ Pub/Sub IPC messaging client wrapper
 │   │   ├── proto/            # Protobuf compiled Python classes (protos/oaa)
 │   │   └── hardware/         # Cross-platform Hardware Adapter Layer (HAL)
-│   │       ├── base_adapter.py        # BaseBluetoothAdapter & BaseWifiApAdapter abstract interfaces
-│   │       ├── bluez_bluetooth.py     # Linux BlueZ D-Bus Bluetooth driver
+│   │       ├── base_bluetooth.py      # BaseBluetoothAdapter abstract interface
+│   │       ├── base_wifi_ap.py        # BaseWifiApAdapter abstract interface
+│   │       ├── bluez_bluetooth.py     # Linux BlueZ D-Bus Bluetooth driver with rich stage logging & MAC resolution
 │   │       ├── windows_bluetooth.py   # Windows / Mock RFCOMM Bluetooth driver
-│   │       ├── apmanager_wifi_ap.py   # Linux D-Bus APManager driver (org.nemo.APManager)
+│   │       ├── apmanager_wifi_ap.py   # Linux D-Bus APManager driver (org.nemo.APManager) with active state tracking
 │   │       └── windows_wifi_ap.py     # Windows Mobile Hotspot & Mock WiFi AP driver
 │   └── modules/              # Process-isolated backend modules (ALL extending BaseBackendModule)
 │       ├── bus_broker/       # Priority 0 core IPC router module (autonomous, manages sockets & system.heartbeat)

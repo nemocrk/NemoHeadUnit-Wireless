@@ -59,9 +59,15 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         self._active_rfcomm_cb = None
         self._on_pin_requested_cb = None
         
-        # State trackers for pairing
+        # State trackers for pairing and connection state
         self._dbus_reply_handler = None
         self._dbus_error_handler = None
+        self._adapter_address = ""
+        self._disconnected_override_addrs: set[str] = set()
+
+    def get_adapter_address(self) -> str:
+        """Get the local BlueZ Bluetooth adapter MAC address."""
+        return self._adapter_address
 
     async def setup(self, adapter_name: str, discoverable: bool, discoverable_timeout: int) -> None:
         import dbus
@@ -104,11 +110,20 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         )
         self._initialized = True
 
-        # Set adapter properties
+        # Set adapter properties and retrieve address
         props = dbus.Interface(self._bus.get_object("org.bluez", adapter_path), "org.freedesktop.DBus.Properties")
         props.Set("org.bluez.Adapter1", "Alias", dbus.String(adapter_name))
         props.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(discoverable))
         props.Set("org.bluez.Adapter1", "DiscoverableTimeout", dbus.UInt32(discoverable_timeout))
+
+        try:
+            addr_val = props.Get("org.bluez.Adapter1", "Address")
+            self._adapter_address = str(addr_val).upper()
+            log.info(f"Linux BlueZ Bluetooth Adapter ready (path={adapter_path}, address={self._adapter_address})")
+        except Exception as e:
+            log.warning(f"Could not read BlueZ adapter address: {e}")
+
+        log.info(f"Linux BlueZ Bluetooth Adapter setup alias: {adapter_name}")
 
         # Register standard profiles (HFP/HSP)
         try:
@@ -203,6 +218,7 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
     async def start_discovery(self, duration_sec: int, on_device_found_cb: Callable[[dict], None]) -> None:
         if self._discovery_running:
             return
+        log.info(f"BlueZ Bluetooth discovery started (duration={duration_sec}s)...")
         self._discovery_running = True
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._run_discovery, duration_sec, on_device_found_cb)
@@ -212,14 +228,17 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             self._adapter.StartDiscovery()
             deadline = time.monotonic() + duration_sec
             seen = set()
+            found_count = 0
             while self._discovery_running and time.monotonic() < deadline:
                 devices = self._get_devices()
                 for dev in devices:
                     addr = dev["address"]
                     if addr not in seen:
                         seen.add(addr)
+                        found_count += 1
                         on_device_found_cb(dev)
                 time.sleep(1.0)
+            log.info(f"BlueZ Bluetooth discovery completed — found {found_count} device(s)")
         except Exception as e:
             log.error(f"Discovery error: {e}")
         finally:
@@ -245,14 +264,17 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         return results
 
     async def stop_discovery(self) -> None:
+        log.info("BlueZ Bluetooth active discovery stopped")
         self._discovery_running = False
 
     async def pair_device(self, address: str, on_pin_cb: Callable[[str, str], None]) -> tuple[bool, str]:
         import dbus
+        log.info(f"Triggering pairing with {address} on BlueZ")
         self._on_pin_requested_cb = on_pin_cb
         try:
             device_path = self._find_device_path(address)
             if not device_path:
+                log.warning(f"Pairing failed: Device {address} not found in DBus objects cache")
                 return False, "Device not found in DBus objects cache"
             
             # Trust device beforehand to make it auto-connect standard profiles
@@ -262,8 +284,10 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             
             # Start pairing
             device.Pair()
+            log.info(f"BlueZ pairing initiated with {address}")
             return True, ""
         except Exception as e:
+            log.warning(f"BlueZ pairing with {address} failed: {e}")
             return False, str(e)
 
     def _find_device_path(self, address: str) -> Optional[str]:
@@ -296,50 +320,62 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         self._dbus_error_handler = None
 
         if confirm:
-            log.info(f"Confirming pairing code for {address}")
+            log.info(f"BlueZ pairing confirm: True for {address}")
             self._trust_device(address)
             if reply:
                 reply()
             return True
         else:
-            log.warning(f"Rejecting pairing code for {address}")
+            log.warning(f"BlueZ pairing confirm: False (rejecting) for {address}")
             if error:
                 error(dbus.exceptions.DBusException("org.bluez.Error.Rejected", "User rejected pairing"))
             return True
 
     async def connect_device(self, address: str) -> tuple[bool, str]:
         import dbus
+        log.info(f"Connecting to {address} on BlueZ")
+        self._disconnected_override_addrs.discard(address)
         try:
             path = self._find_device_path(address)
             if not path:
+                log.warning(f"Connect device failed: {address} not found")
                 return False, "Device not found"
             device = dbus.Interface(self._bus.get_object("org.bluez", path), "org.bluez.Device1")
             device.Connect()
+            log.info(f"Successfully invoked BlueZ Device1.Connect() for {address}")
             return True, ""
         except Exception as e:
+            log.warning(f"BlueZ Device1.Connect() to {address} failed: {e}")
             return False, str(e)
 
     async def disconnect_device(self, address: str) -> bool:
         import dbus
+        log.info(f"Disconnecting {address} on BlueZ")
+        self._disconnected_override_addrs.add(address)
         try:
             path = self._find_device_path(address)
             if not path:
                 return False
             device = dbus.Interface(self._bus.get_object("org.bluez", path), "org.bluez.Device1")
             device.Disconnect()
+            log.info(f"Successfully disconnected device {address} via BlueZ")
             return True
-        except Exception:
+        except Exception as e:
+            log.warning(f"BlueZ disconnect_device notice for {address}: {e}")
             return False
 
     async def remove_paired_device(self, address: str) -> bool:
         import dbus
+        log.info(f"Removing paired device: {address}")
         try:
             path = self._find_device_path(address)
             if not path:
                 return False
             self._adapter.RemoveDevice(path)
+            log.info(f"Successfully removed paired device {address} from BlueZ")
             return True
-        except Exception:
+        except Exception as e:
+            log.warning(f"Failed to remove paired device {address}: {e}")
             return False
 
     async def get_paired_devices(self) -> list[dict]:
@@ -352,14 +388,18 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
                 if "org.bluez.Device1" in ifaces:
                     props = ifaces["org.bluez.Device1"]
                     if props.get("Paired", False):
+                        addr = str(props.get("Address", ""))
+                        is_connected = bool(props.get("Connected", False)) and (addr not in self._disconnected_override_addrs)
                         results.append({
-                            "address": str(props.get("Address", "")),
+                            "address": addr,
                             "name": str(props.get("Alias", props.get("Name", "Unknown"))),
-                            "connected": bool(props.get("Connected", False)),
+                            "connected": is_connected,
                             "trusted": bool(props.get("Trusted", False)),
                         })
+            log.debug(f"BlueZ paired devices: {[d['address'] for d in results]}")
             return results
-        except Exception:
+        except Exception as e:
+            log.warning(f"Failed to fetch BlueZ paired devices: {e}")
             return []
 
     def register_rfcomm_server(self, on_connection_cb: Callable[[object, str], None]) -> bool:
@@ -420,3 +460,6 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         except Exception:
             pass
         self._initialized = False
+        log.info("BlueZ Bluetooth adapter shutdown complete")
+
+
