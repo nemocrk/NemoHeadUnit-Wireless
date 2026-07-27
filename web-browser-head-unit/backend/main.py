@@ -211,7 +211,7 @@ def run():
 
     # 3. Multi-step priority boot sequence
     time.sleep(0.5)
-    priority_map = _collect_module_ready(pub_sock, sub_sock, module_names, 5.0)
+    priority_map = _collect_module_ready(pub_sock, sub_sock, module_names, READYTOSTART_WINDOW)
     log.info(f"Boot priority map → {priority_map}")
 
     for level in sorted(priority_map.keys()):
