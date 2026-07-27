@@ -338,14 +338,23 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
                     return_unknown=True,
                     issue_inquiry=True,
                     inquiry_timeout_multiplier=timeout_mult,
-                    on_device_found_cb=on_device_found_cb,
                 ),
             )
-            log.info(f"Win32 Bluetooth discovery completed — found {len(devices) if devices else 0} device(s)")
-            return
+
+            if devices:
+                for dev in devices:
+                    on_device_found_cb({
+                        "address": dev["address"],
+                        "name": dev["name"],
+                        "rssi": 0,  # Win32 Classic API doesn't expose RSSI
+                    })
+                log.info(f"Win32 Bluetooth discovery completed — found {len(devices)} device(s)")
+                return
+            else:
+                log.info("Win32 Bluetooth discovery completed — no devices found")
+                return
         except Exception as e:
             log.warning(f"Win32 discovery failed ({e}) — falling back to mock")
-
 
         # Mock fallback — emit a simulated device after a short delay
         await asyncio.sleep(0.5)
@@ -354,6 +363,8 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
             "name": "Simulated Phone",
             "rssi": -55
         })
+
+
 
     # ------------------------------------------------------------------
     # Stop discovery
