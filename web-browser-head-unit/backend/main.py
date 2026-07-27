@@ -95,6 +95,7 @@ def _collect_module_ready(
     pub_sock: zmq.Socket,
     sub_sock: zmq.Socket,
     module_names: list[str],
+    external_handled_modules: int,
     window: float,
 ) -> dict[int, list[str]]:
     """Publishes system.readytostart, then collects system.module_ready replies."""
@@ -105,7 +106,7 @@ def _collect_module_ready(
     replied: set[str] = set()
     deadline = time.monotonic() + window
 
-    while time.monotonic() < deadline and len(replied) < len(module_names):
+    while time.monotonic() < deadline and len(replied) < len(module_names) + external_handled_modules:
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
             break
@@ -211,7 +212,7 @@ def run():
 
     # 3. Multi-step priority boot sequence
     time.sleep(0.5)
-    priority_map = _collect_module_ready(pub_sock, sub_sock, module_names, READYTOSTART_WINDOW)
+    priority_map = _collect_module_ready(pub_sock, sub_sock, module_names, len(modules) - len(other_modules), READYTOSTART_WINDOW)
     log.info(f"Boot priority map → {priority_map}")
 
     for level in sorted(priority_map.keys()):
