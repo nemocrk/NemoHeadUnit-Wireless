@@ -155,26 +155,53 @@ export class UIControls {
     }
 
     startWorkflowPolling() {
-        const updateWorkflow = () => {
-            fetch('/api/connectivity/status')
-                .then((res) => res.json())
-                .then((data) => {
-                    if (data.wifi_ap && data.wifi_ap.active) {
-                        this.workflowText.textContent = `WiFi Hotspot Active: ${data.wifi_ap.ssid || 'NemoTestAP'} — Awaiting Phone Connection...`;
-                    } else if (data.bluetooth && data.bluetooth.discovering) {
-                        this.workflowText.textContent = 'Scanning Bluetooth for Phone Pair...';
+        const safeFetchJson = async (url) => {
+            try {
+                const res = await fetch(url);
+                if (!res.ok) return null;
+                return await res.json();
+            } catch (e) {
+                return null;
+            }
+        };
+
+        const updateWorkflow = async () => {
+            if (!this.workflowText) return;
+            try {
+                const [connRes, tcpRes, chRes] = await Promise.all([
+                    safeFetchJson('/api/connectivity/status'),
+                    safeFetchJson('/api/tcp/status'),
+                    safeFetchJson('/api/channels/status')
+                ]);
+
+                if (tcpRes && tcpRes.client_address) {
+                    if (tcpRes.tls_active) {
+                        const activeCount = (chRes && chRes.active_channels) ? chRes.active_channels.length : 0;
+                        if (activeCount > 0) {
+                            this.workflowText.textContent = `Android Auto Session Connected — Streaming Video (${activeCount} active channels)`;
+                        } else {
+                            this.workflowText.textContent = `TLS Secured with ${tcpRes.client_address} — Executing Handshake...`;
+                        }
                     } else {
-                        this.workflowText.textContent = 'Initializing NemoHeadUnit Adapters...';
+                        this.workflowText.textContent = `Phone Connected (${tcpRes.client_address}) — Initializing TLS...`;
                     }
-                })
-                .catch(() => {
-                    this.workflowText.textContent = 'Awaiting NemoHeadUnit Backend Service...';
-                });
+                } else if (connRes && connRes.wifi_ap && connRes.wifi_ap.active) {
+                    this.workflowText.textContent = `WiFi Hotspot Active: ${connRes.wifi_ap.ssid || 'NemoTestAP'} — Awaiting Phone Connection...`;
+                } else if (connRes && connRes.bluetooth && connRes.bluetooth.discovering) {
+                    this.workflowText.textContent = 'Scanning Bluetooth for Phone Pair...';
+                } else {
+                    this.workflowText.textContent = 'Initializing NemoHeadUnit Adapters...';
+                }
+            } catch (err) {
+                this.workflowText.textContent = 'Awaiting NemoHeadUnit Backend Service...';
+            }
         };
 
         updateWorkflow();
-        setInterval(updateWorkflow, 3000);
+        setInterval(updateWorkflow, 2000);
     }
+
+
 
     loadConfigSettings() {
         const container = document.getElementById('config-editor');

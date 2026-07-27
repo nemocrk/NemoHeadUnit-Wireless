@@ -15,5 +15,6 @@
         "./web-browser-head-unit/backend"
     ],
     "python.analysis.typeCheckingMode": "standard",
-    "chatgpt.runCodexInWindowsSubsystemForLinux": true
+    "chatgpt.runCodexInWindowsSubsystemForLinux": true,
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
 }

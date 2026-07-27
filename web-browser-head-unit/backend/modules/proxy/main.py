@@ -48,7 +48,9 @@ class ProxyModule(BaseBackendModule):
 
     async def setup(self) -> None:
         """Configures proxy fallback handler and ZMQ topic subscriptions."""
+        await super().setup()
         self.proxy_client_session = aiohttp.ClientSession()
+
 
         # System discovery endpoints
         self.web_app.router.add_get("/api/system/modules", self.handle_get_modules)

@@ -62,7 +62,8 @@ class SensorChannelHandler:
             d_status.status = 0  # UNRESTRICTED
         elif sensor_type == 10:  # NIGHT_DATA
             n_mode = event.night_mode.add()
-            n_mode.night_mode = False
+            n_mode.is_night = False
+
         elif sensor_type == 7:  # PARKING_BRAKE
             p_brake = event.parking_brake.add()
             p_brake.parking_brake = True

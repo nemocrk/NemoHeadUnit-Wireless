@@ -12,7 +12,9 @@ Module Responsibilities:
 """
 
 import asyncio
+import json
 import struct
+
 from typing import Any, Dict, List, Optional, Set
 import aiohttp
 from aiohttp import web
@@ -81,7 +83,43 @@ class ChannelManagerModule(BaseBackendModule):
 
     def get_channel_type(self, channel_id: int) -> ChannelType:
         """Return the ChannelType for a given channel_id."""
+        if channel_id == 0:
+            return ChannelType.CONTROL
         return self.channel_type_map.get(channel_id, ChannelType.UNKNOWN)
+
+    def on_config_updated(self, config: dict) -> None:
+        super().on_config_updated(config)
+        # Pre-populate channel_type_map from module configuration defaults
+        type_map = {0: ChannelType.CONTROL}
+        for ch in config.get("channels", []):
+            cid = ch.get("channel_id")
+            if cid is None:
+                continue
+            if "input_channel" in ch:
+                type_map[cid] = ChannelType.INPUT
+            elif "sensor_channel" in ch:
+                type_map[cid] = ChannelType.SENSOR
+            elif "av_channel" in ch:
+                codec = ch["av_channel"].get("codec", "")
+                if "VIDEO" in str(codec):
+                    type_map[cid] = ChannelType.VIDEO
+                else:
+                    type_map[cid] = ChannelType.AUDIO
+            elif "av_input_channel" in ch:
+                type_map[cid] = ChannelType.AUDIO_MIC
+            elif "bluetooth_channel" in ch:
+                type_map[cid] = ChannelType.BLUETOOTH
+            elif "wifi_channel" in ch:
+                type_map[cid] = ChannelType.WIFI
+        for k, v in type_map.items():
+            if k not in self.channel_type_map:
+                self.channel_type_map[k] = v
+        for ch in config.get("channels", []):
+            cid = ch.get("channel_id")
+            if cid is not None and cid not in self.active_channels:
+                self.active_channels[cid] = ch
+        self.log.info(f"ChannelManager: Pre-populated channel_type_map: {self.channel_type_map} and active_channels: {list(self.active_channels.keys())}")
+
 
     def get_channel_id_for_type(self, target_type: ChannelType) -> int:
         """Return the first channel_id matching the given ChannelType."""
@@ -98,6 +136,7 @@ class ChannelManagerModule(BaseBackendModule):
             ChannelType.WIFI: 14,
         }
         return fallback_map.get(target_type, 0)
+
 
     def get_default_config(self) -> dict[str, Any]:
         try:
@@ -182,10 +221,13 @@ class ChannelManagerModule(BaseBackendModule):
         if not payload:
             return
 
-        if ch_id == 2:
+        ch_type = self.get_channel_type(ch_id)
+
+        if ch_type == ChannelType.VIDEO:
             await self.video_handler.process_shm_frame(msg_id, payload)
-        elif ch_id in (3, 4):
-            await self.audio_handler.process_shm_frame(msg_id, payload)
+        elif ch_type == ChannelType.AUDIO:
+            await self.audio_handler.process_shm_frame(ch_id, msg_id, payload)
+
 
     async def on_ch0_frame(self, data: dict) -> None:
         """Handle Channel 0 Control messages."""
@@ -200,27 +242,39 @@ class ChannelManagerModule(BaseBackendModule):
         msg_id = data.get("message_id", 0)
         payload_hex = data.get("payload_hex", "")
         body = bytes.fromhex(payload_hex) if payload_hex else b""
-
         ch_type = self.get_channel_type(ch_id)
 
-        if ch_type == ChannelType.CONTROL or ch_id == 0:
-            return  # Handled by on_ch0_frame via aa.frame.ch0 subscription
-        elif ch_type == ChannelType.INPUT or ch_id == 1:
-            await self.input_handler.handle_frame(ch_id, msg_id, body)
-        elif ch_type == ChannelType.SENSOR or ch_id == 2:
-            await self.sensor_handler.handle_frame(ch_id, msg_id, body)
-        elif ch_type == ChannelType.VIDEO or ch_id == 3:
-            await self.video_handler.handle_frame(ch_id, msg_id, body)
-        elif ch_type == ChannelType.AUDIO or ch_id in (4, 5, 6):
-            await self.audio_handler.handle_frame(ch_id, msg_id, body)
-        elif ch_type == ChannelType.AUDIO_MIC or ch_id == 7:
-            await self.av_input_handler.handle_frame(ch_id, msg_id, body)
-        elif ch_type == ChannelType.BLUETOOTH or ch_id == 8:
-            await self.bluetooth_handler.handle_frame(ch_id, msg_id, body)
-        elif ch_type == ChannelType.WIFI or ch_id == 14:
-            await self.wifi_handler.handle_frame(ch_id, msg_id, body)
-        else:
-            self.log.warning(f"⚠️ [Unhandled Channel Frame] Received frame on unhandled channel ch={ch_id} (type={ch_type.name}) msgId=0x{msg_id:04x} len={len(body)}")
+        # Media frames (0x0000 and 0x0001) are handled zero-copy via SHM (on_frame_shm)
+        from protos.oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessage
+        if msg_id in (
+            AVChannelMessage.Enum.AV_MEDIA_WITH_TIMESTAMP_INDICATION,
+            AVChannelMessage.Enum.AV_MEDIA_INDICATION,
+        ):
+            return
+
+        try:
+            if ch_type == ChannelType.CONTROL:
+                return  # Handled by on_ch0_frame via aa.frame.ch0 subscription
+            elif ch_type == ChannelType.INPUT:
+                await self.input_handler.handle_frame(ch_id, msg_id, body)
+            elif ch_type == ChannelType.SENSOR:
+                await self.sensor_handler.handle_frame(ch_id, msg_id, body)
+            elif ch_type == ChannelType.VIDEO:
+                await self.video_handler.handle_frame(ch_id, msg_id, body)
+            elif ch_type == ChannelType.AUDIO:
+                await self.audio_handler.handle_frame(ch_id, msg_id, body)
+            elif ch_type == ChannelType.AUDIO_MIC:
+                await self.av_input_handler.handle_frame(ch_id, msg_id, body)
+            elif ch_type == ChannelType.BLUETOOTH:
+                await self.bluetooth_handler.handle_frame(ch_id, msg_id, body)
+            elif ch_type == ChannelType.WIFI:
+                await self.wifi_handler.handle_frame(ch_id, msg_id, body)
+            else:
+                self.log.warning(f"⚠️ [Unhandled Channel Frame] Received frame on unhandled channel ch={ch_id} (type={ch_type.name}) msgId=0x{msg_id:04x} len={len(body)}")
+        except Exception as exc:
+            self.log.error(f"❌ Error dispatching frame ch={ch_id} msgId=0x{msg_id:04x}: {exc}", exc_info=True)
+
+
 
     async def on_sdr_response(self, data: dict) -> None:
         sdr_hex = data.get("sdr_hex", "")
@@ -228,8 +282,53 @@ class ChannelManagerModule(BaseBackendModule):
             parsed = channels_from_sdr_bytes(sdr_hex)
             self.active_channels = {ch["channel_id"]: ch for ch in parsed if "channel_id" in ch}
             self.log.info("SDR registered %d channels", len(self.active_channels))
+            await self.broadcast_ws_json(self.get_stream_config_dict())
 
-    async def send_wire_frame(self, channel_id: int, message_id: int, body: bytes, encrypted: bool = False) -> None:
+    def get_stream_config_dict(self) -> dict:
+        """Construct dynamic stream_config JSON payload for all active media channels."""
+        from shared.proto_utils import get_codec_descriptor
+        streams = {}
+        for ch_id, ch_meta in self.active_channels.items():
+            ch_type = self.get_channel_type(ch_id)
+            if ch_type in (ChannelType.VIDEO, ChannelType.AUDIO):
+                av_conf = ch_meta.get("av_channel", {})
+                codec_raw = av_conf.get("codec", "MEDIA_CODEC_UNKNOWN")
+                desc = get_codec_descriptor(codec_raw)
+
+                if ch_type == ChannelType.VIDEO:
+                    v_configs = av_conf.get("video_configs", [{}])
+                    v_cfg = v_configs[0] if v_configs else {}
+                    res_str = str(v_cfg.get("video_resolution", "VIDEO_1280x720"))
+                    w, h = 1280, 720
+                    if "x" in res_str:
+                        try:
+                            parts = res_str.replace("VIDEO_", "").split("x")
+                            w, h = int(parts[0]), int(parts[1])
+                        except Exception:
+                            pass
+                    desc.update({
+                        "width": w,
+                        "height": h,
+                        "fps": 30,
+                    })
+                elif ch_type == ChannelType.AUDIO:
+                    a_configs = av_conf.get("audio_configs", [{}])
+                    a_cfg = a_configs[0] if a_configs else {}
+                    desc.update({
+                        "sampleRate": a_cfg.get("sample_rate", 48000 if desc.get("codec") != "PCM" else 16000),
+                        "channels": a_cfg.get("channel_count", 2 if desc.get("codec") != "PCM" else 1),
+                        "bitDepth": a_cfg.get("bit_depth", 16),
+                        "audioType": av_conf.get("audio_type", "MEDIA"),
+                    })
+
+                streams[str(ch_id)] = desc
+
+        return {
+            "type": "stream_config",
+            "streams": streams,
+        }
+
+    async def send_wire_frame(self, channel_id: int, message_id: int, body: bytes, encrypted: bool = False, log_level: str = None) -> None:
         """Publish outgoing frame to aa.frame.send."""
         frame_dict = {
             "channel_id": channel_id,
@@ -237,6 +336,7 @@ class ChannelManagerModule(BaseBackendModule):
             "flags": 0x0B,
             "payload_hex": body.hex(),
             "encrypted": encrypted,
+            "log_level": log_level,
         }
         self.publish("aa.frame.send", frame_dict)
 
@@ -254,16 +354,42 @@ class ChannelManagerModule(BaseBackendModule):
         for ws in stale:
             self.ws_clients.discard(ws)
 
+    async def broadcast_ws_json(self, data: dict) -> None:
+        if not self.ws_clients:
+            return
+
+        text = json.dumps(data)
+        stale = []
+        for ws in self.ws_clients:
+            try:
+                await ws.send_str(text)
+            except Exception:
+                stale.append(ws)
+
+        for ws in stale:
+            self.ws_clients.discard(ws)
+
+
     # ------------------------------------------------------------------
     # REST & WebSocket Endpoints
     # ------------------------------------------------------------------
 
     async def handle_ws_stream(self, request: web.Request) -> web.WebSocketResponse:
-        """Unified WebSocket stream multiplexing Video (0) and Audio (1) arraybuffers."""
+        """Unified WebSocket stream multiplexing Video and Audio channels by channel_id."""
         ws = web.WebSocketResponse(protocols=("binary",))
         await ws.prepare(request)
         self.ws_clients.add(ws)
+
+        # Transmit current stream_config metadata immediately on connection
+        try:
+            config_msg = self.get_stream_config_dict()
+            await ws.send_str(json.dumps(config_msg))
+            self.log.info(f"🌐 WebSocket client connected — sent dynamic stream_config for {len(config_msg['streams'])} channel(s): {list(config_msg['streams'].keys())}")
+        except Exception as exc:
+            self.log.warning(f"Failed to send initial stream_config to WebSocket client: {exc}")
+
         self.log.info("Frontend WebCodecs WS connected from %s", request.remote)
+        await self.video_handler.update_video_focus()
 
         try:
             async for msg in ws:
@@ -271,13 +397,18 @@ class ChannelManagerModule(BaseBackendModule):
                     # Upstream Mic audio frame from browser
                     data = msg.data
                     if len(data) > 0:
+                        self.log.debug(f"🎤 [Mic Upstream] Received audio chunk from browser client {request.remote} (len={len(data)} bytes)")
                         offset = self.shm.upstream.write_frame(1, 0, data)
                         self.publish("aa.mic.shm", {"shm_offset": offset, "len": len(data)})
+                        await self.av_input_handler.send_mic_data(data)
+
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     self.log.error("WS error: %s", ws.exception())
         finally:
             self.ws_clients.discard(ws)
             self.log.info("Frontend WebCodecs WS disconnected from %s", request.remote)
+            await self.video_handler.update_video_focus()
+
 
         return ws
 
@@ -296,7 +427,17 @@ class ChannelManagerModule(BaseBackendModule):
             x = body.get("x", 0)
             y = body.get("y", 0)
             action = body.get("action", 0)
-            await self.input_handler.handle_touch_event(x, y, action)
+            pointer_id = body.get("pointer_id", 0)
+            action_index = body.get("action_index", 0)
+            pointers = body.get("pointers", None)
+            await self.input_handler.handle_touch_event(
+                action=action,
+                pointers=pointers,
+                x=x,
+                y=y,
+                pointer_id=pointer_id,
+                action_index=action_index,
+            )
             return web.json_response({"status": "ok"})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)

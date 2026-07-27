@@ -110,7 +110,9 @@
             const touch = new TouchHandler(canvas);
 
             // 4. Initialize WebCodecs Player
-            const player = new WebCodecsPlayer(canvas, null);
+            const workflowTextEl = document.getElementById('workflow-text');
+            const player = new WebCodecsPlayer(canvas, workflowTextEl);
+
 
             // Hide disconnected clock screen when first video frame is rendered
             player.handleVideoFrame = function(frame) {

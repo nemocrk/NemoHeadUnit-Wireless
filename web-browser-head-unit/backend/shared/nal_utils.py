@@ -50,23 +50,24 @@ def is_header_nal(payload: bytes) -> bool:
     return nal_type in (NAL_TYPE_SPS, NAL_TYPE_PPS)
 
 
-def pack_media_frame(stream_type: int, timestamp_us: int, payload: bytes) -> bytes:
+def pack_media_frame(channel_id: int, timestamp_us: int, payload: bytes) -> bytes:
     """
     Pack binary WebSocket media payload according to docs/new-pattern.md:
-      [StreamType: 1 Byte] + [Timestamp: 8 Bytes (unsigned long long BE)] + [Payload: N Bytes]
+      [ChannelID: 1 Byte] + [Timestamp: 8 Bytes (unsigned long long BE)] + [Payload: N Bytes]
     """
-    header = struct.pack(">B Q", stream_type, timestamp_us)
+    header = struct.pack(">B Q", channel_id, timestamp_us)
     return header + payload
 
 
 def unpack_media_frame(data: bytes) -> Tuple[int, int, bytes]:
     """
     Unpack binary WebSocket media payload:
-      Returns (stream_type, timestamp_us, payload)
+      Returns (channel_id, timestamp_us, payload)
     """
     if len(data) < 9:
         raise ValueError(f"Payload too short ({len(data)} bytes, minimum 9 required)")
 
-    stream_type, timestamp_us = struct.unpack_from(">B Q", data, 0)
+    channel_id, timestamp_us = struct.unpack_from(">B Q", data, 0)
     payload = data[9:]
-    return stream_type, timestamp_us, payload
+    return channel_id, timestamp_us, payload
+

@@ -15,8 +15,14 @@ export class WebCodecsPlayer {
         this.ws = null;
         
         this.isConfigured = false;
+        this.hasReceivedKeyframe = false;
+        this.latestSps = null;
+        this.latestPps = null;
         this.frameCount = 0;
         this.lastFpsUpdate = performance.now();
+        this.mediaRecorder = null;
+        this.micStream = null;
+        this.streamConfigs = {};
 
         this.initDecoders();
     }
@@ -33,6 +39,7 @@ export class WebCodecsPlayer {
             error: (err) => {
                 console.error('VideoDecoder error:', err);
                 this.updateStatus(`VideoDecoder Error: ${err.message}`, true);
+                this.hasReceivedKeyframe = false;
             }
         });
 
@@ -46,20 +53,64 @@ export class WebCodecsPlayer {
         if ('AudioDecoder' in window) {
             this.audioDecoder = new AudioDecoder({
                 output: (audioData) => this.handleAudioData(audioData),
-                error: (err) => console.error('AudioDecoder error:', err)
+                error: (err) => {
+                    const ch = (this.lastSubmittedAudioChunk && this.lastSubmittedAudioChunk.channelId) ? this.lastSubmittedAudioChunk.channelId : '?';
+                    console.error(`[WebCodecsPlayer ch${ch}] AudioDecoder decoding error (switching to WebAudio PCM fallback):`, err);
+                    if (this.lastSubmittedAudioChunk && this.lastSubmittedAudioChunk.payload) {
+                        const p = this.lastSubmittedAudioChunk.payload;
+                        const hexHeader = Array.from(p.subarray(0, 64)).map(b => b.toString(16).padStart(2, '0')).join('');
+                        console.error(`[WebCodecsPlayer ch${ch}] ❌ FAILING AUDIO FRAME (len=${p.length}): hex=${hexHeader}`);
+                    }
+                    try { this.audioDecoder.close(); } catch (e) {}
+                    this.audioDecoder = null;
+                }
             });
+        }
+    }
 
-            try {
-                this.audioDecoder.configure({
-                    codec: 'mp4a.40.2', // AAC-LC
-                    numberOfChannels: 2,
-                    sampleRate: 48000
-                });
-            } catch (e) {
-                console.warn('AudioDecoder AAC config fallback:', e);
+    applyStreamConfigs(streams) {
+        if (!streams) return;
+        for (const [chId, config] of Object.entries(streams)) {
+            if (config.media_type === 'AUDIO' && config.codec !== 'PCM') {
+                try {
+                    // Re-create AudioDecoder if closed or null on early error
+                    if (!this.audioDecoder && ('AudioDecoder' in window)) {
+                        this.audioDecoder = new AudioDecoder({
+                            output: (audioData) => this.handleAudioData(audioData),
+                            error: (err) => {
+                                const ch = (this.lastSubmittedAudioChunk && this.lastSubmittedAudioChunk.channelId) ? this.lastSubmittedAudioChunk.channelId : '?';
+                                console.error(`[WebCodecsPlayer ch${ch}] AudioDecoder decoding error (switching to WebAudio fallback):`, err);
+                                if (this.lastSubmittedAudioChunk && this.lastSubmittedAudioChunk.payload) {
+                                    const p = this.lastSubmittedAudioChunk.payload;
+                                    const hexHeader = Array.from(p.subarray(0, 64)).map(b => b.toString(16).padStart(2, '0')).join('');
+                                    console.error(`[WebCodecsPlayer ch${ch}] ❌ FAILING AUDIO FRAME (len=${p.length}): hex=${hexHeader}`);
+                                }
+                                try { this.audioDecoder.close(); } catch (e) {}
+                                this.audioDecoder = null;
+                            }
+                        });
+                    }
+
+
+                    if (this.audioDecoder) {
+                        // For ADTS AAC streams, description MUST be undefined so AudioDecoder expects ADTS container headers
+                        const desc = (config.audio_format === 'aac_adts') ? undefined : (Array.isArray(config.description) ? new Uint8Array(config.description) : undefined);
+                        this.audioDecoder.configure({
+                            codec: config.codec || 'mp4a.40.2',
+                            numberOfChannels: config.channels || 2,
+                            sampleRate: config.sampleRate || 48000,
+                            description: desc
+                        });
+                        console.info(`[WebCodecsPlayer ch${chId}] AudioDecoder configured for (${config.codec}, ${config.sampleRate}Hz, ${config.channels}ch, format=${config.audio_format})`);
+                    }
+                } catch (e) {
+                    console.warn(`[WebCodecsPlayer ch${chId}] AudioDecoder config failed:`, e);
+                }
             }
         }
     }
+
+
 
     updateStatus(msg, isError = false) {
         if (this.status) {
@@ -74,11 +125,11 @@ export class WebCodecsPlayer {
 
         this.ws.onopen = () => {
             this.updateStatus('WebSocket Connected. Unified Stream Active.');
-            this.startMicrophoneUplink();
         };
 
         this.ws.onclose = () => {
             this.updateStatus('WebSocket Disconnected', true);
+            this.stopMicrophoneUplink();
             setTimeout(() => this.connect(wsUrl), 2000);
         };
 
@@ -91,24 +142,74 @@ export class WebCodecsPlayer {
     }
 
     handleMessage(event) {
+        if (typeof event.data === 'string') {
+            try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'stream_config') {
+                    console.info('[WebCodecsPlayer] Received dynamic stream_config from backend:', msg.streams);
+                    this.streamConfigs = msg.streams || {};
+                    this.applyStreamConfigs(this.streamConfigs);
+                } else if (msg.type === 'mic_control') {
+                    if (msg.enabled) {
+                        console.info('[WebCodecsPlayer] Microphone uplink requested by phone -> Enabling microphone');
+                        this.startMicrophoneUplink();
+                    } else {
+                        console.info('[WebCodecsPlayer] Microphone uplink released by phone -> Disabling microphone');
+                        this.stopMicrophoneUplink();
+                    }
+                }
+            } catch (e) {
+                console.warn('[WebCodecsPlayer] Error parsing JSON text message:', e);
+            }
+            return;
+        }
+
         if (!(event.data instanceof ArrayBuffer)) return;
 
         const data = event.data;
         if (data.byteLength < 9) return;
 
         const view = new DataView(data);
-        const streamType = view.getUint8(0);
-        const timestampUs = Number(view.getBigUint64(1, false));
+        const channelId = view.getUint8(0);
+        const rawTsUs = Number(view.getBigUint64(1, false));
+        const timestampUs = (Number.isFinite(rawTsUs) && rawTsUs >= 0 && rawTsUs <= 9007199254740991) ? rawTsUs : Math.floor(performance.now() * 1000);
         const payload = new Uint8Array(data, 9);
+        const config = this.streamConfigs[String(channelId)];
 
-        if (streamType === 0) {
-            this.processVideoNal(payload, timestampUs);
-        } else if (streamType === 1) {
-            this.processAudioChunk(payload, timestampUs);
+        if (!this.channelMsgCount) this.channelMsgCount = {};
+        const chKey = String(channelId);
+        this.channelMsgCount[chKey] = (this.channelMsgCount[chKey] || 0) + 1;
+        const chCount = this.channelMsgCount[chKey];
+
+        if (chCount <= 5 || chCount % 50 === 0) {
+            console.info(`[WebCodecsPlayer ch${channelId}] WS Packet #${chCount} received: len=${data.byteLength} timestamp=${timestampUs}µs`);
+        }
+
+        let isVideo = false;
+        let isAudio = false;
+
+        if (config && config.media_type) {
+            isVideo = config.media_type === 'VIDEO';
+            isAudio = config.media_type === 'AUDIO';
+        } else {
+            // Pure content inspection fallback (zero hardcoded channel IDs)
+            const isH264Nal = (payload.length >= 4 && payload[0] === 0 && payload[1] === 0 && (payload[2] === 1 || (payload[2] === 0 && payload[3] === 1)));
+            if (isH264Nal) {
+                isVideo = true;
+            } else {
+                isAudio = true;
+            }
+        }
+
+
+        if (isVideo) {
+            this.processVideoNal(payload, timestampUs, channelId, config);
+        } else if (isAudio) {
+            this.processAudioChunk(payload, timestampUs, channelId, config);
         }
     }
 
-    processVideoNal(payload, timestampUs) {
+    processVideoNal(payload, timestampUs, channelId = 3, config = null) {
         if (payload.length === 0) return;
 
         let nalOffset = 0;
@@ -119,76 +220,231 @@ export class WebCodecsPlayer {
         }
 
         const nalType = payload[nalOffset] & 0x1F;
+        const nalName = nalType === 5 ? 'IDR-Keyframe' : (nalType === 7 ? 'SPS' : (nalType === 8 ? 'PPS' : 'P-DeltaFrame'));
 
-        if (!this.isConfigured) {
-            try {
-                this.videoDecoder.configure({
-                    codec: 'avc1.42E01E', // Baseline profile
-                    hardwareAcceleration: 'prefer-hardware',
-                    optimizeForLatency: true
-                });
-                this.isConfigured = true;
-                this.updateStatus('VideoDecoder Configured (Hardware Acceleration Enabled)');
-            } catch (e) {
-                console.error('Failed to configure VideoDecoder:', e);
+        if (!this.receivedNalCount) this.receivedNalCount = 0;
+        this.receivedNalCount++;
+
+        if (this.receivedNalCount <= 5 || nalType === 5 || this.receivedNalCount % 50 === 0) {
+            console.info(`[WebCodecsPlayer ch${channelId}] NAL Unit #${this.receivedNalCount} parsed: nalType=${nalType} (${nalName}), payloadLen=${payload.length}`);
+        }
+
+        // Buffer Parameter Sets (SPS / PPS)
+        if (nalType === 7) {
+            this.latestSps = payload;
+            console.info(`[WebCodecsPlayer ch${channelId}] Stored H.264 SPS parameter set (${payload.length} bytes)`);
+            return;
+        }
+        if (nalType === 8) {
+            this.latestPps = payload;
+            console.info(`[WebCodecsPlayer ch${channelId}] Stored H.264 PPS parameter set (${payload.length} bytes)`);
+            return;
+        }
+
+        // Keyframe Gate: Drop P-frames until an IDR frame arrives
+        if (!this.hasReceivedKeyframe) {
+            if (nalType === 5) {
+                this.hasReceivedKeyframe = true;
+                console.info(`[WebCodecsPlayer ch${channelId}] IDR Keyframe received -> Unlocking VideoDecoder`);
+            } else {
+                if (!this.droppedDeltaCount) this.droppedDeltaCount = 0;
+                this.droppedDeltaCount++;
+                if (this.droppedDeltaCount <= 5 || this.droppedDeltaCount % 30 === 0) {
+                    console.warn(`[WebCodecsPlayer ch${channelId}] Dropping pre-keyframe delta NAL unit #${this.droppedDeltaCount} (nalType=${nalType}) prior to first IDR frame`);
+                }
                 return;
             }
         }
 
-        const chunkType = (nalType === 5) ? 'key' : 'delta';
+        if (!this.isConfigured) {
+            try {
+                const codecStr = (config && config.codec) ? config.codec : 'avc1.42E01E';
+                this.videoDecoder.configure({
+                    codec: codecStr,
+                    hardwareAcceleration: 'prefer-hardware',
+                    optimizeForLatency: true
+                });
+                this.isConfigured = true;
+                console.info(`[WebCodecsPlayer ch${channelId}] VideoDecoder configured successfully with ${codecStr}.`);
+                this.updateStatus(`VideoDecoder Configured (${codecStr})`);
+            } catch (e) {
+                console.error(`[WebCodecsPlayer ch${channelId}] Failed to configure VideoDecoder:`, e);
+                return;
+            }
+        }
+
+        let chunkData = payload;
+        let chunkType = 'delta';
+
+        if (nalType === 5) {
+            chunkType = 'key';
+            // Prepend buffered SPS/PPS to IDR frame for complete keyframe unit
+            if (this.latestSps || this.latestPps) {
+                const parts = [];
+                if (this.latestSps) parts.push(this.latestSps);
+                if (this.latestPps) parts.push(this.latestPps);
+                parts.push(payload);
+
+                let totalLen = 0;
+                for (const p of parts) totalLen += p.length;
+                const combined = new Uint8Array(totalLen);
+                let offset = 0;
+                for (const p of parts) {
+                    combined.set(p, offset);
+                    offset += p.length;
+                }
+                chunkData = combined;
+            }
+        }
 
         try {
             const chunk = new EncodedVideoChunk({
                 type: chunkType,
                 timestamp: timestampUs,
-                data: payload
+                data: chunkData
             });
 
             this.videoDecoder.decode(chunk);
         } catch (e) {
-            console.error('Video decode error:', e);
+            console.error(`[WebCodecsPlayer ch${channelId}] Video decode error:`, e);
+            this.hasReceivedKeyframe = false;
         }
     }
 
-    processAudioChunk(payload, timestampUs) {
-        if (!this.audioCtx || payload.length === 0) return;
+    ensureAudioContext() {
+        if (!this.audioCtx) {
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (AudioContextClass) {
+                this.audioCtx = new AudioContextClass({ sampleRate: 48000 });
+            }
+        }
+        if (this.audioCtx && this.audioCtx.state === 'suspended') {
+            this.audioCtx.resume();
+        }
+        return this.audioCtx;
+    }
 
-        // Try WebCodecs AudioDecoder for AAC or direct PCM AudioBuffer playback
-        if (this.audioDecoder && this.audioDecoder.state === 'configured') {
+    playAudioBuffer(buffer) {
+        const audioCtx = this.ensureAudioContext();
+        if (!audioCtx || !buffer) return;
+
+        const currentTime = audioCtx.currentTime;
+        if (!this.nextAudioStartTime || this.nextAudioStartTime < currentTime) {
+            this.nextAudioStartTime = currentTime + 0.03; // 30ms initial safety jitter buffer
+        }
+
+        const source = audioCtx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioCtx.destination);
+        source.start(this.nextAudioStartTime);
+        this.nextAudioStartTime += buffer.duration;
+    }
+
+    processAudioChunk(payload, timestampUs, channelId = 4, config = null) {
+        if (!this.ensureAudioContext() || payload.length === 0) return;
+
+        // Ensure 16-bit aligned Uint8Array for Int16Array conversion (prevent RangeError)
+        const alignedBytes = (payload.byteOffset % 2 === 0) ? payload : payload.slice();
+
+        // Dynamic PCM check using stream_config metadata (zero hardcoded channel IDs)
+        const isExplicitPcmCodec = (config && (config.codec === 'PCM' || config.codec === 'MEDIA_CODEC_AUDIO_PCM' || config.audio_format === 'pcm'));
+
+        // Check for AAC ADTS 12-bit sync word (0xFFF) with strict layer and frame_length validation
+        let isAdtsAac = false;
+        let aacPayload = alignedBytes;
+        let adtsFrameCopy = null;
+
+        if (!isExplicitPcmCodec && alignedBytes.length >= 7 && alignedBytes[0] === 0xFF && (alignedBytes[1] & 0xF6) === 0xF0) {
+            const mpegLayer = (alignedBytes[1] & 0x06) >> 1; // Must be 00 for AAC
+            const frameLength = ((alignedBytes[3] & 0x03) << 11) | (alignedBytes[4] << 3) | ((alignedBytes[5] & 0xE0) >> 5);
+
+            // Validate strict ADTS header invariants (mpegLayer === 0 and frameLength bounds)
+            if (mpegLayer === 0 && frameLength >= 7 && frameLength <= alignedBytes.length) {
+                isAdtsAac = true;
+                const protectionAbsent = alignedBytes[1] & 0x01;
+                const headerLength = protectionAbsent ? 7 : 9;
+
+                // Strip ADTS header for WebCodecs AudioDecoder raw AAC elementary stream
+                if (frameLength > headerLength) {
+                    aacPayload = alignedBytes.subarray(headerLength, frameLength);
+                }
+
+                // Create copied ArrayBuffer starting at 0xFFF9 ADTS header for WebAudio decodeAudioData
+                const adtsSlice = alignedBytes.subarray(0, frameLength);
+                adtsFrameCopy = adtsSlice.slice().buffer;
+            }
+        }
+
+        // Submit to WebCodecs AudioDecoder ONLY for verified AAC ADTS streams
+        if (!isExplicitPcmCodec && isAdtsAac && this.audioDecoder && this.audioDecoder.state === 'configured') {
+
             try {
+                this.lastSubmittedAudioChunk = { payload: aacPayload, channelId: channelId };
                 const chunk = new EncodedAudioChunk({
                     type: 'key',
                     timestamp: timestampUs,
-                    data: payload
+                    data: aacPayload
                 });
                 this.audioDecoder.decode(chunk);
                 return;
             } catch (e) {
-                // Fallback to PCM AudioBuffer
+                const hexHeader = Array.from(aacPayload.subarray(0, 64)).map(b => b.toString(16).padStart(2, '0')).join('');
+                console.warn(`[WebCodecsPlayer ch${channelId}] AudioDecoder submit exception:`, e, `len=${aacPayload.length}, hex=${hexHeader}`);
             }
         }
 
-        // Direct PCM (16-bit LE 48kHz stereo fallback)
-        try {
-            const int16Array = new Int16Array(payload.buffer, payload.byteOffset, payload.byteLength / 2);
-            const numFrames = int16Array.length / 2;
-            if (numFrames <= 0) return;
 
-            const buffer = this.audioCtx.createBuffer(2, numFrames, 48000);
-            const leftChannel = buffer.getChannelData(0);
-            const rightChannel = buffer.getChannelData(1);
 
-            for (let i = 0; i < numFrames; i++) {
-                leftChannel[i] = int16Array[i * 2] / 32768.0;
-                rightChannel[i] = int16Array[i * 2 + 1] / 32768.0;
+
+        // Web Audio API decodeAudioData for ADTS AAC frames with smooth queueing (prevents PCM clicks & clippy gaps)
+        if (isAdtsAac) {
+            if (this.audioCtx && adtsFrameCopy) {
+                this.audioCtx.decodeAudioData(adtsFrameCopy)
+                    .then((decodedBuffer) => {
+                        this.playAudioBuffer(decodedBuffer);
+                    })
+                    .catch((err) => {
+                        const hexHeader = Array.from(alignedBytes.subarray(0, 64)).map(b => b.toString(16).padStart(2, '0')).join('');
+                        console.error(`[WebCodecsPlayer ch${channelId}] ❌ FAILING WEBAUDIO ADTS FRAME (len=${alignedBytes.length}):`, err, `hex=${hexHeader}`);
+                    });
             }
+            return;
+        }
 
-            const source = this.audioCtx.createBufferSource();
-            source.buffer = buffer;
-            source.connect(this.audioCtx.destination);
-            source.start();
+
+
+        // Direct PCM (supports 48kHz stereo & 16kHz mono dynamically from stream_config with smooth queueing)
+        try {
+            const sampleRate = (config && config.sampleRate) ? config.sampleRate : 48000;
+            const numChannels = (config && config.channels) ? config.channels : 2;
+            const int16Array = new Int16Array(alignedBytes.buffer, alignedBytes.byteOffset, Math.floor(alignedBytes.byteLength / 2));
+
+            if (numChannels === 1) {
+                const numFrames = int16Array.length;
+                if (numFrames <= 0) return;
+                const buffer = this.audioCtx.createBuffer(1, numFrames, sampleRate);
+                const channelData = buffer.getChannelData(0);
+                for (let i = 0; i < numFrames; i++) {
+                    channelData[i] = int16Array[i] / 32768.0;
+                }
+                this.playAudioBuffer(buffer);
+            } else {
+                const numFrames = Math.floor(int16Array.length / 2);
+                if (numFrames <= 0) return;
+
+                const buffer = this.audioCtx.createBuffer(2, numFrames, sampleRate);
+                const leftChannel = buffer.getChannelData(0);
+                const rightChannel = buffer.getChannelData(1);
+
+                for (let i = 0; i < numFrames; i++) {
+                    leftChannel[i] = int16Array[i * 2] / 32768.0;
+                    rightChannel[i] = int16Array[i * 2 + 1] / 32768.0;
+                }
+
+                this.playAudioBuffer(buffer);
+            }
         } catch (e) {
-            console.error('PCM playback error:', e);
+            console.error(`[WebCodecsPlayer ch${channelId}] PCM playback error:`, e);
         }
     }
 
@@ -217,31 +473,129 @@ export class WebCodecsPlayer {
 
     handleAudioData(audioData) {
         try {
-            // AudioData processed and freed
-            audioData.close();
+            if (!this.audioCtx) return;
+            const numberOfChannels = audioData.numberOfChannels;
+            const sampleRate = audioData.sampleRate;
+            const numberOfFrames = audioData.numberOfFrames;
+            const buffer = this.audioCtx.createBuffer(numberOfChannels, numberOfFrames, sampleRate);
+
+            for (let channel = 0; channel < numberOfChannels; channel++) {
+                const options = { planeIndex: channel, format: 'f32-planar' };
+                audioData.copyTo(buffer.getChannelData(channel), options);
+            }
+
+            this.playAudioBuffer(buffer);
         } catch (e) {
-            // Handled
+            console.warn('[WebCodecsPlayer] AudioData playback error:', e);
+        } finally {
+            audioData.close();
         }
     }
 
-    startMicrophoneUplink() {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
 
-        navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-            .then((stream) => {
-                const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-                mediaRecorder.ondataavailable = (event) => {
-                    if (event.data.size > 0 && this.ws && this.ws.readyState === WebSocket.OPEN) {
-                        event.data.arrayBuffer().then((buf) => {
-                            this.ws.send(buf);
-                        });
+    async startMicrophoneUplink() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+        if (this.micStream) return; // Already running
+
+        this.micPcmAccumulator = [];
+
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 16000 }, video: false });
+            this.micStream = stream;
+
+            const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+            this.micAudioCtx = new AudioCtxClass({ sampleRate: 16000 });
+            this.micSource = this.micAudioCtx.createMediaStreamSource(stream);
+
+            const workletCode = `
+                class MicProcessor extends AudioWorkletProcessor {
+                    constructor() {
+                        super();
+                        this.buffer = [];
+                    }
+                    process(inputs) {
+                        const input = inputs[0];
+                        if (input && input[0]) {
+                            const channel = input[0];
+                            for (let i = 0; i < channel.length; i++) {
+                                let s = Math.max(-1, Math.min(1, channel[i]));
+                                this.buffer.push(s < 0 ? s * 0x8000 : s * 0x7FFF);
+                            }
+                            while (this.buffer.length >= 320) {
+                                const samples = this.buffer.splice(0, 320);
+                                const int16 = new Int16Array(samples);
+                                this.port.postMessage(int16.buffer, [int16.buffer]);
+                            }
+                        }
+                        return true;
+                    }
+                }
+                registerProcessor('mic-processor', MicProcessor);
+            `;
+
+            try {
+                const blob = new Blob([workletCode], { type: 'application/javascript' });
+                const workletUrl = URL.createObjectURL(blob);
+                await this.micAudioCtx.audioWorklet.addModule(workletUrl);
+                this.micWorkletNode = new AudioWorkletNode(this.micAudioCtx, 'mic-processor');
+                this.micWorkletNode.port.onmessage = (e) => {
+                    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                        this.ws.send(e.data);
                     }
                 };
-                mediaRecorder.start(100); // 100ms intervals
-                console.log('Microphone uplink stream started');
-            })
-            .catch((err) => {
-                console.warn('Microphone access not granted or unavailable:', err);
-            });
+                this.micSource.connect(this.micWorkletNode);
+                console.log('[WebCodecsPlayer] Microphone uplink started via AudioWorkletNode (Raw 16kHz 16-bit Mono PCM, 20ms chunks)');
+            } catch (workletErr) {
+                console.warn('[WebCodecsPlayer] AudioWorklet fallback to ScriptProcessor:', workletErr);
+                this.micProcessor = this.micAudioCtx.createScriptProcessor(2048, 1, 1);
+                const CHUNK_SAMPLES = 320;
+                this.micProcessor.onaudioprocess = (e) => {
+                    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+                    const float32 = e.inputBuffer.getChannelData(0);
+                    for (let i = 0; i < float32.length; i++) {
+                        let s = Math.max(-1, Math.min(1, float32[i]));
+                        this.micPcmAccumulator.push(s < 0 ? s * 0x8000 : s * 0x7FFF);
+                    }
+                    while (this.micPcmAccumulator.length >= CHUNK_SAMPLES) {
+                        const samples = this.micPcmAccumulator.splice(0, CHUNK_SAMPLES);
+                        const int16 = new Int16Array(samples);
+                        this.ws.send(int16.buffer);
+                    }
+                };
+                this.micSource.connect(this.micProcessor);
+                this.micProcessor.connect(this.micAudioCtx.destination);
+            }
+        } catch (err) {
+            console.warn('Microphone access not granted or unavailable:', err);
+        }
+    }
+
+    stopMicrophoneUplink() {
+        this.micPcmAccumulator = [];
+        if (this.micWorkletNode) {
+            try { this.micWorkletNode.disconnect(); } catch (e) {}
+            this.micWorkletNode = null;
+        }
+        if (this.micProcessor) {
+            try {
+                this.micProcessor.disconnect();
+                this.micProcessor.onaudioprocess = null;
+            } catch (e) {}
+            this.micProcessor = null;
+        }
+        if (this.micSource) {
+            try { this.micSource.disconnect(); } catch (e) {}
+            this.micSource = null;
+        }
+        if (this.micAudioCtx) {
+            try { this.micAudioCtx.close(); } catch (e) {}
+            this.micAudioCtx = null;
+        }
+        if (this.micStream) {
+            try { this.micStream.getTracks().forEach(track => track.stop()); } catch (e) {}
+            this.micStream = null;
+        }
+        console.log('[WebCodecsPlayer] Microphone uplink stopped');
     }
 }
+

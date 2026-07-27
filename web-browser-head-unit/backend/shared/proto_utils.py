@@ -730,3 +730,81 @@ def _coerce_scalar(field_desc: Any, value: Any) -> Any:
         return float(value)
 
     return str(value)  # STRING / BYTES fallback
+
+
+def get_codec_descriptor(codec_val: Any) -> dict[str, Any]:
+    """
+    Exhaustive resolution of all 7 Android Auto MediaCodec enums to WebCodecs / WebAudio parameters:
+      1: MEDIA_CODEC_AUDIO_PCM          -> AUDIO, PCM
+      2: MEDIA_CODEC_AUDIO_AAC_LC       -> AUDIO, mp4a.40.2 (AAC Raw)
+      3: MEDIA_CODEC_VIDEO_H264_BP      -> VIDEO, avc1.42E01E
+      4: MEDIA_CODEC_AUDIO_AAC_LC_ADTS  -> AUDIO, mp4a.40.2 (AAC ADTS)
+      5: MEDIA_CODEC_VIDEO_VP9          -> VIDEO, vp09.00.10.08
+      6: MEDIA_CODEC_VIDEO_AV1          -> VIDEO, av01.0.04M.08
+      7: MEDIA_CODEC_VIDEO_H265         -> VIDEO, hev1.1.6.L93.B0
+    """
+    codec_name = str(codec_val)
+    if isinstance(codec_val, int):
+        try:
+            from protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType
+            codec_name = MediaCodecType.Enum.Name(codec_val)
+        except Exception:
+            codec_name = f"CODEC_{codec_val}"
+
+    upper_name = codec_name.upper()
+
+    if "PCM" in upper_name or upper_name in ("1", "MEDIA_CODEC_AUDIO_PCM"):
+        return {
+            "media_type": "AUDIO",
+            "codec": "PCM",
+            "audio_format": "pcm",
+            "codec_enum": 1,
+            "codec_name": "MEDIA_CODEC_AUDIO_PCM",
+        }
+    elif "AAC_LC_ADTS" in upper_name or upper_name in ("4", "MEDIA_CODEC_AUDIO_AAC_LC_ADTS"):
+        return {
+            "media_type": "AUDIO",
+            "codec": "mp4a.40.2",
+            "audio_format": "aac_adts",
+            "description": [17, 144],  # AAC-LC 48kHz Stereo ESDS
+            "codec_enum": 4,
+            "codec_name": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS",
+        }
+    elif "AAC" in upper_name or upper_name in ("2", "MEDIA_CODEC_AUDIO_AAC_LC"):
+        return {
+            "media_type": "AUDIO",
+            "codec": "mp4a.40.2",
+            "audio_format": "aac",
+            "description": [17, 144],
+            "codec_enum": 2,
+            "codec_name": "MEDIA_CODEC_AUDIO_AAC_LC",
+        }
+    elif "VP9" in upper_name or upper_name in ("5", "MEDIA_CODEC_VIDEO_VP9"):
+        return {
+            "media_type": "VIDEO",
+            "codec": "vp09.00.10.08",
+            "codec_enum": 5,
+            "codec_name": "MEDIA_CODEC_VIDEO_VP9",
+        }
+    elif "AV1" in upper_name or upper_name in ("6", "MEDIA_CODEC_VIDEO_AV1"):
+        return {
+            "media_type": "VIDEO",
+            "codec": "av01.0.04M.08",
+            "codec_enum": 6,
+            "codec_name": "MEDIA_CODEC_VIDEO_AV1",
+        }
+    elif "H265" in upper_name or "HEVC" in upper_name or upper_name in ("7", "MEDIA_CODEC_VIDEO_H265"):
+        return {
+            "media_type": "VIDEO",
+            "codec": "hev1.1.6.L93.B0",
+            "codec_enum": 7,
+            "codec_name": "MEDIA_CODEC_VIDEO_H265",
+        }
+    else:  # Default to H.264 Baseline Profile (3)
+        return {
+            "media_type": "VIDEO",
+            "codec": "avc1.42E01E",
+            "codec_enum": 3,
+            "codec_name": "MEDIA_CODEC_VIDEO_H264_BP",
+        }
+

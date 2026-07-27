@@ -106,7 +106,7 @@ class ControlChannelHandler:
 
         resp = PingResponse()
         resp.timestamp = timestamp
-        await self.manager.send_wire_frame(0, MSG.PING_RESPONSE, resp.SerializeToString(), encrypted=True)
+        await self.manager.send_wire_frame(0, MSG.PING_RESPONSE, resp.SerializeToString(), encrypted=True, log_level='debug')
 
     async def _handle_audio_focus_request(self, body: bytes) -> None:
         focus_type = AudioFocusType.Enum.GAIN

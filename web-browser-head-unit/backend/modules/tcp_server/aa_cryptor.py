@@ -224,6 +224,28 @@ class AACryptor:
             self._ssl_obj.write(plaintext)
             return self._read_out_bio()
 
+    def encrypt_records(self, plaintext: bytes) -> list[bytes]:
+        """Encrypt plaintext and return a list of discrete, complete TLS record byte arrays."""
+        raw_ciphertext = self.encrypt(plaintext)
+        if not raw_ciphertext:
+            return []
+
+        records: list[bytes] = []
+        offset = 0
+        total_len = len(raw_ciphertext)
+        while offset < total_len:
+            if total_len - offset < 5:
+                records.append(raw_ciphertext[offset:])
+                break
+            rec_len = (raw_ciphertext[offset + 3] << 8) | raw_ciphertext[offset + 4]
+            full_rec_len = 5 + rec_len
+            if offset + full_rec_len > total_len:
+                records.append(raw_ciphertext[offset:])
+                break
+            records.append(raw_ciphertext[offset:offset + full_rec_len])
+            offset += full_rec_len
+        return records
+
     def decrypt(self, ciphertext: bytes) -> bytes:
         """Decrypt a TLS record, return plaintext (= Cryptor::decrypt)."""
         if not self._active or self._ssl_obj is None:
@@ -241,6 +263,36 @@ class AACryptor:
                 pass
             return bytes(buf)
 
+    def get_in_bio_pending(self) -> int:
+        return self._in_bio.pending if self._in_bio else 0
+
+    def get_out_bio_pending(self) -> int:
+        return self._out_bio.pending if self._out_bio else 0
+
+    def parse_tls_record_header(self, ciphertext: bytes) -> dict:
+        if len(ciphertext) < 5:
+            return {"valid": False, "reason": f"Payload too short ({len(ciphertext)} bytes < 5)"}
+        content_type = ciphertext[0]
+        version = f"0x{ciphertext[1]:02x}{ciphertext[2]:02x}"
+        rec_len = (ciphertext[3] << 8) | ciphertext[4]
+
+        type_names = {
+            0x14: "ChangeCipherSpec",
+            0x15: "Alert",
+            0x16: "Handshake",
+            0x17: "ApplicationData",
+        }
+        type_str = type_names.get(content_type, f"Unknown(0x{content_type:02x})")
+        return {
+            "valid": True,
+            "content_type": content_type,
+            "type_name": type_str,
+            "version": version,
+            "record_len": rec_len,
+            "total_payload_len": len(ciphertext),
+            "len_match": rec_len == (len(ciphertext) - 5),
+        }
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -251,3 +303,4 @@ class AACryptor:
             return b""
         data = self._out_bio.read()
         return data if data else b""
+

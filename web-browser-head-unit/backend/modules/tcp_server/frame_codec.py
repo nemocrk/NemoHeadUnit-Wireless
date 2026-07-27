@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 # Constants
 # ---------------------------------------------------------------------------
 
-FRAME_SIZE_THRESHOLD = 4096  # bytes — payloads larger than this are fragmented
+FRAME_SIZE_THRESHOLD = 16384  # bytes — payloads larger than this are fragmented
 
 # FrameType bits (flags & 0x03)
 _FT_MIDDLE = 0x00
@@ -118,8 +118,6 @@ def _encryption_type(channel_id: int, message_id: int, ssl_active: bool) -> int:
     """Determine EncryptionType flag from C++ EncryptionPolicy.cpp logic."""
     if not ssl_active:
         return _ET_PLAIN
-    if channel_id == 0 and message_id in _CH0_PLAIN_IDS:
-        return _ET_PLAIN
     return _ET_ENCRYPTED
 
 
@@ -157,20 +155,30 @@ def encode(
     # Build full payload: [msg_id 2B][body]
     payload: bytes = struct.pack(">H", message_id) + body
 
+    cipher_records: list[bytes] = []
     # Encrypt if needed
     if enc_type == _ET_ENCRYPTED:
         if cryptor is None or not cryptor.is_active():
             # Downgrade gracefully — should not happen in normal flow
             enc_type = _ET_PLAIN
+            cipher_records = [payload]
         else:
-            payload = cryptor.encrypt(payload)
+            if hasattr(cryptor, "encrypt_records"):
+                cipher_records = cryptor.encrypt_records(payload)
+            else:
+                cipher_records = [cryptor.encrypt(payload)]
+    else:
+        cipher_records = [payload]
 
-    if len(payload) <= FRAME_SIZE_THRESHOLD:
-        flags = _FT_BULK | msg_type | enc_type
-        return [_build_frame(channel_id, flags, payload)]
+    all_frames: list[bytes] = []
+    for record_bytes in cipher_records:
+        if len(record_bytes) <= FRAME_SIZE_THRESHOLD:
+            flags = _FT_BULK | msg_type | enc_type
+            all_frames.append(_build_frame(channel_id, flags, record_bytes))
+        else:
+            all_frames.extend(_build_multi_frame(channel_id, msg_type, enc_type, record_bytes))
 
-    # Multi-frame path
-    return _build_multi_frame(channel_id, msg_type, enc_type, payload)
+    return all_frames
 
 
 def _build_frame(channel_id: int, flags: int, payload: bytes,
@@ -303,3 +311,15 @@ class FrameAssembler:
 
         # MIDDLE — keep accumulating
         return None
+
+    def get_debug_state(self) -> dict:
+        state = {}
+        for ch_id, buf in self._buffers.items():
+            state[ch_id] = {
+                "chunks_count": len(buf.chunks),
+                "total_size": buf.total_size,
+                "first_flags": f"0x{buf.first_flags:02x}",
+                "accumulated_bytes": sum(len(c) for c in buf.chunks),
+            }
+        return state
+

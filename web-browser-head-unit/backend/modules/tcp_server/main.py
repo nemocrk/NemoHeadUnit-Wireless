@@ -14,12 +14,13 @@ Module Responsibilities:
 """
 
 import asyncio
+from collections import deque
 import os
 import struct
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 
 from aiohttp import web
 
@@ -32,6 +33,7 @@ from modules.tcp_server.frame_codec import FrameAssembler, encode
 from modules.tcp_server.frame_relay import FrameRelay
 from modules.tcp_server.message_to_proto import frame_data_to_dict
 from modules.tcp_server.server import TCPServer
+from modules.tcp_server.messages_logging_levels import CHANNEL_MESSAGES_DEBUG_LEVELS
 
 from protos.oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessage
 
@@ -64,8 +66,23 @@ class TCPServerModule(BaseBackendModule):
         self._restart_pending = False
         self._shutdown_ack_event = threading.Event()
 
-        # Dynamic channel type mapping from SDR
-        self.channel_type_map: Dict[int, str] = {}
+        # Rolling history buffers for diagnostic state dumps
+        self._recent_sent_frames: deque = deque(maxlen=20)
+        self._recent_recv_raw_frames: deque = deque(maxlen=20)
+        self._recent_recv_processed_frames: deque = deque(maxlen=20)
+
+        # Dynamic channel type mapping (pre-populated with standards, updated by SDR)
+        self.channel_type_map: Dict[int, str] = {
+            0: "CONTROL",
+            1: "INPUT",
+            2: "SENSOR",
+            3: "VIDEO",
+            4: "AUDIO",
+            5: "AUDIO",
+            6: "AUDIO",
+            7: "AUDIO_MIC",
+        }
+
 
         # Telemetry counters
         self._client_address: Optional[str] = None
@@ -101,8 +118,10 @@ class TCPServerModule(BaseBackendModule):
         self.subscribe("aa.sdr.channels", self.on_sdr_channels)
 
     async def on_sdr_channels(self, data: dict) -> None:
-        self.channel_type_map = data.get("type_map", {})
+        type_map = data.get("type_map", {})
+        self.channel_type_map = {int(k): v for k, v in type_map.items() if str(k).isdigit()}
         self.log.info(f"tcp_server: Received dynamic channel type map from SDR: {self.channel_type_map}")
+
 
     async def run(self) -> None:
         """Main module execution loop. Handles optional autostart mode."""
@@ -172,89 +191,120 @@ class TCPServerModule(BaseBackendModule):
 
     def _on_raw_frame(self, channel_id: int, flags: int, payload: bytes, total_size: int) -> None:
         """Callback from FrameRelay for every raw frame read off socket."""
+        ts = time.strftime("%H:%M:%S", time.localtime()) + f".{int(time.time()*1000)%1000:03d}"
+        self._recent_recv_raw_frames.append({
+            "ts": ts,
+            "ch": channel_id,
+            "flags": f"0x{flags:02x}",
+            "ftype": flags & 0x03,
+            "len": len(payload),
+            "total_size": total_size,
+            "head_hex": payload[:16].hex() if payload else "",
+        })
+
         if not getattr(self, "_logged_first_tcp_bytes", False):
             self._logged_first_tcp_bytes = True
             self.log.info(f"🌐 [TCP Stage 5/5] First raw bytes received (hex): {payload[:128].hex()}")
 
-        frame_type = flags & 0x03
+        encrypted = bool(flags & _FLAG_ENCRYPTED)
 
-        if frame_type != 0x03:
-            self._multi_frame_lock.acquire(timeout=2.0)
+        # EXPERIMENTAL FIX: Decrypt raw frames immediately in TCP arrival order before FrameAssembler reassembly
+        if encrypted:
+            try:
+                with self._crypto_lock:
+                    if self._cryptor is not None and self._cryptor.is_active():
+                        payload = self._cryptor.decrypt(payload)
+                        if not getattr(self, "_logged_first_encrypted", False):
+                            self._logged_first_encrypted = True
+                            msg_id_preview = struct.unpack_from(">H", payload, 0)[0] if len(payload) >= 2 else 0
+                            self.log.info(f"🔑 [TLS Stage 5/5] 🔓 FIRST ENCRYPTED MESSAGE RECEIVED & DECRYPTED! (ch={channel_id}, msg=0x{msg_id_preview:04x}, len={len(payload)} bytes)")
+            except Exception as exc:
+                tls_info = self._cryptor.parse_tls_record_header(payload) if self._cryptor else {}
+                in_pending = self._cryptor.get_in_bio_pending() if self._cryptor else 0
+                out_pending = self._cryptor.get_out_bio_pending() if self._cryptor else 0
+                assembler_state = self._assembler.get_debug_state() if self._assembler else {}
 
-        try:
-            result = self._assembler.feed(channel_id, flags, payload, total_size)
-            if result is None:
-                return
+                recent_sent = list(self._recent_sent_frames)[-5:]
+                recent_raw = list(self._recent_recv_raw_frames)[-5:]
+                recent_proc = list(self._recent_recv_processed_frames)[-5:]
 
-            channel_id, flags, assembled, total_size = result
-            encrypted = bool(flags & _FLAG_ENCRYPTED)
-
-            if encrypted:
-                try:
-                    with self._crypto_lock:
-                        if self._cryptor is not None and self._cryptor.is_active():
-                            assembled = self._cryptor.decrypt(assembled)
-                            if not getattr(self, "_logged_first_encrypted", False):
-                                self._logged_first_encrypted = True
-                                msg_id_preview = struct.unpack_from(">H", assembled, 0)[0] if len(assembled) >= 2 else 0
-                                self.log.info(f"🔑 [TLS Stage 5/5] 🔓 FIRST ENCRYPTED MESSAGE RECEIVED & DECRYPTED! (ch={channel_id}, msg=0x{msg_id_preview:04x}, len={len(assembled)} bytes)")
-                except Exception as exc:
-                    self.log.error(f"_on_raw_frame: Decrypt failed ch={channel_id} — {exc}")
-                    return
-
-            if len(assembled) < 2:
-                self.log.error(f"_on_raw_frame: ch={channel_id} payload too short ({len(assembled)} bytes)")
-                return
-
-            message_id = struct.unpack_from(">H", assembled, 0)[0]
-            body = assembled[2:]
-            self._frames_received_count += 1
-
-            ch_type_name = self.channel_type_map.get(channel_id)
-            is_media_msg = message_id in (AVChannelMessage.Enum.AV_MEDIA_WITH_TIMESTAMP_INDICATION, AVChannelMessage.Enum.AV_MEDIA_INDICATION)
-
-            # Log all non-media data frames (exclude high-frequency AV_MEDIA indications)
-            if not (ch_type_name in ("VIDEO", "AUDIO") and is_media_msg):
-                self.log.info(f"📥 [TCP Recv] Inbound frame from phone: ch={channel_id}, msgId=0x{message_id:04x}, len={len(body)}, encrypted={encrypted}")
-
-            if (ch_type_name in ("VIDEO", "AUDIO") or channel_id in (2, 3, 4)) and is_media_msg:
-                stream_type = 0 if (ch_type_name == "VIDEO" or channel_id in (2, 3)) else 1
-                shm_offset = self._shm.downstream.write_frame(stream_type, 0, body)
-                self.publish(
-                    "aa.frame.shm",
-                    {
-                        "channel_id": channel_id,
-                        "message_id": message_id,
-                        "encrypted": encrypted,
-                        "shm_offset": shm_offset,
-                        "payload_len": len(body),
-                    },
+                self.log.error(
+                    f"❌ [TLS Decrypt Error Dump - EXPERIMENTAL] Decrypt failed ch={channel_id} — {exc}\n"
+                    f"   ├─ Failing Frame: ch={channel_id}, flags=0x{flags:02x} (ftype={flags & 0x03}), payload_len={len(payload)}\n"
+                    f"   ├─ TLS Record Header Parse: {tls_info}\n"
+                    f"   ├─ Payload Preview: head={payload[:32].hex()}, tail={payload[-16:].hex() if len(payload) > 16 else ''}\n"
+                    f"   ├─ Cryptor State: active={self._cryptor.is_active() if self._cryptor else False}, in_bio_pending={in_pending}, out_bio_pending={out_pending}\n"
+                    f"   ├─ Assembler State: {assembler_state}\n"
+                    f"   ├─ Recent Sent (last 5): {recent_sent}\n"
+                    f"   ├─ Recent Raw Recv (last 5): {recent_raw}\n"
+                    f"   └─ Recent Processed Recv (last 5): {recent_proc}"
                 )
+                return
 
-            frame_data = {
-                "channel_id": channel_id,
-                "message_id": message_id,
-                "encrypted": encrypted,
-                "payload_hex": body.hex(),
-            }
-            received_data = {
-                "channel_id": channel_id,
-                "message_id": message_id,
-                "encrypted": encrypted,
-                "payload_hex": body.hex(),
-                "payload_len": len(body),
-                "payload_head": body[:16].hex(),
-            }
+        result = self._assembler.feed(channel_id, flags, payload, total_size)
+        if result is None:
+            return
 
-            self.publish("aa.frame.received", received_data)
-            self.publish(f"aa.frame.ch{channel_id}", frame_data)
+        channel_id, flags, assembled, total_size = result
 
-        finally:
-            if self._multi_frame_lock.locked():
-                try:
-                    self._multi_frame_lock.release()
-                except RuntimeError:
-                    pass
+        if len(assembled) < 2:
+            self.log.error(f"_on_raw_frame: ch={channel_id} payload too short ({len(assembled)} bytes)")
+            return
+
+        message_id = struct.unpack_from(">H", assembled, 0)[0]
+        body = assembled[2:]
+        self._frames_received_count += 1
+
+        self._recent_recv_processed_frames.append({
+            "ts": ts,
+            "ch": channel_id,
+            "msg_id": f"0x{message_id:04x}",
+            "len": len(body),
+            "encrypted": encrypted,
+        })
+
+        ch_type_name = self.channel_type_map.get(channel_id)
+        is_media_msg = message_id in (
+            AVChannelMessage.Enum.AV_MEDIA_WITH_TIMESTAMP_INDICATION,
+            AVChannelMessage.Enum.AV_MEDIA_INDICATION,
+        )
+
+        log_level = CHANNEL_MESSAGES_DEBUG_LEVELS.get(ch_type_name, {}).get(message_id, "info")
+        if log_level != "None":
+            log_method = getattr(self.log, log_level, self.log.info)
+            log_method(f"📥 [TCP Recv] Inbound frame from phone: ch={channel_id}, msgId=0x{message_id:04x}, len={len(body)}, encrypted={encrypted}")
+
+        if ch_type_name in ("VIDEO", "AUDIO") and is_media_msg:
+            stream_type = 0 if ch_type_name == "VIDEO" else 1
+            shm_offset = self._shm.downstream.write_frame(stream_type, 0, body)
+            self.publish(
+                "aa.frame.shm",
+                {
+                    "channel_id": channel_id,
+                    "message_id": message_id,
+                    "encrypted": encrypted,
+                    "shm_offset": shm_offset,
+                    "payload_len": len(body),
+                },
+            )
+
+        frame_data = {
+            "channel_id": channel_id,
+            "message_id": message_id,
+            "encrypted": encrypted,
+            "payload_hex": body.hex(),
+        }
+        received_data = {
+            "channel_id": channel_id,
+            "message_id": message_id,
+            "encrypted": encrypted,
+            "payload_hex": body.hex(),
+            "payload_head": body[:16].hex(),
+        }
+
+        self.publish("aa.frame.received", received_data)
+        self.publish(f"aa.frame.ch{channel_id}", frame_data)
+
 
     def on_frame_send(self, topic: str, payload: dict) -> None:
         """Write AA frame to socket. Blocked during active multi-frame input reception."""
@@ -267,12 +317,25 @@ class TCPServerModule(BaseBackendModule):
             message_id = int(payload["message_id"])
             body = bytes.fromhex(payload["payload_hex"])
             ssl_active = bool(payload.get("encrypted", False))
+            ch_type_name = self.channel_type_map.get(channel_id)
+            log_level = payload.get("log_level", None)
+            log_level = log_level if log_level else CHANNEL_MESSAGES_DEBUG_LEVELS.get(ch_type_name, {}).get(message_id, "info")
+            if log_level != "None":
+                log_method = getattr(self.log, log_level, self.log.info)
+                log_method(f"📤 [TCP Send] Transmitting frame to phone: ch={channel_id}, msgId=0x{message_id:04x}, len={len(body)}, encrypted={ssl_active}")
+
         except (KeyError, ValueError) as exc:
             self.log.error(f"on_frame_send: Malformed payload — {exc}")
             return
 
-        if not (channel_id in (3, 4) and message_id in (AVChannelMessage.Enum.AV_MEDIA_WITH_TIMESTAMP_INDICATION, AVChannelMessage.Enum.AV_MEDIA_INDICATION)):
-            self.log.info(f"📤 [TCP Send] Transmitting frame to phone: ch={channel_id}, msgId=0x{message_id:04x}, len={len(body)}, encrypted={ssl_active}")
+        ts = time.strftime("%H:%M:%S", time.localtime()) + f".{int(time.time()*1000)%1000:03d}"
+        self._recent_sent_frames.append({
+            "ts": ts,
+            "ch": channel_id,
+            "msg_id": f"0x{message_id:04x}",
+            "len": len(body),
+            "encrypted": ssl_active,
+        })
 
         with self._multi_frame_lock:
             try:
