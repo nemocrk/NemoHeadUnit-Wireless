@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# packaging_micromamba/build_deb.sh
+# packaging/build_deb.sh
 #
-# Build a self-contained .deb for NemoHeadUnit-Wireless (micromamba version).
+# Build a self-contained .deb for NemoHeadUnit-Wireless.
 #
 # Usage:
-#   bash packaging_micromamba/build_deb.sh [--arch amd64|arm64] [--output-dir /path]
+#   bash packaging/build_deb.sh [--arch amd64|arm64] [--output-dir /path]
 #
 # What this script does:
 #   1.  Reads VERSION from repo root
@@ -20,7 +20,7 @@
 #           services/         ← ap_manager_service
 #           hardware_fixes/   ← platform-specific fix scripts + registry
 #           bus_broker.py     ← ZMQ bus broker entry point
-#           environment.yml   ← Micromamba env spec (built on target by postinst)
+#           environment.yml   ← Conda env spec (built on target by postinst)
 #           bin/
 #             nemo-headunit   ← launcher wrapper script
 #         /usr/lib/systemd/system/
@@ -30,7 +30,7 @@
 #         /usr/share/dbus-1/system-services/
 #           org.nemo.APManager.service  (D-Bus activation file)
 #         /usr/share/polkit-1/actions/
-#           org.nemo.apmanager.policy   (lowercase — polkitd 127 case-sensitive)
+#           org.nemo.APManager.policy   (lowercase — polkitd 127 case-sensitive)
 #         /etc/polkit-1/rules.d/
 #           org.nemo.bluetooth.rules
 #         /usr/share/applications/
@@ -38,10 +38,10 @@
 #   4.  Builds the .deb with FPM
 #   5.  Runs dpkg-deb --info + dpkg-deb --contents to verify the package
 #
-# NOTE: The Micromamba environment is NOT pre-built into the .deb.
-#       postinst runs 'micromamba env create' on the target machine so that
-#       all native libs (glibc, ALSA, VA-API ...) are compatible with
-#       the actual target OS — avoiding ABI mismatches / segfaults across distro versions.
+# NOTE: The Conda environment is NOT pre-built into the .deb.
+#       postinst runs 'conda env create' on the target machine so that
+#       all native libs (glibc, ALSA, VA-API …) are compiled for the
+#       actual target OS — avoiding ABI mismatches / segfaults.
 #
 # Requirements (build machine only):
 #   fpm     (gem install fpm)
@@ -49,11 +49,13 @@
 #   dpkg    (to verify)
 #
 # The resulting .deb declares APT deps from packaging/system-deps.txt.
+# Conda must be available on the TARGET machine (postinst bootstraps it
+# via packaging/bootstrap_conda.sh if not found).
 #
 # Arch note:
 #   --arch arm64 cross-compiles the .deb metadata only.
 #   For true arm64 binaries, run this script ON an arm64 machine.
-#
+
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -63,8 +65,8 @@ set -euo pipefail
 BOLD=$(tput bold 2>/dev/null || true)
 RESET=$(tput sgr0 2>/dev/null || true)
 
-log()  { echo "${BOLD}[build_deb_micromamba]${RESET} $*"; }
-die()  { echo "${BOLD}[build_deb_micromamba] ERROR:${RESET} $*" >&2; exit 1; }
+log()  { echo "${BOLD}[build_deb]${RESET} $*"; }
+die()  { echo "${BOLD}[build_deb] ERROR:${RESET} $*" >&2; exit 1; }
 step() { echo; echo "${BOLD}>>> $* ${RESET}"; }
 
 # ---------------------------------------------------------------------------
@@ -103,10 +105,9 @@ POSTINST="${REPO_ROOT}/packaging/postinst"
 PRERM="${REPO_ROOT}/packaging/prerm"
 BT_RULES="${REPO_ROOT}/packaging/org.nemo.bluetooth.rules"
 HW_FIXES_SRC="${REPO_ROOT}/packaging/hardware_fixes"
-BOOTSTRAP_MICROMAMBA="${REPO_ROOT}/packaging/bootstrap_micromamba.sh"
-LAUNCHER_SRC="${REPO_ROOT}/packaging"
+BOOTSTRAP_CONDA="${REPO_ROOT}/packaging/bootstrap_conda.sh"
 
-SERVICES_SRC="${REPO_ROOT}/services"
+SERVICES_SRC="${REPO_ROOT}/services/ap_manager_service"
 
 # ---------------------------------------------------------------------------
 # Step 0 — Read version
@@ -151,26 +152,30 @@ step "Assembling staging directory"
 APP_OPT="${STAGE_DIR}/opt/nemo-headunit"
 mkdir -p "${APP_OPT}"
 
-log "  Copying environment.yml (Micromamba env will be built on target)"
+log "  Copying environment.yml (Conda env will be built on target)"
 cp "${ENV_YML}" "${APP_OPT}/environment.yml"
 
 log "  Copying application source"
 cp "${REPO_ROOT}/main.py"      "${APP_OPT}/main.py"
-cp -a "${REPO_ROOT}/backend"   "${APP_OPT}/backend"
-cp -a "${REPO_ROOT}/frontend"  "${APP_OPT}/frontend"
+cp "${REPO_ROOT}/bus_broker.py" "${APP_OPT}/bus_broker.py"
+cp -a "${REPO_ROOT}/modules"   "${APP_OPT}/modules"
+cp -a "${REPO_ROOT}/shared"    "${APP_OPT}/shared"
+cp -a "${REPO_ROOT}/protos"    "${APP_OPT}/protos"
+mkdir "${APP_OPT}/config"
 
 log "  Copying services/"
-cp -a "${SERVICES_SRC}" "${APP_OPT}/services"
+mkdir -p "${APP_OPT}/services"
+cp -a "${SERVICES_SRC}" "${APP_OPT}/services/ap_manager_service"
 
 log "  Copying hardware_fixes/"
 cp -a "${HW_FIXES_SRC}" "${APP_OPT}/hardware_fixes"
 chmod +x "${APP_OPT}/hardware_fixes/run_hardware_fixes.sh"
 find "${APP_OPT}/hardware_fixes" -name 'fix_*.sh' -exec chmod +x {} \;
 
-if [ -f "${BOOTSTRAP_MICROMAMBA}" ]; then
-    log "  Copying bootstrap_micromamba.sh"
-    cp "${BOOTSTRAP_MICROMAMBA}" "${APP_OPT}/bootstrap_micromamba.sh"
-    chmod +x "${APP_OPT}/bootstrap_micromamba.sh"
+if [ -f "${BOOTSTRAP_CONDA}" ]; then
+    log "  Copying bootstrap_conda.sh"
+    cp "${BOOTSTRAP_CONDA}" "${APP_OPT}/bootstrap_conda.sh"
+    chmod +x "${APP_OPT}/bootstrap_conda.sh"
 fi
 
 # —— /opt/nemo-headunit/bin/ (launcher wrapper) ——
@@ -191,9 +196,6 @@ SYSTEMD_STAGE="${STAGE_DIR}/usr/lib/systemd/system"
 mkdir -p "${SYSTEMD_STAGE}"
 log "  Copying systemd unit"
 cp "${SERVICES_SRC}/org.nemo.APManager.service" "${SYSTEMD_STAGE}/"
-# We use the wrapper/launcher to avoid hardcoding the exact micromamba prefix path in the service file, 
-# or we can use the env python directly if we know it's always in the same place.
-# For simplicity and robustness, we'll point it to the environment's python.
 sed -i \
     "s|ExecStart=.*ap_manager_service.py|ExecStart=/opt/nemo-headunit/env/bin/python /opt/nemo-headunit/services/ap_manager_service/ap_manager_service.py|" \
     "${SYSTEMD_STAGE}/org.nemo.APManager.service"
@@ -205,6 +207,9 @@ log "  Copying D-Bus policy"
 cp "${SERVICES_SRC}/org.nemo.APManager.conf" "${DBUS_STAGE}/"
 
 # —— /usr/share/dbus-1/system-services/ ——
+# This activation file tells the bus daemon that org.nemo.APManager is a
+# legitimate root-owned service.  Without it, polkitd rejects
+# CheckAuthorization calls from the service with AccessDenied.
 DBUS_SERVICES_STAGE="${STAGE_DIR}/usr/share/dbus-1/system-services"
 mkdir -p "${DBUS_SERVICES_STAGE}"
 log "  Copying D-Bus activation file"
@@ -214,9 +219,12 @@ cp "${SERVICES_SRC}/org.nemo.APManager.dbus-service" \
 # —— /usr/share/polkit-1/actions/ ——
 POLKIT_STAGE="${STAGE_DIR}/usr/share/polkit-1/actions"
 mkdir -p "${POLKIT_STAGE}"
-log "  Copying PolicyKit policy"
+log "  Copying PolicyKit policy (installed as lowercase filename for polkitd 127)"
+# polkitd 127 is case-sensitive on filenames: the filename prefix must match
+# the action ID prefix exactly.  Action IDs use 'org.nemo.apmanager.*' so
+# the file must be named org.nemo.apmanager.policy (all lowercase).
 cp "${SERVICES_SRC}/org.nemo.APManager.policy" \
-    "${POLKIT_STAGE}/org.nemo.apmanager.policy"
+   "${POLKIT_STAGE}/org.nemo.apmanager.policy"
 
 # —— /etc/polkit-1/rules.d/ ——
 POLKIT_RULES_STAGE="${STAGE_DIR}/etc/polkit-1/rules.d"
@@ -279,6 +287,8 @@ dpkg-deb --info "${OUTPUT_DIR}/${DEB_FILENAME}"
 
 echo
 echo "--- dpkg-deb --contents (first 40 lines) ---"
+# Usa una subshell con set +o pipefail per evitare il "Broken pipe"
+# che dpkg-deb emette quando head chiude la pipe prima della fine.
 { dpkg-deb --contents "${OUTPUT_DIR}/${DEB_FILENAME}" || true; } | head -n 40
 
 # ---------------------------------------------------------------------------
@@ -292,6 +302,6 @@ log "  sudo apt install --fix-broken ./${DEB_FILENAME}"
 log "  # or:"
 log "  sudo dpkg -i ./${DEB_FILENAME} && sudo apt-get install -f"
 log ""
-log "NOTE: postinst creerà l'env Micromamba su /opt/nemo-headunit/env (~3-5 min)."
+log "NOTE: postinst creerà il Conda env su /opt/nemo-headunit/env (~3-5 min)."
 log "      Assicurati che la macchina target abbia accesso a internet."
 echo

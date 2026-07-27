@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=NemoHeadUnit
+GenericName=Android Auto Head Unit
+Comment=Wireless Android Auto head unit for NemoHeadUnit
+Exec=systemd-cat -t nemo-headunit /opt/nemo-headunit/bin/nemo-headunit
+Icon=/opt/nemo-headunit/assets/nemo-headunit.png
+Terminal=false
+Categories=AudioVideo;Video;Player;
+Keywords=android;auto;headunit;wireless;
+StartupNotify=true
+StartupWMClass=NemoHeadUnit

@@ -1,102 +1,38 @@
-# NemoHeadUnit-Wireless — Conda environment
+# NemoHeadUnit-Wireless — Micromamba Environment Specification
 #
-# Create:  conda env create -f environment.yml
-# Update:  conda env update -f environment.yml --prune
-# Activate: conda activate py314
+# Create:   micromamba create -f environment.yml
+# Activate: micromamba activate NemoHeadUnit-Wireless
+# Update:   micromamba update -f environment.yml --prune
 
-name: py314
+name: NemoHeadUnit-Wireless
 
 channels:
   - conda-forge
   - defaults
 
 dependencies:
-  # -----------------------------------------------------------------------
-  # Python runtime
-  # -----------------------------------------------------------------------
-  - python=3.14
-
-  # -----------------------------------------------------------------------
-  # IPC / Message bus
-  # -----------------------------------------------------------------------
-  - pyzmq>=26.0          # ZeroMQ bindings (bus_broker + BusClient)
-  - msgpack-python>=1.0  # Frame serialisation (conda-forge package name)
-
-  # -----------------------------------------------------------------------
-  # GUI
-  # -----------------------------------------------------------------------
-  - pyqt6>=6.7           # Qt6 bindings + QtBusBridge
-  - pyopengl              # OpenGL bindings per _NV12GLWidget (GLSL renderer)
-
-  # -----------------------------------------------------------------------
-  # Bluetooth / DBus (system packages preferred; pip fallback below)
-  # -----------------------------------------------------------------------
-  # - dbus-python           # Python DBus bindings for BluetoothManager
-
-  # -----------------------------------------------------------------------
-  # Media — GStreamer stack
-  #
-  # gst-python porta il binding gi.repository.Gst ma NON i plugin codec.
-  #
-  # Decoder H264 disponibili dopo l'installazione:
-  #   avdec_h264   — FFmpeg SW decode          (da gst-libav)
-  #   openh264dec  — Cisco openh264 SW decode   (da openh264 + gst-plugins-bad)
-  #                  Più leggero di avdec_h264 su hardware x86 datato.
-  #
-  # Decoder VA-API (HW accelerato) — NON inclusi nell'env conda:
-  #   gst-plugins-vaapi non è pacchettizzato su conda-forge.
-  #   video_ui/_build_pipeline usa Gst.Registry.scan_path() a runtime per
-  #   caricare vaapih264dec / vah264dec dai plugin GStreamer di sistema
-  #   (/usr/lib/x86_64-linux-gnu/gstreamer-1.0) se disponibili.
-  #   Su macchine senza VA-API la probe fallisce silenziosamente e
-  #   l'applicazione scende automaticamente a openh264dec → avdec_h264.
-  #
-  #   Per installare i plugin VA-API di sistema (una tantum sul target HW):
-  #     sudo apt install gstreamer1.0-vaapi
-  #
-  #   NB: usare vaapih264dec, NON vaapidecodebin.
-  #       vaapidecodebin usa DMA-buf e triggera assert nel driver i965
-  #       su Bay Trail (i965_check_alloc_surface_bo).
-  # -----------------------------------------------------------------------
-  - gst-python            # gi.repository.Gst Python bindings (conda-forge)
-  - gst-libav             # avdec_h264 — FFmpeg SW H264 decoder
-  - gst-plugins-bad       # h264parse, openh264dec, ecc.
-  - openh264              # Cisco openh264 — SW decoder leggero per x86 datato
-  - gst-plugins-base 
-  - gst-plugins-good
-
-  # -----------------------------------------------------------------------
-  # Audio backend (channel_modules/audio)
-  #
-  # PCM output is handled by pacat (PulseAudio/PipeWire) — a system tool,
-  # NOT a Python package.  Install via:
-  #   sudo apt install pulseaudio-utils
-  # pacat writes directly to the PipeWire/PulseAudio daemon, avoiding
-  # PortAudio/ALSA exclusive-access conflicts.
-  #
-  # Per-channel volume is controlled via:
-  #   pactl set-sink-input-volume <sink-input-index> <vol>%
-  # -----------------------------------------------------------------------
-  - av>=12.0              # PyAV — FFmpeg bindings for AAC-LC ADTS decoding
-
-  # -----------------------------------------------------------------------
-  # Configuration persistence
-  # -----------------------------------------------------------------------
-  - pyyaml>=6.0           # YAML read/write for config_manager module
-
-  # -----------------------------------------------------------------------
-  # Utilities
-  # -----------------------------------------------------------------------
+  - python=3.13
+  - pyzmq>=26.0
+  - msgpack-python>=1.0
+  - aiohttp>=3.9.0
+  - websockets>=12.0
+  - pyyaml>=6.0
   - pip
-
   - pip:
-    # msgpack is also available via pip if conda-forge version lags
-    - msgpack>=1.0.8
-    # GStreamer Python overrides fallback (if gst-python not in conda)
-    # - PyGObject>=3.46
-    # Protobuf compiler — needed to run scripts/compile_protos.sh
-    # Generates *_pb2.py from .proto files in third_party/open-android-auto
-    - grpcio-tools>=1.62
-    - protobuf>=4.25
-    # Logging — async structured logger (Python 3.14 compatible); replaces logly
     - loguru>=0.7.3
+    - protobuf>=4.25
+    - grpcio-tools>=1.62
+    - winrt-runtime>=3.2.1
+    - winrt-Windows.Networking>=3.2.1
+    - winrt-Windows.Networking.Connectivity>=3.2.1
+    - winrt-Windows.Networking.NetworkOperators>=3.2.1
+    - winrt-windows.Networking.Sockets>=3.2.1
+    - winrt-Windows.Foundation>=3.2.1
+    - winrt-Windows.Foundation.Collections>=3.2.1
+    - winrt-Windows.Devices.Enumeration>=3.2.1
+    - winrt-Windows.Devices.Radios>=3.2.1
+    - winrt-Windows.Devices.Bluetooth>=3.2.1
+    - winrt-Windows.Devices.Bluetooth.Rfcomm>=3.2.1
+    - winrt-Windows.Devices.Bluetooth.Advertisement>=3.2.1
+    - winrt-Windows.Security.Cryptography>=3.2.1
+    - winrt-Windows.Storage.Streams>=3.2.1

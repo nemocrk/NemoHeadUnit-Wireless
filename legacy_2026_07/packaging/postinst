@@ -1,17 +1,30 @@
 #!/bin/bash
-# packaging_micromamba/postinst
+# packaging/postinst
 #
-# dpkg post-installation script for nemo-headunit (micromamba version).
+# dpkg post-installation script for nemo-headunit.
 # Called by dpkg automatically after all files are unpacked.
 #
+# Arguments:
+#   $1 = "configure"  (first install or upgrade)
+#   $1 = "abort-*"    (rollback scenario)
+#
+# Philosophy:
+#   - Idempotent: safe to run multiple times (upgrades).
+#   - Never interactive: no prompts, no stdin reads.
+#   - Log to journald-friendly stdout only.
+#
+# Conda env strategy:
+#   The .deb ships environment.yml, NOT a pre-built env.
+#   postinst builds the env on the target machine so that all native libs
+#   (glibc, ALSA, VA-API...) are compiled for the actual target OS,
+#   avoiding ABI mismatches and segfaults across distro versions.
 
 set -euo pipefail
 
 APP_DIR="/opt/nemo-headunit"
-ENV_PREFIX="${APP_DIR}/env"
+CONDA_ENV_DIR="${APP_DIR}/env"
 ENV_YML="${APP_DIR}/environment.yml"
-BOOTSTRAP_MICROMAMBA="${APP_DIR}/bootstrap_micromamba.sh"
-MICROMAMBA_BIN="/opt/micromamba/micromamba"
+BOOTSTRAP_CONDA="${APP_DIR}/bootstrap_conda.sh"
 SERVICE_NAME="org.nemo.APManager.service"
 GROUP_NAME="ap_manager"
 BLUETOOTH_GROUP_NAME="bluetooth"
@@ -20,16 +33,17 @@ LAUNCHER_SRC="${APP_DIR}/bin/nemo-headunit"
 LAUNCHER_LINK="/usr/local/bin/nemo-headunit"
 DESKTOP_SRC="/usr/share/applications/nemo-headunit.desktop"
 
-log() { echo "[nemo-headunit postinst (micromamba)] $*"; }
+log() { echo "[nemo-headunit postinst] $*"; }
 
-# Trova micromamba nel PATH o in /opt/micromamba
-find_micromamba() {
-    if command -v micromamba &>/dev/null; then
-        command -v micromamba
+# Trova conda nel PATH o in /opt/miniconda3
+find_conda() {
+    if command -v conda &>/dev/null; then
+        command -v conda
         return 0
     fi
-    if [ -x "${MICROMAMBA_BIN}" ]; then
-        echo "${MICROMAMBA_BIN}"
+    if [ -x "/opt/miniconda3/bin/conda" ]; then
+        export PATH="/opt/miniconda3/bin:${PATH}"
+        echo "/opt/miniconda3/bin/conda"
         return 0
     fi
     return 1
@@ -66,38 +80,45 @@ configure)
     done < <(getent passwd)
 
     # ------------------------------------------------------------------
-    # 2. Bootstrap micromamba if missing
+    # 2. Bootstrap conda if missing
     # ------------------------------------------------------------------
-    if ! find_micromamba &>/dev/null; then
-        if [ -f "${BOOTSTRAP_MICROMAMBA}" ]; then
-            log "micromamba non trovato — eseguo bootstrap_micromamba.sh"
-            chmod +x "${BOOTSTRAP_MICROMAMBA}"
-            bash "${BOOTSTRAP_MICROMAMBA}"
+    if ! find_conda &>/dev/null; then
+        if [ -f "${BOOTSTRAP_CONDA}" ]; then
+            log "conda non trovato — eseguo bootstrap_conda.sh"
+            chmod +x "${BOOTSTRAP_CONDA}"
+            bash "${BOOTSTRAP_CONDA}"
         else
-            log "WARNING: micromamba non trovato e bootstrap_micromamba.sh assente."
-            log "         Installa micromamba manualmente e ri-esegui:"
-            log "           micromamba create -p ${ENV_PREFIX} -f ${ENV_YML}"
+            log "WARNING: conda non trovato e bootstrap_conda.sh assente."
+            log "         Installa conda manualmente e ri-esegui:"
+            log "           conda env create --prefix ${CONDA_ENV_DIR} --file ${ENV_YML}"
         fi
     else
-        log "micromamba trovato: $(find_micromamba)"
+        log "conda trovato: $(find_conda)"
     fi
 
     # ------------------------------------------------------------------
-    # 3. Build Micromamba env on target (idempotent)
+    # 3. Build Conda env on target (idempotent)
     # ------------------------------------------------------------------
-    MM_BIN="$(find_micromamba || true)"
+    CONDA_BIN="$(find_conda || true)"
 
-    if [ -n "${MM_BIN}" ]; then
-        if [ -d "${ENV_PREFIX}" ]; then
-            log "Micromamba env già presente in ${ENV_PREFIX} — aggiornamento"
-            "${MM_BIN}" install -y -p "${ENV_PREFIX}" -f "${ENV_YML}"
+    if [ -n "${CONDA_BIN}" ]; then
+        if [ -d "${CONDA_ENV_DIR}" ]; then
+            log "Conda env già presente in ${CONDA_ENV_DIR} — aggiornamento"
+            "${CONDA_BIN}" env update \
+                --prefix "${CONDA_ENV_DIR}" \
+                --file   "${ENV_YML}" \
+                --prune  \
+                --quiet
         else
-            log "Creazione Micromamba env in ${ENV_PREFIX} (potrebbe richiedere qualche minuto)"
-            "${MM_BIN}" create -y -p "${ENV_PREFIX}" -f "${ENV_YML}"
+            log "Creazione Conda env in ${CONDA_ENV_DIR} (potrebbe richiedere qualche minuto)"
+            "${CONDA_BIN}" env create \
+                --prefix "${CONDA_ENV_DIR}" \
+                --file   "${ENV_YML}" \
+                --quiet
         fi
-        log "Micromamba env pronto."
+        log "Conda env pronto."
     else
-        log "WARNING: impossibile creare l'env Micromamba — micromamba non disponibile."
+        log "WARNING: impossibile creare il Conda env — conda non disponibile."
         log "         Il servizio non si avvierà finché l'env non è presente."
     fi
 
@@ -108,8 +129,8 @@ configure)
     chown -R root:root "${APP_DIR}"
     chmod -R a+rX,u+w "${APP_DIR}"
     chmod -R a+rwX,u+w "${APP_DIR}/config"
-    if [ -x "${ENV_PREFIX}/bin/python" ]; then
-        chmod +x "${ENV_PREFIX}/bin/python"
+    if [ -x "${CONDA_ENV_DIR}/bin/python" ]; then
+        chmod +x "${CONDA_ENV_DIR}/bin/python"
     fi
 
     # ------------------------------------------------------------------

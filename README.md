@@ -1,177 +1,239 @@
 # NemoHeadUnit-Wireless
 
-![Coverage](docs/badges/coverage.svg)
+Modular, cross-platform web-based head unit architecture for Wireless Android Auto (Linux & Windows).
 
-NemoHeadUnit-Wireless is an emulation platform that runs an Android Auto™ wireless headunit experience on resource-constrained edge devices. Written in pure Python 3.14, the system handles wireless pairing, network handshakes, dynamic UI composition, and hardware-accelerated video/audio rendering—**completely eliminating C++ compiler dependencies and toolchain complexity.**
+## Overview
 
----
-
-## 🚀 Key Architectural Innovations
-
-Traditional headunit architectures suffer from CPU contention, thread deadlock, and GIL (Global Interpreter Lock) bottlenecking when simultaneously decoding $60\text{ fps}$ video, routing PCM audio, and handling high-frequency touch screen inputs. 
-
-NemoHeadUnit-Wireless solves these constraints using a series of innovative software design patterns:
-
-### 1. GIL-Isolated Multi-Process Topography
-Rather than running all modules in a single event loop, each major subsystem runs as an independent OS process. If a widget crashes, the rest of the system (including active audio projection and control sockets) continues running.
-- **Orchestration**: `main.py` discovers module processes dynamically and coordinates a reactive priority-based boot sequence (from configuration manager up to visual widgets).
-- **Communication**: Processes communicate exclusively through a central ZeroMQ (ZMQ) XPUB/XSUB broker (`bus_broker.py`). No Python object references cross process boundaries.
-
-### 2. The Input Trap Pattern
-Because each UI widget runs as a separate process with its own transparent PyQt6 window, routing touch inputs is a major challenge. The system addresses this with a global input dispatcher:
-1. **Overlay capture**: `ui_shell` spawns an invisible, frameless `InputTrap` window that floats on top of the entire screen ($z = \infty$).
-2. **Event serialization**: `InputTrap` captures 100% of touch and mouse coordinates and publishes them as raw events (`input.raw`).
-3. **Geometry Hit-Testing**: `ui_shell` subscribes to raw inputs, runs a collision hit-test against the registered geometries of the widgets, and calculates local offsets relative to the target widget's origin:
-   $$\begin{aligned}
-   x_{\text{local}} &= x_{\text{global}} - x_{\text{widget\_left}} \\
-   y_{\text{local}} &= y_{\text{global}} - y_{\text{widget\_top}}
-   \end{aligned}$$
-4. **Targeted Dispatch**: The translated coordinates are routed to `input.event.<widget_name>`, allowing the target process to react locally (e.g., triggering button hover states).
-
-```
-User Touch/Click
-       │
-       ▼
-┌──────────────────────────────────────────────┐
-│       InputTrap Window (z = infinity)        │
-└──────────────────────┬───────────────────────┘
-                       │ input.raw (ZMQ)
-                       ▼
-┌──────────────────────────────────────────────┐
-│             ui_shell Compositor              │
-│  (Hit-tests coordinates & translates offset)  │
-└──────────────────────┬───────────────────────┘
-                       │ input.event.navbar_ui (ZMQ)
-                       ▼
-┌──────────────────────────────────────────────┐
-│        Target Process (e.g., navbar_ui)      │
-└──────────────────────────────────────────────┘
-```
-
-### 3. Declarative UI Reflow Compositor
-Widgets do not hardcode screen coordinates. Instead, they announce layout constraints (e.g., `dock: "bottom"`, `height: 60`, `min_height: 48`) via the `ui.widget.register` topic. `ui_shell` automatically reflows coordinates, handles z-order stacking, and pushes geometry configurations down to individual windows.
-
-### 4. Zero-Copy Media Transport
-To bypass JSON string processing and Base64 parsing overhead, media streams (AAC audio, H.264 video) travel as **2-Frame ZMQ Multipart Messages**:
-- **Frame 0 (Topic)**: Routing key (bytes).
-- **Frame 1 (Payload)**: A raw byte array passed directly via memoryviews to Python bindings for GStreamer, minimizing CPU copying.
+`NemoHeadUnit-Wireless` is a refactored, microservices-based core for Wireless Android Auto. It replaces legacy monolithic PyQt UI scripts with process-isolated backend modules communicating over ZeroMQ (ZMQ) Pub/Sub and managed by a Priority Boot Orchestrator. HTTP and WebSocket routes are unified under a central Gateway Proxy (`proxy` module).
 
 ---
 
-## 📂 Repository Directory Tour
+## Environment & Dependencies
 
-```
-.
-├── main.py                     # Orchestrator (spawns modules and coordinates priority boot)
-├── bus_broker.py               # ZeroMQ XPUB/XSUB IPC message broker
-├── shared/                     # Reusable utilities shared across isolated processes
-│   ├── bus_client.py           # Instrumented ZMQ IPC wrapper (injects telemetry & latency metrics)
-│   ├── config_client.py        # Schema-first configuration validation library
-│   ├── logger.py               # Loguru-based logger with a thread-safe ZMQ bus drain sink
-│   └── proto_utils.py          # Android Auto wire-format frame encoders and decoders
-│
-├── modules/                    # Isolated OS-level process modules
-│   ├── config_manager/         # Central config manager; persists settings to YAML
-│   ├── ui_shell/               # Composer layout manager and Input Trap coordinate translator
-│   ├── navbar_ui/              # Bottom playback progress bar
-│   ├── floating_menu_ui/       # Settings launcher displaying dynamic arc-shaped widget buttons
-│   ├── bluetooth_ui/           # Bluetooth pairing manager overlay
-│   ├── config_ui/              # Dynamic UI settings configuration editor
-│   ├── video_ui/               # GStreamer H.264 projection renderer (hardware accelerated)
-│   │
-│   ├── channel_manager/        # Coordinates Open Android Auto stream session channels
-│   ├── oaa_control_channel/    # Implements OAA handshakes, control commands, and serialization
-│   └── channel_modules/        # Specific stream encoders (audio, video, input, sensor, wifi)
-│
-└── tests/                      # Core test suites (Unit, Integration, E2E, Fuzz)
-    ├── conftest.py              # In-process ZMQ broker and offscreen QApp fixtures
-    └── e2e/helpers/             # Stack launchers and PhoneMock RFCOMM/TCP socket simulators
-```
+This project relies on **micromamba** (or standard `conda`/`mamba`) for reproducible cross-platform Python environment management.
 
----
-
-## 🛠️ Technical Stack Summary
-
-| Layer | Component | Details |
-|---|---|---|
-| **Core** | Language | Python 3.14 (running in a `conda` sandbox environment) |
-| **OS** | Deployment Target | Ubuntu 24 (optimized for embedded platforms) |
-| **Bus** | IPC Broker | ZeroMQ XPUB/XSUB sockets (`pyzmq` over Unix domain sockets) |
-| **Serialization** | Format | JSON (control messages) + Raw Binary Multipart (media frames) |
-| **UI** | Compositor | PyQt6 (with Alpha-channel transulency and hardware GLSL shaders) |
-| **Media** | Video Decoding | PyGObject GStreamer binding (hardware accelerated decoding) |
-| **Audio** | Sound Mixing | PulseAudio / PipeWire device mapping (`pacat` process streams) |
-
----
-
-## ⚙️ How the System Starts Up
-
-NemoHeadUnit-Wireless initiates a reactive handshake to ensure background services are ready before UI panels register.
-
-```mermaid
-sequenceDiagram
-    participant Orchestrator as main.py
-    participant Broker as bus_broker.py
-    participant Config as config_manager [Priority 0]
-    participant Shell as ui_shell [Priority 2]
-    participant Widget as video_ui [Priority 4]
-
-    Orchestrator->>Broker: Start XPUB/XSUB broker
-    Orchestrator->>Broker: Spawn module subprocesses
-    Orchestrator->>Broker: Publish "system.readytostart"
-    Config-->>Orchestrator: system.module_ready {priority: 0}
-    Shell-->>Orchestrator: system.module_ready {priority: 2}
-    Widget-->>Orchestrator: system.module_ready {priority: 4}
-
-    Note over Orchestrator: Level 0 Boot
-    Orchestrator->>Broker: Publish "system.start" {priority: 0}
-    Config->>Config: Load YAML settings
-    Config-->>Orchestrator: system.ready {priority: 0}
-
-    Note over Orchestrator: Level 2 Boot
-    Orchestrator->>Broker: Publish "system.start" {priority: 2}
-    Shell->>Shell: Open window & top Input Trap
-    Shell-->>Orchestrator: system.ready {priority: 2}
-
-    Note over Orchestrator: Level 4 Boot
-    Orchestrator->>Broker: Publish "system.start" {priority: 4}
-    Widget->>Shell: Publish "ui.widget.register"
-    Shell-->>Widget: Publish "ui.widget.geometry"
-    Widget->>Widget: Apply geometry & show()
-    Widget-->>Orchestrator: system.ready {priority: 4}
-```
-
----
-
-## 🧪 Verification & Simulation Suite
-
-The repository contains an E2E simulation harness capable of mimicking a physical Android device to verify connection logic headlessly:
-- **`PhoneMock`**: Simulates Bluetooth RFCOMM pairing and negotiates Wi-Fi AP association.
-- **`TcpPhoneClient`**: Establishes a virtual OAA TCP socket, completing Version exchanges and Channel openings.
-- **`StackLauncher`**: Spins up the entire Headunit stack inside thread-safe daemon processes to test session restarts.
-
-### Running Verification Locally
+### Micromamba Environment Setup
 
 ```bash
-# Install testing dependencies
-pip install -e ".[test]"
+# Clone or navigate to repo root
+cd NemoHeadUnit-Wireless
 
-# Run Unit & Integration tests (enforcing minimum 80% coverage)
-pytest -m "unit or integration" --cov=. --cov-report=term-missing --cov-fail-under=80
+# Create the virtual environment from environment.yml
+micromamba create -f environment.yml -y
 
-# Run headless E2E connection checks
-pytest -m e2e_smoke -v
+# Activate the environment
+micromamba activate NemoHeadUnit-Wireless
+
+# (Optional) Update dependencies if environment.yml changes:
+micromamba env update -n NemoHeadUnit-Wireless -f environment.yml --prune
+```
+
+*Note: On Windows systems, you can also use `environment.windows.yml` located in the root repository if native Windows build toolchains are required.*
+
+---
+
+## Architecture & Priority Boot Waves
+
+Backend modules inherit from `BaseBackendModule` and are launched in strictly ordered priority boot waves by `backend/main.py` (via root `main.py` entry point):
+
+```
+Priority 0: bus_broker
+       │
+       ▼
+Priority 1: config_manager
+       │
+       ▼
+Priority 2: proxy
+       │
+       ▼
+Priority 3+: tcp_server, connectivity_manager
+```
+
+* **Priority 0 (`bus_broker`)**: Autonomous IPC message router operating on local defaults without external configuration dependencies. Manages heartbeat registry (`system.heartbeat`).
+* **Priority 1 (`config_manager`)**: Central configuration engine storing YAML settings in OS AppData, validating strongly-typed module schemas, and exposing `/api/config`.
+* **Priority 2 (`proxy`)**: Gateway Proxy webserver binding to the primary public port (`8000`) and dynamically routing `/api/<module_prefix>` to internal loopback microservices.
+* **Priority 3+ (`tcp_server`, `connectivity_manager`)**: Functional domain microservices exposing hardware controls, sockets, and channel logic.
+
+---
+
+## Directory Structure
+
+```
+NemoHeadUnit-Wireless/
+├── environment.yml           # Micromamba environment specification (NemoHeadUnit-Wireless)
+├── environment.windows.yml   # Windows environment specification
+├── README.md                 # Architecture & usage documentation
+├── main.py                   # Root application entry point (delegates to backend/main.py)
+├── backend/
+│   ├── main.py               # Backend orchestrator (injects PYTHONPATH, boots module subprocesses in waves)
+│   ├── shared/               # Core shared backend libraries
+│   │   ├── base_module.py    # BaseBackendModule abstract class & run_module() entry launcher
+│   │   ├── base_channel_module.py # BaseChannelModule abstract class for AA channel microservices
+│   │   ├── nal_utils.py      # Binary H.264 NAL parsing & WebCodecs frame packing
+│   │   ├── proto_utils.py    # AA frame serialization, SDR parsing & timestamp extraction
+│   │   ├── config_client.py  # ConfigClient for ZMQ config fetching, schema transmission & hot-reloading
+│   │   ├── config_schema.py  # Strongly-typed schema descriptors (field_string, field_int, field_bool, field_enum)
+│   │   ├── ipc_utils.py      # Cross-platform ZMQ URI resolver (TCP loopback on Windows / POSIX IPC on Linux)
+│   │   ├── logger.py         # Loguru console logging & WebSocket stream sink (ws://0.0.0.0:8766)
+│   │   ├── bus_client.py     # Per-module ZMQ Pub/Sub IPC messaging client wrapper
+│   │   ├── proto/            # Protobuf compiled Python classes (protos/oaa)
+│   │   └── hardware/         # Cross-platform Hardware Adapter Layer (HAL)
+│   │       ├── base_bluetooth.py      # BaseBluetoothAdapter abstract interface
+│   │       ├── base_wifi_ap.py        # BaseWifiApAdapter abstract interface
+│   │       ├── bluez_bluetooth.py     # Linux BlueZ D-Bus Bluetooth driver with rich stage logging & MAC resolution
+│   │       ├── windows_bluetooth.py   # Windows / Mock RFCOMM Bluetooth driver
+│   │       ├── apmanager_wifi_ap.py   # Linux D-Bus APManager driver (org.nemo.APManager) with active state tracking
+│   │       └── windows_wifi_ap.py     # Windows Mobile Hotspot & Mock WiFi AP driver
+│   └── modules/              # Process-isolated backend modules (ALL extending BaseBackendModule)
+│       ├── bus_broker/       # Priority 0 core IPC router module (autonomous, manages sockets & system.heartbeat)
+│       ├── config_manager/   # Priority 1 central config service (stores YAML in OS AppData, schema validation, REST API)
+│       ├── proxy/            # Priority 2 Gateway Proxy module (exposed webserver on public port 8000)
+│       ├── tcp_server/       # Priority 3 Wireless Android Auto TCP connection listener (port 5288) & SHM writer
+│       ├── connectivity_manager/ # Priority 3 Bluetooth discovery/pairing & WiFi AP manager
+│       ├── channel_manager/  # Priority 3 Consolidated channels (Control, Video, Audio PCM/AAC, Mic, Input, Sensor)
+│       └── _template/        # Template extending BaseBackendModule using run_module(SampleModule)
+├── frontend/                 # Modern HTML5/CSS3/JS Web UI shell & client apps
+│   ├── index.html            # Main UI shell & WebCodecs Canvas player
+│   └── js/
+│       └── webcodecs_player.js # WebCodecs VideoDecoder & DataView binary protocol parser
+├── scripts/                  # Developer tooling, deploy scripts, kiosk launchers
+│   ├── deploy_remote_micromamba.sh # Remote deployment script
+│   ├── bus_monitor.py        # Real-time ZMQ bus traffic monitor
+│   ├── launch_kiosk.sh       # Linux kiosk launcher
+│   └── launch_kiosk.bat      # Windows kiosk launcher
+├── packaging/                # Debian packaging (micromamba-based), systemd service units, hardware fixes
+├── services/                 # Platform-specific system background services
+│   └── linux/                # Linux D-Bus APManager daemon service
+│       └── ap_manager_service/
+├── legacy_2026_07/           # Date-stamped legacy code archive
+└── tests/                    # Unit test suite
 ```
 
 ---
 
-## 📖 Comprehensive Documentation Index
+## Hardware Abstraction Layer (HAL)
 
-For in-depth explanations of individual subsystems, consult our documentation suite:
+To guarantee universal cross-platform execution across Linux and Windows without hardcoded OS assumptions:
+* **Bluetooth**: `connectivity_manager` attempts Linux BlueZ D-Bus initialization via `BlueZBluetoothAdapter`. If system D-Bus is unavailable, it gracefully falls back to `WindowsBluetoothAdapter` (supporting Windows Winsock `WSASetServiceW` SDP registration for Android Auto UUID `0000fcef-0000-1000-8000-00805f9b34fb` and mock loopback RFCOMM sockets for VM testing).
+* **WiFi Access Point**: `connectivity_manager` attempts Linux APManager D-Bus initialization (`org.nemo.APManager`). If unavailable on Windows, it falls back to `WindowsWifiApAdapter` (direct WinRT `winrt.windows.networking` API or mock driver).
 
-- 📐 **[System Architecture](docs/SYSTEM_ARCHITECTURE.md)**: Multi-process isolation, telemetry, and graceful shutdown sequence barriers.
-- 🧩 **[Design Patterns](docs/DESIGN_PATTERNS.md)**: Boot handshake protocols, registration contracts, and Input Trap hit-testing.
-- ⚙️ **[Functional Targets](docs/FUNCTIONAL_TARGETS.md)**: Bluetooth/Wi-Fi credential negotiations, GStreamer decoders, and audio mixing.
-- 🖥️ **[UI Compositor Architecture](docs/UI_ARCHITECTURE.md)**: Multi-process transparent window configurations and ZMQ routing.
-- 🎨 **[UI Design System Specification](docs/UI_DESIGN_SYSTEM.md)**: Colors, typography scale, Lucide icons, and motion guidelines.
-- 🧪 **[Test Suite Architecture](docs/TEST_SUITE_ARCHITECTURE.md)**: Unit, integration, E2E, fuzz, and performance testing methodologies.
+---
+
+## System Background Services Setup
+
+The Access Point Manager (`APManager`) operates as a system-level background daemon to manage WiFi hardware, softAP configuration, and networking interfaces without requiring root privileges for the main head unit backend process.
+
+### Linux D-Bus APManager Daemon (`services/linux/ap_manager_service/`)
+
+On Linux, the service exposes `org.nemo.APManager` on the system D-Bus and uses PolicyKit rules for unprivileged client access.
+
+```bash
+# 1. Install service as root (creates Unix group 'ap_manager', installs D-Bus policy, polkit rules, and systemd unit)
+sudo bash services/linux/ap_manager_service/install.sh
+
+# 2. Add your user to the 'ap_manager' Unix group
+sudo usermod -aG ap_manager $USER
+
+# 3. Log out and log back in for group membership to take effect
+
+# Useful management commands:
+sudo systemctl status org.nemo.APManager.service   # Check service status
+journalctl -u org.nemo.APManager.service -f        # Stream live daemon logs
+busctl introspect org.nemo.APManager /org/nemo/APManager # Inspect D-Bus methods
+```
+
+---
+
+## Configuration Directory Standard
+
+Persistent YAML configuration files are stored in the cross-platform OS standard user AppData directory (or resolved via `NEMO_CONFIG_DIR`):
+* **Linux**: `~/.config/NemoHeadUnit-Wireless/`
+* **Windows**: `%APPDATA%\NemoHeadUnit-Wireless\`
+
+---
+
+## Running the Application
+
+### Launching Backend Subprocess Orchestrator
+
+**On Linux (Bash):**
+```bash
+micromamba run -n NemoHeadUnit-Wireless python main.py
+```
+
+**On Windows (PowerShell):**
+```powershell
+micromamba run -n NemoHeadUnit-Wireless python main.py
+```
+
+---
+
+### Primary Endpoints (via Gateway Proxy at http://127.0.0.1:8000):
+* **`GET /api/config/`**: View system-wide configuration parameters and schema descriptors.
+* **`GET /api/connectivity/status`**: Check Bluetooth discovery status, paired devices, and active WiFi AP state.
+* **`POST /api/connectivity/discover`**: Trigger Bluetooth discovery scan.
+* **`POST /api/connectivity/wifi/start`**: Programmatically initiate softAP hotspot.
+* **`GET /api/tcp/status`**: Monitor active Wireless Android Auto TCP listener state.
+
+---
+
+## Packaging & Distribution
+
+### 1. Debian Package Creation (`.deb`)
+
+You can package the application into a self-contained Debian package targeting Linux distributions (Ubuntu/Debian) using `fpm`.
+
+#### Prerequisites (Build Host)
+* Ruby & FPM: `gem install fpm`
+* `dpkg-deb` toolchain (`apt install dpkg`)
+
+#### Build Command
+```bash
+# Build for amd64 architecture (default output in dist/)
+bash packaging/build_deb.sh
+
+# Cross-build metadata for arm64 target architecture
+bash packaging/build_deb.sh --arch arm64 --output-dir dist
+```
+
+#### What the `.deb` Package Handles Automatically
+* **Staging Layout**: Installs application files to `/opt/nemo-headunit/` (`main.py`, `backend/`, `frontend/`, `services/`, `hardware_fixes/`).
+* **Environment Provisioning**: The `postinst` script automatically installs `micromamba` and creates the `NemoHeadUnit-Wireless` environment natively on the target hardware to prevent GLIBC/ABI version mismatches.
+* **D-Bus & Systemd Integration**: Installs `org.nemo.APManager.service` for WiFi AP control and system policy rules.
+* **Launcher Wrapper**: Installs `/usr/bin/nemo-headunit` and desktop entry shortcut.
+
+#### Installing on Target Hardware
+```bash
+sudo dpkg -i dist/nemo-headunit_<version>_<arch>.deb
+sudo apt-get install -f # Install system dependencies if missing
+```
+
+---
+
+### 2. Automated Remote SSH Deployment
+
+For rapid development and remote testing on head unit devices (e.g. Raspberry Pi, Intel Bay Trail / HP Omni 10), use the automated SSH sync deployment script.
+
+```bash
+# Sync source code, update micromamba environment, and launch remote main.py
+bash scripts/deploy_remote_micromamba.sh --sync-env nemo 192.168.1.50
+
+# Include platform hardware & boot fixes (Intel Bay Trail / HP Omni 10)
+bash scripts/deploy_remote_micromamba.sh --sync-env --omni-fix nemo 192.168.1.50
+```
+
+---
+
+### 3. Kiosk Launcher Tools
+
+For production display deployment in head unit touchscreens:
+
+* **Linux Kiosk Launcher**:
+  ```bash
+  bash scripts/launch_kiosk.sh http://localhost:8000
+  ```
+* **Windows Kiosk Launcher**:
+  ```cmd
+  scripts\launch_kiosk.bat http://localhost:8000
+  ```
+
