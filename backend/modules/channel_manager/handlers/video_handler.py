@@ -1,3 +1,4 @@
+import base64
 from typing import TYPE_CHECKING, Callable, Dict
 from shared.nal_utils import pack_media_frame, STREAM_TYPE_VIDEO
 from shared.proto_utils import parse_media_with_timestamp
@@ -136,19 +137,38 @@ class VideoChannelHandler:
             return
 
         video_ch_id = self.manager.get_channel_id_for_type(ChannelType.VIDEO)
-        binary_frame = pack_media_frame(video_ch_id, ts_us, codec_payload)
-        await self.manager.broadcast_ws_media(binary_frame)
-        if self.frame_count % UNACKED_FRAMES_THRESHOLD == 0:
-            self.log.debug(f"📹 [Video Stream Flow] Processed video frame {self.frame_count}/{UNACKED_FRAMES_THRESHOLD} (ch{video_ch_id}): msgId=0x{message_id:04x}, payload_len={len(codec_payload)}, ts={ts_us} µs -> Broadcasting to {len(self.manager.ws_clients)} WS client(s)")
 
-        # Batch MediaAck every 10 frames using AVMediaAckIndication(ack_count=10)
+        if self.frame_count % UNACKED_FRAMES_THRESHOLD == 0:
+            self.log.debug(
+                f"📹 [Video Stream Flow] Processed video frame {self.frame_count}/{UNACKED_FRAMES_THRESHOLD} "
+                f"(ch{video_ch_id}): msgId=0x{message_id:04x}, payload_len={len(codec_payload)}, ts={ts_us} µs "
+                f"-> Publishing to video.raw_nal (transport: {self.manager.active_video_transport or 'h264'})"
+            )
+
+        # Publish raw NAL bytes to video_decoder module via ZMQ bus.
+        # video_decoder applies the configured transport strategy (decode, encode, passthrough)
+        # and publishes the result back as video.transport_frame, which channel_manager
+        # then broadcasts to WebSocket clients.
+        self.manager.publish("video.raw_nal", {
+            "channel_id": video_ch_id,
+            "timestamp_us": ts_us,
+            "payload_b64": base64.b64encode(codec_payload).decode(),
+        })
+
+        # Batch MediaAck every UNACKED_FRAMES_THRESHOLD frames
         self.frame_count += 1
         if self.frame_count % UNACKED_FRAMES_THRESHOLD == 0:
             ack = AVMediaAckIndication()
             ack.session_id = self.session_id
             ack.ack_count = UNACKED_FRAMES_THRESHOLD
-            self.log.debug(f"📹 VideoChannel (ch{video_ch_id}): Sending batch AVMediaAckIndication (session_id={self.session_id}, ack_count=10, total_frames={self.frame_count})")
-            await self.manager.send_wire_frame(video_ch_id, AV_MSG.AV_MEDIA_ACK_INDICATION, ack.SerializeToString(), encrypted=True, log_level='debug')
+            self.log.debug(
+                f"📹 VideoChannel (ch{video_ch_id}): Sending batch AVMediaAckIndication "
+                f"(session_id={self.session_id}, ack_count={UNACKED_FRAMES_THRESHOLD}, total_frames={self.frame_count})"
+            )
+            await self.manager.send_wire_frame(
+                video_ch_id, AV_MSG.AV_MEDIA_ACK_INDICATION,
+                ack.SerializeToString(), encrypted=True, log_level='debug'
+            )
 
 
 

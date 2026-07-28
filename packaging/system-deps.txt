@@ -59,6 +59,13 @@ network-manager
 pulseaudio-utils
 
 # ────────────────────────────────────────────────────────────────────────
+# FFmpeg
+# ffmpeg — HW-accelerated video decode/transcode for mjpeg-ffmpeg transport.
+#          Also provides avformat/avcodec for optional fallback paths.
+# ────────────────────────────────────────────────────────────────────────
+ffmpeg
+
+# ────────────────────────────────────────────────────────────────────────
 # GStreamer system plugins
 # These are NOT in the Conda env (no conda-forge packaging for vaapi/v4l2).
 # Loaded at runtime via Gst.Registry.scan_path() from the system plugin dir.

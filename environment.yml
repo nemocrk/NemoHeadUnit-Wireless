@@ -19,6 +19,7 @@ dependencies:
   - dbus-python
   - pygobject
   - pyyaml>=6.0
+  - ffmpeg                   # HW-accelerated video transcode for mjpeg-ffmpeg transport
   - pip
   - pip:
     - loguru>=0.7.3

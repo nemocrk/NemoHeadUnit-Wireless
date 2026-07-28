@@ -24,6 +24,12 @@ export class WebCodecsPlayer {
         this.micStream = null;
         this.streamConfigs = {};
 
+        // Active video transport mode — updated from stream_config JSON
+        this.videoTransport = 'h264'; // default until server reports otherwise
+
+        // WebGL YUV renderer — lazily initialized on first yuv420 frame
+        this._glRenderer = null;
+
         this.initDecoders();
     }
 
@@ -153,8 +159,12 @@ export class WebCodecsPlayer {
         this.ws = new WebSocket(wsUrl);
         this.ws.binaryType = 'arraybuffer';
 
-        this.ws.onopen = () => {
+        this.ws.onopen = async () => {
             this.updateStatus('WebSocket Connected. Unified Stream Active.');
+            // Send client capabilities for auto-negotiation
+            const caps = await this._probeCapabilities();
+            this.ws.send(JSON.stringify(caps));
+            console.info('[WebCodecsPlayer] Sent client_capabilities:', caps);
         };
 
         this.ws.onclose = () => {
@@ -171,6 +181,31 @@ export class WebCodecsPlayer {
         this.ws.onmessage = (event) => this.handleMessage(event);
     }
 
+    async _probeCapabilities() {
+        const caps = {
+            type: 'client_capabilities',
+            webcodecs_h264_hw: false,
+            webgl: !!document.createElement('canvas').getContext('webgl'),
+            webgl2: !!document.createElement('canvas').getContext('webgl2'),
+            create_image_bitmap: typeof createImageBitmap === 'function',
+            max_bandwidth_mbps: null,
+        };
+
+        if ('VideoDecoder' in window) {
+            try {
+                const result = await VideoDecoder.isConfigSupported({
+                    codec: 'avc1.42E01E',
+                    hardwareAcceleration: 'prefer-hardware',
+                });
+                caps.webcodecs_h264_hw = !!(result && result.supported);
+            } catch (e) {
+                caps.webcodecs_h264_hw = false;
+            }
+        }
+
+        return caps;
+    }
+
     handleMessage(event) {
         if (typeof event.data === 'string') {
             try {
@@ -179,6 +214,22 @@ export class WebCodecsPlayer {
                     console.info('[WebCodecsPlayer] Received dynamic stream_config from backend:', msg.streams);
                     this.streamConfigs = msg.streams || {};
                     this.applyStreamConfigs(this.streamConfigs);
+
+                    // Update active video transport and switch rendering path
+                    if (msg.video_transport && msg.video_transport !== this.videoTransport) {
+                        this.videoTransport = msg.video_transport;
+                        console.info(`[WebCodecsPlayer] Video transport switched to: '${this.videoTransport}'`);
+                        this.sendLogToBackend('INFO',
+                            `Video transport switched to '${this.videoTransport}'`,
+                            'webcodecs_player'
+                        );
+                        // Reset WebCodecs state when leaving h264 mode
+                        if (this.videoTransport !== 'h264') {
+                            this.hasReceivedKeyframe = false;
+                            this.isConfigured = false;
+                        }
+                    }
+
                 } else if (msg.type === 'mic_control') {
                     if (msg.enabled) {
                         console.info('[WebCodecsPlayer] Microphone uplink requested by phone -> Enabling microphone');
@@ -233,13 +284,22 @@ export class WebCodecsPlayer {
 
 
         if (isVideo) {
-            // Drop AVMediaIndication or non-Annex-B control/metadata packets (packets without 0x000001 or 0x00000001 start code)
-            const hasStartCode = (payload.length >= 4 && payload[0] === 0 && payload[1] === 0 && (payload[2] === 1 || (payload[2] === 0 && payload[3] === 1)));
-            if (!hasStartCode) {
-                console.info(`[WebCodecsPlayer ch${channelId}] Dropping AVMediaIndication / non-Annex-B metadata packet (${payload.length} bytes)`);
-                return;
+            if (this.videoTransport === 'mjpeg' || this.videoTransport === 'webp') {
+                this._renderImageBitmap(payload, this.videoTransport);
+            } else if (this.videoTransport === 'yuv420') {
+                this._renderYuv420(payload, timestampUs, channelId);
+            } else if (this.videoTransport === 'rgba') {
+                this._renderRgba(payload, channelId);
+            } else {
+                // Default: h264 via WebCodecs VideoDecoder
+                const hasStartCode = (payload.length >= 4 && payload[0] === 0 && payload[1] === 0 &&
+                    (payload[2] === 1 || (payload[2] === 0 && payload[3] === 1)));
+                if (!hasStartCode) {
+                    console.info(`[WebCodecsPlayer ch${channelId}] Dropping AVMediaIndication / non-Annex-B metadata packet (${payload.length} bytes)`);
+                    return;
+                }
+                this.processVideoNal(payload, timestampUs, channelId, config);
             }
-            this.processVideoNal(payload, timestampUs, channelId, config);
         } else if (isAudio) {
             this.processAudioChunk(payload, timestampUs, channelId, config);
         }
@@ -504,18 +564,216 @@ export class WebCodecsPlayer {
             }
 
             this.ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
-            this.frameCount++;
-
-            const now = performance.now();
-            if (now - this.lastFpsUpdate >= 1000) {
-                const fps = Math.round((this.frameCount * 1000) / (now - this.lastFpsUpdate));
-                this.updateStatus(`Streaming: ${this.canvas.width}x${this.canvas.height} @ ${fps} FPS`);
-                this.frameCount = 0;
-                this.lastFpsUpdate = now;
-            }
+            this._updateFps();
         } finally {
             // CRITICAL per docs/new-pattern.md: Close frame immediately to prevent memory leaks on 2GB RAM
             frame.close();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // MJPEG / WebP rendering  (createImageBitmap path)
+    // ------------------------------------------------------------------
+
+    _renderImageBitmap(payload, mimeSubtype) {
+        const mimeType = mimeSubtype === 'webp' ? 'image/webp' : 'image/jpeg';
+        const blob = new Blob([payload], { type: mimeType });
+        createImageBitmap(blob).then((bitmap) => {
+            if (this.canvas.width !== bitmap.width || this.canvas.height !== bitmap.height) {
+                this.canvas.width = bitmap.width;
+                this.canvas.height = bitmap.height;
+            }
+            this.ctx.drawImage(bitmap, 0, 0, this.canvas.width, this.canvas.height);
+            bitmap.close();
+            this._updateFps();
+        }).catch((err) => {
+            console.warn(`[WebCodecsPlayer] ${mimeSubtype} decode error:`, err);
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // YUV420 rendering  (WebGL BT.601 YUV→RGB shader path)
+    // ------------------------------------------------------------------
+
+    _initWebGl() {
+        if (this._glRenderer) return;
+        try {
+            const gl = this.canvas.getContext('webgl') || this.canvas.getContext('experimental-webgl');
+            if (!gl) { console.warn('[WebCodecsPlayer] WebGL not available for YUV renderer'); return; }
+
+            const vsSource = `
+                attribute vec2 aPosition;
+                varying vec2 vTexCoord;
+                void main() {
+                    vTexCoord = aPosition * 0.5 + 0.5;
+                    vTexCoord.y = 1.0 - vTexCoord.y;
+                    gl_Position = vec4(aPosition, 0.0, 1.0);
+                }`;
+
+            const fsSource = `
+                precision mediump float;
+                varying vec2 vTexCoord;
+                uniform sampler2D yTex;
+                uniform sampler2D uTex;
+                uniform sampler2D vTex;
+                void main() {
+                    float y = texture2D(yTex, vTexCoord).r;
+                    float u = texture2D(uTex, vTexCoord).r - 0.5;
+                    float v = texture2D(vTex, vTexCoord).r - 0.5;
+                    gl_FragColor = vec4(
+                        clamp(y + 1.402 * v,          0.0, 1.0),
+                        clamp(y - 0.344 * u - 0.714 * v, 0.0, 1.0),
+                        clamp(y + 1.772 * u,          0.0, 1.0),
+                        1.0
+                    );
+                }`;
+
+            const compile = (type, src) => {
+                const s = gl.createShader(type);
+                gl.shaderSource(s, src);
+                gl.compileShader(s);
+                if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+                    throw new Error(gl.getShaderInfoLog(s));
+                return s;
+            };
+
+            const prog = gl.createProgram();
+            gl.attachShader(prog, compile(gl.VERTEX_SHADER, vsSource));
+            gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsSource));
+            gl.linkProgram(prog);
+            if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+                throw new Error(gl.getProgramInfoLog(prog));
+
+            // Fullscreen quad
+            const buf = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+            gl.bufferData(gl.ARRAY_BUFFER,
+                new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+            const mkTex = () => {
+                const t = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, t);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                return t;
+            };
+
+            this._glRenderer = {
+                gl, prog, buf,
+                yTex: mkTex(), uTex: mkTex(), vTex: mkTex(),
+                aPos: gl.getAttribLocation(prog, 'aPosition'),
+                uY: gl.getUniformLocation(prog, 'yTex'),
+                uU: gl.getUniformLocation(prog, 'uTex'),
+                uV: gl.getUniformLocation(prog, 'vTex'),
+            };
+            console.info('[WebCodecsPlayer] WebGL YUV→RGB renderer initialized');
+        } catch (e) {
+            console.error('[WebCodecsPlayer] WebGL init failed:', e);
+            this._glRenderer = null;
+        }
+    }
+
+    _renderYuv420(payload, timestampUs, channelId) {
+        if (payload.length < 12) return;
+        const dv = new DataView(payload.buffer, payload.byteOffset);
+        const width  = dv.getUint32(0);
+        const height = dv.getUint32(4);
+        // flags = dv.getUint32(8) — reserved
+
+        const ySize = width * height;
+        const uvSize = (width >> 1) * (height >> 1);
+        if (payload.length < 12 + ySize + uvSize * 2) {
+            console.warn(`[WebCodecsPlayer ch${channelId}] YUV420 frame too short: ${payload.length} vs expected ${12 + ySize + uvSize * 2}`);
+            return;
+        }
+
+        const yPlane = new Uint8Array(payload.buffer, payload.byteOffset + 12, ySize);
+        const uPlane = new Uint8Array(payload.buffer, payload.byteOffset + 12 + ySize, uvSize);
+        const vPlane = new Uint8Array(payload.buffer, payload.byteOffset + 12 + ySize + uvSize, uvSize);
+
+        if (this.canvas.width !== width || this.canvas.height !== height) {
+            this.canvas.width = width;
+            this.canvas.height = height;
+        }
+
+        this._initWebGl();
+        const r = this._glRenderer;
+        if (!r) {
+            // WebGL unavailable — fall back to rgba-style rendering is not possible here;
+            // log and skip. The auto-negotiation should have avoided yuv420 in this case.
+            return;
+        }
+
+        const { gl, prog, buf, yTex, uTex, vTex, aPos, uY, uU, uV } = r;
+        gl.viewport(0, 0, width, height);
+        gl.useProgram(prog);
+
+        const uploadTex = (tex, plane, w, h) => {
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, w, h, 0,
+                gl.LUMINANCE, gl.UNSIGNED_BYTE, plane);
+        };
+
+        gl.activeTexture(gl.TEXTURE0); uploadTex(yTex, yPlane, width, height);
+        gl.activeTexture(gl.TEXTURE1); uploadTex(uTex, uPlane, width >> 1, height >> 1);
+        gl.activeTexture(gl.TEXTURE2); uploadTex(vTex, vPlane, width >> 1, height >> 1);
+
+        gl.uniform1i(uY, 0);
+        gl.uniform1i(uU, 1);
+        gl.uniform1i(uV, 2);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.enableVertexAttribArray(aPos);
+        gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+        this._updateFps();
+    }
+
+    // ------------------------------------------------------------------
+    // RGBA rendering  (putImageData path — zero dependencies)
+    // ------------------------------------------------------------------
+
+    _renderRgba(payload, channelId) {
+        if (payload.length < 12) return;
+        const dv = new DataView(payload.buffer, payload.byteOffset);
+        const width  = dv.getUint32(0);
+        const height = dv.getUint32(4);
+        // flags = dv.getUint32(8) — reserved
+
+        const expectedBytes = 12 + width * height * 4;
+        if (payload.length < expectedBytes) {
+            console.warn(`[WebCodecsPlayer ch${channelId}] RGBA frame too short: ${payload.length} vs expected ${expectedBytes}`);
+            return;
+        }
+
+        if (this.canvas.width !== width || this.canvas.height !== height) {
+            this.canvas.width = width;
+            this.canvas.height = height;
+        }
+
+        const rgbaData = new Uint8ClampedArray(
+            payload.buffer, payload.byteOffset + 12, width * height * 4
+        );
+        const imageData = new ImageData(rgbaData, width, height);
+        this.ctx.putImageData(imageData, 0, 0);
+        this._updateFps();
+    }
+
+    // ------------------------------------------------------------------
+    // FPS tracking  (shared across all rendering paths)
+    // ------------------------------------------------------------------
+
+    _updateFps() {
+        this.frameCount++;
+        const now = performance.now();
+        if (now - this.lastFpsUpdate >= 1000) {
+            const fps = Math.round((this.frameCount * 1000) / (now - this.lastFpsUpdate));
+            this.updateStatus(`Streaming [${this.videoTransport}]: ${this.canvas.width}x${this.canvas.height} @ ${fps} FPS`);
+            this.frameCount = 0;
+            this.lastFpsUpdate = now;
         }
     }
 

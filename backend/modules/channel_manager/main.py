@@ -76,6 +76,9 @@ class ChannelManagerModule(BaseBackendModule):
         self.bluetooth_handler = BluetoothChannelHandler(self)
         self.wifi_handler = WifiChannelHandler(self)
 
+        # Active video transport name — set by video_decoder module via video.transport_active
+        self.active_video_transport: str = "h264"
+
     def set_channel_type_map(self, type_map: dict) -> None:
         """Store dynamic channel_id -> ChannelType mapping from SDR."""
         self.channel_type_map = {int(k): ChannelType[v] for k, v in type_map.items() if v in ChannelType.__members__}
@@ -175,6 +178,10 @@ class ChannelManagerModule(BaseBackendModule):
         self.subscribe("aa.sdr.response", self.on_sdr_response)
         self.subscribe("tcp.session.connected", self.on_tcp_session_connected)
         self.subscribe("tcp.server.tls_handshake_completed", self.on_tls_handshake_completed)
+
+        # Video transport layer subscriptions
+        self.subscribe("video.transport_frame", self.on_video_transport_frame)
+        self.subscribe("video.transport_active", self.on_video_transport_active)
 
     async def run(self) -> None:
         self.log.info("ChannelManager active (SHM zero-copy & unified WebCodecs stream ready)")
@@ -284,6 +291,32 @@ class ChannelManagerModule(BaseBackendModule):
             self.log.info("SDR registered %d channels", len(self.active_channels))
             await self.broadcast_ws_json(self.get_stream_config_dict())
 
+    async def on_video_transport_frame(self, data: dict) -> None:
+        """Receive decoded/encoded frame from video_decoder module and broadcast to WS clients."""
+        import base64
+        wire_format = data.get("wire_format", "h264")
+        timestamp_us = data.get("timestamp_us", 0)
+        payload_b64 = data.get("payload_b64", "")
+        if not payload_b64:
+            return
+        try:
+            frame_bytes = base64.b64decode(payload_b64)
+        except Exception:
+            return
+
+        video_ch_id = self.get_channel_id_for_type(ChannelType.VIDEO)
+        binary_frame = pack_media_frame(video_ch_id, timestamp_us, frame_bytes)
+        await self.broadcast_ws_media(binary_frame)
+
+    async def on_video_transport_active(self, data: dict) -> None:
+        """Update active transport name when video_decoder switches modes."""
+        transport_name = data.get("transport_name", "h264")
+        if transport_name != self.active_video_transport:
+            self.active_video_transport = transport_name
+            self.log.info(f"📹 VideoTransport: Active transport changed to '{transport_name}'")
+            # Re-broadcast stream_config so frontend switches rendering path
+            await self.broadcast_ws_json(self.get_stream_config_dict())
+
     def get_stream_config_dict(self) -> dict:
         """Construct dynamic stream_config JSON payload for all active media channels."""
         from shared.proto_utils import get_codec_descriptor
@@ -325,6 +358,7 @@ class ChannelManagerModule(BaseBackendModule):
 
         return {
             "type": "stream_config",
+            "video_transport": self.active_video_transport,
             "streams": streams,
         }
 
@@ -384,7 +418,11 @@ class ChannelManagerModule(BaseBackendModule):
         try:
             config_msg = self.get_stream_config_dict()
             await ws.send_str(json.dumps(config_msg))
-            self.log.info(f"🌐 WebSocket client connected — sent dynamic stream_config for {len(config_msg['streams'])} channel(s): {list(config_msg['streams'].keys())}")
+            self.log.info(
+                f"🌐 WebSocket client connected from {request.remote} — "
+                f"sent stream_config (transport={self.active_video_transport}, "
+                f"{len(config_msg['streams'])} channel(s))"
+            )
         except Exception as exc:
             self.log.warning(f"Failed to send initial stream_config to WebSocket client: {exc}")
 
@@ -393,11 +431,29 @@ class ChannelManagerModule(BaseBackendModule):
 
         try:
             async for msg in ws:
-                if msg.type == aiohttp.WSMsgType.BINARY:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    # Handle client_capabilities from frontend (auto-negotiation)
+                    try:
+                        parsed = json.loads(msg.data)
+                        if parsed.get("type") == "client_capabilities":
+                            parsed["remote_addr"] = request.remote or ""
+                            self.publish("video.client_capabilities", parsed)
+                            self.log.info(
+                                f"📹 Received client_capabilities from {request.remote}: "
+                                f"hw_decode={parsed.get('webcodecs_h264_hw')}, "
+                                f"webgl={parsed.get('webgl')}"
+                            )
+                    except Exception:
+                        pass
+
+                elif msg.type == aiohttp.WSMsgType.BINARY:
                     # Upstream Mic audio frame from browser
                     data = msg.data
                     if len(data) > 0:
-                        self.log.debug(f"🎤 [Mic Upstream] Received audio chunk from browser client {request.remote} (len={len(data)} bytes)")
+                        self.log.debug(
+                            f"🎤 [Mic Upstream] Received audio chunk from browser client "
+                            f"{request.remote} (len={len(data)} bytes)"
+                        )
                         offset = self.shm.upstream.write_frame(1, 0, data)
                         self.publish("aa.mic.shm", {"shm_offset": offset, "len": len(data)})
                         await self.av_input_handler.send_mic_data(data)
@@ -408,7 +464,6 @@ class ChannelManagerModule(BaseBackendModule):
             self.ws_clients.discard(ws)
             self.log.info("Frontend WebCodecs WS disconnected from %s", request.remote)
             await self.video_handler.update_video_focus()
-
 
         return ws
 
