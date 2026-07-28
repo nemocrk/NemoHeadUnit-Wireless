@@ -71,14 +71,14 @@ detect_browser() {
     fi
   fi
 
-  for candidate in chromium-browser chromium google-chrome google-chrome-stable microsoft-edge-stable microsoft-edge firefox surf; do
+  for candidate in firefox falkon chromium-browser chromium google-chrome google-chrome-stable microsoft-edge-stable microsoft-edge surf; do
     if command -v "$candidate" &>/dev/null; then
       echo "$candidate"
       return 0
     fi
   done
 
-  echo "Error: No supported browser found in system PATH (chromium-browser, chromium, google-chrome, firefox, surf)." >&2
+  echo "Error: No supported browser found in system PATH (firefox, falkon, chromium-browser, chromium, google-chrome, surf)." >&2
   exit 1
 }
 
@@ -101,11 +101,18 @@ if [ "$ENABLE_DEVTOOLS" -eq 1 ]; then
   )
 fi
 
-if [[ "$BROWSER_BIN" == *"surf"* ]]; then
+if [[ "$BROWSER_BIN" == *"falkon"* ]]; then
+  # Falkon (QtWebEngine) kiosk flags: -e (fullscreen / kiosk), -r (open URL)
+  export DISPLAY="${DISPLAY:-:0}"
+  exec "$BROWSER_BIN" -e -r "${URL}"
+elif [[ "$BROWSER_BIN" == *"surf"* ]]; then
   # Surf (suckless WebKit) kiosk flags: -F (fullscreen), -K (kiosk mode)
   exec "$BROWSER_BIN" -F -K "${URL}"
 elif [[ "$BROWSER_BIN" == *"firefox"* ]]; then
-  exec "$BROWSER_BIN" --kiosk "${URL}"
+  export MOZ_CRASHREPORTER_DISABLE=1
+  export MOZ_WEBRENDER=1
+  export MOZ_DISABLE_RDD_SANDBOX=1
+  exec "$BROWSER_BIN" --no-remote -p NemoHeadUnit-Wireless --kiosk "${URL}"
 else
   # Chromium / Chrome / Edge flags optimized for low-end device RAM footprint & WebCodecs stream playback
   exec "$BROWSER_BIN" \

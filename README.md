@@ -234,14 +234,14 @@ For production display deployment in head unit touchscreens:
 
 * **Linux Kiosk Launcher (`scripts/launch_kiosk.sh`)**:
   ```bash
-  # Launch Chromium kiosk browser (recommended: low-memory flags enabled)
+  # Launch Falkon kiosk browser (QtWebEngine with low memory footprint)
   bash scripts/launch_kiosk.sh
 
-  # Launch with Chrome DevTools open + remote debugging enabled (port 9222)
+  # Launch with Chrome DevTools / remote debugging enabled
   bash scripts/launch_kiosk.sh --dev
 
-  # Explicitly launch Chromium or Chrome
-  bash scripts/launch_kiosk.sh --browser chromium-browser
+  # Explicitly launch Falkon or Chromium
+  bash scripts/launch_kiosk.sh --browser falkon
   ```
 * **Windows Kiosk Launcher**:
   ```cmd

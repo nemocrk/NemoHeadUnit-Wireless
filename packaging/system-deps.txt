@@ -70,8 +70,8 @@ pulseaudio-utils
 # gstreamer1.0-vaapi         — vaapih264dec (HW accelerated, optional)
 # gstreamer1.0-libav         — avdec_h264 SW fallback
 # ────────────────────────────────────────────────────────────────────────
-# Chromium kiosk browser (WebCodecs H.264 support)
-chromium-browser
+# Firefox kiosk browser (WebCodecs H.264 support)
+firefox
 
 gstreamer1.0-plugins-base
 gstreamer1.0-plugins-good

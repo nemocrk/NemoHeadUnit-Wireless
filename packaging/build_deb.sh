@@ -279,7 +279,7 @@ fpm \
     --license     "GPL-2.0-only" \
     --after-install  "${POSTINST}" \
     --before-remove  "${PRERM}" \
-    --deb-recommends "chromium-browser | chromium | google-chrome | surf, i965-va-driver | intel-media-va-driver | nvidia-va-driver | mesa-va-drivers" \
+    --deb-recommends "falkon | chromium-browser | chromium | google-chrome | surf, i965-va-driver | intel-media-va-driver | nvidia-va-driver | mesa-va-drivers" \
     --deb-no-default-config-files \
     --package     "${OUTPUT_DIR}/${DEB_FILENAME}" \
     --chdir       "${STAGE_DIR}" \
