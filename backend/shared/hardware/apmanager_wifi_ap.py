@@ -28,6 +28,9 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
         import dbus
         import dbus.mainloop.glib
 
+        if not os.environ.get("DBUS_SYSTEM_BUS_ADDRESS", "").strip():
+            os.environ["DBUS_SYSTEM_BUS_ADDRESS"] = "unix:path=/run/dbus/system_bus_socket"
+
         self._loop = asyncio.get_running_loop()
 
         try:

@@ -17,6 +17,7 @@ dependencies:
   - aiohttp>=3.9.0
   - websockets>=12.0
   - dbus-python
+  - pygobject
   - pyyaml>=6.0
   - pip
   - pip:

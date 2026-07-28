@@ -83,17 +83,29 @@ configure)
     fi
 
     # ------------------------------------------------------------------
-    # 3. Build Micromamba env on target (idempotent)
+    # 3. Build Micromamba env on target (idempotent with SHA256 checksum)
     # ------------------------------------------------------------------
     MM_BIN="$(find_micromamba || true)"
 
     if [ -n "${MM_BIN}" ]; then
-        if [ -d "${ENV_PREFIX}" ]; then
-            log "Micromamba env già presente in ${ENV_PREFIX} — aggiornamento"
-            "${MM_BIN}" install -y -p "${ENV_PREFIX}" -f "${ENV_YML}"
+        CHECKSUM_FILE="${ENV_PREFIX}/.env_spec.sha256"
+        CURRENT_HASH="$(sha256sum "${ENV_YML}" 2>/dev/null | awk '{print $1}')"
+        SAVED_HASH=""
+        if [ -f "${CHECKSUM_FILE}" ]; then
+            SAVED_HASH="$(cat "${CHECKSUM_FILE}" 2>/dev/null || true)"
+        fi
+
+        if [ -d "${ENV_PREFIX}" ] && [ -n "${CURRENT_HASH}" ] && [ "${CURRENT_HASH}" = "${SAVED_HASH}" ]; then
+            log "Micromamba env in ${ENV_PREFIX} is up-to-date with environment.yml — skipping update."
+        elif [ -d "${ENV_PREFIX}" ]; then
+            log "Micromamba env spec changed — updating env in ${ENV_PREFIX}"
+            log "Command: ${MM_BIN} env update -y -p ${ENV_PREFIX} -f ${ENV_YML} --prune"
+            "${MM_BIN}" env update -y -p "${ENV_PREFIX}" -f "${ENV_YML}" --prune
+            echo "${CURRENT_HASH}" > "${CHECKSUM_FILE}"
         else
             log "Creazione Micromamba env in ${ENV_PREFIX} (potrebbe richiedere qualche minuto)"
             "${MM_BIN}" create -y -p "${ENV_PREFIX}" -f "${ENV_YML}"
+            echo "${CURRENT_HASH}" > "${CHECKSUM_FILE}"
         fi
         log "Micromamba env pronto."
     else
@@ -107,6 +119,7 @@ configure)
     log "Setting permissions on ${APP_DIR}"
     chown -R root:root "${APP_DIR}"
     chmod -R a+rX,u+w "${APP_DIR}"
+    mkdir -p "${APP_DIR}/config"
     chmod -R a+rwX,u+w "${APP_DIR}/config"
     if [ -x "${ENV_PREFIX}/bin/python" ]; then
         chmod +x "${ENV_PREFIX}/bin/python"
@@ -115,13 +128,15 @@ configure)
     # ------------------------------------------------------------------
     # 5. Fix permissions on privileged service script
     # ------------------------------------------------------------------
-    chmod 700 "${APP_DIR}/services/ap_manager_service/ap_manager_service.py"
+    if [ -f "${APP_DIR}/services/linux/ap_manager_service/ap_manager_service.py" ]; then
+        chmod 700 "${APP_DIR}/services/linux/ap_manager_service/ap_manager_service.py"
+    fi
 
     # ------------------------------------------------------------------
     # 6. Reload D-Bus so it picks up the new policy
     # ------------------------------------------------------------------
     log "Reloading D-Bus configuration"
-    sudo systemctl restart polkit || true
+    systemctl restart polkit 2>/dev/null || true
     systemctl reload dbus 2>/dev/null || true
 
     # ------------------------------------------------------------------

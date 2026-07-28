@@ -15,6 +15,6 @@
 
 [D-BUS Service]
 Name=org.nemo.APManager
-Exec=/opt/nemo-headunit/services/ap_manager_service/ap_manager_service.py
+Exec=/opt/nemo-headunit/services/linux/ap_manager_service/ap_manager_service.py
 User=root
 SystemdService=nemo-ap-manager.service

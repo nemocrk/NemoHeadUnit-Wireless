@@ -212,14 +212,18 @@ sudo apt-get install -f # Install system dependencies if missing
 
 ### 2. Automated Remote SSH Deployment
 
-For rapid development and remote testing on head unit devices (e.g. Raspberry Pi, Intel Bay Trail / HP Omni 10), use the automated SSH sync deployment script.
+#### Automated Package Deployment (`scripts/deploy_remote_deb.sh`)
+Builds the `.deb` package locally, transfers it over SSH to the target device, installs it via APT (automatically triggering platform hardware fixes), and launches the app in the background (`nohup`) while streaming live logs to your terminal:
 
 ```bash
-# Sync source code, update micromamba environment, and launch remote main.py
-bash scripts/deploy_remote_micromamba.sh --sync-env nemo 192.168.1.50
+# Build .deb locally, transfer, install via APT, and run on remote machine
+bash scripts/deploy_remote_deb.sh nemo 192.168.1.50
+```
 
-# Include platform hardware & boot fixes (Intel Bay Trail / HP Omni 10)
-bash scripts/deploy_remote_micromamba.sh --sync-env --omni-fix nemo 192.168.1.50
+#### Source Sync Deployment (`scripts/deploy_remote_micromamba.sh`)
+For rapid dev/source syncing without building a `.deb`:
+```bash
+bash scripts/deploy_remote_micromamba.sh --sync-env nemo 192.168.1.50
 ```
 
 ---
@@ -228,12 +232,18 @@ bash scripts/deploy_remote_micromamba.sh --sync-env --omni-fix nemo 192.168.1.50
 
 For production display deployment in head unit touchscreens:
 
-* **Linux Kiosk Launcher**:
+* **Linux Kiosk Launcher (`scripts/launch_kiosk.sh`)**:
   ```bash
-  bash scripts/launch_kiosk.sh http://localhost:8000
+  # Launch Chromium kiosk browser (recommended: low-memory flags enabled)
+  bash scripts/launch_kiosk.sh
+
+  # Launch with Chrome DevTools open + remote debugging enabled (port 9222)
+  bash scripts/launch_kiosk.sh --dev
+
+  # Explicitly launch Chromium or Chrome
+  bash scripts/launch_kiosk.sh --browser chromium-browser
   ```
 * **Windows Kiosk Launcher**:
   ```cmd
   scripts\launch_kiosk.bat http://localhost:8000
   ```
-

@@ -11,7 +11,7 @@ from .base_bluetooth import BaseBluetoothAdapter
 log = get_logger("hardware.bluez_bluetooth")
 
 # Workaround: conda injects DBUS_SYSTEM_BUS_ADDRESS as empty string
-if not os.environ.get("DBUS_SYSTEM_BUS_ADDRESS"):
+if not os.environ.get("DBUS_SYSTEM_BUS_ADDRESS", "").strip():
     os.environ["DBUS_SYSTEM_BUS_ADDRESS"] = "unix:path=/run/dbus/system_bus_socket"
 
 AA_UUID = "4de17a00-52cb-11e6-bdf4-0800200c9a66"

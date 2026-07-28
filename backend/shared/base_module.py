@@ -53,9 +53,11 @@ class BaseBackendModule(ABC):
         self.port: int = 0
         self.target_url: str = ""
 
-        # Automatically register standard module WebSocket log stream routes
+        # Automatically register standard module WebSocket log stream & client log REST routes
         self.add_ws_route("/logs", self._handle_ws_logs)
         self.add_ws_route("/api/logs", self._handle_ws_logs)
+        self.add_http_route("POST", "/api/system/client_log", self._handle_client_log)
+        self.add_http_route("POST", "/api/system/close_window", self._handle_close_window)
         if self.path_prefix in ("/", None):
             self.add_ws_route("/api/proxy/logs", self._handle_ws_logs)
 
@@ -138,6 +140,42 @@ class BaseBackendModule(ABC):
             remove_log_listener(on_log)
             self.log.info("Client disconnected from live log stream")
         return ws
+
+    async def _handle_client_log(self, request: web.Request) -> web.Response:
+        """REST endpoint for frontend web client to forward warnings/errors directly into system loguru logs."""
+        try:
+            body = await request.json()
+            level = str(body.get("level", "WARNING")).upper()
+            msg = str(body.get("message", ""))
+            client_module = str(body.get("module", "webclient"))
+            if not client_module.startswith("webclient"):
+                client_module = f"webclient:{client_module}"
+
+            client_log = get_logger(client_module)
+            if level == "DEBUG":
+                client_log.debug(msg)
+            elif level in ("WARN", "WARNING"):
+                client_log.warning(msg)
+            elif level in ("ERR", "ERROR"):
+                client_log.error(msg)
+            elif level in ("CRIT", "CRITICAL"):
+                client_log.critical(msg)
+            else:
+                client_log.info(msg)
+
+            return web.json_response({"status": "ok"})
+        except Exception as exc:
+            return web.json_response({"status": "error", "reason": str(exc)}, status=400)
+
+    async def _handle_close_window(self, request: web.Request) -> web.Response:
+        """REST endpoint to trigger kiosk browser window exit or application shutdown."""
+        self.log.info("Close window requested by frontend web client.")
+        try:
+            # Publish system shutdown / exit event on ZMQ bus
+            self.publish("system.shutdown", {"sender": self.name, "reason": "user_exit_button"})
+        except Exception:
+            pass
+        return web.json_response({"status": "ok"})
 
     def publish(self, topic: str, payload: dict) -> None:
         """Shortcut to publish message on ZMQ bus."""

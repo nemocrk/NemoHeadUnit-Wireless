@@ -13,7 +13,7 @@ User=root
 Group=root
 
 # Absolute path — adjust if installed elsewhere
-ExecStart=/usr/bin/python3 /opt/nemo/services/ap_manager_service/ap_manager_service.py
+ExecStart=/opt/nemo-headunit/env/bin/python /opt/nemo-headunit/services/linux/ap_manager_service/ap_manager_service.py
 
 Restart=on-failure
 RestartSec=3

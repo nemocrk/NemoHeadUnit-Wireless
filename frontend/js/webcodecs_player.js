@@ -34,14 +34,7 @@ export class WebCodecsPlayer {
         }
 
         // Initialize H.264 Video Decoder
-        this.videoDecoder = new VideoDecoder({
-            output: (frame) => this.handleVideoFrame(frame),
-            error: (err) => {
-                console.error('VideoDecoder error:', err);
-                this.updateStatus(`VideoDecoder Error: ${err.message}`, true);
-                this.hasReceivedKeyframe = false;
-            }
-        });
+        this.initVideoDecoder();
 
         // Initialize Web Audio API for PCM/AAC Playback
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -66,6 +59,30 @@ export class WebCodecsPlayer {
                 }
             });
         }
+    }
+
+    initVideoDecoder() {
+        if (!('VideoDecoder' in window)) return;
+        try {
+            if (this.videoDecoder) {
+                try { this.videoDecoder.close(); } catch (e) {}
+            }
+        } catch (e) {}
+
+        this.videoDecoder = new VideoDecoder({
+            output: (frame) => this.handleVideoFrame(frame),
+            error: (err) => {
+                const hexHeader = this.lastSubmittedVideoChunk ? Array.from(this.lastSubmittedVideoChunk.data.subarray(0, 64)).map(b => b.toString(16).padStart(2, '0')).join(' ') : 'none';
+                console.error(`[WebCodecsPlayer] ❌ VideoDecoder fatal error (${err.name}: ${err.message})! State=${this.videoDecoder ? this.videoDecoder.state : 'null'}`);
+                console.error(`[WebCodecsPlayer] ❌ FAILING NAL CHUNK (type=${this.lastSubmittedVideoChunk ? this.lastSubmittedVideoChunk.type : '?'}, len=${this.lastSubmittedVideoChunk ? this.lastSubmittedVideoChunk.data.length : 0}): hex=[ ${hexHeader} ]`);
+                this.updateStatus(`VideoDecoder Error: ${err.message}`, true);
+                this.hasReceivedKeyframe = false;
+                this.isConfigured = false;
+            }
+        });
+        this.isConfigured = false;
+        this.hasReceivedKeyframe = false;
+        this.lastSubmittedVideoChunk = null;
     }
 
     applyStreamConfigs(streams) {
@@ -117,6 +134,19 @@ export class WebCodecsPlayer {
             this.status.textContent = msg;
             this.status.style.color = isError ? '#ff4d4d' : '#00e676';
         }
+        if (isError) {
+            this.sendLogToBackend('WARNING', msg);
+        }
+    }
+
+    sendLogToBackend(level, message, module = 'webcodecs_player') {
+        try {
+            fetch('/api/system/client_log', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ level, message, module })
+            }).catch(() => {});
+        } catch (e) {}
     }
 
     connect(wsUrl) {
@@ -203,6 +233,12 @@ export class WebCodecsPlayer {
 
 
         if (isVideo) {
+            // Drop AVMediaIndication or non-Annex-B control/metadata packets (packets without 0x000001 or 0x00000001 start code)
+            const hasStartCode = (payload.length >= 4 && payload[0] === 0 && payload[1] === 0 && (payload[2] === 1 || (payload[2] === 0 && payload[3] === 1)));
+            if (!hasStartCode) {
+                console.info(`[WebCodecsPlayer ch${channelId}] Dropping AVMediaIndication / non-Annex-B metadata packet (${payload.length} bytes)`);
+                return;
+            }
             this.processVideoNal(payload, timestampUs, channelId, config);
         } else if (isAudio) {
             this.processAudioChunk(payload, timestampUs, channelId, config);
@@ -229,7 +265,7 @@ export class WebCodecsPlayer {
             console.info(`[WebCodecsPlayer ch${channelId}] NAL Unit #${this.receivedNalCount} parsed: nalType=${nalType} (${nalName}), payloadLen=${payload.length}`);
         }
 
-        // Buffer Parameter Sets (SPS / PPS)
+        // 1. Buffer Parameter Sets (SPS / PPS)
         if (nalType === 7) {
             this.latestSps = payload;
             console.info(`[WebCodecsPlayer ch${channelId}] Stored H.264 SPS parameter set (${payload.length} bytes)`);
@@ -241,44 +277,49 @@ export class WebCodecsPlayer {
             return;
         }
 
-        // Keyframe Gate: Drop P-frames until an IDR frame arrives
+        // 2. Keyframe Gate: Drop P-frames (nalType 1, 2, 3, 4) until an IDR frame (nalType 5) arrives
         if (!this.hasReceivedKeyframe) {
             if (nalType === 5) {
                 this.hasReceivedKeyframe = true;
-                console.info(`[WebCodecsPlayer ch${channelId}] IDR Keyframe received -> Unlocking VideoDecoder`);
+                console.info(`[WebCodecsPlayer ch${channelId}] IDR Keyframe (nalType=5, byte=0x${payload[nalOffset].toString(16)}) received -> Unlocking VideoDecoder`);
             } else {
                 if (!this.droppedDeltaCount) this.droppedDeltaCount = 0;
                 this.droppedDeltaCount++;
                 if (this.droppedDeltaCount <= 5 || this.droppedDeltaCount % 30 === 0) {
-                    console.warn(`[WebCodecsPlayer ch${channelId}] Dropping pre-keyframe delta NAL unit #${this.droppedDeltaCount} (nalType=${nalType}) prior to first IDR frame`);
+                    console.warn(`[WebCodecsPlayer ch${channelId}] Dropping pre-keyframe delta NAL unit #${this.droppedDeltaCount} (nalType=${nalType}, byte=0x${payload[nalOffset].toString(16)}) prior to first IDR frame`);
                 }
                 return;
             }
         }
 
+        // 3. Configure VideoDecoder if not yet configured
         if (!this.isConfigured) {
+            if (!this.videoDecoder || this.videoDecoder.state === 'closed') {
+                console.info(`[WebCodecsPlayer ch${channelId}] VideoDecoder instance is null/closed. Initializing...`);
+                this.initVideoDecoder();
+            }
+
+            const codecStr = (config && config.codec) ? config.codec : 'avc1.42E01E';
+            const chosenConfig = { codec: codecStr, optimizeForLatency: true };
+
             try {
-                const codecStr = (config && config.codec) ? config.codec : 'avc1.42E01E';
-                this.videoDecoder.configure({
-                    codec: codecStr,
-                    hardwareAcceleration: 'prefer-hardware',
-                    optimizeForLatency: true
-                });
+                this.videoDecoder.configure(chosenConfig);
                 this.isConfigured = true;
-                console.info(`[WebCodecsPlayer ch${channelId}] VideoDecoder configured successfully with ${codecStr}.`);
+                console.info(`[WebCodecsPlayer ch${channelId}] VideoDecoder configured synchronously with ${codecStr}.`);
                 this.updateStatus(`VideoDecoder Configured (${codecStr})`);
             } catch (e) {
-                console.error(`[WebCodecsPlayer ch${channelId}] Failed to configure VideoDecoder:`, e);
+                console.error(`[WebCodecsPlayer ch${channelId}] Failed to configure VideoDecoder with ${codecStr}:`, e);
+                this.updateStatus(`VideoDecoder Error: ${e.message}`, true);
                 return;
             }
         }
 
+        // 4. Assemble Chunk Payload (Prepend SPS/PPS to IDR keyframe units)
         let chunkData = payload;
         let chunkType = 'delta';
 
         if (nalType === 5) {
             chunkType = 'key';
-            // Prepend buffered SPS/PPS to IDR frame for complete keyframe unit
             if (this.latestSps || this.latestPps) {
                 const parts = [];
                 if (this.latestSps) parts.push(this.latestSps);
@@ -304,10 +345,17 @@ export class WebCodecsPlayer {
                 data: chunkData
             });
 
+            this.lastSubmittedVideoChunk = { type: chunkType, data: chunkData, nalType };
             this.videoDecoder.decode(chunk);
         } catch (e) {
-            console.error(`[WebCodecsPlayer ch${channelId}] Video decode error:`, e);
+            const hexHeader = Array.from(chunkData.subarray(0, 64)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+            console.error(`[WebCodecsPlayer ch${channelId}] ❌ Synchronous Video decode exception (${e.name}: ${e.message})`);
+            console.error(`[WebCodecsPlayer ch${channelId}] ❌ FAILING NAL CHUNK (type=${chunkType}, nalType=${nalType}, len=${chunkData.length}): hex=[ ${hexHeader} ]`);
             this.hasReceivedKeyframe = false;
+            this.isConfigured = false;
+            if (this.videoDecoder && this.videoDecoder.state !== 'closed') {
+                try { this.videoDecoder.close(); } catch (closeErr) {}
+            }
         }
     }
 

@@ -40,6 +40,7 @@
             <button class="cmd-btn" id="btn-home" title="Home / Clock">🏠</button>
             <button class="cmd-btn" id="btn-audio" title="Audio Controls">🎵</button>
             <button class="cmd-btn" id="fab-reconnect" title="Reconnect Session">🔄</button>
+            <button class="cmd-btn" id="btn-close" title="Close Window / Exit">✕</button>
             <button class="cmd-btn" id="btn-menu" title="Menu">☰</button>
         </div>
 
@@ -88,6 +89,7 @@
     </div>
 
     <script type="module">
+        import './js/console_forwarder.js';
         import { WebCodecsPlayer } from './js/webcodecs_player.js';
         import { AnalogClock } from './js/analog_clock.js';
         import { TouchHandler } from './js/touch_handler.js';

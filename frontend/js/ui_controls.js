@@ -15,6 +15,7 @@ export class UIControls {
         this.btnAudio = document.getElementById('btn-audio');
         this.btnMenu = document.getElementById('btn-menu');
         this.btnReconnect = document.getElementById('fab-reconnect');
+        this.btnClose = document.getElementById('btn-close');
 
         // Arc FAB Menu Elements
         this.arcMenu = document.getElementById('arc-radial-menu');
@@ -101,6 +102,11 @@ export class UIControls {
             this.triggerReconnect();
         });
 
+        bindFab(this.btnClose, () => {
+            this.closeArcMenu();
+            this.closeWindow();
+        });
+
         // Close Drawers
         if (this.btnCloseSettings) {
             this.btnCloseSettings.addEventListener('click', () => this.closeDrawer(this.drawerSettings));
@@ -144,6 +150,18 @@ export class UIControls {
 
     closeDrawer(drawer) {
         if (drawer) drawer.classList.remove('open');
+    }
+
+    closeWindow() {
+        try {
+            fetch('/api/system/close_window', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            }).catch(() => {});
+        } catch (e) {}
+        try {
+            window.close();
+        } catch (e) {}
     }
 
     toggleFullscreen() {

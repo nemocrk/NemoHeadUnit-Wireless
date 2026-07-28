@@ -106,16 +106,28 @@ HW_FIXES_SRC="${REPO_ROOT}/packaging/hardware_fixes"
 BOOTSTRAP_MICROMAMBA="${REPO_ROOT}/packaging/bootstrap_micromamba.sh"
 LAUNCHER_SRC="${REPO_ROOT}/packaging"
 
-SERVICES_SRC="${REPO_ROOT}/services"
+SERVICES_SRC="${REPO_ROOT}/services/linux/ap_manager_service"
 
 # ---------------------------------------------------------------------------
-# Step 0 — Read version
+# Step 0 — Read & Increment version
 # ---------------------------------------------------------------------------
-step "Reading version"
+step "Reading & Auto-Incrementing version"
 [[ -f "${VERSION_FILE}" ]] || die "VERSION file not found at ${REPO_ROOT}/VERSION"
-VERSION="$(tr -d '[:space:]' < "${VERSION_FILE}")"
-[[ -n "${VERSION}" ]] || die "VERSION file is empty"
-log "Version: ${VERSION}"
+RAW_VERSION="$(tr -d '[:space:]' < "${VERSION_FILE}")"
+[[ -n "${RAW_VERSION}" ]] || die "VERSION file is empty"
+
+# Auto-increment patch/revision number (e.g. 0.2.4 -> 0.2.5)
+if [[ "${RAW_VERSION}" =~ ^([0-9]+\.[0-9]+\.)([0-9]+)$ ]]; then
+  BASE_VERSION="${BASH_REMATCH[1]}"
+  PATCH_REV="${BASH_REMATCH[2]}"
+  NEW_PATCH_REV=$((PATCH_REV + 1))
+  VERSION="${BASE_VERSION}${NEW_PATCH_REV}"
+  echo "${VERSION}" > "${VERSION_FILE}"
+  log "Auto-incremented version: ${RAW_VERSION} -> ${VERSION}"
+else
+  VERSION="${RAW_VERSION}"
+  log "Version: ${VERSION}"
+fi
 
 PACKAGE_NAME="nemo-headunit"
 DEB_FILENAME="${PACKAGE_NAME}_${VERSION}_${ARCH}.deb"
@@ -158,9 +170,11 @@ log "  Copying application source"
 cp "${REPO_ROOT}/main.py"      "${APP_OPT}/main.py"
 cp -a "${REPO_ROOT}/backend"   "${APP_OPT}/backend"
 cp -a "${REPO_ROOT}/frontend"  "${APP_OPT}/frontend"
+cp -a "${REPO_ROOT}/scripts"   "${APP_OPT}/scripts"
+cp -a "${REPO_ROOT}/protos"   "${APP_OPT}/protos"
 
 log "  Copying services/"
-cp -a "${SERVICES_SRC}" "${APP_OPT}/services"
+cp -a "${REPO_ROOT}/services" "${APP_OPT}/services"
 
 log "  Copying hardware_fixes/"
 cp -a "${HW_FIXES_SRC}" "${APP_OPT}/hardware_fixes"
@@ -195,7 +209,7 @@ cp "${SERVICES_SRC}/org.nemo.APManager.service" "${SYSTEMD_STAGE}/"
 # or we can use the env python directly if we know it's always in the same place.
 # For simplicity and robustness, we'll point it to the environment's python.
 sed -i \
-    "s|ExecStart=.*ap_manager_service.py|ExecStart=/opt/nemo-headunit/env/bin/python /opt/nemo-headunit/services/ap_manager_service/ap_manager_service.py|" \
+    "s|ExecStart=.*ap_manager_service.py|ExecStart=/opt/nemo-headunit/env/bin/python /opt/nemo-headunit/services/linux/ap_manager_service/ap_manager_service.py|" \
     "${SYSTEMD_STAGE}/org.nemo.APManager.service"
 
 # —— /etc/dbus-1/system.d/ ——
@@ -224,11 +238,16 @@ mkdir -p "${POLKIT_RULES_STAGE}"
 log "  Copying polkit JS rules"
 cp "${BT_RULES}" "${POLKIT_RULES_STAGE}/"
 
-# —— /usr/share/applications/ (.desktop entry) ——
+# —— /usr/share/applications/ (.desktop entry & icon) ——
 APPS_STAGE="${STAGE_DIR}/usr/share/applications"
 mkdir -p "${APPS_STAGE}"
 log "  Copying .desktop entry"
 cp "${REPO_ROOT}/packaging/nemo-headunit.desktop" "${APPS_STAGE}/"
+
+PIXMAPS_STAGE="${STAGE_DIR}/usr/share/pixmaps"
+mkdir -p "${PIXMAPS_STAGE}"
+log "  Copying application icon"
+cp "${REPO_ROOT}/packaging/assets/nemo-headunit.png" "${PIXMAPS_STAGE}/nemo-headunit.png"
 
 # ---------------------------------------------------------------------------
 # Step 4 — Build --depends list
@@ -260,6 +279,7 @@ fpm \
     --license     "GPL-2.0-only" \
     --after-install  "${POSTINST}" \
     --before-remove  "${PRERM}" \
+    --deb-recommends "chromium-browser | chromium | google-chrome | surf, i965-va-driver | intel-media-va-driver | nvidia-va-driver | mesa-va-drivers" \
     --deb-no-default-config-files \
     --package     "${OUTPUT_DIR}/${DEB_FILENAME}" \
     --chdir       "${STAGE_DIR}" \

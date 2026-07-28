@@ -53,14 +53,6 @@ remove)
 
     log "Cleanup complete."
     ;;
->>>>
-<task_progress>
-- [x] List files in packaging_micromamba
-- [x] Read prerm script
-- [x] Read postrm script (if exists)
-- [x] Analyze removal process
-- [x] Add unhandled cleanup to prerm
-</task_progress>
 
 upgrade)
     # During upgrade dpkg installs the new version first, then calls
