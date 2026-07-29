@@ -287,8 +287,15 @@ class BaseBackendModule(ABC):
             self.target_url = f"http://127.0.0.1:{self.port}"
             self.log.info(f"Internal web server listening on {self.target_url} (Route Prefix: '{self.path_prefix}')")
 
-    def _announce_readiness(self) -> None:
+    def _announce_readiness(self, level: str) -> None:
         """Announces module readiness and proxy route details to ZMQ broker."""
+        if level == "ready_to_start":
+            self.log.info(f"Module '{self.name}' is ready to start")
+            topic = "system.module_ready"
+        elif level == "ready":
+            self.log.info(f"Module '{self.name}' is ready")
+            topic = "system.ready"
+
         payload = {
             "name": self.name,
             "priority": self.priority,
@@ -297,8 +304,8 @@ class BaseBackendModule(ABC):
             payload["path_prefix"] = self.path_prefix
             payload["target_url"] = self.target_url
 
-        self.bus.publish("system.module_ready", payload)
-        if self.path_prefix and self.target_url:
+        self.bus.publish(topic, payload)
+        if level == "ready" and self.path_prefix and self.target_url:
             self.bus.publish("proxy.register_route", {
                 "path_prefix": self.path_prefix,
                 "target_url": self.target_url,
@@ -313,22 +320,28 @@ class BaseBackendModule(ABC):
         # 1. Subscribe to system lifecycle and heartbeat topics immediately on bus start
         self.subscribe("system.heartbeat", self._handle_heartbeat)
 
-        def _on_readytostart(topic, payload):
-            self.log.info("Received system.readytostart — announcing readiness...")
-            self._announce_readiness()
-
         def _on_start(topic, payload):
             if payload.get("priority") == self.priority:
                 self.log.info(f"Received system.start for priority {self.priority}")
-                self.bus.publish("system.ready", {"name": self.name, "priority": self.priority})
+                self._running = True
 
         def _on_stop(topic, payload):
             self.log.info("Received system.stop — triggering teardown...")
             self._running = False
 
-        self.subscribe("system.readytostart", _on_readytostart)
         self.subscribe("system.start", _on_start)
         self.subscribe("system.stop", _on_stop)
+
+        await asyncio.sleep(0.5)
+
+        if self.name == "bus_broker":
+            self._running = True
+
+        self._announce_readiness("ready_to_start")
+        self.log.info("Announced readiness to main process, waiting for system.start...")
+
+        while not self._running:
+            await asyncio.sleep(0.1)
 
         # 2. Initialize & subscribe ConfigClient with default fallback config and schema
         if self.name != "bus_broker":
@@ -342,12 +355,8 @@ class BaseBackendModule(ABC):
         # 4. Start internal web server
         await self._start_web_server()
 
-        # 5. Announce readiness after ZMQ IPC connection settles
-        await asyncio.sleep(0.1)
-        self._announce_readiness()
+        self._announce_readiness("ready")
 
-        # 6. Run main execution loop
-        self._running = True
         try:
             await self.run()
         except asyncio.CancelledError:

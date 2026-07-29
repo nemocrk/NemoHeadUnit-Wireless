@@ -85,6 +85,39 @@ class InputChannelHandler:
         payload = msg.SerializeToString()
         await self.manager.send_wire_frame(input_ch_id, INPUT_MSG.INPUT_EVENT_INDICATION, payload, encrypted=True)
 
+    async def handle_media_key(self, key_code: int) -> None:
+        """Inject Media Key button event (play/pause, next, prev) via Input Channel."""
+        try:
+            from protos.oaa.input.ButtonEventsData_pb2 import ButtonEvents
+            from protos.oaa.input.ButtonEventData_pb2 import ButtonEvent
+
+            msg = InputEventIndication()
+            msg.timestamp = int(time.monotonic() * 1_000_000)
+            
+            btn_events = ButtonEvents()
+            btn = btn_events.button_events.add()
+            btn.keycode = key_code
+            btn.is_pressed = True
+            btn.meta_state = 0
+            msg.button_event.CopyFrom(btn_events)
+
+            input_ch_id = self.manager.get_channel_id_for_type(ChannelType.INPUT)
+            await self.manager.send_wire_frame(input_ch_id, INPUT_MSG.INPUT_EVENT_INDICATION, msg.SerializeToString(), encrypted=True)
+
+            # Send key release event
+            msg_rel = InputEventIndication()
+            msg_rel.timestamp = int(time.monotonic() * 1_000_000) + 50_000
+            btn_events_rel = ButtonEvents()
+            btn_rel = btn_events_rel.button_events.add()
+            btn_rel.keycode = key_code
+            btn_rel.is_pressed = False
+            btn_rel.meta_state = 0
+            msg_rel.button_event.CopyFrom(btn_events_rel)
+            await self.manager.send_wire_frame(input_ch_id, INPUT_MSG.INPUT_EVENT_INDICATION, msg_rel.SerializeToString(), encrypted=True)
+            self.log.info(f"🎮 InputChannel (ch{input_ch_id}): Injected media key button event (keycode={key_code})")
+        except Exception as exc:
+            self.log.warning(f"Failed to inject media key event: {exc}")
+
     async def _handle_unhandled_message(self, channel_id: int, message_id: int, body: bytes) -> None:
         self.log.warning(f"⚠️ [Unhandled Input Message] InputChannel (ch{channel_id}) received unknown msgId=0x{message_id:04x} len={len(body)}")
 

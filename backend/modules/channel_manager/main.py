@@ -168,7 +168,10 @@ class ChannelManagerModule(BaseBackendModule):
     async def setup(self) -> None:
         """Register REST and WebSocket endpoints, ZMQ topic subscriptions."""
         self.add_http_route("GET", "/api/channels/status", self.handle_get_status)
+        self.add_http_route("GET", "/api/channels/stream_status", self.handle_stream_status)
         self.add_http_route("POST", "/api/channels/input/touch", self.handle_post_touch)
+        self.add_http_route("POST", "/api/channels/input/media", self.handle_post_media_key)
+        self.add_http_route("POST", "/api/channels/focus", self.handle_post_focus)
         self.add_ws_route("/stream", self.handle_ws_stream)
 
         # Bus subscriptions
@@ -202,18 +205,83 @@ class ChannelManagerModule(BaseBackendModule):
         """HU speaks first: send Version Request (VERSION_REQUEST) on Channel 0 immediately when phone TCP connects."""
         address = data.get("address", "")
         self.control_handler.tls_started = False
+        self.current_stage_index = 7
+        self._notify_status_changed()
         self.log.info(f"🌐 [TCP Stage 4/5] Phone TCP session connected from {address} — HU sending VERSION_REQUEST...")
         version_payload = struct.pack(">H H", 1, 1)  # Major=1, Minor=1
         await self.send_wire_frame(0, MSG.VERSION_REQUEST, version_payload)
 
     async def on_tls_handshake_completed(self, data: dict) -> None:
         """Send AUTH_COMPLETE to phone upon TLS completion, then await SERVICE_DISCOVERY_REQUEST."""
+        self.current_stage_index = 9
+        self._notify_status_changed()
         self.log.info("🔒 [TLS Stage 5/5] TLS handshake complete — HU sending AUTH_COMPLETE to phone...")
         from protos.oaa.control.AuthCompleteIndicationMessage_pb2 import AuthCompleteIndication
         auth = AuthCompleteIndication()
         auth.status = 0  # STATUS_OK
         auth_payload = auth.SerializeToString()
         await self.send_wire_frame(0, MSG.AUTH_COMPLETE, auth_payload, encrypted=False)
+
+    def _notify_status_changed(self) -> None:
+        if hasattr(self, "_status_changed_evt") and self._status_changed_evt:
+            self._status_changed_evt.set()
+
+    async def handle_stream_status(self, request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+            }
+        )
+        await response.prepare(request)
+
+        labels = {
+            0: ("IDLE", "Disconnected", "Disconnected from Phone"),
+            7: ("TCP_CONNECTED", "Phone WiFi Connected", "Phone Connected to WiFi Server"),
+            8: ("TLS_STARTING", "Securing Session", "Initializing TLS 1.2 Security Session"),
+            9: ("TLS_COMPLETED", "Security Active", "TLS Session Encrypted & Authenticated"),
+            10: ("PROJECTION_ACTIVE", "Android Auto Active", "Android Auto Video Projection Active"),
+        }
+
+        if not hasattr(self, "_status_changed_evt") or self._status_changed_evt is None:
+            self._status_changed_evt = asyncio.Event()
+
+        try:
+            while request.protocol and request.protocol.transport and not request.protocol.transport.is_closing():
+                st_idx = getattr(self, "current_stage_index", 0)
+                if self.video_handler and getattr(self.video_handler, "setup_completed", False):
+                    st_idx = 10
+                    self.current_stage_index = 10
+
+                code, lbl, msg = labels.get(st_idx, ("IDLE", "Disconnected", "Disconnected from Phone"))
+
+                payload = {
+                    "stage_index": st_idx,
+                    "stage_code": code,
+                    "stage_label": lbl,
+                    "toast_message": msg if st_idx > 0 else None,
+                    "active_channels": list(self.active_channels.keys()),
+                    "ws_clients": len(self.ws_clients),
+                    "video_transport": self.active_video_transport,
+                }
+                data = f"data: {json.dumps(payload)}\n\n"
+                await response.write(data.encode('utf-8'))
+                await response.drain()
+
+                # Wait strictly for an actual state change event (with 10s heartbeat fallback)
+                self._status_changed_evt.clear()
+                try:
+                    await asyncio.wait_for(self._status_changed_evt.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    pass
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        except Exception as exc:
+            if "is_closing" not in str(exc):
+                self.log.warning(f"handle_stream_status stream notice: {exc}")
+        return response
 
     async def on_frame_shm(self, data: dict) -> None:
         """Received lightweight notification for media frame written to SHM."""
@@ -413,6 +481,7 @@ class ChannelManagerModule(BaseBackendModule):
         ws = web.WebSocketResponse(protocols=("binary",))
         await ws.prepare(request)
         self.ws_clients.add(ws)
+        self._notify_status_changed()
 
         # Transmit current stream_config metadata immediately on connection
         try:
@@ -462,6 +531,7 @@ class ChannelManagerModule(BaseBackendModule):
                     self.log.error("WS error: %s", ws.exception())
         finally:
             self.ws_clients.discard(ws)
+            self._notify_status_changed()
             self.log.info("Frontend WebCodecs WS disconnected from %s", request.remote)
             await self.video_handler.update_video_focus()
 
@@ -497,6 +567,25 @@ class ChannelManagerModule(BaseBackendModule):
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
+    async def handle_post_focus(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            mode_str = body.get("mode", "PROJECTED").upper()
+            from protos.oaa.video.VideoFocusModeEnum_pb2 import VideoFocusMode
+            focus_mode = VideoFocusMode.Enum.PROJECTED if mode_str == "PROJECTED" else VideoFocusMode.Enum.NATIVE
+            await self.video_handler.send_focus_indication(focus_mode)
+            return web.json_response({"status": "ok", "mode": mode_str})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_post_media_key(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            key_code = body.get("key_code", 85) # default KEYCODE_MEDIA_PLAY_PAUSE (85)
+            await self.input_handler.handle_media_key(key_code)
+            return web.json_response({"status": "ok", "key_code": key_code})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
 
 if __name__ == "__main__":
     run_module(ChannelManagerModule)

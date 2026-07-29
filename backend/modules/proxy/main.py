@@ -66,7 +66,7 @@ class ProxyModule(BaseBackendModule):
         """REST API: GET /api/system/modules — Returns active module metadata and log stream endpoints."""
         modules_info = {}
         for mod_name, mod_info in self.module_registry.items():
-            prefix = mod_info.get("path_prefix", f"/api/{mod_name}")
+            prefix = mod_info.get("path_prefix") or f"/api/{mod_name}"
             log_url = f"{prefix.rstrip('/')}/logs" if prefix != "/api/proxy" else "/api/logs"
             modules_info[mod_name] = {
                 "name": mod_name,
@@ -105,6 +105,7 @@ class ProxyModule(BaseBackendModule):
         priority = payload.get("priority", 3)
         if prefix and target:
             self.register_route(prefix, target, name=name, priority=priority)
+            self.log.info(f"Received proxy.register_route: '{prefix}' → '{target}'")
 
     def on_module_ready(self, topic: str, payload: dict) -> None:
         prefix = payload.get("path_prefix")
@@ -180,13 +181,20 @@ class ProxyModule(BaseBackendModule):
                 data=body,
                 allow_redirects=False,
             ) as resp:
-                response = web.StreamResponse(status=resp.status, headers=resp.headers)
+                # Filter out hop-by-hop headers that aiohttp manages automatically
+                resp_headers = {
+                    k: v for k, v in resp.headers.items()
+                    if k.lower() not in ("transfer-encoding", "content-length", "connection")
+                }
+                response = web.StreamResponse(status=resp.status, headers=resp_headers)
                 await response.prepare(request)
                 async for chunk in resp.content.iter_any():
                     await response.write(chunk)
+                    await response.drain()
                 return response
         except Exception as e:
-            self.log.error(f"Proxy error for {target_url}: {e}")
+            if "closing transport" not in str(e).lower():
+                self.log.error(f"Proxy error for {target_url}: {e}")
             return web.Response(status=502, text=f"Bad Gateway: {e}")
 
     async def _proxy_websocket(self, request: web.Request, target_url: str) -> web.WebSocketResponse:

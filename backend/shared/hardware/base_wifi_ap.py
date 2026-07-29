@@ -25,6 +25,10 @@ class BaseWifiApAdapter(abc.ABC):
         """Stops the Access Point."""
         pass
 
+    def get_status(self) -> dict:
+        """Return current WiFi AP status dict."""
+        return {"active": getattr(self, "_active", False), "ssid": getattr(self, "_ssid", "AndroidAutoAP")}
+
     @abc.abstractmethod
     async def teardown(self) -> None:
         """Clean up Wifi AP resources."""

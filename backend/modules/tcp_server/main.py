@@ -135,10 +135,11 @@ class TCPServerModule(BaseBackendModule):
     def start_tcp_server(self) -> None:
         with self._server_lock:
             if self._server_starting or self._server is not None:
-                self.log.info("TCP server is already running/starting — ignoring start request")
+                self.log.info(f"🔄 [TCP Server State] Start requested but server is already active (starting={self._server_starting}, server={self._server is not None}, client={self._client_address})")
                 return
             self._server_starting = True
 
+        self.log.info("🔄 [TCP Server State] Launching new TCP server listener thread...")
         t = threading.Thread(target=self._run_server_thread, daemon=True, name="tcp_server_listener")
         self._server_thread = t
         t.start()
@@ -147,6 +148,7 @@ class TCPServerModule(BaseBackendModule):
         host = self.config.get("host", "0.0.0.0")
         port = self.config.get("port", 5288)
 
+        self.log.info(f"🔄 [TCP Server State] Binding socket for host='{host}', port={port}...")
         server = TCPServer(host=host, port=port)
         with self._server_lock:
             self._server = server
@@ -156,17 +158,19 @@ class TCPServerModule(BaseBackendModule):
                 if self._server is server:
                     self._server = None
                 self._server_starting = False
+            self.log.error("❌ [TCP Server State] TCPServer.start() failed to bind port")
             self.publish("tcp.server.error", {"error": "TCPServer.start() failed"})
             return
 
         with self._server_lock:
             self._server_starting = False
 
-        self.log.info(f"🌐 [TCP Stage 4/5] TCPServer listening on {server.host}:{server.port} — awaiting phone connection...")
+        self.log.info(f"🌐 [TCP Stage 4/5] READY & LISTENING on {server.host}:{server.port} — awaiting phone connection...")
         self.publish("tcp.server.started", {"host": server.host, "port": server.port})
 
         result = server.accept()
         if result is None:
+            self.log.warning("⚠️ [TCP Server State] TCP accept timed out or returned None — shutting down server thread")
             self.publish("tcp.server.error", {"error": "No connection within timeout"})
             self._teardown_server()
             return
@@ -458,12 +462,17 @@ class TCPServerModule(BaseBackendModule):
 
     def _on_session_closed(self) -> None:
         if self._restart_pending:
+            self.log.info("🔄 [TCP Server State] Session closed during pending restart — skipping teardown")
             return
-        self.log.info("AA TCP session closed")
+        self.log.info("🌐 [TCP Server State] AA TCP session closed — tearing down socket & resetting cryptor/assembler state")
         self.publish("tcp.session.closed", {})
         self._teardown_server()
+        if self._running:
+            self.log.info("🔄 [TCP Server State] Auto-restarting TCP server listener loop for next connection...")
+            self.start_tcp_server()
 
     def _teardown_server(self) -> None:
+        self.log.info("🔄 [TCP Server State] Teardown initiated — cleaning up relay, server, cryptor, and assembler...")
         if self._relay:
             self._relay.stop()
             self._relay = None
@@ -480,6 +489,7 @@ class TCPServerModule(BaseBackendModule):
         with self._server_lock:
             self._server_starting = False
         self._client_address = None
+        self.log.info("✅ [TCP Server State] Teardown complete — TCP server state reset cleanly")
 
     async def handle_get_status(self, request: web.Request) -> web.Response:
         """REST endpoint GET /api/tcp/status."""

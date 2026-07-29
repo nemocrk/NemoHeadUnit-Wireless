@@ -52,6 +52,19 @@ class VideoChannelHandler:
         else:
             await self._handle_unhandled_message(channel_id, message_id, body)
 
+    async def send_focus_indication(self, focus_mode: int) -> None:
+        """Send explicit VideoFocusIndication message to phone."""
+        from protos.oaa.video.VideoFocusModeEnum_pb2 import VideoFocusMode
+        mode_name = VideoFocusMode.Enum.Name(focus_mode) if hasattr(VideoFocusMode.Enum, "Name") else focus_mode
+        self.log.info(f"📹 VideoChannel: Sending explicit VideoFocusIndication({mode_name}) to phone")
+
+        focus_ind = VideoFocusIndication()
+        focus_ind.focus_mode = focus_mode
+        focus_ind.unrequested = False
+
+        video_ch_id = self.manager.get_channel_id_for_type(ChannelType.VIDEO)
+        await self.manager.send_wire_frame(video_ch_id, AV_MSG.VIDEO_FOCUS_INDICATION, focus_ind.SerializeToString(), encrypted=True)
+
     async def update_video_focus(self) -> None:
         """Gates VideoFocusIndication (0x8008) based on active frontend WebSocket clients."""
         if not self.setup_completed:
@@ -59,16 +72,7 @@ class VideoChannelHandler:
 
         has_clients = len(self.manager.ws_clients) > 0
         focus_enum = VideoFocusMode.Enum.PROJECTED if has_clients else VideoFocusMode.Enum.NATIVE
-        mode_name = "PROJECTED" if has_clients else "NATIVE"
-
-        self.log.info(f"📹 VideoChannel: Sending VideoFocusIndication({mode_name}) to phone (Active WS clients: {len(self.manager.ws_clients)})")
-
-        focus_ind = VideoFocusIndication()
-        focus_ind.focus_mode = focus_enum
-        focus_ind.unrequested = False
-
-        video_ch_id = self.manager.get_channel_id_for_type(ChannelType.VIDEO)
-        await self.manager.send_wire_frame(video_ch_id, AV_MSG.VIDEO_FOCUS_INDICATION, focus_ind.SerializeToString(), encrypted=True)
+        await self.send_focus_indication(focus_enum)
 
 
 
@@ -100,9 +104,11 @@ class VideoChannelHandler:
                 self.log.info(f"📹 VideoChannel (ch{channel_id}): Extracted start session_id={self.session_id}")
             except Exception as exc:
                 self.log.warning(f"VideoChannel (ch{channel_id}): Failed to parse start indication session_id: {exc}")
+        self.manager.publish("video.stream_start", {"session_id": self.session_id})
 
     async def _handle_stop_indication(self, channel_id: int, body: bytes) -> None:
         self.log.info(f"VideoChannel (ch{channel_id}): Received AVChannelStopIndication — video stream STOPPED")
+        self.manager.publish("video.stream_stop", {"session_id": self.session_id})
 
 
     async def _handle_focus_request(self, channel_id: int, body: bytes) -> None:

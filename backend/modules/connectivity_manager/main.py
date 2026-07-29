@@ -87,6 +87,7 @@ class ConnectivityManagerModule(BaseBackendModule):
         self.add_http_route("GET", "/paired", self.handle_get_paired)
         self.add_http_route("GET", "/discovered", self.handle_get_discovered)
         self.add_http_route("POST", "/discover", self.handle_post_discover)
+        self.add_http_route("GET", "/stream_status", self.handle_stream_status)
         self.add_http_route("POST", "/pair", self.handle_post_pair)
         self.add_http_route("POST", "/pair/confirm", self.handle_post_pair_confirm)
         self.add_http_route("POST", "/pair/reject", self.handle_post_pair_reject)
@@ -235,6 +236,8 @@ class ConnectivityManagerModule(BaseBackendModule):
         self.log.info(f"🔵 [BT Stage 1/5] ConnectivityManager accepted RFCOMM from {device_address} — starting WiFi AP & Handshake thread...")
         self._rfcomm_connected = True
         self._active_device = device_address
+        self.current_stage_index = 1
+        self._notify_status_changed()
 
         self.publish("rfcomm.handshake.started", {"device_address": device_address})
 
@@ -242,6 +245,8 @@ class ConnectivityManagerModule(BaseBackendModule):
         asyncio.run_coroutine_threadsafe(self._start_ap_and_handshake(sock, device_address), loop)
 
     async def _start_ap_and_handshake(self, sock: object, device_address: str) -> None:
+        self.current_stage_index = 2
+        self._notify_status_changed()
         ap_config = {
             "ssid": self.config.get("wifi_ssid", "AndroidAutoAP"),
             "ap_password": self.config.get("wifi_password", ""),
@@ -257,9 +262,13 @@ class ConnectivityManagerModule(BaseBackendModule):
             self.log.error("❌ [WiFi Stage 2/5] Failed to start WiFi AP — aborting RFCOMM handshake")
             self.publish("rfcomm.handshake.failed", {"device_address": device_address, "error": "WiFi AP start failed"})
             self._rfcomm_connected = False
+            self.current_stage_index = 0
+            self._notify_status_changed()
             return
 
         self._wifi_credentials = creds
+        self.current_stage_index = 3
+        self._notify_status_changed()
         self.log.info(f"📶 [WiFi Stage 2/5] WiFi AP active! Credentials: SSID='{creds['ssid']}', BSSID='{creds['bssid']}', Gateway={creds['gateway_ip']}")
 
         # Handshake credentials dict
@@ -282,23 +291,37 @@ class ConnectivityManagerModule(BaseBackendModule):
 
     def _run_handshake_thread(self, sock: Any, device_address: str, creds: dict) -> None:
         res_success = False
+        self.current_stage_index = 4
+        self._notify_status_changed()
+
+        def on_stage(stage_name: str):
+            if stage_name == "WifiInfoRequest":
+                self.current_stage_index = 5
+                self._notify_status_changed()
+
         try:
-            hs = RfcommHandshake(sock, creds)
+            hs = RfcommHandshake(sock, creds, on_stage_cb=on_stage)
             res = hs.run()
             res_success = bool(res.success)
             if res.success:
+                self.current_stage_index = 6
+                self._notify_status_changed()
                 self.log.info(f"🤝 [Handshake Stage 3/5] 🎉 RFCOMM Handshake completed successfully! Phone IP: {res.phone_ip}")
                 self.publish("rfcomm.handshake.completed", {
                     "device_address": device_address,
                     "phone_ip": res.phone_ip
                 })
             else:
+                self.current_stage_index = 0
+                self._notify_status_changed()
                 self.log.error(f"❌ [Handshake Stage 3/5] RFCOMM Handshake failed: {res.error}")
                 self.publish("rfcomm.handshake.failed", {
                     "device_address": device_address,
                     "error": res.error
                 })
         except Exception as e:
+            self.current_stage_index = 0
+            self._notify_status_changed()
             self.log.error(f"Unexpected error in RFCOMM handshake thread: {e}")
             self.publish("rfcomm.handshake.failed", {
                 "device_address": device_address,
@@ -314,6 +337,8 @@ class ConnectivityManagerModule(BaseBackendModule):
             except Exception:
                 pass
             self._rfcomm_connected = False
+            self.current_stage_index = 0
+            self._notify_status_changed()
 
     # -------------------------------------------------------------------------
     # REST API Handlers
@@ -346,11 +371,14 @@ class ConnectivityManagerModule(BaseBackendModule):
         duration = int(body.get("duration_sec", self.config.get("discovery_duration_sec", 10)))
 
         self._discovering = True
+        this_notify = getattr(self, "_notify_status_changed", lambda: None)
+        this_notify()
         self._discovered_devices = []
         
         def on_dev(device):
             if not any(d.get("address") == device.get("address") for d in self._discovered_devices):
                 self._discovered_devices.append(device)
+                this_notify()
             self.publish("bluetooth_manager.device.found", device)
 
         try:
@@ -359,6 +387,7 @@ class ConnectivityManagerModule(BaseBackendModule):
             self.log.error(f"Error during Bluetooth discovery: {e}")
         finally:
             self._discovering = False
+            this_notify()
             self.publish("bluetooth_manager.discovery.completed", {})
 
         return web.json_response({
@@ -376,10 +405,13 @@ class ConnectivityManagerModule(BaseBackendModule):
         addr = body["device_address"]
         self._pairing_device = addr
         self._pairing_pin = None
+        this_notify = getattr(self, "_notify_status_changed", lambda: None)
+        this_notify()
         
         def on_pin(address, pin):
             self._pairing_pin = str(pin)
             self._pairing_device = address
+            this_notify()
             self.publish("bluetooth_manager.pairing.pin", {"device_address": address, "pin": str(pin)})
 
         success, err = await self._bt_adapter.pair_device(addr, on_pin)
@@ -392,6 +424,7 @@ class ConnectivityManagerModule(BaseBackendModule):
             })
         self._pairing_pin = None
         self._pairing_device = None
+        this_notify()
         return web.json_response({"status": "error", "message": err}, status=400)
 
     async def handle_post_pair_confirm(self, request: web.Request) -> web.Response:
@@ -402,6 +435,8 @@ class ConnectivityManagerModule(BaseBackendModule):
         res = await self._bt_adapter.confirm_pairing(addr, True)
         self._pairing_pin = None
         self._pairing_device = None
+        this_notify = getattr(self, "_notify_status_changed", lambda: None)
+        this_notify()
         if res:
             self.publish("bluetooth_manager.pairing.completed", {"device_address": addr, "success": True})
             self.log.info(f"🎉 Bluetooth pairing confirmed by UI for device {addr}")
@@ -427,6 +462,8 @@ class ConnectivityManagerModule(BaseBackendModule):
         res = await self._bt_adapter.confirm_pairing(addr, False)
         self._pairing_pin = None
         self._pairing_device = None
+        this_notify = getattr(self, "_notify_status_changed", lambda: None)
+        this_notify()
         if res:
             self.publish("bluetooth_manager.pairing.completed", {"device_address": addr, "success": False})
             self.log.info(f"❌ Bluetooth pairing rejected by UI for device {addr}")
@@ -441,6 +478,8 @@ class ConnectivityManagerModule(BaseBackendModule):
         res = await self._bt_adapter.remove_paired_device(addr)
         if res:
             self.publish("bluetooth_manager.paired.removed", {"device_address": addr})
+            this_notify = getattr(self, "_notify_status_changed", lambda: None)
+            this_notify()
             return web.json_response({"status": "ok"})
         return web.json_response({"status": "error", "message": "Failed to remove paired device"}, status=400)
 
@@ -452,6 +491,8 @@ class ConnectivityManagerModule(BaseBackendModule):
         success, err = await self._bt_adapter.connect_device(addr)
         if success:
             self.publish("bluetooth_manager.paired.connected", {"device_address": addr})
+            this_notify = getattr(self, "_notify_status_changed", lambda: None)
+            this_notify()
             return web.json_response({"status": "ok"})
         return web.json_response({"status": "error", "message": err}, status=400)
 
@@ -487,6 +528,78 @@ class ConnectivityManagerModule(BaseBackendModule):
         self._wifi_credentials = None
         self.publish("hostapd.stopped", {})
         return web.json_response({"status": "ok" if res else "error"})
+
+    def _notify_status_changed(self) -> None:
+        if hasattr(self, "_status_changed_evt") and self._status_changed_evt:
+            self._status_changed_evt.set()
+
+    async def handle_stream_status(self, request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+            }
+        )
+        await response.prepare(request)
+        import json
+
+        labels = {
+            0: ("IDLE", "Disconnected", "Disconnected from Phone"),
+            1: ("BT_ACCEPTED", "Bluetooth Connected", "Phone Accepted Bluetooth Connection"),
+            2: ("WIFI_AP_LAUNCHING", "Starting WiFi Hotspot", "Starting WiFi Hotspot & Credentials"),
+            3: ("WIFI_AP_ACTIVE", "WiFi Hotspot Ready", "WiFi Hotspot Active & Broadcasting"),
+            4: ("HANDSHAKE_START", "Handshake Initiated", "Sent WiFi Credentials Request to Phone"),
+            5: ("HANDSHAKE_INFO_REQ", "Exchanging Credentials", "Exchanging WiFi Security Credentials"),
+            6: ("HANDSHAKE_COMPLETE", "Handshake Complete", "RFCOMM Handshake Completed Successfully"),
+        }
+
+        if not hasattr(self, "_status_changed_evt") or self._status_changed_evt is None:
+            self._status_changed_evt = asyncio.Event()
+
+        try:
+            while request.protocol and request.protocol.transport and not request.protocol.transport.is_closing():
+                wifi_st = self._wifi_adapter.get_status() if self._wifi_adapter else {}
+                paired_devs = []
+                try:
+                    paired_devs = await asyncio.wait_for(self._bt_adapter.get_paired_devices(), timeout=1.0) if self._bt_adapter else []
+                except Exception as e:
+                    self.log.debug(f"Stream status get_paired_devices notice: {e}")
+
+                st_idx = getattr(self, "current_stage_index", 0)
+                code, lbl, msg = labels.get(st_idx, ("IDLE", "Disconnected", "Disconnected from Phone"))
+
+                payload = {
+                    "stage_index": st_idx,
+                    "stage_code": code,
+                    "stage_label": lbl,
+                    "toast_message": msg if st_idx > 0 else None,
+                    "discovering": self._discovering,
+                    "rfcomm_connected": self._rfcomm_connected,
+                    "active_device": self._active_device,
+                    "wifi_ap": wifi_st,
+                    "paired_devices": paired_devs,
+                    "discovered_devices": self._discovered_devices,
+                    "pairing_pin": self._pairing_pin,
+                    "pairing_device": self._pairing_device,
+                }
+                data = f"data: {json.dumps(payload)}\n\n"
+                await response.write(data.encode('utf-8'))
+                await response.drain()
+
+                # Wait strictly for an actual state change event (with 10s heartbeat fallback)
+                self._status_changed_evt.clear()
+                try:
+                    await asyncio.wait_for(self._status_changed_evt.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    pass
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        except Exception as exc:
+            if "is_closing" not in str(exc):
+                self.log.warning(f"handle_stream_status stream notice: {exc}")
+        return response
 
     async def teardown(self) -> None:
         self.log.info("Teardown ConnectivityManagerModule...")

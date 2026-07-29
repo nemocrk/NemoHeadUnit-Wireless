@@ -95,7 +95,7 @@ def _collect_module_ready(
     pub_sock: zmq.Socket,
     sub_sock: zmq.Socket,
     module_names: list[str],
-    external_handled_modules: int,
+    external_handled_module: str,
     window: float,
 ) -> dict[int, list[str]]:
     """Publishes system.readytostart, then collects system.module_ready replies."""
@@ -106,7 +106,7 @@ def _collect_module_ready(
     replied: set[str] = set()
     deadline = time.monotonic() + window
 
-    while time.monotonic() < deadline and len(replied) < len(module_names) + external_handled_modules:
+    while time.monotonic() < deadline and len(replied) < len(module_names):
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
             break
@@ -120,13 +120,13 @@ def _collect_module_ready(
                     payload = json.loads(frames[1].decode("utf-8"))
                     name = payload.get("name")
                     priority = payload.get("priority", 1)
-                    if name and name not in replied:
+                    if name and name not in replied and name!=external_handled_module:
                         priority_map[priority].append(name)
                         replied.add(name)
                         log.info(f"  module_ready received: '{name}' (priority={priority})")
         except Exception:
             continue
-
+    log.info(f"Total modules = {len(module_names)}, total replied = {len(replied)}")
     # Fallback: any module that did not reply gets priority 1
     for name in module_names:
         if name not in replied:
@@ -212,7 +212,7 @@ def run():
 
     # 3. Multi-step priority boot sequence
     time.sleep(0.5)
-    priority_map = _collect_module_ready(pub_sock, sub_sock, module_names, len(modules) - len(other_modules), READYTOSTART_WINDOW)
+    priority_map = _collect_module_ready(pub_sock, sub_sock, module_names, "bus_broker", READYTOSTART_WINDOW)
     log.info(f"Boot priority map → {priority_map}")
 
     for level in sorted(priority_map.keys()):

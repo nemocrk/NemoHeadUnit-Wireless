@@ -33,12 +33,12 @@ from shared.config_schema import field_enum, field_int, field_string
 from shared.nal_utils import pack_media_frame
 
 try:
-    from modules.video_decoder.transports import (
+    from modules.media_server.transports import (
         get_transport_class,
         get_available_modes,
         TransportUnavailableError,
     )
-    from modules.video_decoder.transports.base import BaseVideoTransport
+    from modules.media_server.transports.base import BaseVideoTransport
 except ImportError:
     from transports import get_transport_class, get_available_modes, TransportUnavailableError
     from transports.base import BaseVideoTransport
@@ -60,16 +60,67 @@ def _is_loopback(remote_addr: str) -> bool:
         return host in ("localhost", "::1", "127.0.0.1")
 
 
-class VideoDecoderModule(BaseBackendModule):
+from shared.hardware.base_audio import get_audio_adapter
+
+class MediaServerModule(BaseBackendModule):
     def __init__(self):
         super().__init__(
-            name="video_decoder",
-            priority=3,
+            name="media_server",
+            priority=4,
+            path_prefix="/api/media",
         )
         self._transport: Optional[BaseVideoTransport] = None
         self._transport_lock = asyncio.Lock()
-        # Effective transport name (may differ from config if auto-negotiated)
         self._active_transport_name: str = "h264"
+        self.audio_adapter = get_audio_adapter()
+
+    async def setup(self) -> None:
+        await super().setup()
+
+        # REST endpoints for volume controls
+        self.add_http_route("GET", "/api/media/volume", self._handle_volume)
+        self.add_http_route("POST", "/api/media/volume", self._handle_volume)
+        # Per-module SSE status stream endpoint
+        self.add_http_route("GET", "/api/media/stream_status", self._handle_stream_status)
+
+    async def _handle_volume(self, request):
+        from aiohttp import web
+        if request.method == "POST":
+            data = await request.json()
+            action = data.get("action")
+            step = data.get("step", 5)
+            val = data.get("volume")
+
+            if action == "up":
+                res = await self.audio_adapter.volume_up(step)
+            elif action == "down":
+                res = await self.audio_adapter.volume_down(step)
+            elif action == "mute":
+                res = await self.audio_adapter.toggle_mute()
+            elif val is not None:
+                res = await self.audio_adapter.set_volume(int(val))
+            else:
+                res = await self.audio_adapter.get_volume()
+            return web.json_response(res)
+        else:
+            res = await self.audio_adapter.get_volume()
+            return web.json_response(res)
+
+    async def _handle_stream_status(self, request):
+        from aiohttp import web
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+            }
+        )
+        await response.prepare(request)
+        vol_info = await self.audio_adapter.get_volume()
+        data = f"data: {{\"transport\": \"{self._active_transport_name}\", \"volume\": {vol_info['volume']}, \"muted\": {vol_info['muted']}}}\n\n"
+        await response.write(data.encode('utf-8'))
+        return response
 
     # ------------------------------------------------------------------
     # Config Schema
@@ -96,13 +147,15 @@ class VideoDecoderModule(BaseBackendModule):
         """Hot-swap transport mode when config changes at runtime."""
         configured_mode = new_config.get("transport_mode", "auto")
         if configured_mode != "auto":
-            # Explicit mode change — re-initialize transport
-            asyncio.get_event_loop().create_task(
-                self._switch_transport(configured_mode)
-            )
-        self.log.info(f"VideoDecoder: Config updated — transport_mode={configured_mode}, "
-                      f"jpeg_quality={new_config.get('jpeg_quality', 75)}, "
-                      f"video_scale='{new_config.get('video_scale', '')}'")
+            # Thread-safe schedule back to main loop without asyncio.get_event_loop()
+            if hasattr(self, 'loop') and self.loop:
+                asyncio.run_coroutine_threadsafe(
+                    self._switch_transport(new_config.get("transport_mode")), 
+                    self.loop
+                )
+            self.log.info(f"VideoDecoder: Config updated — transport_mode={configured_mode}, "
+                          f"jpeg_quality={new_config.get('jpeg_quality', 75)}, "
+                          f"video_scale='{new_config.get('video_scale', '')}'")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -326,4 +379,4 @@ class VideoDecoderModule(BaseBackendModule):
 
 
 if __name__ == "__main__":
-    run_module(VideoDecoderModule)
+    run_module(MediaServerModule)
