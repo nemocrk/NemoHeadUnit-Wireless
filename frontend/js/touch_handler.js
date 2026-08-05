@@ -159,16 +159,21 @@ export class TouchHandler {
         }
     }
 
+    isInteractiveUI(element) {
+        if (!element) return false;
+        return !!element.closest('.fab-item, .command-bar-btn, .settings-card, .drawer, .popover-card, button, input');
+    }
+
     handlePointerDown(e) {
         if (e.pointerType === 'touch') return; // Handled by HTML5 touch events
-        if (e.target !== this.canvas) return;
+        if (this.isInteractiveUI(e.target)) return;
         const { x, y } = this.getNormalizedCoords(e.clientX, e.clientY);
         this.sendMultiTouchEvent([{ x, y, pointer_id: 0 }], 0, 0); // PRESS (0)
     }
 
     handlePointerMove(e) {
         if (e.pointerType === 'touch') return;
-        if (e.target !== this.canvas || e.buttons !== 1) return;
+        if (this.isInteractiveUI(e.target) || e.buttons !== 1) return;
         const now = performance.now();
         if (now - this.lastDragTime < this.sampleIntervalMs) {
             return;
@@ -180,8 +185,9 @@ export class TouchHandler {
 
     handlePointerUp(e) {
         if (e.pointerType === 'touch') return;
-        if (e.target !== this.canvas) return;
+        if (this.isInteractiveUI(e.target)) return;
         const { x, y } = this.getNormalizedCoords(e.clientX, e.clientY);
         this.sendMultiTouchEvent([{ x, y, pointer_id: 0 }], 1, 0); // RELEASE (1)
     }
 }
+

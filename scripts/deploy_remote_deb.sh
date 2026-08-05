@@ -113,16 +113,16 @@ echo "      (Press Ctrl+C to disconnect log streaming — application continues 
 echo ""
 
 exec ssh -t "${REMOTE}" '
-  LOGFILE="/var/log/nemo-headunit.log"
+  LOGFILE="/tmp/nemo-headunit.log"
   echo "Starting launcher..."
-  sudo touch "$LOGFILE" && sudo chmod 666 "$LOGFILE"
+  touch "$LOGFILE" && chmod 666 "$LOGFILE"
   
   # Kill previous instance if running
   pkill -f "/opt/nemo-headunit/main.py" 2>/dev/null || true
   pkill -f "launch_kiosk" 2>/dev/null || true
   
   # Launch launcher wrapper via nohup
-  nohup /opt/nemo-headunit/bin/nemo-headunit > "$LOGFILE" 2>&1 &
+  nohup systemd-cat -t nemo-headunit /opt/nemo-headunit/bin/nemo-headunit > "$LOGFILE" 2>&1 &
   LAUNCH_PID=$!
   
   echo "[SSH] NemoHeadUnit launched (PID: $LAUNCH_PID)."

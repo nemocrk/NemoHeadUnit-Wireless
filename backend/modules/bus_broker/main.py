@@ -76,6 +76,7 @@ class BusBrokerModule(BaseBackendModule):
         self.log.info("ZMQ Proxy thread active — routing messages.")
 
         self.subscribe("system.module_ready", self._on_module_event)
+        self.subscribe("system.ready", self._on_module_event)
         self.subscribe("proxy.register_route", self._on_module_event)
 
     def _on_module_event(self, topic: str, payload: dict) -> None:

@@ -299,6 +299,19 @@ export class UIControls {
                 }
             };
         } catch (e) {}
+
+        // Subscribe to media_server EventSource stream for real-time volume & mute updates
+        try {
+            const mediaEvt = new EventSource('/api/media/stream_status');
+            mediaEvt.onmessage = (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    if (this.volLevelDisplay && data.volume !== undefined) {
+                        this.volLevelDisplay.textContent = data.muted ? 'MUTE' : `${data.volume}%`;
+                    }
+                } catch (err) {}
+            };
+        } catch (e) {}
     }
 
     loadBluetoothWidget() {

@@ -23,6 +23,12 @@ from typing import Optional
 from .base import BaseVideoTransport, TransportUnavailableError
 
 
+from shared.logger import get_logger
+
+log = get_logger("media_server")
+
+
+
 class FFmpegMjpegTransport(BaseVideoTransport):
     """
     FFmpeg subprocess H.264 → JPEG transport.
@@ -45,7 +51,11 @@ class FFmpegMjpegTransport(BaseVideoTransport):
         super().__init__(jpeg_quality, video_scale)
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._reader_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
         self._jpeg_buf = bytearray()
+        self._hw_accel_name: str = "ffmpeg_auto"
+        self._is_hw_accelerated: bool = True
+        self._decoder_type_desc: str = "FFmpeg -hwaccel auto"
 
     @staticmethod
     def is_available() -> bool:
@@ -60,7 +70,7 @@ class FFmpegMjpegTransport(BaseVideoTransport):
         qscale = self._quality_to_qscale()
         args = [
             "ffmpeg",
-            "-loglevel", "quiet",
+            "-loglevel", "info",
             "-hwaccel", "auto",
             "-f", "h264",
             "-i", "pipe:0",
@@ -93,13 +103,52 @@ class FFmpegMjpegTransport(BaseVideoTransport):
                 *args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
         except Exception as exc:
             raise TransportUnavailableError(f"Failed to start FFmpeg subprocess: {exc}") from exc
 
         self._jpeg_buf = bytearray()
         self._reader_task = asyncio.create_task(self._read_jpeg_frames())
+        self._stderr_task = asyncio.create_task(self._read_stderr_diagnostics())
+
+        log.info(
+            "🎬 [Video Decoder] Started FFmpeg subprocess mode: 'mjpeg-ffmpeg' (-hwaccel auto)"
+        )
+
+    async def _read_stderr_diagnostics(self) -> None:
+        if not self._proc or not self._proc.stderr:
+            return
+        try:
+            while True:
+                line_bytes = await self._proc.stderr.readline()
+                if not line_bytes:
+                    break
+                line = line_bytes.decode("utf-8", errors="ignore").strip()
+                if "hwaccel" in line.lower() or "using" in line.lower() or "decoder" in line.lower():
+                    if "Selected hwaccel" in line or "Using" in line:
+                        self._hw_accel_name = line
+                        if "failed" in line.lower() or "cannot" in line.lower():
+                            self._is_hw_accelerated = False
+                            self._decoder_type_desc = "Software Fallback (CPU)"
+                        else:
+                            self._is_hw_accelerated = True
+                            self._decoder_type_desc = f"Hardware Accelerated ({line})"
+                        log.info(f"🎬 [Video Decoder] FFmpeg stderr diagnostic: {line}")
+        except Exception:
+            pass
+
+    def get_diagnostics(self) -> dict:
+        return {
+            "transport": self.transport_name,
+            "decoder_element": self._hw_accel_name,
+            "hw_accelerated": self._is_hw_accelerated,
+            "decoder_type": self._decoder_type_desc,
+            "details": {
+                "ffmpeg_args": " ".join(self._build_ffmpeg_args()),
+            },
+        }
+
 
     async def _read_jpeg_frames(self) -> None:
         """

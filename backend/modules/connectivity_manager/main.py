@@ -586,7 +586,6 @@ class ConnectivityManagerModule(BaseBackendModule):
                 }
                 data = f"data: {json.dumps(payload)}\n\n"
                 await response.write(data.encode('utf-8'))
-                await response.drain()
 
                 # Wait strictly for an actual state change event (with 10s heartbeat fallback)
                 self._status_changed_evt.clear()

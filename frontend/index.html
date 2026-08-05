@@ -158,18 +158,26 @@
             const player = new WebCodecsPlayer(canvas, workflowTextEl);
 
 
-            // Hide disconnected clock screen when active video frame arrives & show on socket disconnect/stop
-            player.handleVideoFrame = function(frame) {
+            // Hide disconnected clock screen when any active video frame format arrives
+            const hideDisconnectedScreen = () => {
                 if (ui.isVideoFocused && disconnectedScreen.classList.contains('hidden') === false) {
                     disconnectedScreen.classList.add('hidden');
                 }
+            };
+            player.handleVideoFrame = function(frame) {
+                hideDisconnectedScreen();
                 WebCodecsPlayer.prototype.handleVideoFrame.call(this, frame);
             };
+            const origRenderImageBitmap = player._renderImageBitmap;
+            player._renderImageBitmap = function(payload, mimeSubtype) {
+                hideDisconnectedScreen();
+                origRenderImageBitmap.call(this, payload, mimeSubtype);
+            };
 
-            // Connect WebSocket via Gateway Proxy route at ws://localhost:8000/api/stream
+            // Connect WebSocket via Gateway Proxy route at ws://localhost:8000/api/media/stream
             const host = window.location.host || '127.0.0.1:8000';
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${host}/api/channels/stream`;
+            const wsUrl = `${protocol}//${host}/api/media/stream`;
 
             player.connect(wsUrl);
 

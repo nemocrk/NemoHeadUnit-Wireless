@@ -66,13 +66,11 @@ class VideoChannelHandler:
         await self.manager.send_wire_frame(video_ch_id, AV_MSG.VIDEO_FOCUS_INDICATION, focus_ind.SerializeToString(), encrypted=True)
 
     async def update_video_focus(self) -> None:
-        """Gates VideoFocusIndication (0x8008) based on active frontend WebSocket clients."""
+        """Send default VideoFocusIndication(PROJECTED) on channel setup completion."""
         if not self.setup_completed:
             return
-
-        has_clients = len(self.manager.ws_clients) > 0
-        focus_enum = VideoFocusMode.Enum.PROJECTED if has_clients else VideoFocusMode.Enum.NATIVE
-        await self.send_focus_indication(focus_enum)
+        from protos.oaa.video.VideoFocusModeEnum_pb2 import VideoFocusMode
+        await self.send_focus_indication(VideoFocusMode.Enum.PROJECTED)
 
 
 
@@ -151,14 +149,13 @@ class VideoChannelHandler:
                 f"-> Publishing to video.raw_nal (transport: {self.manager.active_video_transport or 'h264'})"
             )
 
-        # Publish raw NAL bytes to video_decoder module via ZMQ bus.
-        # video_decoder applies the configured transport strategy (decode, encode, passthrough)
-        # and publishes the result back as video.transport_frame, which channel_manager
-        # then broadcasts to WebSocket clients.
-        self.manager.publish("video.raw_nal", {
+        # Write raw H.264 NAL bytes directly to SHM (nemo_video_transcode_in) zero-copy
+        shm_offset = self.manager.shm.transcode_in.write_frame(4, ts_us, codec_payload)
+        self.manager.publish("media.video.raw_nal_shm", {
+            "shm_offset": shm_offset,
+            "len": len(codec_payload),
             "channel_id": video_ch_id,
             "timestamp_us": ts_us,
-            "payload_b64": base64.b64encode(codec_payload).decode(),
         })
 
         # Batch MediaAck every UNACKED_FRAMES_THRESHOLD frames

@@ -60,12 +60,12 @@ class AVInputChannelHandler:
         await self.manager.send_wire_frame(channel_id, AV_MSG.SETUP_RESPONSE, resp.SerializeToString(), encrypted=True)
 
     async def _handle_start_indication(self, channel_id: int, body: bytes) -> None:
-        self.log.info(f"AVInputChannel (ch{channel_id}): Received AVChannelStartIndication — microphone stream ACTIVE. Notifying web client...")
-        await self.manager.broadcast_ws_json({"type": "mic_control", "enabled": True})
+        self.log.info(f"AVInputChannel (ch{channel_id}): Received AVChannelStartIndication — microphone stream ACTIVE. Notifying media_server...")
+        self.manager.publish("media.audio.mic_control", {"enabled": True})
 
     async def _handle_stop_indication(self, channel_id: int, body: bytes) -> None:
-        self.log.info(f"AVInputChannel (ch{channel_id}): Received AVChannelStopIndication — microphone stream STOPPED. Notifying web client...")
-        await self.manager.broadcast_ws_json({"type": "mic_control", "enabled": False})
+        self.log.info(f"AVInputChannel (ch{channel_id}): Received AVChannelStopIndication — microphone stream STOPPED. Notifying media_server...")
+        self.manager.publish("media.audio.mic_control", {"enabled": False})
 
     async def _handle_av_input_open_request(self, channel_id: int, body: bytes) -> None:
         open_stream = True
@@ -78,13 +78,13 @@ class AVInputChannelHandler:
 
         self.log.info(
             f"AVInputChannel (ch{channel_id}): Received AVInputOpenRequest(open={open_stream}) — "
-            f"responding AVInputOpenResponse(session=0, value=0) & notifying web client (enabled={open_stream})..."
+            f"responding AVInputOpenResponse(session=0, value=0) & notifying media_server..."
         )
         resp = AVInputOpenResponse()
         resp.session = 0
         resp.value = 0
         await self.manager.send_wire_frame(channel_id, AV_MSG.AV_INPUT_OPEN_RESPONSE, resp.SerializeToString(), encrypted=True)
-        await self.manager.broadcast_ws_json({"type": "mic_control", "enabled": open_stream})
+        self.manager.publish("media.audio.mic_control", {"enabled": open_stream})
 
     async def send_mic_data(self, pcm_data: bytes) -> None:
         """Pack and transmit upstream microphone audio chunk to the phone on AUDIO_MIC channel."""

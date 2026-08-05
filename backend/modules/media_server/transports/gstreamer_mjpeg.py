@@ -39,9 +39,10 @@ class GStreamerMjpegTransport(GStreamerBaseTransport):
         return (
             "appsrc name=src is-live=true format=time do-timestamp=true "
             "! h264parse "
-            "! decodebin "
+            "! decodebin name=dec "
             "! videoconvert "
             f"{scale_frag}"
             f"! jpegenc quality={self.jpeg_quality} "
             "! appsink name=sink emit-signals=true max-buffers=2 drop=true"
         )
+

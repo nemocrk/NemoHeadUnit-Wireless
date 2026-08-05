@@ -77,9 +77,10 @@ ffmpeg
 # gstreamer1.0-vaapi         — vaapih264dec (HW accelerated, optional)
 # gstreamer1.0-libav         — avdec_h264 SW fallback
 # ────────────────────────────────────────────────────────────────────────
-# Firefox kiosk browser (WebCodecs H.264 support)
-firefox
+# surf kiosk browser (No WebCodecs H.264 support)
+surf
 
+gstreamer1.0-tools
 gstreamer1.0-plugins-base
 gstreamer1.0-plugins-good
 gstreamer1.0-plugins-bad
@@ -87,6 +88,10 @@ gstreamer1.0-plugins-ugly
 gstreamer1.0-vaapi
 gstreamer1.0-gl
 gstreamer1.0-libav
+gir1.2-gstreamer-1.0
+gir1.2-gst-plugins-base-1.0
+i965-va-driver
+
 
 # ────────────────────────────────────────────────────────────────────────
 # GLib runtime — required by dbus-python + GObject bindings inside Conda

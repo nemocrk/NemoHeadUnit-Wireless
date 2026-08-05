@@ -52,7 +52,8 @@ Priority 3+: tcp_server, connectivity_manager
 * **Priority 0 (`bus_broker`)**: Autonomous IPC message router operating on local defaults without external configuration dependencies. Manages heartbeat registry (`system.heartbeat`).
 * **Priority 1 (`config_manager`)**: Central configuration engine storing YAML settings in OS AppData, validating strongly-typed module schemas, and exposing `/api/config`.
 * **Priority 2 (`proxy`)**: Gateway Proxy webserver binding to the primary public port (`8000`) and dynamically routing `/api/<module_prefix>` to internal loopback microservices.
-* **Priority 3+ (`tcp_server`, `connectivity_manager`)**: Functional domain microservices exposing hardware controls, sockets, and channel logic.
+* **Priority 3+ (`tcp_server`, `connectivity_manager`, `channel_manager`, `media_server`)**: Functional domain microservices exposing hardware controls, sockets, channel logic, and media transports.
+* **Priority 5 (`qt6_gui`)**: Native Qt6 Frontend Module using Shared Memory (SHM) zero-copy video/audio rendering and 16kHz microphone capture.
 
 ---
 
@@ -78,12 +79,6 @@ NemoHeadUnit-Wireless/
 │   │   ├── bus_client.py     # Per-module ZMQ Pub/Sub IPC messaging client wrapper
 │   │   ├── proto/            # Protobuf compiled Python classes (protos/oaa)
 │   │   └── hardware/         # Cross-platform Hardware Adapter Layer (HAL)
-│   │       ├── base_bluetooth.py      # BaseBluetoothAdapter abstract interface
-│   │       ├── base_wifi_ap.py        # BaseWifiApAdapter abstract interface
-│   │       ├── bluez_bluetooth.py     # Linux BlueZ D-Bus Bluetooth driver with rich stage logging & MAC resolution
-│   │       ├── windows_bluetooth.py   # Windows / Mock RFCOMM Bluetooth driver
-│   │       ├── apmanager_wifi_ap.py   # Linux D-Bus APManager driver (org.nemo.APManager) with active state tracking
-│   │       └── windows_wifi_ap.py     # Windows Mobile Hotspot & Mock WiFi AP driver
 │   └── modules/              # Process-isolated backend modules (ALL extending BaseBackendModule)
 │       ├── bus_broker/       # Priority 0 core IPC router module (autonomous, manages sockets & system.heartbeat)
 │       ├── config_manager/   # Priority 1 central config service (stores YAML in OS AppData, schema validation, REST API)
@@ -91,13 +86,16 @@ NemoHeadUnit-Wireless/
 │       ├── tcp_server/       # Priority 3 Wireless Android Auto TCP connection listener (port 5288) & SHM writer
 │       ├── connectivity_manager/ # Priority 3 Bluetooth discovery/pairing & WiFi AP manager
 │       ├── channel_manager/  # Priority 3 Consolidated channels (Control, Video, Audio PCM/AAC, Mic, Input, Sensor)
+│       ├── media_server/     # Priority 4 Video transport decoder & SHM frame broadcaster
+│       ├── qt6_gui/          # Priority 5 Native Qt6 Frontend Module (QOpenGLWidget, SHM, QAudioSink, QAudioSource)
 │       └── _template/        # Template extending BaseBackendModule using run_module(SampleModule)
 ├── frontend/                 # Modern HTML5/CSS3/JS Web UI shell & client apps
-│   ├── index.html            # Main UI shell & WebCodecs Canvas player
-│   └── js/
-│       └── webcodecs_player.js # WebCodecs VideoDecoder & DataView binary protocol parser
 ├── scripts/                  # Developer tooling, deploy scripts, kiosk launchers
-│   ├── deploy_remote_micromamba.sh # Remote deployment script
+│   ├── launch_kiosk.sh       # Browser Kiosk Mode launcher script (Linux)
+│   ├── launch_qt_kiosk.sh    # Native Qt6 Kiosk Mode launcher script (Linux)
+│   ├── launch_qt_kiosk.bat   # Native Qt6 Kiosk Mode launcher script (Windows)
+
+
 │   ├── bus_monitor.py        # Real-time ZMQ bus traffic monitor
 │   ├── launch_kiosk.sh       # Linux kiosk launcher
 │   └── launch_kiosk.bat      # Windows kiosk launcher

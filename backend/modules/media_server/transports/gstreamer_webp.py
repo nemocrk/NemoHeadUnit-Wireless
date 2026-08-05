@@ -35,9 +35,10 @@ class GStreamerWebpTransport(GStreamerBaseTransport):
         return (
             "appsrc name=src is-live=true format=time do-timestamp=true "
             "! h264parse "
-            "! decodebin "
+            "! decodebin name=dec "
             "! videoconvert "
             f"{scale_frag}"
             f"! webpenc quality={self.jpeg_quality} speed=4 "
             "! appsink name=sink emit-signals=true max-buffers=2 drop=true"
         )
+

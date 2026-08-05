@@ -7,7 +7,7 @@ export class WebCodecsPlayer {
   constructor(canvasElement, statusElement) {
     this.canvas = canvasElement;
     this.status = statusElement;
-    this.ctx = canvasElement ? canvasElement.getContext("2d") : null;
+    this.ctx = null;
 
     this.videoDecoder = null;
     this.audioDecoder = null;
@@ -30,7 +30,30 @@ export class WebCodecsPlayer {
     // WebGL YUV renderer — lazily initialized on first yuv420 frame
     this._glRenderer = null;
 
+    // Single-flight lock & pending queue for MJPEG / WebP createImageBitmap (prevents CPU 100% promise stacking)
+    this._isDecodingBitmap = false;
+    this._pendingBitmapPayload = null;
+    this._pendingMimeSubtype = null;
+
     this.initDecoders();
+  }
+
+  resetRenderingState() {
+    this._glRenderer = null;
+    this._isDecodingBitmap = false;
+    this._pendingBitmapPayload = null;
+    this._pendingMimeSubtype = null;
+    this.hasReceivedKeyframe = false;
+    this.isConfigured = false;
+
+    if (this.canvas) {
+      const newCanvas = this.canvas.cloneNode(true);
+      if (this.canvas.parentNode) {
+        this.canvas.parentNode.replaceChild(newCanvas, this.canvas);
+      }
+      this.canvas = newCanvas;
+      this.ctx = null;
+    }
   }
 
   initDecoders() {
@@ -281,11 +304,7 @@ export class WebCodecsPlayer {
               `Video transport switched to '${this.videoTransport}'`,
               "webcodecs_player",
             );
-            // Reset WebCodecs state when leaving h264 mode
-            if (this.videoTransport !== "h264") {
-              this.hasReceivedKeyframe = false;
-              this.isConfigured = false;
-            }
+            this.resetRenderingState();
           }
         } else if (msg.type === "mic_control") {
           if (msg.enabled) {
@@ -480,8 +499,16 @@ export class WebCodecsPlayer {
         console.info(
           `[WebCodecsPlayer ch${channelId}] VideoDecoder configured synchronously with ${codecStr}.`,
         );
+        if ("VideoDecoder" in window && typeof VideoDecoder.isConfigSupported === "function") {
+          VideoDecoder.isConfigSupported(chosenConfig).then((res) => {
+            console.info(
+              `[WebCodecsPlayer ch${channelId}] 🎬 WebCodecs VideoDecoder hardware acceleration support query: supported=${res.supported}`,
+            );
+          }).catch(() => {});
+        }
         this.updateStatus(`VideoDecoder Configured (${codecStr})`);
       } catch (e) {
+
         console.error(
           `[WebCodecsPlayer ch${channelId}] Failed to configure VideoDecoder with ${codecStr}:`,
           e,
@@ -723,6 +750,13 @@ export class WebCodecsPlayer {
     }
   }
 
+  _get2dContext() {
+    if (!this.ctx && this.canvas && !this._glRenderer) {
+      this.ctx = this.canvas.getContext("2d");
+    }
+    return this.ctx;
+  }
+
   handleVideoFrame(frame) {
     try {
       if (
@@ -733,7 +767,10 @@ export class WebCodecsPlayer {
         this.canvas.height = frame.displayHeight;
       }
 
-      this.ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
+      const ctx = this._get2dContext();
+      if (ctx) {
+        ctx.drawImage(frame, 0, 0, this.canvas.width, this.canvas.height);
+      }
       this._updateFps();
     } finally {
       // CRITICAL per docs/new-pattern.md: Close frame immediately to prevent memory leaks on 2GB RAM
@@ -746,23 +783,46 @@ export class WebCodecsPlayer {
   // ------------------------------------------------------------------
 
   _renderImageBitmap(payload, mimeSubtype) {
+    if (this._isDecodingBitmap) {
+      // Single-flight lock: store newest payload and drop intermediate backlogged frames
+      this._pendingBitmapPayload = payload;
+      this._pendingMimeSubtype = mimeSubtype;
+      return;
+    }
+
+    this._isDecodingBitmap = true;
     const mimeType = mimeSubtype === "webp" ? "image/webp" : "image/jpeg";
     const blob = new Blob([payload], { type: mimeType });
+
     createImageBitmap(blob)
       .then((bitmap) => {
+        const ctx = this._get2dContext();
         if (
-          this.canvas.width !== bitmap.width ||
-          this.canvas.height !== bitmap.height
+          this.canvas &&
+          (this.canvas.width !== bitmap.width ||
+            this.canvas.height !== bitmap.height)
         ) {
           this.canvas.width = bitmap.width;
           this.canvas.height = bitmap.height;
         }
-        this.ctx.drawImage(bitmap, 0, 0, this.canvas.width, this.canvas.height);
+        if (ctx) {
+          ctx.drawImage(bitmap, 0, 0, this.canvas.width, this.canvas.height);
+        }
         bitmap.close();
         this._updateFps();
       })
       .catch((err) => {
         console.warn(`[WebCodecsPlayer] ${mimeSubtype} decode error:`, err);
+      })
+      .finally(() => {
+        this._isDecodingBitmap = false;
+        if (this._pendingBitmapPayload) {
+          const nextPayload = this._pendingBitmapPayload;
+          const nextSubtype = this._pendingMimeSubtype;
+          this._pendingBitmapPayload = null;
+          this._pendingMimeSubtype = null;
+          this._renderImageBitmap(nextPayload, nextSubtype);
+        }
       });
   }
 
@@ -772,12 +832,26 @@ export class WebCodecsPlayer {
 
   _initWebGl() {
     if (this._glRenderer) return;
+    if (!this.canvas) return;
     try {
+      if (this.ctx && !this.canvas.getContext("webgl")) {
+        console.info("[WebCodecsPlayer] Canvas 2D context active — replacing DOM canvas node for WebGL YUV renderer");
+        const newCanvas = this.canvas.cloneNode(true);
+        if (this.canvas.parentNode) {
+          this.canvas.parentNode.replaceChild(newCanvas, this.canvas);
+        }
+        this.canvas = newCanvas;
+        this.ctx = null;
+      }
+
       const gl =
         this.canvas.getContext("webgl") ||
         this.canvas.getContext("experimental-webgl");
       if (!gl) {
-        console.warn("[WebCodecsPlayer] WebGL not available for YUV renderer");
+        if (!this._warnedWebGl) {
+          this._warnedWebGl = true;
+          console.warn("[WebCodecsPlayer] WebGL not available for YUV renderer");
+        }
         return;
       }
 

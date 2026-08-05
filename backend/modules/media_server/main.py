@@ -25,8 +25,11 @@ Transport Modes:
 
 import asyncio
 import base64
+import json
 import ipaddress
 from typing import Any, Optional
+import aiohttp
+from aiohttp import web
 
 from shared.base_module import BaseBackendModule, run_module
 from shared.config_schema import field_enum, field_int, field_string
@@ -61,6 +64,8 @@ def _is_loopback(remote_addr: str) -> bool:
 
 
 from shared.hardware.base_audio import get_audio_adapter
+from shared.media_shm import BidirectionalMediaSHM
+from shared.nal_utils import pack_media_frame
 
 class MediaServerModule(BaseBackendModule):
     def __init__(self):
@@ -73,15 +78,8 @@ class MediaServerModule(BaseBackendModule):
         self._transport_lock = asyncio.Lock()
         self._active_transport_name: str = "h264"
         self.audio_adapter = get_audio_adapter()
-
-    async def setup(self) -> None:
-        await super().setup()
-
-        # REST endpoints for volume controls
-        self.add_http_route("GET", "/api/media/volume", self._handle_volume)
-        self.add_http_route("POST", "/api/media/volume", self._handle_volume)
-        # Per-module SSE status stream endpoint
-        self.add_http_route("GET", "/api/media/stream_status", self._handle_stream_status)
+        self.shm = BidirectionalMediaSHM(create=False)
+        self.ws_clients: set = set()
 
     async def _handle_volume(self, request):
         from aiohttp import web
@@ -101,13 +99,33 @@ class MediaServerModule(BaseBackendModule):
                 res = await self.audio_adapter.set_volume(int(val))
             else:
                 res = await self.audio_adapter.get_volume()
+            self._notify_status_changed()
             return web.json_response(res)
         else:
             res = await self.audio_adapter.get_volume()
             return web.json_response(res)
 
+    async def handle_get_status(self, request: web.Request) -> web.Response:
+        """REST endpoint GET /api/media/status."""
+        vol_info = await self.audio_adapter.get_volume()
+        diag = self._transport.get_diagnostics() if self._transport else {}
+        return web.json_response({
+            "module": "media_server",
+            "active_transport": self._active_transport_name,
+            "ws_clients_count": len(self.ws_clients),
+            "volume": vol_info.get("volume", 80),
+            "muted": vol_info.get("muted", False),
+            "video_decoder_diagnostics": diag,
+        })
+
+
+    def _notify_status_changed(self) -> None:
+        if hasattr(self, "_status_changed_evt") and self._status_changed_evt:
+            self._status_changed_evt.set()
+
     async def _handle_stream_status(self, request):
         from aiohttp import web
+        import json
         response = web.StreamResponse(
             status=200,
             headers={
@@ -117,9 +135,31 @@ class MediaServerModule(BaseBackendModule):
             }
         )
         await response.prepare(request)
-        vol_info = await self.audio_adapter.get_volume()
-        data = f"data: {{\"transport\": \"{self._active_transport_name}\", \"volume\": {vol_info['volume']}, \"muted\": {vol_info['muted']}}}\n\n"
-        await response.write(data.encode('utf-8'))
+
+        if not hasattr(self, "_status_changed_evt") or self._status_changed_evt is None:
+            self._status_changed_evt = asyncio.Event()
+
+        try:
+            while request.protocol and request.protocol.transport and not request.protocol.transport.is_closing():
+                vol_info = await self.audio_adapter.get_volume()
+                payload = {
+                    "transport": self._active_transport_name,
+                    "volume": vol_info.get("volume", 80),
+                    "muted": vol_info.get("muted", False),
+                }
+                data = f"data: {json.dumps(payload)}\n\n"
+                await response.write(data.encode('utf-8'))
+
+                self._status_changed_evt.clear()
+                try:
+                    await asyncio.wait_for(self._status_changed_evt.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    pass
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        except Exception as exc:
+            if "is_closing" not in str(exc):
+                self.log.warning(f"_handle_stream_status notice: {exc}")
         return response
 
     # ------------------------------------------------------------------
@@ -163,8 +203,18 @@ class MediaServerModule(BaseBackendModule):
 
     async def setup(self) -> None:
         """Subscribe to ZMQ topics and initialize the default transport."""
-        self.subscribe("video.raw_nal", self._on_raw_nal)
-        self.subscribe("video.client_capabilities", self._on_client_capabilities)
+        # REST endpoints for volume and status controls
+        self.add_http_route("GET", "/volume", self._handle_volume)
+        self.add_http_route("POST", "/volume", self._handle_volume)
+        self.add_http_route("GET", "/status", self.handle_get_status)
+        # Per-module SSE status stream endpoint
+        self.add_http_route("GET", "/stream_status", self._handle_stream_status)
+        # Unified Direct WebSocket Stream Endpoint for Frontend WebCodecsPlayer
+        self.add_ws_route("/stream", self.handle_ws_stream)
+
+        self.subscribe("media.video.raw_nal_shm", self._on_raw_nal_shm)
+        self.subscribe("media.audio.frame", self._on_audio_frame)
+        self.subscribe("media.audio.mic_control", self._on_mic_control)
 
         configured_mode = self.config.get("transport_mode", "auto")
         if configured_mode == "auto":
@@ -230,11 +280,30 @@ class MediaServerModule(BaseBackendModule):
                     else:
                         self.log.info(f"VideoDecoder: Transport '{candidate_mode}' started successfully")
 
-                    # Announce the active transport to channel_manager
-                    self.publish("video.transport_active", {
+                    diag = transport.get_diagnostics()
+                    self.log.info(
+                        f"🎬 VideoDecoder Diagnostics — Mode: '{candidate_mode}' | "
+                        f"Element: '{diag.get('decoder_element', 'unknown')}' | "
+                        f"Acceleration: {diag.get('decoder_type', 'unknown')}"
+                    )
+
+                    # Announce the active transport to channel_manager and WebSocket clients
+                    self.publish("media.video.transport_active", {
                         "transport_name": candidate_mode,
                         "wire_format": transport.wire_format,
                     })
+
+                    if self.ws_clients:
+                        msg_json = json.dumps({
+                            "type": "stream_config",
+                            "video_transport": candidate_mode,
+                        })
+                        for ws in list(self.ws_clients):
+                            try:
+                                await ws.send_str(msg_json)
+                            except Exception:
+                                pass
+
                     return True
 
                 except TransportUnavailableError as exc:
@@ -273,24 +342,144 @@ class MediaServerModule(BaseBackendModule):
             self._transport = None
 
     # ------------------------------------------------------------------
-    # ZMQ Bus Callbacks
+    # WebSocket Streaming Endpoint
     # ------------------------------------------------------------------
 
-    async def _on_raw_nal(self, payload: dict) -> None:
-        """Receive H.264 NAL bytes from channel_manager and feed into active transport."""
+    async def handle_ws_stream(self, request: web.Request) -> web.WebSocketResponse:
+        """Unified WebSocket stream pushing video frames directly to WebCodecsPlayer."""
+        ws = web.WebSocketResponse(protocols=("binary",))
+        await ws.prepare(request)
+        self.ws_clients.add(ws)
+
+        self.log.info("Frontend WebCodecs WS connected directly to media_server from %s", request.remote)
+
+        # Transmit current dynamic stream_config metadata from channel_manager immediately on connection
+        try:
+            config_msg = await self.call_module("channel_manager", "GET", "/api/channels/status")
+            if not config_msg or "stream_config" not in config_msg or "streams" not in config_msg["stream_config"]:
+                raise Exception("No stream_config found")
+            else:
+                config_msg["stream_config"]["type"] = "stream_config"
+                config_msg["stream_config"]["video_transport"] = self._active_transport_name
+
+            await ws.send_str(json.dumps(config_msg["stream_config"]))
+            self.log.info(f"📹 Sent dynamic stream_config to WS client {request.remote} (transport: {self._active_transport_name}, {len(config_msg.get('stream_config', {}).get('streams', {}))} streams)")
+        except Exception as exc:
+            self.log.warning(f"Failed to send initial stream_config to WS client: {exc}")
+            # Fallback descriptor
+            config_msg = {
+                "stream_config": {
+                    "type": "stream_config",
+                    "video_transport": self._active_transport_name,
+                    "streams": {
+                        "3": {"media_type": "VIDEO", "codec": "avc1.42E01E", "codec_enum": 3, "codec_name": "MEDIA_CODEC_VIDEO_H264_BP", "width": 1280, "height": 720, "fps": 30}, 
+                        "4": {"media_type": "AUDIO", "codec": "mp4a.40.2", "audio_format": "aac_adts", "description": [17, 144], "codec_enum": 4, "codec_name": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS", "sampleRate": 48000, "channels": 2, "bitDepth": 16, "audioType": "MEDIA"}, 
+                        "5": {"media_type": "AUDIO", "codec": "PCM", "audio_format": "pcm", "codec_enum": 1, "codec_name": "MEDIA_CODEC_AUDIO_PCM", "sampleRate": 16000, "channels": 1, "bitDepth": 16, "audioType": "SPEECH"}, 
+                        "6": {"media_type": "AUDIO", "codec": "PCM", "audio_format": "pcm", "codec_enum": 1, "codec_name": "MEDIA_CODEC_AUDIO_PCM", "sampleRate": 16000, "channels": 1, "bitDepth": 16, "audioType": "SYSTEM"}
+                    }
+                }
+            }
+            await ws.send_str(json.dumps(config_msg["stream_config"]))
+            self.log.info(f"📹 Sent fallback stream_config to WS client {request.remote} (transport: {self._active_transport_name}, {len(config_msg.get('stream_config', {}).get('streams', {}))} streams)")
+
+        # Request video focus from phone via ZMQ bus
+        self.publish("media.video.request_focus", {"sender": "media_server"})
+
+        try:
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        parsed = json.loads(msg.data)
+                        if parsed.get("type") == "client_capabilities":
+                            parsed["remote_addr"] = request.remote or ""
+                            await self._on_client_capabilities(parsed)
+                    except Exception:
+                        pass
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    # Upstream Mic audio frame from browser client
+                    pcm_bytes = msg.data
+                    if len(pcm_bytes) > 0:
+                        offset = self.shm.upstream.write_frame(1, 0, pcm_bytes)
+                        self.publish("media.audio.mic_shm", {"shm_offset": offset, "len": len(pcm_bytes)})
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    self.log.error("WS error: %s", ws.exception())
+        finally:
+            self.ws_clients.discard(ws)
+            self.log.info(f"Frontend WebCodecs WS disconnected from media_server {request.remote}")
+            if len(self.ws_clients) == 0:
+                self.publish("media.video.release_focus", {"sender": "media_server"})
+        return ws
+
+    async def _on_mic_control(self, payload: dict) -> None:
+        """Receive mic enable/disable command from av_input_handler and relay JSON to WS clients."""
+        enabled = payload.get("enabled", False)
+        msg_json = json.dumps({"type": "mic_control", "enabled": enabled})
+        for ws in list(self.ws_clients):
+            try:
+                await ws.send_str(msg_json)
+            except Exception:
+                pass
+
+    async def broadcast_ws_media(self, binary_data: bytes) -> None:
+        """Broadcast binary frame directly to all connected WebSocket clients."""
+        if not self.ws_clients or not binary_data:
+            return
+
+        stale = set()
+        for ws in list(self.ws_clients):
+            try:
+                await ws.send_bytes(binary_data)
+            except Exception:
+                stale.add(ws)
+
+        for ws in stale:
+            self.ws_clients.discard(ws)
+
+    # ------------------------------------------------------------------
+    # ZMQ Bus & SHM Callbacks
+    # ------------------------------------------------------------------
+
+    async def _on_audio_frame(self, payload: dict) -> None:
+        """Receive audio frame from channel_manager, write to SHM downstream ring buffer, and broadcast to WS clients."""
+        try:
+            payload_b64 = payload.get("payload_b64", "")
+            if not payload_b64:
+                return
+            binary_data = base64.b64decode(payload_b64)
+            if len(binary_data) >= 9:
+                from shared.nal_utils import unpack_media_frame
+                channel_id, timestamp_us, pcm_payload = unpack_media_frame(binary_data)
+                # StreamType 1 = STREAM_TYPE_AUDIO
+                shm_offset = self.shm.downstream.write_frame(1, timestamp_us, pcm_payload)
+                if shm_offset >= 0:
+                    self.publish("media.audio.frame_shm", {
+                        "shm_offset": shm_offset,
+                        "len": len(pcm_payload),
+                        "timestamp_us": timestamp_us,
+                        "channel_id": channel_id,
+                    })
+
+            await self.broadcast_ws_media(binary_data)
+        except Exception as exc:
+            self.log.debug(f"MediaServer: Error relaying audio frame: {exc}")
+
+
+    async def _on_raw_nal_shm(self, payload: dict) -> None:
+        """Receive H.264 NAL bytes zero-copy off SHM (nemo_video_transcode_in) from channel_manager."""
         if not self._transport:
             return
 
         try:
-            nal_b64 = payload.get("payload_b64", "")
+            offset = payload.get("shm_offset", -1)
             timestamp_us = payload.get("timestamp_us", 0)
-            if not nal_b64:
+            if offset < 0:
                 return
-            nal_data = base64.b64decode(nal_b64)
+
+            _, _, nal_data = self.shm.transcode_in.read_frame(offset)
             if nal_data:
                 await self._transport.feed_nal(nal_data, timestamp_us)
         except Exception as exc:
-            self.log.debug(f"VideoDecoder: Error feeding NAL to transport: {exc}")
+            self.log.debug(f"VideoDecoder: Error reading NAL from SHM: {exc}")
 
     async def _on_client_capabilities(self, payload: dict) -> None:
         """
@@ -346,6 +535,8 @@ class MediaServerModule(BaseBackendModule):
                 return "rgba"
             if "mjpeg" in available:
                 return "mjpeg"
+            if "mjpeg-ffmpeg" in available:
+                return "mjpeg-ffmpeg"
             return "h264"
 
         # Remote client
@@ -363,20 +554,27 @@ class MediaServerModule(BaseBackendModule):
 
     async def _on_frame_ready(self, frame_bytes: bytes, timestamp_us: int, wire_format: str) -> None:
         """
-        Called by the active transport when a decoded/encoded frame is ready.
-        Publishes the frame to channel_manager via the ZMQ bus.
+        Called by active transport when a decoded/encoded frame is ready.
+        Writes frame to SHM downstream ring buffer and broadcasts to WS clients.
         """
         if not frame_bytes:
             return
 
-        # Use channel_id=0 here; channel_manager will use the real video channel_id
-        # when it receives this and calls pack_media_frame before broadcasting.
-        self.publish("video.transport_frame", {
-            "wire_format": wire_format,
-            "timestamp_us": timestamp_us,
-            "payload_b64": base64.b64encode(frame_bytes).decode(),
-        })
+        # Write video frame to SHM downstream ring buffer (stream_type 4 = VIDEO)
+        shm_offset = self.shm.downstream.write_frame(4, timestamp_us, frame_bytes)
+        if shm_offset >= 0:
+            self.publish("media.video.transport_frame_shm", {
+                "shm_offset": shm_offset,
+                "len": len(frame_bytes),
+                "timestamp_us": timestamp_us,
+                "wire_format": wire_format,
+            })
+
+        # Pack binary frame with video channel_id=3 (ChannelType.VIDEO) for WebSocket clients
+        binary_frame = pack_media_frame(3, timestamp_us, frame_bytes)
+        await self.broadcast_ws_media(binary_frame)
 
 
 if __name__ == "__main__":
     run_module(MediaServerModule)
+

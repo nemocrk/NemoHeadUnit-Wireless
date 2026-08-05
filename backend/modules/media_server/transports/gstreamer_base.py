@@ -13,6 +13,24 @@ from typing import Optional
 from .base import BaseVideoTransport, TransportUnavailableError
 
 
+import os
+
+
+def _scan_system_plugin_paths(Gst) -> None:
+    """Ensure GStreamer system plugin directories are registered in Conda/Micromamba env."""
+    for path in [
+        "/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
+        "/usr/lib/gstreamer-1.0",
+        "/usr/lib64/gstreamer-1.0",
+        "/usr/lib/i386-linux-gnu/gstreamer-1.0",
+    ]:
+        if os.path.isdir(path):
+            try:
+                Gst.Registry.get().scan_path(path)
+            except Exception:
+                pass
+
+
 def _gst_available() -> bool:
     """Check if GStreamer Python bindings are importable."""
     try:
@@ -31,9 +49,19 @@ def _element_exists(element_name: str) -> bool:
         gi.require_version("Gst", "1.0")
         from gi.repository import Gst
         Gst.init(None)
+        _scan_system_plugin_paths(Gst)
         return Gst.Registry.get().find_feature(element_name, Gst.ElementFactory.__gtype__) is not None
     except Exception:
         return False
+
+
+
+from shared.logger import get_logger
+
+log = get_logger("media_server")
+
+_HW_DECODER_KEYWORDS = ("vaapi", "nv", "v4l2", "d3d11", "dxva2", "qsv", "omx", "mali", "vpu", "cuda", "videotoolbox")
+
 
 
 class GStreamerBaseTransport(BaseVideoTransport):
@@ -57,6 +85,9 @@ class GStreamerBaseTransport(BaseVideoTransport):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._gst_thread: Optional[threading.Thread] = None
         self._bus_watch_id: Optional[int] = None
+        self._detected_decoder: str = "decodebin (dynamic)"
+        self._is_hw_accelerated: bool = True
+        self._decoder_type_desc: str = "GStreamer dynamic decodebin"
 
     def _build_pipeline_string(self) -> str:
         """Return the GStreamer pipeline description string. Must be overridden by subclasses."""
@@ -77,6 +108,26 @@ class GStreamerBaseTransport(BaseVideoTransport):
         finally:
             buf.unmap(map_info)
 
+    def _on_decodebin_element_added(self, bin_obj, element) -> None:
+        try:
+            factory = element.get_factory()
+            if not factory:
+                return
+            fname = factory.get_name()
+            klass = factory.get_klass() or ""
+            if "Decoder" in klass and ("Video" in klass or "h264" in fname.lower()):
+                self._detected_decoder = fname
+                self._is_hw_accelerated = any(kw in fname.lower() for kw in _HW_DECODER_KEYWORDS)
+                self._decoder_type_desc = (
+                    "Hardware Accelerated" if self._is_hw_accelerated else "Software Fallback (CPU)"
+                )
+                log.info(
+                    f"🎬 [Video Decoder] Mode: '{self.transport_name}' | GStreamer Element: '{fname}' | "
+                    f"Acceleration: {self._decoder_type_desc}"
+                )
+        except Exception:
+            pass
+
     async def start(self) -> None:
         try:
             import gi
@@ -87,7 +138,9 @@ class GStreamerBaseTransport(BaseVideoTransport):
             raise TransportUnavailableError(f"GStreamer Python bindings not available: {exc}") from exc
 
         Gst.init(None)
+        _scan_system_plugin_paths(Gst)
         self._loop = asyncio.get_running_loop()
+
 
         pipeline_str = self._build_pipeline_string()
         try:
@@ -97,9 +150,16 @@ class GStreamerBaseTransport(BaseVideoTransport):
 
         self._appsrc = self._pipeline.get_by_name("src")
         self._appsink = self._pipeline.get_by_name("sink")
+        dec = self._pipeline.get_by_name("dec")
 
         if not self._appsrc or not self._appsink:
             raise TransportUnavailableError("GStreamer pipeline missing 'src' appsrc or 'sink' appsink element")
+
+        if dec:
+            try:
+                dec.connect("element-added", self._on_decodebin_element_added)
+            except Exception:
+                pass
 
         # Connect appsink new-sample signal
         self._appsink.set_property("emit-signals", True)
@@ -119,11 +179,29 @@ class GStreamerBaseTransport(BaseVideoTransport):
                 "Check that the required decoder plugin is installed (vaapih264dec, nvh264dec, or avdec_h264)."
             )
 
+        log.info(
+            f"🎬 [Video Decoder] Started GStreamer transport '{self.transport_name}' "
+            f"(decodebin attached, awaiting dynamic decoder binding)"
+        )
+
+    def get_diagnostics(self) -> dict:
+        return {
+            "transport": self.transport_name,
+            "decoder_element": self._detected_decoder,
+            "hw_accelerated": self._is_hw_accelerated,
+            "decoder_type": self._decoder_type_desc,
+            "details": {
+                "gstreamer_pipeline": self._build_pipeline_string(),
+            },
+        }
+
+
     def _on_new_sample(self, sink) -> int:
         """GStreamer appsink callback — called from GST thread."""
         try:
             import gi
             gi.require_version("Gst", "1.0")
+            gi.require_version("GstApp", "1.0")
             from gi.repository import Gst, GstApp  # noqa: F401
             sample = sink.emit("pull-sample")
             if sample is None:

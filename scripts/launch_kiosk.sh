@@ -71,7 +71,7 @@ detect_browser() {
     fi
   fi
 
-  for candidate in firefox falkon chromium-browser chromium google-chrome google-chrome-stable microsoft-edge-stable microsoft-edge surf; do
+  for candidate in surf falkon chromium-browser chromium google-chrome google-chrome-stable microsoft-edge-stable microsoft-edge firefox; do
     if command -v "$candidate" &>/dev/null; then
       echo "$candidate"
       return 0
@@ -106,7 +106,15 @@ if [[ "$BROWSER_BIN" == *"falkon"* ]]; then
   export DISPLAY="${DISPLAY:-:0}"
   exec "$BROWSER_BIN" -e -r "${URL}"
 elif [[ "$BROWSER_BIN" == *"surf"* ]]; then
-  # Surf (suckless WebKit) kiosk flags: -F (fullscreen), -K (kiosk mode)
+  # Surf (suckless WebKitGTK) kiosk flags: -F (fullscreen), -K (kiosk mode)
+  # Force WebKitGTK hardware accelerated compositing, WebGL, & GStreamer rank priorities
+  export WEBKIT_FORCE_COMPOSITING_MODE=1
+  export WEBKIT_DISABLE_COMPOSITING_MODE=0
+  export WEBKIT_ENABLE_WEBGL=1
+  export WEBKIT_WEBGL_ACCELERATION=1
+  export WEBKIT_GST_DECODER_RANK="${WEBKIT_GST_DECODER_RANK:-primary}"
+  export GDK_BACKEND="${GDK_BACKEND:-x11}"
+  export LIBGL_DRIVERS_PATH="${LIBGL_DRIVERS_PATH:-/usr/lib/x86_64-linux-gnu/dri:/usr/lib/dri:/opt/nemo-headunit/env/lib/dri}"
   exec "$BROWSER_BIN" -F -K "${URL}"
 elif [[ "$BROWSER_BIN" == *"firefox"* ]]; then
   export MOZ_CRASHREPORTER_DISABLE=1

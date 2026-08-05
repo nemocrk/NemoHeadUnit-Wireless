@@ -8,7 +8,11 @@ This preserves the current WebCodecs-based frontend rendering path.
 Availability: Always available (no external dependencies).
 """
 
+from shared.logger import get_logger
+
+log = get_logger("media_server")
 from .base import BaseVideoTransport
+
 
 
 class H264PassthroughTransport(BaseVideoTransport):
@@ -29,7 +33,10 @@ class H264PassthroughTransport(BaseVideoTransport):
         return True
 
     async def start(self) -> None:
-        pass  # Nothing to initialize
+        log.info(
+            "🎬 [Video Decoder] Mode: 'h264' (Passthrough) | Decoder: 'browser_webcodecs' | "
+            "Acceleration: Frontend WebCodecs GPU Offload (Hardware Accelerated)"
+        )
 
     async def feed_nal(self, nal_data: bytes, timestamp_us: int) -> None:
         if self.on_frame_ready and nal_data:
@@ -37,3 +44,15 @@ class H264PassthroughTransport(BaseVideoTransport):
 
     async def stop(self) -> None:
         pass  # Nothing to tear down
+
+    def get_diagnostics(self) -> dict:
+        return {
+            "transport": self.transport_name,
+            "decoder_element": "browser_webcodecs",
+            "hw_accelerated": True,
+            "decoder_type": "Frontend WebCodecs GPU Offload",
+            "details": {
+                "description": "Zero-copy H.264 NAL passthrough to browser WebCodecs VideoDecoder",
+            },
+        }
+

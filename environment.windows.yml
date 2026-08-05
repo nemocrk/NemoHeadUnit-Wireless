@@ -8,7 +8,7 @@ name: NemoHeadUnit-Wireless
 
 channels:
   - conda-forge
-  - defaults
+  - nodefaults
 
 dependencies:
   - python=3.13
@@ -17,23 +17,33 @@ dependencies:
   - aiohttp>=3.9.0
   - websockets>=12.0
   - pyyaml>=6.0
-  - ffmpeg                   # HW-accelerated video transcode for mjpeg-ffmpeg transport
+  - ffmpeg # HW-accelerated video transcode for mjpeg-ffmpeg transport
+  - numpy
   - pip
+
   - pip:
-    - loguru>=0.7.3
-    - protobuf>=4.25
-    - grpcio-tools>=1.62
-    - winrt-runtime>=3.2.1
-    - winrt-Windows.Networking>=3.2.1
-    - winrt-Windows.Networking.Connectivity>=3.2.1
-    - winrt-Windows.Networking.NetworkOperators>=3.2.1
-    - winrt-windows.Networking.Sockets>=3.2.1
-    - winrt-Windows.Foundation>=3.2.1
-    - winrt-Windows.Foundation.Collections>=3.2.1
-    - winrt-Windows.Devices.Enumeration>=3.2.1
-    - winrt-Windows.Devices.Radios>=3.2.1
-    - winrt-Windows.Devices.Bluetooth>=3.2.1
-    - winrt-Windows.Devices.Bluetooth.Rfcomm>=3.2.1
-    - winrt-Windows.Devices.Bluetooth.Advertisement>=3.2.1
-    - winrt-Windows.Security.Cryptography>=3.2.1
-    - winrt-Windows.Storage.Streams>=3.2.1
+      - loguru>=0.7.3
+      - protobuf>=4.25
+      - grpcio-tools>=1.62
+      - winrt-runtime>=3.2.1
+      - winrt-Windows.Networking>=3.2.1
+      - winrt-Windows.Networking.Connectivity>=3.2.1
+      - winrt-Windows.Networking.NetworkOperators>=3.2.1
+      - winrt-windows.Networking.Sockets>=3.2.1
+      - winrt-Windows.Foundation>=3.2.1
+      - winrt-Windows.Foundation.Collections>=3.2.1
+      - winrt-Windows.Devices.Enumeration>=3.2.1
+      - winrt-Windows.Devices.Radios>=3.2.1
+      - winrt-Windows.Devices.Bluetooth>=3.2.1
+      - winrt-Windows.Devices.Bluetooth.Rfcomm>=3.2.1
+      - winrt-Windows.Devices.Bluetooth.Advertisement>=3.2.1
+      - winrt-Windows.Security.Cryptography>=3.2.1
+      - winrt-Windows.Storage.Streams>=3.2.1
+      - comtypes; sys_platform == 'win32'
+      - pycaw; sys_platform == 'win32'
+      - PyQt6
+      - PyOpenGL
+      - qasync>=0.27.1
+      - av>=10.0.0
+
+

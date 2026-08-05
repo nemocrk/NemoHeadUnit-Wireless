@@ -79,19 +79,48 @@ class BaseBackendModule(ABC):
 
     def add_http_route(self, method: str, path: str, handler: Callable) -> None:
         """Helper to register HTTP endpoint on internal aiohttp web server."""
-        full_path = path if path.startswith("/") else f"/{path}"
-        if self.path_prefix and not full_path.startswith(self.path_prefix):
-            full_path = f"{self.path_prefix.rstrip('/')}/{full_path.lstrip('/')}"
+        raw_path = path if path.startswith("/") else f"/{path}"
+        full_path = raw_path
+        rel_path = raw_path
+
+        if self.path_prefix:
+            if not raw_path.startswith(self.path_prefix):
+                full_path = f"{self.path_prefix.rstrip('/')}/{raw_path.lstrip('/')}"
+            else:
+                rel_path = raw_path[len(self.path_prefix):]
+                if not rel_path.startswith("/"):
+                    rel_path = f"/{rel_path}"
+
         self.web_app.router.add_route(method.upper(), full_path, handler)
-        self.log.info(f"Registered HTTP route: [{method.upper()}] {full_path}")
+        if rel_path != full_path and rel_path:
+            try:
+                self.web_app.router.add_route(method.upper(), rel_path, handler)
+            except Exception:
+                pass
+        self.log.info(f"Registered HTTP route: [{method.upper()}] {full_path} (alt: {rel_path})")
 
     def add_ws_route(self, path: str, handler: Callable) -> None:
         """Helper to register WebSocket endpoint on internal aiohttp web server."""
-        full_path = path if path.startswith("/") else f"/{path}"
-        if self.path_prefix and not full_path.startswith(self.path_prefix):
-            full_path = f"{self.path_prefix.rstrip('/')}/{full_path.lstrip('/')}"
+        raw_path = path if path.startswith("/") else f"/{path}"
+        full_path = raw_path
+        rel_path = raw_path
+
+        if self.path_prefix:
+            if not raw_path.startswith(self.path_prefix):
+                full_path = f"{self.path_prefix.rstrip('/')}/{raw_path.lstrip('/')}"
+            else:
+                rel_path = raw_path[len(self.path_prefix):]
+                if not rel_path.startswith("/"):
+                    rel_path = f"/{rel_path}"
+
         self.web_app.router.add_get(full_path, handler)
-        self.log.info(f"Registered WebSocket route: {full_path}")
+        if rel_path != full_path and rel_path:
+            try:
+                self.web_app.router.add_get(rel_path, handler)
+            except Exception:
+                pass
+        self.log.info(f"Registered WebSocket route: {full_path} (alt: {rel_path})")
+
 
     async def _handle_ws_logs(self, request: web.Request) -> web.WebSocketResponse:
         """Standard module WebSocket log stream handler with module and level filtering."""
@@ -307,6 +336,8 @@ class BaseBackendModule(ABC):
         self.bus.publish(topic, payload)
         if level == "ready" and self.path_prefix and self.target_url:
             self.bus.publish("proxy.register_route", {
+                "name": self.name,
+                "priority": self.priority,
                 "path_prefix": self.path_prefix,
                 "target_url": self.target_url,
             })

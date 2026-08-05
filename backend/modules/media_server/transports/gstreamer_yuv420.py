@@ -51,11 +51,12 @@ class GStreamerYuv420Transport(GStreamerBaseTransport):
         return (
             "appsrc name=src is-live=true format=time do-timestamp=true "
             "! h264parse "
-            "! decodebin "
+            "! decodebin name=dec "
             "! videoconvert "
             f"{scale_frag}"
             "! appsink name=sink emit-signals=true max-buffers=2 drop=true"
         )
+
 
     def _extract_frame(self, sample) -> bytes:
         """

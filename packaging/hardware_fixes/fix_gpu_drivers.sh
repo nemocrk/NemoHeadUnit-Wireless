@@ -60,4 +60,20 @@ if lspci 2>/dev/null | grep -qi "AMD" || lspci 2>/dev/null | grep -qi "Radeon"; 
     fi
 fi
 
+# 4. Fix AppArmor permissions for surf kiosk browser if AppArmor is active
+if [ -d "/etc/apparmor.d" ] && [ -f "/etc/apparmor.d/usr.bin.surf" ]; then
+    echo -n "  [gpu-detect] Configuring AppArmor permissions for /usr/bin/surf... "
+    mkdir -p /etc/apparmor.d/local
+    cat <<'EOF' > /etc/apparmor.d/local/usr.bin.surf
+# Allow surf kiosk browser & GStreamer child processes to access DRI GPU drivers & devices
+/opt/nemo-headunit/env/lib/dri/** r,
+/opt/nemo-headunit/env/lib/** mr,
+/dev/dri/** rw,
+EOF
+    if command -v apparmor_parser &>/dev/null; then
+        apparmor_parser -r /etc/apparmor.d/usr.bin.surf >/dev/null 2>&1 || true
+    fi
+    echo -e "${GREEN}OK.${NC}"
+fi
+
 echo -e "${GREEN}[gpu-detect] GPU driver verification complete.${NC}"

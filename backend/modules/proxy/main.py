@@ -49,7 +49,9 @@ class ProxyModule(BaseBackendModule):
     async def setup(self) -> None:
         """Configures proxy fallback handler and ZMQ topic subscriptions."""
         await super().setup()
-        self.proxy_client_session = aiohttp.ClientSession()
+        # Disable all timeouts on proxy client session for long-lived SSE stream_status and WS streams
+        timeout = aiohttp.ClientTimeout(total=None, connect=None, sock_connect=None, sock_read=None)
+        self.proxy_client_session = aiohttp.ClientSession(timeout=timeout)
 
 
         # System discovery endpoints
@@ -60,6 +62,7 @@ class ProxyModule(BaseBackendModule):
 
         self.subscribe("proxy.register_route", self.on_register_route)
         self.subscribe("system.module_ready", self.on_module_ready)
+        self.subscribe("system.ready", self.on_module_ready)
         self.subscribe("system.heartbeat", self.on_heartbeat)
 
     async def handle_get_modules(self, request: web.Request) -> web.Response:
@@ -190,7 +193,6 @@ class ProxyModule(BaseBackendModule):
                 await response.prepare(request)
                 async for chunk in resp.content.iter_any():
                     await response.write(chunk)
-                    await response.drain()
                 return response
         except Exception as e:
             if "closing transport" not in str(e).lower():

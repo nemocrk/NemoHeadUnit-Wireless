@@ -1,3 +1,4 @@
+import base64
 from typing import TYPE_CHECKING, Callable, Dict
 from shared.nal_utils import pack_media_frame, STREAM_TYPE_AUDIO
 from shared.proto_utils import parse_media_with_timestamp
@@ -90,10 +91,27 @@ class AudioChannelHandler:
         self.log.info(f"AudioChannel (ch{channel_id}): Received AVChannelStopIndication — audio stream STOPPED")
 
     async def _handle_focus_request(self, channel_id: int, body: bytes) -> None:
-        self.log.info(f"AudioChannel (ch{channel_id}): Received AudioFocusRequest — responding AudioFocusResponse(GAIN)...")
+        focus_type = AudioFocusType.Enum.GAIN
+        try:
+            req = AudioFocusRequest()
+            req.ParseFromString(body)
+            focus_type = req.audio_focus_type
+        except Exception as exc:
+            self.log.warning(f"AudioChannel (ch{channel_id}): AudioFocusRequest parse warning: {exc}")
+
         focus_resp = AudioFocusResponse()
-        focus_resp.audio_focus_state = AudioFocusState.GAIN
-        focus_resp.granted = False
+        if focus_type == AudioFocusType.Enum.GAIN:
+            focus_resp.audio_focus_state = AudioFocusState.GAIN
+        elif focus_type == AudioFocusType.Enum.GAIN_TRANSIENT:
+            focus_resp.audio_focus_state = AudioFocusState.GAIN_TRANSIENT
+        elif focus_type == AudioFocusType.Enum.GAIN_TRANSIENT_MAY_DUCK:
+            focus_resp.audio_focus_state = AudioFocusState.GAIN_TRANSIENT_GUIDANCE_ONLY
+        elif focus_type == AudioFocusType.Enum.RELEASE:
+            focus_resp.audio_focus_state = AudioFocusState.LOSS
+        else:
+            focus_resp.audio_focus_state = AudioFocusState.INVALID
+        focus_resp.granted = True
+        self.log.info(f"AudioChannel (ch{channel_id}): Responding AudioFocusResponse(state={focus_resp.audio_focus_state}, granted=True)")
         await self.manager.send_wire_frame(channel_id, MSG.AUDIO_FOCUS_RESPONSE, focus_resp.SerializeToString(), encrypted=True)
 
     async def process_shm_frame(self, channel_id: int, message_id: int, payload: bytes) -> None:
@@ -111,10 +129,16 @@ class AudioChannelHandler:
             return
 
         binary_frame = pack_media_frame(channel_id, ts_us, audio_payload)
+
+        self.manager.publish("media.audio.frame", {
+            "payload_b64": base64.b64encode(binary_frame).decode(),
+        })
+
         await self.manager.broadcast_ws_media(binary_frame)
 
         if self.frame_count % UNACKED_FRAMES_THRESHOLD == 0:
-            self.log.debug(f"🔊 [Audio Stream Flow] Processed audio frame {self.frame_count}/{UNACKED_FRAMES_THRESHOLD} (ch{channel_id}): msgId=0x{message_id:04x}, payload_len={len(audio_payload)}, ts={ts_us} µs -> Broadcasting to {len(self.manager.ws_clients)} WS client(s)")
+            self.log.info(f"🔊 [Audio Stream Flow] Processed audio frame {self.frame_count}/{UNACKED_FRAMES_THRESHOLD} (ch{channel_id}): msgId=0x{message_id:04x}, payload_len={len(audio_payload)}, ts={ts_us} µs -> Broadcasting to {len(self.manager.ws_clients)} WS client(s)")
+
 
         # Batch MediaAck every 10 frames using AVMediaAckIndication(session_id, ack_count=10)
         session_id = self.sessions.get(channel_id, 0)

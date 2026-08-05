@@ -8,7 +8,7 @@ name: NemoHeadUnit-Wireless
 
 channels:
   - conda-forge
-  - defaults
+  - nodefaults
 
 dependencies:
   - python=3.13
@@ -18,10 +18,25 @@ dependencies:
   - websockets>=12.0
   - dbus-python
   - pygobject
+  - gstreamer>=1.22
+  - gst-plugins-base>=1.22
+  - gst-plugins-good>=1.22
+  - gst-plugins-bad>=1.22
+  - gst-plugins-ugly>=1.22
+  - gst-libav>=1.22
   - pyyaml>=6.0
-  - ffmpeg                   # HW-accelerated video transcode for mjpeg-ffmpeg transport
+  - ffmpeg # HW-accelerated video transcode for mjpeg-ffmpeg transport
+  - pyopengl
+  - numpy
   - pip
+
   - pip:
-    - loguru>=0.7.3
-    - protobuf>=4.25
-    - grpcio-tools>=1.62
+      - PyQt6>=6.6.0
+      - loguru>=0.7.3
+      - protobuf>=4.25
+      - grpcio-tools>=1.62
+      - qasync>=0.27.1
+      - av>=10.0.0
+
+
+

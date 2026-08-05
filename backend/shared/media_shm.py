@@ -42,9 +42,11 @@ def _patch_resource_tracker():
 
 _patch_resource_tracker()
 
-DEFAULT_SHM_SIZE = 4 * 1024 * 1024  # 4MB ring buffer
+DEFAULT_SHM_SIZE = 32 * 1024 * 1024  # 32MB ring buffer capacity
 SHM_DOWNSTREAM_NAME = "nemo_media_shm_down"
 SHM_UPSTREAM_NAME = "nemo_media_shm_up"
+SHM_TRANSCODE_IN_NAME = "nemo_video_transcode_in"
+
 
 
 class RingSharedMemoryBuffer:
@@ -118,8 +120,9 @@ class RingSharedMemoryBuffer:
         magic, stream_type, _, length, ts_low = struct.unpack(">2s B B I I", header_bytes)
 
         if magic != b"NM":
-            logger.warning("Invalid SHM frame magic at offset %d", offset)
+            logger.debug("Invalid SHM frame magic at offset %d", offset)
             return 0, 0, b""
+
 
         if offset + 12 + length > self.size:
             return 0, 0, b""
@@ -131,23 +134,29 @@ class RingSharedMemoryBuffer:
         if self.shm:
             try:
                 self.shm.close()
-                if self.create:
-                    self.shm.unlink()
+                import sys
+                if self.create and sys.platform != "win32":
+                    try:
+                        self.shm.unlink()
+                    except Exception as unlink_err:
+                        logger.debug("SHM unlink notice: %s", unlink_err)
             except Exception as e:
                 logger.debug("SHM close exception: %s", e)
             self.shm = None
 
 
+
 class BidirectionalMediaSHM:
     """
-    Manages both Downstream (Phone -> tcp_server -> SHM -> channel_manager)
-    and Upstream (Frontend Mic -> channel_manager -> SHM -> tcp_server) shared memory buffers.
+    Manages Downstream, Upstream, and Video Transcode Input shared memory buffers.
     """
 
     def __init__(self, create: bool = False, size: int = DEFAULT_SHM_SIZE):
         self.downstream = RingSharedMemoryBuffer(SHM_DOWNSTREAM_NAME, size=size, create=create)
         self.upstream = RingSharedMemoryBuffer(SHM_UPSTREAM_NAME, size=size, create=create)
+        self.transcode_in = RingSharedMemoryBuffer(SHM_TRANSCODE_IN_NAME, size=size, create=create)
 
     def close(self):
         self.downstream.close()
         self.upstream.close()
+        self.transcode_in.close()

@@ -88,3 +88,16 @@ class BaseVideoTransport(ABC):
         except (ValueError, AttributeError):
             pass
         return None
+
+    def get_diagnostics(self) -> dict:
+        """
+        Return diagnostic metadata about the active video decoder and hardware acceleration status.
+        """
+        return {
+            "transport": getattr(self, "transport_name", "unknown"),
+            "decoder_element": "unknown",
+            "hw_accelerated": False,
+            "decoder_type": "Unknown Decoder",
+            "details": {},
+        }
+
