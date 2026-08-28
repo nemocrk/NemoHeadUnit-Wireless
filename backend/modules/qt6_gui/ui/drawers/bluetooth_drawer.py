@@ -73,8 +73,9 @@ class BluetoothDrawerWidget(QWidget):
     close_clicked = pyqtSignal()
     scan_requested = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, service_enabled: bool = True):
         super().__init__(parent)
+        self._service_enabled = service_enabled
         self.setProperty("class", "drawer-card")
         self.setMinimumWidth(340)
 
@@ -150,7 +151,7 @@ class BluetoothDrawerWidget(QWidget):
         self.stop_stream()
 
     def start_stream(self):
-        if not self.stream_thread:
+        if self._service_enabled and not self.stream_thread:
             self.stream_thread = BluetoothStreamThread()
             self.stream_thread.status_updated.connect(self._on_status_updated)
             self.stream_thread.start()
@@ -162,9 +163,23 @@ class BluetoothDrawerWidget(QWidget):
             self.stream_thread = None
 
     def _on_scan_clicked(self):
-        self.lbl_status.setText("Initiating Bluetooth discovery scan...")
-        self.scan_thread = BluetoothScanThread()
-        self.scan_thread.start()
+        self.scan_requested.emit()
+        if self._service_enabled:
+            self.lbl_status.setText("Initiating Bluetooth discovery scan...")
+            self.scan_thread = BluetoothScanThread()
+            self.scan_thread.start()
+        else:
+            self.lbl_status.setText("Connectivity provider unavailable in standalone mode.")
+
+    def set_connectivity_state(self, state) -> None:
+        """Apply a transport-neutral connectivity state supplied by a controller."""
+        self._on_status_updated({
+            "discovering": state.discovering,
+            "rfcomm_connected": state.connected,
+            "stage_label": state.stage_label,
+            "paired_devices": [dict(device) for device in state.paired_devices],
+            "discovered_devices": [dict(device) for device in state.discovered_devices],
+        })
 
     def _on_status_updated(self, data: dict):
         discovering = data.get("discovering", False)

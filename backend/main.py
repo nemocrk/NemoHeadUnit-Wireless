@@ -55,13 +55,15 @@ def get_execution_mode(argv: list[str] | None = None) -> str:
         "--mode",
         dest="mode",
         default=default_mode,
-        choices=["multiprocessing", "multithreading", "threading", "thread", "threads"],
-        help="Execution isolation mode: multiprocessing (separate processes) or multithreading (shared threads)",
+        choices=["multiprocessing", "multithreading", "threading", "thread", "threads", "embedded", "qt-embedded"],
+        help="Execution mode: multiprocessing, multithreading, or embedded Qt with in-process transport",
     )
     args, _ = parser.parse_known_args(argv)
     raw_mode = (args.mode or "multiprocessing").lower().strip()
     if raw_mode in ("multithreading", "threading", "thread", "threads"):
         return "multithreading"
+    if raw_mode in ("embedded", "qt-embedded"):
+        return "embedded"
     return "multiprocessing"
 
 
@@ -253,6 +255,10 @@ def run(argv: list[str] | None = None):
     mode = get_execution_mode(argv)
     log.info(f"Starting Web Browser Head Unit Backend Orchestrator (Mode: {mode.upper()})...")
 
+    if mode == "embedded":
+        from embedded import run_embedded
+        return run_embedded()
+
     modules = discover_modules()
     module_handles: list[ModuleHandle] = []
 
@@ -370,4 +376,3 @@ def run(argv: list[str] | None = None):
 
 if __name__ == "__main__":
     run()
-

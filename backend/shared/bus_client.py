@@ -18,6 +18,21 @@ BUS_HWM = 5000
 
 
 class BusClient:
+    def __new__(cls, module_name: str):
+        # Embedded mode is selected by the composition root before modules exist.
+        # Returning a facade preserves the public module API without mixing
+        # transport conditionals into every provider.
+        if cls is BusClient:
+            try:
+                from shared.runtime import get_inprocess_bus
+                from shared.inprocess_bus_client import InProcessBusClient
+                bus = get_inprocess_bus()
+                if bus is not None:
+                    return InProcessBusClient(module_name, bus)
+            except ImportError:
+                pass
+        return super().__new__(cls)
+
     def __init__(self, module_name: str):
         self.module_name = module_name
         self.log = get_logger(module_name)

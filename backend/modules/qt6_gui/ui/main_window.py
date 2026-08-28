@@ -37,8 +37,15 @@ class MainWindow(QMainWindow):
 
     close_app_requested = pyqtSignal()
     video_focus_toggled = pyqtSignal(str)  # Emits "PROJECTED" or "NATIVE"
+    projection_focus_requested = pyqtSignal(str)
+    touch_input_requested = pyqtSignal(dict)
+    microphone_data_requested = pyqtSignal(bytes)
+    bluetooth_scan_requested = pyqtSignal()
+    volume_action_requested = pyqtSignal(str)
+    settings_load_requested = pyqtSignal()
+    settings_save_requested = pyqtSignal(str, dict)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, service_enabled: bool = True):
         super().__init__(parent)
         self.setWindowTitle("NemoHeadUnit — Wireless Android Auto (Qt6)")
         self.resize(1280, 720)
@@ -77,14 +84,14 @@ class MainWindow(QMainWindow):
         self.arc_menu = ArcRadialMenuWidget(self.central_widget)
 
         # 5. Volume Popover Card
-        self.volume_popover = VolumePopoverWidget(self.central_widget)
+        self.volume_popover = VolumePopoverWidget(self.central_widget, service_enabled=service_enabled)
 
         # 6. Floating Top-Center Toast Notification Banner
         self.toast_widget = ToastNotificationWidget(self.central_widget)
 
         # 7. Slide-Over Drawers
-        self.bluetooth_drawer = BluetoothDrawerWidget(self.central_widget)
-        self.settings_drawer = SettingsDrawerWidget(self.central_widget)
+        self.bluetooth_drawer = BluetoothDrawerWidget(self.central_widget, service_enabled=service_enabled)
+        self.settings_drawer = SettingsDrawerWidget(self.central_widget, service_enabled=service_enabled)
         self.logs_drawer = LogsDrawerWidget(self.central_widget)
 
         self._connect_signals()
@@ -95,6 +102,11 @@ class MainWindow(QMainWindow):
         self.command_bar.volume_clicked.connect(self._toggle_volume_popover)
         self.command_bar.menu_clicked.connect(self.arc_menu.toggle_menu)
         self.command_bar.exit_clicked.connect(self.close_app_requested.emit)
+        self.video_viewport.touch_input_event.connect(self.touch_input_requested.emit)
+        self.volume_popover.vol_action.connect(self.volume_action_requested.emit)
+        self.bluetooth_drawer.scan_requested.connect(self.bluetooth_scan_requested.emit)
+        self.settings_drawer.load_config_requested.connect(self.settings_load_requested.emit)
+        self.settings_drawer.save_config_requested.connect(self.settings_save_requested.emit)
 
         # Arc Menu drawer toggle signals
         self.arc_menu.bluetooth_clicked.connect(lambda: self._toggle_drawer(self.bluetooth_drawer))
@@ -127,6 +139,7 @@ class MainWindow(QMainWindow):
             self.toast_widget.show_toast("Switched to Clock / Home (Video Suspended)", "info")
 
         self.video_focus_toggled.emit(target_mode)
+        self.projection_focus_requested.emit(target_mode)
 
     def _toggle_volume_popover(self):
         self.volume_popover.setVisible(not self.volume_popover.isVisible())

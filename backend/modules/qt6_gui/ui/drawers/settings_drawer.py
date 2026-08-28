@@ -83,8 +83,11 @@ class SettingsDrawerWidget(QWidget):
     close_clicked = pyqtSignal()
     save_config_requested = pyqtSignal(str, dict)
 
-    def __init__(self, parent=None):
+    load_config_requested = pyqtSignal()
+
+    def __init__(self, parent=None, service_enabled: bool = True):
         super().__init__(parent)
+        self._service_enabled = service_enabled
         self.setProperty("class", "drawer-card")
         self.setMinimumWidth(380)
 
@@ -161,7 +164,10 @@ class SettingsDrawerWidget(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.refresh_all_config()
+        if self._service_enabled:
+            self.refresh_all_config()
+        else:
+            self.load_config_requested.emit()
 
     def refresh_all_config(self):
         """Fetch /api/config/all asynchronously."""
@@ -172,6 +178,9 @@ class SettingsDrawerWidget(QWidget):
         self.fetch_thread.start()
 
     def _on_config_loaded(self, data: dict):
+        self.set_config_data(data)
+
+    def set_config_data(self, data: dict) -> None:
         self.all_config = data
         self.lbl_status.setText("")
         self._build_module_tabs()
@@ -322,11 +331,17 @@ class SettingsDrawerWidget(QWidget):
                 new_config[key] = widget.text()
 
         self.lbl_status.setText("Saving settings...")
-        self.save_thread = ConfigSaveThread(self.active_module, new_config)
-        self.save_thread.save_finished.connect(self._on_save_finished)
-        self.save_thread.start()
+        if self._service_enabled:
+            self.save_thread = ConfigSaveThread(self.active_module, new_config)
+            self.save_thread.save_finished.connect(self._on_save_finished)
+            self.save_thread.start()
+        else:
+            self.save_config_requested.emit(self.active_module, new_config)
 
     def _on_save_finished(self, success: bool, msg: str):
+        self.set_save_result(success, msg)
+
+    def set_save_result(self, success: bool, msg: str) -> None:
         if success:
             self.lbl_status.setText("✅ Settings saved!")
         else:

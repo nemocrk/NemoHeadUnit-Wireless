@@ -15,9 +15,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(dirname "$SCRIPT_DIR")"
 
-echo "[launch_qt_kiosk] Starting Qt6 HeadUnit Frontend Module..."
+echo "[launch_qt_kiosk] Starting standalone Qt6 HeadUnit shell..."
 cd "$WORKSPACE_DIR"
 
 export PYTHONPATH="$WORKSPACE_DIR:$WORKSPACE_DIR/backend:${PYTHONPATH:-}"
 
-micromamba run -n NemoHeadUnit-Wireless python backend/modules/qt6_gui/main.py $FULLSCREEN_FLAG
+micromamba run -n NemoHeadUnit-Wireless python -m backend.modules.qt6_gui.standalone $FULLSCREEN_FLAG

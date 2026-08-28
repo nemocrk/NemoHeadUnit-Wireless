@@ -1,0 +1,36 @@
+"""Small application ports. Implementations must not expose transport details."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Protocol
+
+from .models import AudioState, ConnectivityState, ProjectionState
+
+Unsubscribe = Callable[[], None]
+
+
+class ProjectionPort(Protocol):
+    def subscribe_state(self, callback: Callable[[ProjectionState], None]) -> Unsubscribe: ...
+    def request_focus(self, mode: str) -> None: ...
+    def send_touch(self, event: dict) -> None: ...
+    def send_microphone(self, pcm_data: bytes) -> None: ...
+
+
+class ConnectivityPort(Protocol):
+    def subscribe_state(self, callback: Callable[[ConnectivityState], None]) -> Unsubscribe: ...
+    def request_scan(self) -> None: ...
+
+
+class SettingsPort(Protocol):
+    def list_settings(self) -> dict: ...
+    def save_settings(self, module: str, values: dict) -> None: ...
+
+
+class AudioControlPort(Protocol):
+    def subscribe_state(self, callback: Callable[[AudioState], None]) -> Unsubscribe: ...
+    def request_volume_action(self, action: str) -> None: ...
+
+
+class DiagnosticsPort(Protocol):
+    def subscribe_logs(self, callback: Callable[[str], None]) -> Unsubscribe: ...

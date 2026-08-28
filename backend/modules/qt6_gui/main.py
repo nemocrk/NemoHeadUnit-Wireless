@@ -200,7 +200,7 @@ class Qt6GuiModule(BaseBackendModule):
         self.log.info("⏱ [Boot Trace 4a/7] Initializing MainWindow widget hierarchy...")
         self.main_window = MainWindow()
         self.main_window.close_app_requested.connect(self._on_close_requested)
-        self.main_window.video_viewport.touch_input_event.connect(self._on_touch_input_event)
+        self.main_window.touch_input_requested.connect(self._on_touch_input_event)
         self.log.info(f"⏱ [Boot Trace 4c/7] MainWindow signals connected in {(time.time()-t3)*1000:.1f}ms")
 
         # Initialize SHM & Audio Engines
@@ -420,5 +420,8 @@ class Qt6GuiModule(BaseBackendModule):
 
 
 if __name__ == "__main__":
+    if "--standalone" in sys.argv:
+        from backend.modules.qt6_gui.standalone import run as run_standalone
+        standalone_args = [arg for arg in sys.argv[1:] if arg != "--standalone"]
+        raise SystemExit(run_standalone(standalone_args))
     run_module(Qt6GuiModule)
-

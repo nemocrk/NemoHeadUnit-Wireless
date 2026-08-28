@@ -71,8 +71,9 @@ class VolumePopoverWidget(QWidget):
 
     vol_action = pyqtSignal(str)  # "up", "down", "mute"
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, service_enabled: bool = True):
         super().__init__(parent)
+        self._service_enabled = service_enabled
         self.setObjectName("volume-popover")
         self.setStyleSheet("""
             #volume-popover {
@@ -148,7 +149,7 @@ class VolumePopoverWidget(QWidget):
         self.stop_media_stream()
 
     def start_media_stream(self):
-        if not self.media_stream:
+        if self._service_enabled and not self.media_stream:
             self.media_stream = MediaStatusStreamThread()
             self.media_stream.media_status_updated.connect(self._on_media_status_updated)
             self.media_stream.start()
@@ -175,9 +176,10 @@ class VolumePopoverWidget(QWidget):
         self.update_volume(self.current_volume, self.is_muted)
         self.vol_action.emit(action)
 
-        self.action_thread = VolumeActionThread(action)
-        self.action_thread.volume_updated.connect(self.update_volume)
-        self.action_thread.start()
+        if self._service_enabled:
+            self.action_thread = VolumeActionThread(action)
+            self.action_thread.volume_updated.connect(self.update_volume)
+            self.action_thread.start()
 
     def update_volume(self, level: int, muted: bool):
         self.current_volume = level
