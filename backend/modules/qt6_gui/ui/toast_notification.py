@@ -47,7 +47,7 @@ class ToastNotificationWidget(QWidget):
 
         self.hide()
 
-    def show_toast(self, message: str, toast_type: str = "info", duration_ms: int = 3500):
+    def show_toast(self, message: str, toast_type: str = "info", duration_ms: int = 3500, icon: str = None):
         """
         Display floating top-center toast banner.
         Every new toast immediately clears previous active toasts (matching WebClient showToast).
@@ -68,8 +68,9 @@ class ToastNotificationWidget(QWidget):
             }}
         """)
 
-        self.lbl_icon.setText(theme["icon"])
+        self.lbl_icon.setText(icon if icon else theme["icon"])
         self.lbl_text.setText(message)
+
 
         self.adjustSize()
         self.show()

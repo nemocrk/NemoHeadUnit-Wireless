@@ -12,7 +12,8 @@ import time
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
 
 
 # Bootstrap PYTHONPATH/sys.path
@@ -198,9 +199,8 @@ class Qt6GuiModule(BaseBackendModule):
         t3 = time.time()
         self.log.info("⏱ [Boot Trace 4a/7] Initializing MainWindow widget hierarchy...")
         self.main_window = MainWindow()
-        self.log.info("⏱ [Boot Trace 4b/7] MainWindow widget hierarchy created cleanly!")
         self.main_window.close_app_requested.connect(self._on_close_requested)
-        self.main_window.video_viewport.user_input_event.connect(self._on_user_input_event)
+        self.main_window.video_viewport.touch_input_event.connect(self._on_touch_input_event)
         self.log.info(f"⏱ [Boot Trace 4c/7] MainWindow signals connected in {(time.time()-t3)*1000:.1f}ms")
 
         # Initialize SHM & Audio Engines
@@ -315,7 +315,10 @@ class Qt6GuiModule(BaseBackendModule):
 
     # ------------------------------------------------------------------
     # Handlers & Callbacks
-    # ------------------------    def _on_connectivity_status_updated(self, data: dict):
+    # ------------------------------------------------------------------
+
+    def _on_connectivity_status_updated(self, data: dict):
+
         toast_msg = data.get("toast_message")
         pairing_pin = data.get("pairing_pin")
         if pairing_pin:
@@ -383,6 +386,9 @@ class Qt6GuiModule(BaseBackendModule):
             offset = self.shm_engine.write_upstream_mic(pcm_chunk)
             if offset >= 0:
                 self.publish("media.audio.mic_shm", {"shm_offset": offset, "len": len(pcm_chunk)})
+
+    def _on_touch_input_event(self, touch_data: dict):
+        self.publish("input.event", touch_data)
 
     def _on_user_input_event(self, ev_type: str, x: int, y: int, button: int):
         self.publish("input.event", {

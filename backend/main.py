@@ -46,11 +46,24 @@ MODULE_READY_TIMEOUT = 10.0  # seconds per level wait
 log = get_logger("main")
 
 
-def get_execution_mode() -> str:
-    raw_mode = os.environ.get("NEMO_EXECUTION_MODE", os.environ.get("NEMO_MODE", "multiprocessing")).lower().strip()
+def get_execution_mode(argv: list[str] | None = None) -> str:
+    import argparse
+    parser = argparse.ArgumentParser(description="NemoHeadUnit-Wireless Backend Orchestrator")
+    default_mode = os.environ.get("NEMO_EXECUTION_MODE", os.environ.get("NEMO_MODE", "multiprocessing")).lower().strip()
+    parser.add_argument(
+        "-m",
+        "--mode",
+        dest="mode",
+        default=default_mode,
+        choices=["multiprocessing", "multithreading", "threading", "thread", "threads"],
+        help="Execution isolation mode: multiprocessing (separate processes) or multithreading (shared threads)",
+    )
+    args, _ = parser.parse_known_args(argv)
+    raw_mode = (args.mode or "multiprocessing").lower().strip()
     if raw_mode in ("multithreading", "threading", "thread", "threads"):
         return "multithreading"
     return "multiprocessing"
+
 
 
 class ModuleHandle:
@@ -236,9 +249,10 @@ def _wait_for_level_ready(
         log.warning(f"  '{name}' (priority={priority}) timeout waiting for system.ready — continuing boot.")
 
 
-def run():
-    mode = get_execution_mode()
+def run(argv: list[str] | None = None):
+    mode = get_execution_mode(argv)
     log.info(f"Starting Web Browser Head Unit Backend Orchestrator (Mode: {mode.upper()})...")
+
     modules = discover_modules()
     module_handles: list[ModuleHandle] = []
 

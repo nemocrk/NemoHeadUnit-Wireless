@@ -3,8 +3,8 @@
  */
 
 export class TouchHandler {
-    constructor(canvasElement, apiEndpoint = '/api/channels/input/touch', sampleIntervalMs = 30) {
-        this.canvas = canvasElement;
+    constructor(canvasOrContainer, apiEndpoint = '/api/channels/input/touch', sampleIntervalMs = 30) {
+        this.container = document.getElementById('app-container') || canvasOrContainer || document.body;
         this.apiEndpoint = apiEndpoint;
         this.sampleIntervalMs = sampleIntervalMs; // Throttling interval for DRAG events (~33Hz)
         
@@ -13,8 +13,12 @@ export class TouchHandler {
         this.bindEvents();
     }
 
+    get canvas() {
+        return document.getElementById('video-canvas') || this.container;
+    }
+
     bindEvents() {
-        const c = this.canvas;
+        const c = this.container;
 
         // HTML5 Touch Events (primary for multi-touch touchscreens)
         c.addEventListener('touchstart', (e) => this.handleTouchStart(e), { passive: false });
@@ -90,6 +94,7 @@ export class TouchHandler {
     }
 
     handleTouchStart(e) {
+        if (this.isInteractiveUI(e.target)) return;
         e.preventDefault();
         const activeList = [];
         for (let i = 0; i < e.touches.length; i++) {
@@ -113,6 +118,7 @@ export class TouchHandler {
     }
 
     handleTouchMove(e) {
+        if (this.isInteractiveUI(e.target)) return;
         e.preventDefault();
         const now = performance.now();
         // Touch sampling: throttle continuous DRAG events to sampleIntervalMs (default 30ms)
@@ -135,6 +141,7 @@ export class TouchHandler {
     }
 
     handleTouchEnd(e) {
+        if (this.isInteractiveUI(e.target)) return;
         e.preventDefault();
         // Active list remaining after touch release
         const remainingList = [];
@@ -161,7 +168,7 @@ export class TouchHandler {
 
     isInteractiveUI(element) {
         if (!element) return false;
-        return !!element.closest('.fab-item, .command-bar-btn, .settings-card, .drawer, .popover-card, button, input');
+        return !!element.closest('.arc-fab-item, .cmd-btn, .vol-btn, .close-btn, .drawer, #volume-popover, #arc-radial-menu, #command-bar, #disconnected-screen:not(.hidden), button, input, select, textarea');
     }
 
     handlePointerDown(e) {

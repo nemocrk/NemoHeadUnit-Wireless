@@ -65,6 +65,8 @@ class MainWindow(QMainWindow):
 
         # 2. Overlay Disconnected Clock Screen
         self.disconnected_screen = QWidget(self.central_widget)
+        self.disconnected_screen.setObjectName("disconnected-screen")
+        self.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.disconnected_screen.setGeometry(0, 0, 1280, 720)
         self.clock_widget = AnalogClockWidget(self.disconnected_screen)
 

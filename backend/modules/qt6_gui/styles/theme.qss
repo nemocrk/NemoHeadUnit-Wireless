@@ -162,3 +162,10 @@ QComboBox.styled-select:hover {
 QComboBox::drop-down {
     border: none;
 }
+
+/* ------------------------------------------------------------------
+   Disconnected / Home Clock Screen Overlay
+   ------------------------------------------------------------------ */
+QWidget#disconnected-screen {
+    background: qradialgradient(cx:0.5, cy:0.5, radius:0.8, fx:0.5, fy:0.5, stop:0 #1e293b, stop:1 #090d16);
+}

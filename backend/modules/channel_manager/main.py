@@ -377,20 +377,34 @@ class ChannelManagerModule(BaseBackendModule):
         x = data.get("x", 0)
         y = data.get("y", 0)
         pointer_id = data.get("pointer_id", 0)
+        action_index = data.get("action_index", 0)
+        pointers = data.get("pointers", None)
         
-        # TouchAction enum: 0 = PRESS, 1 = RELEASE, 2 = DRAG / MOVE
-        action = 0
-        if ev_type == "release":
-            action = 1
-        elif ev_type == "move":
-            action = 2
+        # TouchAction enum: 0 = PRESS, 1 = RELEASE, 2 = DRAG / MOVE, 5 = POINTER_DOWN, 6 = POINTER_UP
+        action = data.get("action", None)
+        if action is None:
+            if ev_type == "release":
+                action = 1
+            elif ev_type == "move":
+                action = 2
+            elif ev_type == "pointer_down":
+                action = 5
+            elif ev_type == "pointer_up":
+                action = 6
+            else:
+                action = 0
 
-        self.log.debug("👇 [Touch Input] Dispatching touch event action=%d x=%d y=%d to phone", action, x, y)
+        self.log.debug(
+            "👇 [Touch Input] Dispatching touch event action=%d action_index=%d x=%d y=%d pointers=%s to phone",
+            action, action_index, x, y, pointers
+        )
         await self.input_handler.handle_touch_event(
             action=action,
+            pointers=pointers,
             x=int(x),
             y=int(y),
             pointer_id=pointer_id,
+            action_index=action_index,
         )
 
 
@@ -404,11 +418,14 @@ class ChannelManagerModule(BaseBackendModule):
             await self.broadcast_ws_json(self.get_stream_config_dict())
 
     async def on_video_request_focus(self, data: dict) -> None:
-        """Handle focus request from media_server when a new WebSocket client connects."""
+        """Handle focus request from media_server or qt6_gui."""
         sender = data.get("sender", "unknown")
-        self.log.info(f"📹 VideoChannel: Focus requested by {sender} — sending VideoFocusIndication(PROJECTED) to phone")
+        mode_str = data.get("mode", "PROJECTED")
         from protos.oaa.video.VideoFocusModeEnum_pb2 import VideoFocusMode
-        await self.video_handler.send_focus_indication(VideoFocusMode.Enum.PROJECTED)
+        focus_mode = VideoFocusMode.Enum.PROJECTED if mode_str == "PROJECTED" else VideoFocusMode.Enum.NATIVE
+        mode_name = "PROJECTED" if focus_mode == VideoFocusMode.Enum.PROJECTED else "NATIVE"
+        self.log.info(f"📹 VideoChannel: Focus ({mode_name}) requested by {sender} — sending VideoFocusIndication({mode_name}) to phone")
+        await self.video_handler.send_focus_indication(focus_mode)
 
     async def on_video_release_focus(self, data: dict) -> None:
         """Handle focus release from media_server when all WebSocket clients disconnect."""

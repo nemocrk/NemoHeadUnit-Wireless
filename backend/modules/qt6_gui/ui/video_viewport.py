@@ -6,10 +6,11 @@ Intercepts mouse/touch events and emits normalized input coordinates for channel
 """
 
 import logging
+import time
 from typing import Callable, Optional
 from PyQt6.QtCore import QPointF, Qt, pyqtSignal
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtGui import QEventPoint, QMouseEvent, QTouchEvent
 try:
     from OpenGL import GL
     HAS_OPENGL = True
@@ -21,15 +22,21 @@ logger = logging.getLogger("qt6_gui.video_viewport")
 
 class VideoViewportWidget(QOpenGLWidget):
     """
-    OpenGL Texture Render Canvas for Android Auto Video Stream.
+    OpenGL Texture Render Canvas for Android Auto Video Stream with Multi-Touch Support.
     """
 
-    # Emits (event_type, x, y, button) for input routing
+    # Emits full touch event dict for AA input channel (action, action_index, pointers)
+    touch_input_event = pyqtSignal(dict)
+    # Legacy signal for backwards compatibility
     user_input_event = pyqtSignal(str, int, int, int)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, sample_interval_ms: int = 30):
         super().__init__(parent)
         self.setMouseTracking(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+
+        self.sample_interval_ms = sample_interval_ms  # Throttling interval for DRAG events (default 30ms / ~33Hz)
+        self._last_drag_time = 0.0
 
         self.texture_id = 0
         self.frame_width = 1280
@@ -60,7 +67,6 @@ class VideoViewportWidget(QOpenGLWidget):
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
         logger.info("🔍 [Video Viewport Trace] initializeGL() completed cleanly!")
-
 
     def resizeGL(self, w: int, h: int):
         if HAS_OPENGL:
@@ -97,7 +103,6 @@ class VideoViewportWidget(QOpenGLWidget):
                 logger.debug("OpenGL glTexImage2D exception: %s", exc)
                 self.has_new_frame = False
 
-
         if self.texture_id and self.current_frame_data:
             GL.glBindTexture(GL.GL_TEXTURE_2D, self.texture_id)
             GL.glBegin(GL.GL_QUADS)
@@ -108,7 +113,7 @@ class VideoViewportWidget(QOpenGLWidget):
             GL.glEnd()
 
     # ------------------------------------------------------------------
-    # Input Event Interception
+    # Input Event Interception (Multi-Touch & Mouse)
     # ------------------------------------------------------------------
 
     def _map_coords(self, pos) -> tuple[int, int]:
@@ -120,20 +125,100 @@ class VideoViewportWidget(QOpenGLWidget):
         norm_y = max(0, min(self.frame_height, norm_y))
         return norm_x, norm_y
 
+    def touchEvent(self, event: QTouchEvent):
+        """Native Qt Multi-Touch Event Interception."""
+        points = event.points()
+        if not points:
+            return super().touchEvent(event)
+
+        active_pointers = []
+        pressed_indices = []
+        released_points = []
+
+        for pt in points:
+            px, py = self._map_coords(pt.position())
+            pid = int(pt.id())
+            state = pt.state()
+            if state != QEventPoint.State.Released:
+                active_pointers.append({"x": px, "y": py, "pointer_id": pid})
+                if state == QEventPoint.State.Pressed:
+                    pressed_indices.append(len(active_pointers) - 1)
+            else:
+                released_points.append({"x": px, "y": py, "pointer_id": pid})
+
+        # Determine Android Auto Touch Action:
+        # 0 = PRESS, 1 = RELEASE, 2 = DRAG, 5 = POINTER_DOWN, 6 = POINTER_UP
+        if not active_pointers:
+            # Last pointer released -> RELEASE (1)
+            action = 1
+            action_index = 0
+            pointers_payload = released_points if released_points else [{"x": 0, "y": 0, "pointer_id": 0}]
+        elif pressed_indices:
+            if len(active_pointers) == 1 and pressed_indices[0] == 0:
+                # First pointer pressed -> PRESS (0)
+                action = 0
+                action_index = 0
+            else:
+                # Secondary pointer pressed -> POINTER_DOWN (5)
+                action = 5
+                action_index = pressed_indices[0]
+            pointers_payload = active_pointers
+        elif released_points:
+            # Non-last pointer released -> POINTER_UP (6)
+            action = 6
+            action_index = 0
+            pointers_payload = active_pointers
+        else:
+            # Moving / Dragging -> DRAG (2)
+            now = time.monotonic()
+            if (now - self._last_drag_time) * 1000.0 < self.sample_interval_ms:
+                event.accept()
+                return
+            self._last_drag_time = now
+            action = 2
+            action_index = 0
+            pointers_payload = active_pointers
+
+        self.touch_input_event.emit({
+            "action": action,
+            "action_index": action_index,
+            "pointers": pointers_payload,
+        })
+        event.accept()
+
     def mousePressEvent(self, event: QMouseEvent):
         x, y = self._map_coords(event.position())
         btn = getattr(event.button(), "value", 1)
         self.user_input_event.emit("press", x, y, int(btn))
+        self.touch_input_event.emit({
+            "action": 0,
+            "action_index": 0,
+            "pointers": [{"x": x, "y": y, "pointer_id": 0}],
+        })
 
     def mouseMoveEvent(self, event: QMouseEvent):
         if event.buttons() != Qt.MouseButton.NoButton:
+            now = time.monotonic()
+            if (now - self._last_drag_time) * 1000.0 < self.sample_interval_ms:
+                return
+            self._last_drag_time = now
             x, y = self._map_coords(event.position())
             btn = getattr(event.button(), "value", 1)
             self.user_input_event.emit("move", x, y, int(btn))
+            self.touch_input_event.emit({
+                "action": 2,
+                "action_index": 0,
+                "pointers": [{"x": x, "y": y, "pointer_id": 0}],
+            })
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         x, y = self._map_coords(event.position())
         btn = getattr(event.button(), "value", 1)
         self.user_input_event.emit("release", x, y, int(btn))
+        self.touch_input_event.emit({
+            "action": 1,
+            "action_index": 0,
+            "pointers": [{"x": x, "y": y, "pointer_id": 0}],
+        })
 
 
