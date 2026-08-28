@@ -6,7 +6,8 @@ Uses Qt6 `QAudioSink` for PCM playback and `QAudioSource` for 16kHz 16-bit Mono 
 
 import logging
 from typing import Callable, Optional
-from PyQt6.QtCore import QByteArray, QIODevice, QObject, pyqtSignal
+from PyQt6.QtCore import QByteArray, QIODevice, QObject, QTimer, pyqtSignal
+
 
 try:
     from PyQt6.QtMultimedia import QAudioFormat, QAudioSink, QAudioSource, QMediaDevices
@@ -59,10 +60,8 @@ class QtAudioEngine:
 
         self.aac_decoder = None
         self.resampler = None
-        self._init_aac_decoder()
-        # Defer QAudioSink initialization to first play call or background timer to prevent blocking GUI boot
-        QTimer.singleShot(200, self._init_playback)
         logger.info("🔍 [Audio Engine Trace] QtAudioEngine.__init__ completed cleanly!")
+
 
 
 
@@ -115,10 +114,14 @@ class QtAudioEngine:
         if not audio_bytes:
             return
 
+        if not self.aac_decoder:
+            self._init_aac_decoder()
+
         if not self.sink_io or not self.sink_io.isOpen():
             self._init_playback()
             if not self.sink_io or not self.sink_io.isOpen():
                 return
+
 
 
         decoded_pcm = bytearray()
@@ -144,24 +147,36 @@ class QtAudioEngine:
         # Enqueue decoded PCM into jitter queue
         self.pcm_queue.extend(decoded_pcm)
 
-        # Prevent queue overflow (>500ms audio buffer)
-        MAX_QUEUE_LEN = 48000 * 2 * 2 // 2  # 96000 bytes
+        # Cap max buffer to 50ms latency (48000Hz * 2ch * 2B * 0.05s = 9600 bytes)
+        MAX_QUEUE_LEN = 9600
         if len(self.pcm_queue) > MAX_QUEUE_LEN:
             del self.pcm_queue[: len(self.pcm_queue) - MAX_QUEUE_LEN]
 
     def _feed_audio_sink(self):
-        """10ms QTimer ticker feeding steady PCM chunks to QAudioSink output device."""
-        if not self.sink_io or not self.sink_io.isOpen() or not self.pcm_queue:
+        """Feed PCM audio chunks dynamically based on QAudioSink.bytesFree()."""
+        if not self.audio_sink or not self.sink_io or not self.sink_io.isOpen() or not self.pcm_queue:
             return
 
-        CHUNK_SIZE = 1920  # 10ms chunk at 48kHz 16-bit Stereo (480 samples * 4 bytes/sample)
-        if len(self.pcm_queue) >= CHUNK_SIZE:
-            chunk = bytes(self.pcm_queue[:CHUNK_SIZE])
-            del self.pcm_queue[:CHUNK_SIZE]
-            try:
-                self.sink_io.write(chunk)
-            except Exception as exc:
-                logger.debug("Audio sink write exception: %s", exc)
+        try:
+            bytes_free = self.audio_sink.bytesFree()
+            # Feed while hardware audio buffer has room for at least 10ms (1920 bytes)
+            while bytes_free >= 1920 and self.pcm_queue:
+                to_write = min(len(self.pcm_queue), bytes_free)
+                # Align to 4-byte sample boundaries (16-bit stereo = 4 bytes per frame)
+                to_write = (to_write // 4) * 4
+                if to_write == 0:
+                    break
+
+                chunk = bytes(self.pcm_queue[:to_write])
+                written = self.sink_io.write(chunk)
+                if written > 0:
+                    del self.pcm_queue[:written]
+                    bytes_free -= written
+                else:
+                    break
+        except Exception as exc:
+            logger.debug("Audio sink write exception: %s", exc)
+
 
 
 

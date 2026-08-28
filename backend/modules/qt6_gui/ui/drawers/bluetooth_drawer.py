@@ -178,8 +178,19 @@ class BluetoothDrawerWidget(QWidget):
         else:
             self.lbl_status.setText(f"🔵 {stage_label}")
 
+        toast_msg = data.get("toast_message")
+        pairing_pin = data.get("pairing_pin")
+        if pairing_pin:
+            dev_addr = data.get("pairing_device", "Phone")
+            toast_msg = f"🔑 Pairing Request from {dev_addr}: PIN {pairing_pin}"
+
+        if toast_msg and hasattr(self.window(), "toast_widget") and self.window().toast_widget:
+            self.window().toast_widget.show_toast(toast_msg, icon="📶")
+
+
         paired = data.get("paired_devices", [])
         discovered = data.get("discovered_devices", [])
+
 
         # Combine paired and discovered devices, marking connection state
         all_devices = []

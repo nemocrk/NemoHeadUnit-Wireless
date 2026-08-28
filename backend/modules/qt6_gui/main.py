@@ -128,38 +128,7 @@ from backend.modules.qt6_gui.ui.main_window import MainWindow
 logger = logging.getLogger("qt6_gui")
 
 
-class ChannelStatusStreamThread(QThread):
-    """Background thread reading /api/channels/stream_status SSE stream."""
-    status_updated = pyqtSignal(dict)
 
-    def __init__(self, host_port="127.0.0.1:8000"):
-        super().__init__()
-        self.host_port = host_port
-        self._running = True
-
-    def run(self):
-        self.msleep(1500)  # Non-blocking startup delay so setup() finishes instantly
-        url = f"http://{self.host_port}/api/channels/stream_status"
-        while self._running:
-            try:
-                req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
-                with urllib.request.urlopen(req, timeout=3.0) as resp:
-                    for line in resp:
-                        if not self._running:
-                            break
-                        line_str = line.decode("utf-8", errors="ignore").strip()
-                        if line_str.startswith("data:"):
-                            json_str = line_str[5:].strip()
-                            if json_str:
-                                data = json.loads(json_str)
-                                self.status_updated.emit(data)
-            except Exception:
-                self.msleep(2000)
-
-
-
-    def stop(self):
-        self._running = False
 
 
 class Qt6GuiModule(BaseBackendModule):
@@ -177,7 +146,10 @@ class Qt6GuiModule(BaseBackendModule):
         self.main_window: Optional[MainWindow] = None
         self.shm_engine: Optional[QtSHMMediaEngine] = None
         self.audio_engine: Optional[QtAudioEngine] = None
-        self.channel_stream: Optional[ChannelStatusStreamThread] = None
+        self._sse_tasks: list[asyncio.Task] = []
+        self._last_toast_message = ""
+
+
 
     def get_default_config(self) -> dict[str, Any]:
         return {
@@ -246,14 +218,10 @@ class Qt6GuiModule(BaseBackendModule):
         self.audio_engine.mic_data_captured.connect(self._on_mic_data_captured)
         self.log.info(f"⏱ [Boot Trace 5/7] SHM & Audio engines initialized in {(time.time()-t4)*1000:.1f}ms")
 
-        # Start Channel Manager SSE Status Stream Thread
+        # Connect Window Signals
         t5 = time.time()
-        self.log.info("⏱ [Boot Trace 5a/7] Instantiating ChannelStatusStreamThread...")
-        self.channel_stream = ChannelStatusStreamThread()
-        self.channel_stream.status_updated.connect(self._on_channel_status_updated)
-        self.log.info("⏱ [Boot Trace 5b/7] Starting ChannelStatusStreamThread...")
-        self.channel_stream.start()
-        self.log.info(f"⏱ [Boot Trace 6/7] Channel status stream thread spawned in {(time.time()-t5)*1000:.1f}ms")
+        self.main_window.video_focus_toggled.connect(self._on_video_focus_toggled)
+        self.log.info(f"⏱ [Boot Trace 6/7] Window signals connected in {(time.time()-t5)*1000:.1f}ms")
 
         # ZMQ Topic Subscriptions
         self.log.info("⏱ [Boot Trace 6a/7] Subscribing to ZMQ topics...")
@@ -282,23 +250,60 @@ class Qt6GuiModule(BaseBackendModule):
 
         self.log.info(f"⏱ [Boot Trace 7/7] Total setup() completed cleanly in {(time.time()-t0)*1000:.1f}ms")
 
-
-
-
     async def run(self) -> None:
-        """Run asyncio loop processing Qt events periodically."""
+        """Run asyncio loop processing Qt events periodically and SSE status streams."""
         self.log.info("Qt6 GUI Module running...")
+
+        # Spawn pure Python asyncio SSE stream background tasks
+        task1 = asyncio.create_task(self._read_sse_loop("/api/connectivity/stream_status", self._on_connectivity_status_updated))
+        task2 = asyncio.create_task(self._read_sse_loop("/api/channels/stream_status", self._on_channel_status_updated))
+        self._sse_tasks = [task1, task2]
+
         while self._running:
             if self.app:
                 self.app.processEvents()
             await asyncio.sleep(0.016)  # ~60 FPS Qt event processing cycle
 
+    async def _read_sse_loop(self, path: str, callback: Callable[[dict], None]) -> None:
+        """Pure Python asyncio loop reading SSE streams without C++ QThread locks."""
+        await asyncio.sleep(1.0)  # Wait for web servers to bind
+        url = f"http://127.0.0.1:8000{path}"
+        while self._running:
+            try:
+                import urllib.request
+                req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
+                # Run blocking line reading in asyncio executor thread
+                def _fetch():
+                    lines = []
+                    with urllib.request.urlopen(req, timeout=3.0) as resp:
+                        for line in resp:
+                            if not self._running:
+                                break
+                            lines.append(line.decode("utf-8", errors="ignore").strip())
+                            if len(lines) >= 5:
+                                break
+                    return lines
+
+                lines = await asyncio.to_thread(_fetch)
+                for line_str in lines:
+                    if line_str.startswith("data:"):
+                        json_str = line_str[5:].strip()
+                        if json_str:
+                            data = json.loads(json_str)
+                            callback(data)
+            except Exception:
+                await asyncio.sleep(2.0)
+
     async def teardown(self) -> None:
         """Clean up Qt window, SHM engine, and audio resources."""
         self.log.info("Tearing down Qt6 GUI Module...")
-        if self.channel_stream:
-            self.channel_stream.stop()
-            self.channel_stream = None
+        self.publish("system.shutdown", {"sender": "qt6_gui", "reason": "gui_teardown"})
+        self.publish("system.stop", {"sender": "qt6_gui", "reason": "gui_teardown"})
+
+        for t in self._sse_tasks:
+            t.cancel()
+        self._sse_tasks.clear()
+
         if self.audio_engine:
             self.audio_engine.close()
         if self.shm_engine:
@@ -307,9 +312,25 @@ class Qt6GuiModule(BaseBackendModule):
             self.main_window.close()
             self.main_window = None
 
+
     # ------------------------------------------------------------------
     # Handlers & Callbacks
-    # ------------------------------------------------------------------
+    # ------------------------    def _on_connectivity_status_updated(self, data: dict):
+        toast_msg = data.get("toast_message")
+        pairing_pin = data.get("pairing_pin")
+        if pairing_pin:
+            dev_addr = data.get("pairing_device", "Phone")
+            toast_msg = f"🔑 Pairing Request from {dev_addr}: PIN {pairing_pin}"
+
+        if toast_msg and toast_msg != self._last_toast_message and self.main_window:
+            self._last_toast_message = toast_msg
+            stage_idx = data.get("stage_index", 0)
+            toast_type = "success" if stage_idx == 10 else "warning"
+            self.main_window.toast_widget.show_toast(toast_msg, toast_type)
+
+    def _on_video_focus_toggled(self, mode: str):
+        self.log.info(f"Video Focus Toggled by user -> Requesting focus mode: {mode}")
+        self.publish("media.video.request_focus", {"mode": mode, "sender": "qt6_gui"})
 
     def _on_channel_status_updated(self, data: dict):
         is_connected = data.get("connected", False)
@@ -346,9 +367,14 @@ class Qt6GuiModule(BaseBackendModule):
 
     def _on_video_frame_from_shm(self, rgba_bytes: bytes, w: int, h: int, ts_us: int):
         if self.main_window:
+            if self.main_window.isVideoFocused and self.main_window.disconnected_screen.isVisible():
+                self.main_window.disconnected_screen.hide()
+                self.main_window.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             self.main_window.video_viewport.update_frame(rgba_bytes, w, h)
 
+
     def _on_audio_frame_from_shm(self, pcm_bytes: bytes, ts_us: int):
+
         if self.audio_engine:
             self.audio_engine.play_pcm_frame(pcm_bytes)
 
@@ -368,10 +394,15 @@ class Qt6GuiModule(BaseBackendModule):
 
     def _on_close_requested(self):
         self.log.info("Close requested by user — shutting down Qt6 GUI module...")
+        self.publish("system.shutdown", {"sender": "qt6_gui", "reason": "gui_close"})
+        self.publish("system.stop", {"sender": "qt6_gui", "reason": "gui_close"})
         self._running = False
-        if self.channel_stream:
-            self.channel_stream.stop()
-            self.channel_stream = None
+
+        for t in self._sse_tasks:
+            t.cancel()
+        self._sse_tasks.clear()
+
+
         if self.audio_engine:
             self.audio_engine.close()
         if self.shm_engine:

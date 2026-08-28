@@ -1,39 +1,51 @@
 """
-main_window.py — Master QMainWindow Staging Canvas, Overlay Views, Drawers, and Floating Bars.
+main_window.py — Main Application Window Layout and Layering Management with WebClient Focus Parity.
 
-Graphically identical layout staging for NemoHeadUnit-Wireless Qt6 Frontend.
+Manages stacked layout:
+1. Base Layer: OpenGL Video Viewport Widget (0, 0, w, h)
+2. Overlay: Analog Clock / Disconnected Screen Widget (0, 0, w, h)
+3. Floating: Bottom Command Bar Widget
+4. Floating: Arc Radial FAB Action Menu Widget
+5. Floating: Volume Popover Card Widget
+6. Floating: Slide-Over Drawers (Bluetooth, Settings, Logs)
+7. Floating: Top-Center Toast Notification Banner Widget
 """
 
 import logging
 from pathlib import Path
-from PyQt6.QtCore import QPoint, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QFrame, QMainWindow, QStackedLayout, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QVBoxLayout, QWidget
 
 from .analog_clock import AnalogClockWidget
 from .arc_radial_menu import ArcRadialMenuWidget
 from .command_bar import CommandBarWidget
+from .drawers.bluetooth_drawer import BluetoothDrawerWidget
+from .drawers.logs_drawer import LogsDrawerWidget
+from .drawers.settings_drawer import SettingsDrawerWidget
+from .toast_notification import ToastNotificationWidget
 from .video_viewport import VideoViewportWidget
 from .volume_popover import VolumePopoverWidget
-from .drawers.bluetooth_drawer import BluetoothDrawerWidget
-from .drawers.settings_drawer import SettingsDrawerWidget
-from .drawers.logs_drawer import LogsDrawerWidget
 
 logger = logging.getLogger("qt6_gui.main_window")
 
 
 class MainWindow(QMainWindow):
     """
-    Main Qt6 Window Staging Canvas & GUI Panels.
+    Main Headunit Window Container with WebClient Video Focus & Toast Parity.
     """
 
     close_app_requested = pyqtSignal()
+    video_focus_toggled = pyqtSignal(str)  # Emits "PROJECTED" or "NATIVE"
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("NemoHeadUnit — Wireless Android Auto (Qt6)")
         self.resize(1280, 720)
         self.setMinimumSize(800, 480)
+
+        self.isVideoFocused = True
+        self._is_connected = False
 
         # Set Window Icon
         try:
@@ -43,12 +55,10 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             logger.debug("Failed to set window icon: %s", exc)
 
-
         # Central Master Container
         self.central_widget = QWidget(self)
         self.setCentralWidget(self.central_widget)
 
-        # Stacked / Layered Container
         # 1. Base Layer: Video Viewport OpenGL Canvas
         self.video_viewport = VideoViewportWidget(self.central_widget)
         self.video_viewport.setGeometry(0, 0, 1280, 720)
@@ -67,7 +77,10 @@ class MainWindow(QMainWindow):
         # 5. Volume Popover Card
         self.volume_popover = VolumePopoverWidget(self.central_widget)
 
-        # 6. Slide-Over Drawers
+        # 6. Floating Top-Center Toast Notification Banner
+        self.toast_widget = ToastNotificationWidget(self.central_widget)
+
+        # 7. Slide-Over Drawers
         self.bluetooth_drawer = BluetoothDrawerWidget(self.central_widget)
         self.settings_drawer = SettingsDrawerWidget(self.central_widget)
         self.logs_drawer = LogsDrawerWidget(self.central_widget)
@@ -93,23 +106,37 @@ class MainWindow(QMainWindow):
         self.logs_drawer.close_clicked.connect(self.logs_drawer.hide)
 
     def _toggle_clock_overlay(self):
-        is_vis = not self.disconnected_screen.isVisible()
-        self.disconnected_screen.setVisible(is_vis)
-        self.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, not is_vis)
-        if is_vis:
+        """Toggle video focus mode between PROJECTED and NATIVE (matching WebClient toggleVideoFocus)."""
+        self.isVideoFocused = not self.isVideoFocused
+        target_mode = "PROJECTED" if self.isVideoFocused else "NATIVE"
+
+        if self.isVideoFocused:
+            self.disconnected_screen.hide()
+            self.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.toast_widget.show_toast("Resuming Android Auto Video Projection", "info")
+        else:
+            self.disconnected_screen.show()
+            self.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
             self.disconnected_screen.raise_()
             self.command_bar.raise_()
             self.arc_menu.raise_()
             self.volume_popover.raise_()
+            self.toast_widget.raise_()
+            self.toast_widget.show_toast("Switched to Clock / Home (Video Suspended)", "info")
 
+        self.video_focus_toggled.emit(target_mode)
 
     def _toggle_volume_popover(self):
         self.volume_popover.setVisible(not self.volume_popover.isVisible())
+        if self.volume_popover.isVisible():
+            self.volume_popover.raise_()
 
     def _toggle_drawer(self, target_drawer: QWidget):
         for drawer in (self.bluetooth_drawer, self.settings_drawer, self.logs_drawer):
             if drawer == target_drawer:
                 drawer.setVisible(not drawer.isVisible())
+                if drawer.isVisible():
+                    drawer.raise_()
             else:
                 drawer.hide()
 
@@ -140,6 +167,9 @@ class MainWindow(QMainWindow):
         # Position Volume Popover (above command bar)
         self.volume_popover.setGeometry((w - 240) // 2, h - bar_h - 85, 240, 52)
 
+        # Position Floating Toast Banner (top center)
+        self.toast_widget.setGeometry((w - 380) // 2, 20, 380, 44)
+
         # Position Slide-Over Drawers (pinned to right edge)
         drawer_w = 380
         self.bluetooth_drawer.setGeometry(w - drawer_w, 0, drawer_w, h)
@@ -147,15 +177,21 @@ class MainWindow(QMainWindow):
         self.logs_drawer.setGeometry(w - drawer_w, 0, drawer_w, h)
 
     def set_connected_state(self, is_connected: bool):
+        """Update connection state: hide clock on projection, re-show on disconnect."""
+        self._is_connected = is_connected
         self.command_bar.set_online_status(is_connected)
         if is_connected:
-            self.disconnected_screen.hide()
-            self.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            if self.isVideoFocused:
+                self.disconnected_screen.hide()
+                self.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         else:
+            self.isVideoFocused = False
             self.disconnected_screen.show()
+            self.disconnected_screen.raise_()
+            self.command_bar.raise_()
+            self.arc_menu.raise_()
             self.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
 
     def closeEvent(self, event):
         self.close_app_requested.emit()
         super().closeEvent(event)
-
