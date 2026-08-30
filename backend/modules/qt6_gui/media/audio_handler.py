@@ -170,7 +170,11 @@ class QtAudioEngine:
 
         decoded_pcm = bytearray()
         decode_success = False
-        if self.aac_decoder:
+
+        # Detect AAC ADTS frame header (syncword 0xFFF at start of packet)
+        is_adts_aac = len(audio_bytes) >= 2 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xF0) == 0xF0
+
+        if is_adts_aac and self.aac_decoder:
             try:
                 import av
                 packet = av.Packet(audio_bytes)
@@ -186,11 +190,22 @@ class QtAudioEngine:
                             decoded_pcm.extend(frame.to_ndarray().tobytes())
             except Exception as exc:
                 logger.debug(f"AAC decode exception: {exc}")
-
-        # If we couldn't decode via AAC decoder and AAC decoder is enabled, do NOT push raw compressed AAC bytes
-        # as PCM into the speaker (which results in loud harsh white noise/static).
-        if not decoded_pcm and not self.aac_decoder:
-            decoded_pcm.extend(audio_bytes)
+        elif not is_adts_aac:
+            # Channel 5 Speech / Channel 6 System uncompressed Linear PCM (16kHz 16-bit Mono or 48kHz Stereo)
+            # Upsample 16kHz Mono to 48kHz Stereo by duplicating samples 3x across 2 channels
+            try:
+                import numpy as np
+                pcm_16 = np.frombuffer(audio_bytes, dtype=np.int16)
+                # If frame length corresponds to 16kHz mono (2048 bytes = 1024 int16 samples = 64ms @ 16kHz)
+                # Repeat 3x (16kHz -> 48kHz) and duplicate to 2 channels (mono -> stereo)
+                upsampled = np.repeat(pcm_16, 3)
+                stereo = np.column_stack((upsampled, upsampled)).flatten()
+                decoded_pcm.extend(stereo.tobytes())
+                decode_success = True
+            except Exception as exc:
+                logger.debug(f"PCM upsample exception: {exc}")
+                # Fallback: duplicate bytes directly
+                decoded_pcm.extend(audio_bytes)
 
         if not decoded_pcm:
             return
