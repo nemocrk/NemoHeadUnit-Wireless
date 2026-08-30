@@ -372,9 +372,9 @@ class ChannelManagerModule(BaseBackendModule):
             elif ch_type == ChannelType.WIFI:
                 await self.wifi_handler.handle_frame(ch_id, msg_id, body)
             elif ch_type == ChannelType.NAVIGATION:
-                await self.navigation_handler.handle_frame(msg_id, body)
+                await self.navigation_handler.handle_frame(ch_id, msg_id, body)
             elif ch_type == ChannelType.MEDIA_PLAYBACK:
-                await self.media_playback_handler.handle_frame(msg_id, body)
+                await self.media_playback_handler.handle_frame(ch_id, msg_id, body)
             else:
                 self.log.warning(f"⚠️ [Unhandled Channel Frame] Received frame on unhandled channel ch={ch_id} (type={ch_type.name}) msgId=0x{msg_id:04x} len={len(body)}")
         except Exception as exc:

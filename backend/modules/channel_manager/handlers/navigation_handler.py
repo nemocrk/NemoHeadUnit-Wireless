@@ -27,9 +27,19 @@ class NavigationChannelHandler:
         self.last_maneuver: str = ""
         self.distance_meters: float = -1.0
 
-    async def handle_frame(self, message_id: int, body: bytes) -> None:
+    async def handle_frame(self, channel_id: int, message_id: int, body: bytes) -> None:
         """Process incoming navigation payload frames."""
         try:
+            # Handle Channel Open Request
+            if message_id == 7:  # MSG.CHANNEL_OPEN_REQUEST
+                from protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse
+                from protos.oaa.common.StatusEnum_pb2 import Status
+                resp = ChannelOpenResponse()
+                resp.status = Status.OK
+                self.log.info(f"🧭 [Navigation Channel] Received ChannelOpenRequest on ch={channel_id} — responding STATUS_OK")
+                await self.manager.send_wire_frame(channel_id, 8, resp.SerializeToString(), encrypted=True)
+                return
+
             # Check for NavigationTurnEvent
             turn_event = NavigationTurnEvent()
             try:

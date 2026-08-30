@@ -25,9 +25,19 @@ class MediaPlaybackChannelHandler:
         self.playback_state: str = "STOPPED"
         self._fragment_buffer = bytearray()
 
-    async def handle_frame(self, message_id: int, body: bytes) -> None:
+    async def handle_frame(self, channel_id: int, message_id: int, body: bytes) -> None:
         """Process incoming media playback and metadata frames."""
         try:
+            # Handle Channel Open Request
+            if message_id == 7:  # MSG.CHANNEL_OPEN_REQUEST
+                from protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse
+                from protos.oaa.common.StatusEnum_pb2 import Status
+                resp = ChannelOpenResponse()
+                resp.status = Status.OK
+                self.log.info(f"🎵 [Media Playback Channel] Received ChannelOpenRequest on ch={channel_id} — responding STATUS_OK")
+                await self.manager.send_wire_frame(channel_id, 8, resp.SerializeToString(), encrypted=True)
+                return
+
             # 1. Try parsing MediaPlaybackStatus
             status = MediaPlaybackStatus()
             try:

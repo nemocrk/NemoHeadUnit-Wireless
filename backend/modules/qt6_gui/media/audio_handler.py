@@ -175,8 +175,8 @@ class QtAudioEngine:
                 import av
                 packet = av.Packet(audio_bytes)
                 frames = self.aac_decoder.decode(packet)
-                decode_success = True if frames else False
                 if frames:
+                    decode_success = True
                     for frame in frames:
                         if self.resampler:
                             resampled = self.resampler.resample(frame)
@@ -185,11 +185,15 @@ class QtAudioEngine:
                         else:
                             decoded_pcm.extend(frame.to_ndarray().tobytes())
             except Exception as exc:
-                logger.debug(f"AAC decode exception, using raw: {exc}")
-                pass  # Fall back to raw PCM if decoding fails
+                logger.debug(f"AAC decode exception: {exc}")
+
+        # If we couldn't decode via AAC decoder and AAC decoder is enabled, do NOT push raw compressed AAC bytes
+        # as PCM into the speaker (which results in loud harsh white noise/static).
+        if not decoded_pcm and not self.aac_decoder:
+            decoded_pcm.extend(audio_bytes)
 
         if not decoded_pcm:
-            decoded_pcm.extend(audio_bytes)
+            return
 
         # Enqueue decoded PCM into jitter queue (thread-safe lock)
         with self._queue_lock:
@@ -257,8 +261,8 @@ class QtAudioEngine:
                     else:
                         break
 
-                # If queue emptied out completely, enter pre-rolling again to prevent jitter on next packet burst
-                if len(self.pcm_queue) == 0:
+                # Only re-enter pre-roll state if both software queue AND hardware buffer are starved
+                if len(self.pcm_queue) == 0 and bytes_free >= 90000:
                     self.is_pre_rolling = True
 
             except Exception as exc:
