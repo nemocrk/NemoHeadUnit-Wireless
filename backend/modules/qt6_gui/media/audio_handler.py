@@ -277,21 +277,33 @@ class QtAudioEngine:
             return True  # Already running
 
         try:
+            default_device = QMediaDevices.defaultAudioInput()
+            if not default_device or default_device.isNull():
+                logger.warning("🎤 [Microphone] No default audio input device found!")
+                return False
+
+            dev_name = default_device.description()
+            logger.info("🎤 [Microphone] Starting microphone on input device: '%s'", dev_name)
+
             fmt = QAudioFormat()
             fmt.setSampleRate(16000)
             fmt.setChannelCount(1)
             fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
 
-            default_device = QMediaDevices.defaultAudioInput()
             if not default_device.isFormatSupported(fmt):
-                fmt = default_device.preferredFormat()
+                pref_fmt = default_device.preferredFormat()
+                logger.info("🎤 [Microphone] 16kHz Int16 Mono not natively supported, requested fallback format: %s (rate=%d, ch=%d)",
+                            pref_fmt.sampleFormat(), pref_fmt.sampleRate(), pref_fmt.channelCount())
+                fmt = pref_fmt
 
             self.audio_source = QAudioSource(default_device, fmt)
             self.source_io = self.audio_source.start()
             if self.source_io:
                 self.source_io.readyRead.connect(self._on_mic_ready_read)
-                logger.info("Microphone uplink started via Qt6 QAudioSource (16kHz 16-bit Mono PCM)")
+                logger.info("🎤 [Microphone] Uplink stream ACTIVE via Qt6 QAudioSource on '%s'", dev_name)
                 return True
+            else:
+                logger.warning("🎤 [Microphone] QAudioSource.start() returned null QIODevice")
         except Exception as exc:
             logger.warning("Failed to start Qt6 QAudioSource microphone: %s", exc)
             self.stop_microphone()
@@ -324,7 +336,7 @@ class QtAudioEngine:
             self.audio_source = None
             self.source_io = None
             self.mic_accumulator.clear()
-            logger.info("Microphone uplink stopped")
+            logger.info("🎤 [Microphone] Uplink stream STOPPED")
 
     def close(self):
         """Cleanly stop audio sink playback, microphone capture, and AAC decoder."""
