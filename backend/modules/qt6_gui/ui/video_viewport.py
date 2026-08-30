@@ -117,10 +117,32 @@ class VideoViewportWidget(QOpenGLWidget):
     # ------------------------------------------------------------------
 
     def _map_coords(self, pos) -> tuple[int, int]:
-        widget_w = max(1, self.width())
-        widget_h = max(1, self.height())
-        norm_x = int((pos.x() / widget_w) * self.frame_width)
-        norm_y = int((pos.y() / widget_h) * self.frame_height)
+        """Map screen pixel coordinates to video projection coordinates compensating for letterboxing/pillarboxing."""
+        widget_w = max(1.0, float(self.width()))
+        widget_h = max(1.0, float(self.height()))
+        target_w = max(1.0, float(self.frame_width))
+        target_h = max(1.0, float(self.frame_height))
+
+        target_ratio = target_w / target_h
+        view_ratio = widget_w / widget_h
+
+        # Compute letterbox bounds
+        if view_ratio > target_ratio:
+            displayed_w = widget_h * target_ratio
+            displayed_h = widget_h
+        else:
+            displayed_w = widget_w
+            displayed_h = widget_w / target_ratio
+
+        ui_left = (widget_w - displayed_w) / 2.0
+        ui_top = (widget_h - displayed_h) / 2.0
+
+        local_x = float(pos.x()) - ui_left
+        local_y = float(pos.y()) - ui_top
+
+        norm_x = int((local_x / displayed_w) * target_w)
+        norm_y = int((local_y / displayed_h) * target_h)
+
         norm_x = max(0, min(self.frame_width, norm_x))
         norm_y = max(0, min(self.frame_height, norm_y))
         return norm_x, norm_y

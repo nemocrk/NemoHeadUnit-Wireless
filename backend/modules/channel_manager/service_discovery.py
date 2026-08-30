@@ -141,6 +141,24 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
                 "audio_config": {"sample_rate": 16000, "bit_depth": 16, "channel_count": 1},
             },
         },
+        # ch 8 — Navigation (Turn-by-turn HUD data)
+        {
+            "channel_id": 8,
+            "navigation_channel": {
+                "minimum_interval_ms": 1000,
+                "type": "INSTRUMENT_CLUSTER",
+                "image_options": {
+                    "width": 128,
+                    "height": 128,
+                    "colour_depth_bits": 32,
+                },
+            },
+        },
+        # ch 9 — Media Playback Metadata
+        {
+            "channel_id": 9,
+            "media_info_channel": {},
+        },
     ],
 }
 
@@ -158,6 +176,10 @@ def classify_channel_descriptor(descriptor_dict: dict) -> ChannelType:
         return ChannelType.BLUETOOTH
     elif "wifi_channel" in descriptor_dict:
         return ChannelType.WIFI
+    elif "navigation_channel" in descriptor_dict:
+        return ChannelType.NAVIGATION
+    elif "media_info_channel" in descriptor_dict:
+        return ChannelType.MEDIA_PLAYBACK
     elif "av_input_channel" in descriptor_dict:
         return ChannelType.AUDIO_MIC
     elif "av_channel" in descriptor_dict:

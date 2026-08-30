@@ -137,7 +137,7 @@ class AudioChannelHandler:
         await self.manager.broadcast_ws_media(binary_frame)
 
         if self.frame_count % UNACKED_FRAMES_THRESHOLD == 0:
-            self.log.info(f"🔊 [Audio Stream Flow] Processed audio frame {self.frame_count}/{UNACKED_FRAMES_THRESHOLD} (ch{channel_id}): msgId=0x{message_id:04x}, payload_len={len(audio_payload)}, ts={ts_us} µs -> Broadcasting to {len(self.manager.ws_clients)} WS client(s)")
+            self.log.debug(f"🔊 [Audio Stream Flow] Processed audio frame {self.frame_count}/{UNACKED_FRAMES_THRESHOLD} (ch{channel_id}): msgId=0x{message_id:04x}, payload_len={len(audio_payload)}, ts={ts_us} µs -> Broadcasting to {len(self.manager.ws_clients)} WS client(s)")
 
 
         # Batch MediaAck every 10 frames using AVMediaAckIndication(session_id, ack_count=10)

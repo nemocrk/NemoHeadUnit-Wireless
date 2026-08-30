@@ -213,3 +213,4 @@ tests/reports/
 .agents/
 
 config/
+graphify-out/

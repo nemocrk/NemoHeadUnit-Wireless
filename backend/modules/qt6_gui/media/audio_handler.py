@@ -5,8 +5,10 @@ Uses Qt6 `QAudioSink` for PCM playback and `QAudioSource` for 16kHz 16-bit Mono 
 """
 
 import logging
+import threading
 from typing import Callable, Optional
-from PyQt6.QtCore import QByteArray, QIODevice, QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import QByteArray, QIODevice, QObject, QTimer, pyqtSignal, QThread
+from shared.logger import get_logger
 
 
 try:
@@ -19,7 +21,7 @@ except ImportError:
     QMediaDevices = None
 
 
-logger = logging.getLogger("qt6_gui.audio_handler")
+logger = get_logger("qt6_gui.audio_handler")
 
 
 class Signal:
@@ -42,6 +44,8 @@ class Signal:
 class QtAudioEngine:
     """
     Qt6 Multimedia Audio Engine managing Audio Output & Microphone Input.
+    Uses a dedicated background thread for feeding QAudioSink to guarantee continuous
+    playback even when the main Qt GUI event loop is blocked (e.g. window dragging/resizing).
     """
 
     def __init__(self):
@@ -56,14 +60,28 @@ class QtAudioEngine:
         self.mic_accumulator = bytearray()
 
         self.pcm_queue = bytearray()
-        self.playback_timer: Optional[QTimer] = None
+        self._queue_lock = threading.Lock()
+
+        # Dedicated background feeding thread (bypasses main UI thread stalls during window move/drag)
+        self._feed_thread: Optional[threading.Thread] = None
+        self._running: bool = False
+
+        # Anti-jitter pre-roll state (60ms = 3 cycles of 20ms @ 48kHz 16-bit stereo = 11,520 bytes)
+        self.is_pre_rolling: bool = True
+        self.pre_roll_threshold_bytes: int = 48000 * 2 * 2 * 3 // 50  # ~11520 bytes (60ms)
 
         self.aac_decoder = None
         self.resampler = None
+
+        self.frame_count = 0
+
+        self._init_aac_decoder()
+        # Eagerly initialize QAudioSink immediately on boot to prevent startup queue drops
+        self._init_playback()
+        logger.info("Pipeline quality state: AAC decoder=%s, sink status=%s",
+                    "not initialized" if not self.aac_decoder else "ready",
+                    "not initialized" if not self.audio_sink else "active")
         logger.info("🔍 [Audio Engine Trace] QtAudioEngine.__init__ completed cleanly!")
-
-
-
 
     def _init_aac_decoder(self):
         """Initialize PyAV FFmpeg AAC decoder and 48kHz Stereo AudioResampler."""
@@ -71,12 +89,12 @@ class QtAudioEngine:
             import av
             self.aac_decoder = av.CodecContext.create("aac", "r")
             self.resampler = av.AudioResampler(format="s16", layout="stereo", rate=48000)
-            logger.info("QtAudioEngine PyAV AAC decoder initialized (48kHz Int16 Stereo output)")
+            logger.info("AAC decoder ready (48kHz Int16 Stereo)")
         except Exception as exc:
-            logger.warning("Failed to initialize PyAV AAC decoder: %s", exc)
+            logger.warning("AAC decoder init failed, will use raw PCM: %s", exc)
 
     def _init_playback(self):
-        """Initialize QAudioSink for 48kHz 16-bit Stereo PCM output."""
+        """Initialize and eagerly start QAudioSink for 48kHz 16-bit Stereo PCM output."""
         if self.sink_io and self.sink_io.isOpen():
             return
         try:
@@ -92,27 +110,45 @@ class QtAudioEngine:
                     fmt = default_device.preferredFormat()
 
             self.audio_sink = QAudioSink(default_device, fmt)
-            # 250ms buffer size (48000Hz * 2ch * 2B * 0.25s = 48000B)
-            self.audio_sink.setBufferSize(48000 * 2 * 2 // 4)
+            # 500ms hardware buffer size (48000Hz * 2ch * 2B * 0.5s = 96000B)
+            self.audio_sink.setBufferSize(48000 * 2 * 2 // 2)
             self.sink_io = self.audio_sink.start()
 
-            if not self.playback_timer:
-                self.playback_timer = QTimer()
-                self.playback_timer.setInterval(10)
-                self.playback_timer.timeout.connect(self._feed_audio_sink)
-                self.playback_timer.start()
+            # Start dedicated background feeding thread (runs independently of Qt UI event loop)
+            self._running = True
+            if not self._feed_thread or not self._feed_thread.is_alive():
+                self._feed_thread = threading.Thread(target=self._feed_loop, daemon=True, name="QtAudioFeedThread")
+                self._feed_thread.start()
 
-            logger.info("QtAudioEngine playback initialized successfully (48kHz Int16 Stereo, 250ms buffer)")
-
+            logger.info("QtAudioEngine playback initialized eagerly with dedicated background thread (48kHz Int16 Stereo)")
 
         except Exception as exc:
             logger.warning("Failed to initialize Qt6 QAudioSink playback: %s", exc)
 
+    @staticmethod
+    def _soft_clip(sample: int) -> int:
+        """Soft-clipping saturation curve to prevent digital wrap-around distortion when channels mix."""
+        if sample > 20480:
+            diff = sample - 20480
+            return int(20480 + (diff * 12287) / (diff + 24574))
+        elif sample < -20480:
+            diff = -sample - 20480
+            return int(-(20480 + (diff * 12287) / (diff + 24574)))
+        return sample
 
     def play_pcm_frame(self, audio_bytes: bytes):
         """Decode compressed AAC or push raw PCM audio frame into jitter queue."""
         if not audio_bytes:
             return
+
+        # Discard tiny frames (< 100 bytes) - likely config messages, not real AAC
+        if len(audio_bytes) < 100:
+            logger.debug(f"Discarding tiny frame ({len(audio_bytes)} bytes) - treating as config message")
+            return
+
+        self.frame_count += 1
+        if self.frame_count % 50 == 0:
+            logger.info(f"Frame processed: {len(audio_bytes)} bytes (cumulative: {self.frame_count})")
 
         if not self.aac_decoder:
             self._init_aac_decoder()
@@ -122,14 +158,14 @@ class QtAudioEngine:
             if not self.sink_io or not self.sink_io.isOpen():
                 return
 
-
-
         decoded_pcm = bytearray()
+        decode_success = False
         if self.aac_decoder:
             try:
                 import av
                 packet = av.Packet(audio_bytes)
                 frames = self.aac_decoder.decode(packet)
+                decode_success = True if frames else False
                 if frames:
                     for frame in frames:
                         if self.resampler:
@@ -139,43 +175,84 @@ class QtAudioEngine:
                         else:
                             decoded_pcm.extend(frame.to_ndarray().tobytes())
             except Exception as exc:
-                pass
+                logger.debug(f"AAC decode exception, using raw: {exc}")
+                pass  # Fall back to raw PCM if decoding fails
 
         if not decoded_pcm:
             decoded_pcm.extend(audio_bytes)
 
-        # Enqueue decoded PCM into jitter queue
-        self.pcm_queue.extend(decoded_pcm)
+        # Enqueue decoded PCM into jitter queue (thread-safe lock)
+        with self._queue_lock:
+            self.pcm_queue.extend(decoded_pcm)
 
-        # Cap max buffer to 50ms latency (48000Hz * 2ch * 2B * 0.05s = 9600 bytes)
-        MAX_QUEUE_LEN = 9600
-        if len(self.pcm_queue) > MAX_QUEUE_LEN:
-            del self.pcm_queue[: len(self.pcm_queue) - MAX_QUEUE_LEN]
+            # Cap max buffer to 2.0s latency (48000Hz * 2ch * 2B * 2.0s = 384000 bytes)
+            # Allows headroom during window drags, modal resizing, or UI event loop stalls
+            MAX_QUEUE_LEN = 384000
+            if len(self.pcm_queue) > MAX_QUEUE_LEN:
+                dropped = len(self.pcm_queue) - MAX_QUEUE_LEN
+                del self.pcm_queue[:dropped]
+                logger.warning(f"Pipeline quality: queue overflow! Dropped {dropped} bytes (now at {len(self.pcm_queue)}/{MAX_QUEUE_LEN})")
+
+        if decode_success:
+            logger.debug(f"Pipeline quality: decoded {len(decoded_pcm)} bytes from AAC stream")
+        else:
+            logger.debug(f"Pipeline quality: passed through as raw PCM ({len(decoded_pcm)} bytes)")
+
+    def _feed_loop(self):
+        """
+        Autonomous background thread continuously feeding QAudioSink independently of Qt UI event loop.
+        Guarantees audio never pauses or jitters when the user moves, drags, or resizes the Qt window.
+        """
+        import time
+        while self._running:
+            try:
+                self._feed_audio_sink()
+            except Exception as exc:
+                logger.warning("Audio feed loop exception: %s", exc)
+            time.sleep(0.005)  # 5ms feeding interval
 
     def _feed_audio_sink(self):
-        """Feed PCM audio chunks dynamically based on QAudioSink.bytesFree()."""
-        if not self.audio_sink or not self.sink_io or not self.sink_io.isOpen() or not self.pcm_queue:
+        """Feed PCM audio chunks dynamically based on QAudioSink.bytesFree() with pre-roll protection."""
+        if not self.audio_sink or not self.sink_io or not self.sink_io.isOpen():
             return
 
-        try:
-            bytes_free = self.audio_sink.bytesFree()
-            # Feed while hardware audio buffer has room for at least 10ms (1920 bytes)
-            while bytes_free >= 1920 and self.pcm_queue:
-                to_write = min(len(self.pcm_queue), bytes_free)
-                # Align to 4-byte sample boundaries (16-bit stereo = 4 bytes per frame)
-                to_write = (to_write // 4) * 4
-                if to_write == 0:
-                    break
+        with self._queue_lock:
+            if not self.pcm_queue:
+                return
 
-                chunk = bytes(self.pcm_queue[:to_write])
-                written = self.sink_io.write(chunk)
-                if written > 0:
-                    del self.pcm_queue[:written]
-                    bytes_free -= written
+            # Pre-roll check: wait until buffer accumulates 60ms before starting playback
+            if self.is_pre_rolling:
+                if len(self.pcm_queue) >= self.pre_roll_threshold_bytes:
+                    self.is_pre_rolling = False
+                    logger.debug("QtAudioEngine: Pre-roll threshold reached (%d bytes), starting playback", len(self.pcm_queue))
                 else:
-                    break
-        except Exception as exc:
-            logger.debug("Audio sink write exception: %s", exc)
+                    return  # Keep buffering to prevent underruns
+
+            try:
+                bytes_free = self.audio_sink.bytesFree()
+                # Feed while hardware audio buffer has room for at least 10ms (1920 bytes)
+                while bytes_free >= 1920 and self.pcm_queue:
+                    to_write = min(len(self.pcm_queue), bytes_free)
+                    # Align to 4-byte sample boundaries (16-bit stereo = 4 bytes per frame)
+                    to_write = (to_write // 4) * 4
+                    if to_write == 0:
+                        break
+
+                    chunk = bytes(self.pcm_queue[:to_write])
+                    written = self.sink_io.write(chunk)
+                    if written > 0:
+                        del self.pcm_queue[:written]
+                        bytes_free -= written
+                        logger.debug(f"Pipeline quality: wrote {written} bytes (free: {bytes_free}, queue now: {len(self.pcm_queue)})")
+                    else:
+                        break
+
+                # If queue emptied out completely, enter pre-rolling again to prevent jitter on next packet burst
+                if len(self.pcm_queue) == 0:
+                    self.is_pre_rolling = True
+
+            except Exception as exc:
+                logger.warning(f"Sink write exception: {exc}")
 
 
 
@@ -220,6 +297,7 @@ class QtAudioEngine:
         while len(self.mic_accumulator) >= CHUNK_SIZE:
             chunk = bytes(self.mic_accumulator[:CHUNK_SIZE])
             del self.mic_accumulator[:CHUNK_SIZE]
+            logger.debug(f"Pipeline quality: mic emitted {len(chunk)} bytes (queue now: {len(self.mic_accumulator)})")
             self.mic_data_captured.emit(chunk)
 
     def stop_microphone(self):
@@ -236,13 +314,18 @@ class QtAudioEngine:
 
     def close(self):
         """Cleanly stop audio sink playback, microphone capture, and AAC decoder."""
+        self._running = False
         self.stop_microphone()
-        if self.playback_timer:
+        if self._feed_thread and self._feed_thread.is_alive() and threading.current_thread() != self._feed_thread:
             try:
-                self.playback_timer.stop()
+                self._feed_thread.join(timeout=0.2)
             except Exception:
                 pass
-        self.pcm_queue.clear()
+        self._feed_thread = None
+
+        with self._queue_lock:
+            self.pcm_queue.clear()
+
         if self.audio_sink:
             try:
                 self.audio_sink.stop()

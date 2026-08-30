@@ -340,22 +340,29 @@ class Qt6GuiModule(BaseBackendModule):
         if self.main_window:
             self.main_window.set_connected_state(is_connected)
 
-    async def _on_shm_video_notify(self, payload: dict) -> None:
-        offset = payload.get("shm_offset", -1)
+    def _on_shm_video_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        """Synchronous callback invoked directly on ZMQ sub thread to avoid asyncio loop drag stalls."""
+        data = payload if payload is not None else topic_or_payload
+        offset = data.get("shm_offset", -1) if isinstance(data, dict) else -1
         if offset >= 0 and self.shm_engine:
             self.shm_engine.process_downstream_frame(offset)
 
-    async def _on_shm_audio_notify(self, payload: dict) -> None:
-        offset = payload.get("shm_offset", -1)
+    def _on_shm_audio_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        """Synchronous callback invoked directly on ZMQ sub thread to avoid asyncio loop drag stalls."""
+        data = payload if payload is not None else topic_or_payload
+        offset = data.get("shm_offset", -1) if isinstance(data, dict) else -1
         if offset >= 0 and self.shm_engine:
             self.shm_engine.process_downstream_frame(offset)
 
-    async def _on_mic_control_notify(self, payload: dict) -> None:
-        enabled = payload.get("enabled", False)
+    def _on_mic_control_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        data = payload if payload is not None else topic_or_payload
+        enabled = data.get("enabled", False) if isinstance(data, dict) else False
         if enabled and self.config.get("enable_mic", True):
-            self.audio_engine.start_microphone()
+            if self.audio_engine:
+                self.audio_engine.start_microphone()
         else:
-            self.audio_engine.stop_microphone()
+            if self.audio_engine:
+                self.audio_engine.stop_microphone()
 
     async def _on_stream_start(self, payload: dict) -> None:
         self.log.info("Video stream started -> Switching Qt GUI to connected state")

@@ -34,6 +34,8 @@ try:
         BluetoothChannelHandler,
         WifiChannelHandler,
         AVInputChannelHandler,
+        NavigationChannelHandler,
+        MediaPlaybackChannelHandler,
     )
 except ImportError:
     from handlers import (
@@ -45,6 +47,8 @@ except ImportError:
         BluetoothChannelHandler,
         WifiChannelHandler,
         AVInputChannelHandler,
+        NavigationChannelHandler,
+        MediaPlaybackChannelHandler,
     )
 
 from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
@@ -75,6 +79,8 @@ class ChannelManagerModule(BaseBackendModule):
         self.sensor_handler = SensorChannelHandler(self)
         self.bluetooth_handler = BluetoothChannelHandler(self)
         self.wifi_handler = WifiChannelHandler(self)
+        self.navigation_handler = NavigationChannelHandler(self)
+        self.media_playback_handler = MediaPlaybackChannelHandler(self)
 
         # Active video transport name — set by video_decoder module via video.transport_active
         self.active_video_transport: str = "h264"
@@ -347,6 +353,10 @@ class ChannelManagerModule(BaseBackendModule):
                 await self.bluetooth_handler.handle_frame(ch_id, msg_id, body)
             elif ch_type == ChannelType.WIFI:
                 await self.wifi_handler.handle_frame(ch_id, msg_id, body)
+            elif ch_type == ChannelType.NAVIGATION:
+                await self.navigation_handler.handle_frame(msg_id, body)
+            elif ch_type == ChannelType.MEDIA_PLAYBACK:
+                await self.media_playback_handler.handle_frame(msg_id, body)
             else:
                 self.log.warning(f"⚠️ [Unhandled Channel Frame] Received frame on unhandled channel ch={ch_id} (type={ch_type.name}) msgId=0x{msg_id:04x} len={len(body)}")
         except Exception as exc:

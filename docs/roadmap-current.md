@@ -34,6 +34,7 @@ All components of the V2 promotion and base UI implementation have been successf
 ## 3. Active Phase 3 Tasks: Hardening & Optimization
 
 ### High-Priority Optimization Targets
+- **Media Pipeline & Anti-Jitter Architecture**: Port Open-Headunit optimization tricks (Unified Audio Mixer, Pre-Roll anti-underrun state machine, soft-clipping saturation, letterbox touch coordinate mapping, and automated keyframe request on packet loss) to Qt6 & WebCodecs. See [NEXT_DEV_MEDIA_OPTIMIZATIONS.md](file:///home/nemo/NemoHeadUnit-Wireless/docs/NEXT_DEV_MEDIA_OPTIMIZATIONS.md).
 - **ZMQ High Water Mark Tuning**: Validate socket behaviors under bursty log and raw video frames traffic to prevent `zmq.Again` drops.
 - **Hardware-Accelerated Video UI**: Benchmark GStreamer pipelines (`v4l2h264dec`, `vaapih264dec`) on target Atom/ARM edge devices.
 - **Headless Test Suite Alignment**: Ensure full test suite executions can run headlessly on CI runners without real display cards (virtual framebuffers).
