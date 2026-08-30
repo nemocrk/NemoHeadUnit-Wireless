@@ -148,7 +148,17 @@ class QtAudioEngine:
 
         self.frame_count += 1
         if self.frame_count % 50 == 0:
-            logger.info(f"Frame processed: {len(audio_bytes)} bytes (cumulative: {self.frame_count})")
+            with self._queue_lock:
+                q_len = len(self.pcm_queue)
+            # 48000 Hz * 2 channels * 2 bytes = 192,000 bytes/sec -> 192 bytes/ms
+            buffer_latency_ms = q_len / 192.0
+            bytes_free = self.audio_sink.bytesFree() if self.audio_sink else 0
+            sink_status = "active" if (self.sink_io and self.sink_io.isOpen()) else "inactive"
+            logger.info(
+                f"Frame processed: {len(audio_bytes)} bytes (cumulative: {self.frame_count}) | "
+                f"Pipeline: sink={sink_status}, buffer={q_len}B ({buffer_latency_ms:.1f}ms), "
+                f"sink_free={bytes_free}B, pre_roll={self.is_pre_rolling}"
+            )
 
         if not self.aac_decoder:
             self._init_aac_decoder()

@@ -267,6 +267,22 @@ class ChannelManagerModule(BaseBackendModule):
 
                 code, lbl, msg = labels.get(st_idx, ("IDLE", "Disconnected", "Disconnected from Phone"))
 
+                nav_info = None
+                if self.navigation_handler and (self.navigation_handler.active_road or self.navigation_handler.distance_meters >= 0):
+                    nav_info = {
+                        "road": self.navigation_handler.active_road,
+                        "distance_meters": self.navigation_handler.distance_meters,
+                    }
+
+                media_info = None
+                if self.media_playback_handler and (self.media_playback_handler.track_title or self.media_playback_handler.artist):
+                    media_info = {
+                        "title": self.media_playback_handler.track_title,
+                        "artist": self.media_playback_handler.artist,
+                        "album": self.media_playback_handler.album,
+                        "playback_state": self.media_playback_handler.playback_state,
+                    }
+
                 payload = {
                     "stage_index": st_idx,
                     "stage_code": code,
@@ -275,6 +291,8 @@ class ChannelManagerModule(BaseBackendModule):
                     "active_channels": list(self.active_channels.keys()),
                     "ws_clients": len(self.ws_clients),
                     "video_transport": self.active_video_transport,
+                    "navigation": nav_info,
+                    "media": media_info,
                 }
                 data = f"data: {json.dumps(payload)}\n\n"
                 await response.write(data.encode('utf-8'))

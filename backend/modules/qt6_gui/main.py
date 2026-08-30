@@ -230,6 +230,9 @@ class Qt6GuiModule(BaseBackendModule):
         self.subscribe("media.audio.mic_control", self._on_mic_control_notify)
         self.subscribe("video.stream_start", self._on_stream_start)
         self.subscribe("video.stream_stop", self._on_stream_stop)
+        self.subscribe("navigation.turn_event", self._on_nav_turn_notify)
+        self.subscribe("navigation.distance_event", self._on_nav_dist_notify)
+        self.subscribe("media.metadata", self._on_media_metadata_notify)
 
         # Request video focus from channel_manager / media_server on setup
         self.log.info("⏱ [Boot Trace 6b/7] Publishing media.video.request_focus...")
@@ -353,6 +356,25 @@ class Qt6GuiModule(BaseBackendModule):
         offset = data.get("shm_offset", -1) if isinstance(data, dict) else -1
         if offset >= 0 and self.shm_engine:
             self.shm_engine.process_downstream_frame(offset)
+
+    def _on_nav_turn_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.main_window and self.main_window.clock_widget:
+            road = data.get("road", "")
+            self.main_window.clock_widget.update_nav_info(road, -1.0)
+
+    def _on_nav_dist_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.main_window and self.main_window.clock_widget:
+            dist = data.get("distance_meters", -1.0)
+            self.main_window.clock_widget.update_nav_info("", dist)
+
+    def _on_media_metadata_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.main_window and self.main_window.clock_widget:
+            title = data.get("title", "")
+            artist = data.get("artist", "")
+            self.main_window.clock_widget.update_media_info(title, artist)
 
     def _on_mic_control_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload

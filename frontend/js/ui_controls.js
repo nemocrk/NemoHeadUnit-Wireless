@@ -97,8 +97,12 @@ export class UIControls {
                 this.setStatus('offline');
                 this.showToast('Android Auto Disconnected', 'error');
             }
+            this._updateClockAuxInfo(null, null);
             return;
         }
+
+        // Update live media & navigation info on disconnected/home screen
+        this._updateClockAuxInfo(data.media, data.navigation);
 
         // Monotonic Stage Progression (only advance forward)
         if (newIndex > this.currentStageIndex) {
@@ -113,6 +117,40 @@ export class UIControls {
             if (data.toast_message) {
                 const toastType = newIndex === 10 ? 'success' : 'warning';
                 this.showToast(data.toast_message, toastType);
+            }
+        }
+    }
+
+    _updateClockAuxInfo(media, nav) {
+        const mediaCard = document.getElementById('clock-media-card');
+        const mediaText = document.getElementById('clock-media-text');
+        if (mediaCard && mediaText) {
+            if (media && (media.title || media.artist)) {
+                let text = media.title || 'Unknown Track';
+                if (media.artist) text += ` — ${media.artist}`;
+                mediaText.textContent = text;
+                mediaCard.classList.remove('hidden');
+            } else {
+                mediaCard.classList.add('hidden');
+            }
+        }
+
+        const navCard = document.getElementById('clock-nav-card');
+        const navText = document.getElementById('clock-nav-text');
+        if (navCard && navText) {
+            if (nav && (nav.road || (nav.distance_meters !== undefined && nav.distance_meters >= 0))) {
+                let parts = [];
+                if (nav.road) parts.push(nav.road);
+                if (nav.distance_meters !== undefined && nav.distance_meters >= 0) {
+                    const distStr = nav.distance_meters >= 1000
+                        ? `${(nav.distance_meters / 1000).toFixed(1)} km`
+                        : `${Math.round(nav.distance_meters)} m`;
+                    parts.push(`(${distStr})`);
+                }
+                navText.textContent = parts.join(' ');
+                navCard.classList.remove('hidden');
+            } else {
+                navCard.classList.add('hidden');
             }
         }
     }
