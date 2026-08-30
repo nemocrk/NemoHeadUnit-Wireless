@@ -221,6 +221,7 @@ class QtAudioEngine:
         while self._running:
             try:
                 self._feed_audio_sink()
+                self._poll_mic()
             except Exception as exc:
                 logger.warning("Audio feed loop exception: %s", exc)
             time.sleep(0.005)  # 5ms feeding interval
@@ -283,7 +284,7 @@ class QtAudioEngine:
                 return False
 
             dev_name = default_device.description()
-            logger.info("🎤 [Microphone] Starting microphone on input device: '%s'", dev_name)
+            logger.info(f"🎤 [Microphone] Starting microphone on input device: '{dev_name}'")
 
             fmt = QAudioFormat()
             fmt.setSampleRate(16000)
@@ -292,15 +293,14 @@ class QtAudioEngine:
 
             if not default_device.isFormatSupported(fmt):
                 pref_fmt = default_device.preferredFormat()
-                logger.info("🎤 [Microphone] 16kHz Int16 Mono not natively supported, requested fallback format: %s (rate=%d, ch=%d)",
-                            pref_fmt.sampleFormat(), pref_fmt.sampleRate(), pref_fmt.channelCount())
+                logger.info(f"🎤 [Microphone] 16kHz Int16 Mono not natively supported, requested fallback format: {pref_fmt.sampleFormat()} (rate={pref_fmt.sampleRate()}, ch={pref_fmt.channelCount()})")
                 fmt = pref_fmt
 
             self.audio_source = QAudioSource(default_device, fmt)
             self.source_io = self.audio_source.start()
             if self.source_io:
                 self.source_io.readyRead.connect(self._on_mic_ready_read)
-                logger.info("🎤 [Microphone] Uplink stream ACTIVE via Qt6 QAudioSource on '%s'", dev_name)
+                logger.info(f"🎤 [Microphone] Uplink stream ACTIVE via Qt6 QAudioSource on '{dev_name}'")
                 return True
             else:
                 logger.warning("🎤 [Microphone] QAudioSource.start() returned null QIODevice")
@@ -309,21 +309,32 @@ class QtAudioEngine:
             self.stop_microphone()
         return False
 
-    def _on_mic_ready_read(self):
-        """Read captured audio from mic QIODevice, accumulator into 20ms (640B) packets."""
-        if not self.source_io:
+    def _poll_mic(self):
+        """Read any available mic data synchronously from source_io (called by background feed loop and readyRead)."""
+        if not self.source_io or not self.audio_source:
             return
-        data = self.source_io.readAll().data()
-        if not data:
-            return
+        try:
+            bytes_available = self.source_io.bytesAvailable()
+            if bytes_available > 0:
+                data = self.source_io.readAll().data()
+                if data:
+                    self._on_raw_mic_data(data)
+        except Exception as exc:
+            logger.debug("Mic poll error: %s", exc)
 
+    def _on_mic_ready_read(self):
+        """Qt readyRead slot handler for mic source_io."""
+        self._poll_mic()
+
+    def _on_raw_mic_data(self, data: bytes):
+        """Accumulate raw mic PCM bytes and emit standard 20ms (640-byte) packets."""
         self.mic_accumulator.extend(data)
         CHUNK_SIZE = 640  # 320 samples * 2 bytes/sample = 640 bytes (20ms at 16kHz)
 
         while len(self.mic_accumulator) >= CHUNK_SIZE:
             chunk = bytes(self.mic_accumulator[:CHUNK_SIZE])
             del self.mic_accumulator[:CHUNK_SIZE]
-            logger.debug(f"Pipeline quality: mic emitted {len(chunk)} bytes (queue now: {len(self.mic_accumulator)})")
+            logger.info(f"🎤 [Microphone Uplink] Emitted 20ms mic frame: {len(chunk)} bytes -> SHM upstream")
             self.mic_data_captured.emit(chunk)
 
     def stop_microphone(self):
