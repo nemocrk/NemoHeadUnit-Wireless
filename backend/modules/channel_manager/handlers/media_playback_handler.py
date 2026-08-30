@@ -45,12 +45,14 @@ class MediaPlaybackChannelHandler:
             status = MediaPlaybackStatus()
             try:
                 status.ParseFromString(body)
+                source_name = getattr(status, "source_app", "") or getattr(status, "media_source", "")
+                pos_sec = getattr(status, "position_seconds", 0) or (getattr(status, "playback_position_ms", 0) // 1000)
                 status_dict = {
                     "playback_state": getattr(status, "playback_state", 0),
-                    "playback_position_ms": getattr(status, "playback_position_ms", 0),
-                    "media_source": getattr(status, "media_source", ""),
+                    "position_seconds": pos_sec,
+                    "media_source": source_name,
                 }
-                self.log.info(f"🎵 [Media Playback Channel] Status update: source='{status_dict['media_source']}' state={status_dict['playback_state']}")
+                self.log.info(f"🎵 [Media Playback Channel] Status update: source='{source_name}' state={status_dict['playback_state']}, pos={pos_sec}s")
                 self.manager.publish("media.playback_status", status_dict)
                 self.manager._notify_status_changed()
                 return
@@ -61,15 +63,17 @@ class MediaPlaybackChannelHandler:
             meta = MediaPlaybackMetadata()
             try:
                 meta.ParseFromString(body)
-                self.track_title = getattr(meta, "song_title", "") or getattr(meta, "title", "")
+                self.track_title = getattr(meta, "title", "") or getattr(meta, "song_title", "") or getattr(meta, "song", "")
                 self.artist = getattr(meta, "artist", "")
                 self.album = getattr(meta, "album", "")
+                album_art = getattr(meta, "album_art", b"")
                 meta_dict = {
                     "title": self.track_title,
                     "artist": self.artist,
                     "album": self.album,
+                    "has_album_art": bool(album_art),
                 }
-                self.log.info(f"🎵 [Media Playback Channel] Metadata received: title='{self.track_title}', artist='{self.artist}'")
+                self.log.info(f"🎵 [Media Playback Channel] Metadata received: title='{self.track_title}', artist='{self.artist}', album='{self.album}'")
                 self.manager.publish("media.metadata", meta_dict)
                 self.manager._notify_status_changed()
                 return
