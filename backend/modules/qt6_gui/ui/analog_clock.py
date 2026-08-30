@@ -18,10 +18,10 @@ class AnalogClockWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(300, 300)
+        self.setMinimumSize(180, 180)
 
         self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(20, 20, 20, 20)
+        self.layout.setContentsMargins(10, 10, 10, 10)
         self.layout.addStretch()
 
         # Date Display
@@ -29,75 +29,17 @@ class AnalogClockWidget(QWidget):
         self.date_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.date_label.setStyleSheet("""
             color: #8b949e;
-            font-size: 18px;
+            font-size: 16px;
             font-weight: 600;
             letter-spacing: 2px;
         """)
         self.layout.addWidget(self.date_label)
-
-        # Media Playback Card (When connected without video focus)
-        self.media_card = QLabel(self)
-        self.media_card.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.media_card.setStyleSheet("""
-            color: #58a6ff;
-            font-size: 15px;
-            font-weight: 500;
-            margin-top: 6px;
-            padding: 4px 12px;
-            background: rgba(30, 41, 59, 0.7);
-            border-radius: 8px;
-        """)
-        self.media_card.hide()
-        self.layout.addWidget(self.media_card)
-
-        # Navigation Card (When connected without video focus)
-        self.nav_card = QLabel(self)
-        self.nav_card.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.nav_card.setStyleSheet("""
-            color: #00e676;
-            font-size: 14px;
-            font-weight: 500;
-            margin-top: 4px;
-            padding: 4px 12px;
-            background: rgba(16, 185, 129, 0.15);
-            border-radius: 8px;
-        """)
-        self.nav_card.hide()
-        self.layout.addWidget(self.nav_card)
 
         # 1 Hz update timer
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_tick)
         self.timer.start(1000)
         self._update_date()
-
-    def update_media_info(self, title: str, artist: str):
-        """Update media info display on disconnected/clock screen."""
-        if title or artist:
-            text = f"🎵 {title}"
-            if artist:
-                text += f" — {artist}"
-            self.media_card.setText(text)
-            self.media_card.show()
-        else:
-            self.media_card.hide()
-
-    def update_nav_info(self, road: str, distance_meters: float):
-        """Update navigation turn/road display on disconnected/clock screen."""
-        if road or distance_meters >= 0:
-            parts = []
-            if road:
-                parts.append(f"🧭 {road}")
-            if distance_meters >= 0:
-                if distance_meters >= 1000:
-                    dist_str = f"{distance_meters / 1000.0:.1f} km"
-                else:
-                    dist_str = f"{int(distance_meters)} m"
-                parts.append(f"({dist_str})")
-            self.nav_card.setText(" ".join(parts))
-            self.nav_card.show()
-        else:
-            self.nav_card.hide()
 
     def _on_tick(self):
         self._update_date()

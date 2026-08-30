@@ -122,35 +122,116 @@ export class UIControls {
     }
 
     _updateClockAuxInfo(media, nav) {
-        const mediaCard = document.getElementById('clock-media-card');
-        const mediaText = document.getElementById('clock-media-text');
-        if (mediaCard && mediaText) {
-            if (media && (media.title || media.artist)) {
-                let text = media.title || 'Unknown Track';
-                if (media.artist) text += ` — ${media.artist}`;
-                mediaText.textContent = text;
+        const grid = document.getElementById('dashboard-grid');
+        const navCard = document.getElementById('dashboard-nav-card');
+        const mediaCard = document.getElementById('dashboard-media-card');
+
+        let hasNav = false;
+        let hasMedia = false;
+
+        // 1. Update Navigation Card
+        if (navCard) {
+            const hasActiveNav = nav && (nav.road || (nav.distance_meters !== undefined && nav.distance_meters >= 0));
+            if (hasActiveNav) {
+                hasNav = true;
+                navCard.classList.remove('hidden');
+
+                const distEl = document.getElementById('dash-nav-distance');
+                const roadEl = document.getElementById('dash-nav-road');
+                const etaEl = document.getElementById('dash-nav-eta');
+                const iconEl = document.getElementById('dash-nav-icon');
+
+                if (distEl) {
+                    if (nav.distance_meters !== undefined && nav.distance_meters >= 0) {
+                        distEl.textContent = nav.distance_meters >= 1000
+                            ? `${(nav.distance_meters / 1000).toFixed(1)} km`
+                            : `${Math.round(nav.distance_meters)} m`;
+                    } else {
+                        distEl.textContent = '—';
+                    }
+                }
+
+                if (roadEl) {
+                    roadEl.textContent = nav.road || 'Follow Route';
+                }
+
+                if (etaEl) {
+                    if (nav.eta_seconds && nav.eta_seconds > 0) {
+                        const mins = Math.floor(nav.eta_seconds / 60);
+                        const hrs = Math.floor(mins / 60);
+                        etaEl.textContent = hrs > 0 ? `ETA: ${hrs}h ${mins % 60}m` : `ETA: ${mins} min`;
+                    } else {
+                        etaEl.textContent = '';
+                    }
+                }
+
+                // Render Icon / Turn Direction
+                if (iconEl) {
+                    if (nav.turn_icon) {
+                        iconEl.innerHTML = `<img src="${nav.turn_icon}" style="max-width: 64px; max-height: 64px; object-fit: contain;">`;
+                    } else {
+                        // Vector Arrow default
+                        const side = nav.turn_side || 0;
+                        if (side === 1) { // Left
+                            iconEl.innerHTML = '<svg viewBox="0 0 24 24" width="48" height="48" fill="#00e676"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>';
+                        } else if (side === 2) { // Right
+                            iconEl.innerHTML = '<svg viewBox="0 0 24 24" width="48" height="48" fill="#00e676"><path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z"/></svg>';
+                        } else { // Straight
+                            iconEl.innerHTML = '<svg viewBox="0 0 24 24" width="48" height="48" fill="#00e676"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>';
+                        }
+                    }
+                }
+            } else {
+                navCard.classList.add('hidden');
+            }
+        }
+
+        // 2. Update Media Card
+        if (mediaCard) {
+            const hasActiveMedia = media && (media.title || media.artist);
+            if (hasActiveMedia) {
+                hasMedia = true;
                 mediaCard.classList.remove('hidden');
+
+                const titleEl = document.getElementById('dash-media-title');
+                const artistEl = document.getElementById('dash-media-artist');
+                const albumEl = document.getElementById('dash-media-album');
+                const badgeEl = document.getElementById('dash-media-badge');
+                const artEl = document.getElementById('dash-media-art');
+
+                if (titleEl) titleEl.textContent = media.title || 'Unknown Track';
+                if (artistEl) artistEl.textContent = media.artist || '—';
+                if (albumEl) albumEl.textContent = media.album || '';
+
+                if (badgeEl) {
+                    const st = media.playback_state;
+                    badgeEl.textContent = st === 2 ? 'NOW PLAYING' : (st === 3 ? 'PAUSED' : 'MEDIA');
+                    badgeEl.style.color = st === 2 ? '#3fb950' : (st === 3 ? '#d29922' : '#58a6ff');
+                }
+
+                if (artEl) {
+                    if (media.album_art) {
+                        artEl.style.backgroundImage = `url("${media.album_art}")`;
+                        artEl.innerHTML = '';
+                    } else {
+                        artEl.style.backgroundImage = 'none';
+                        artEl.innerHTML = '<span class="default-art-icon">🎵</span>';
+                    }
+                }
             } else {
                 mediaCard.classList.add('hidden');
             }
         }
 
-        const navCard = document.getElementById('clock-nav-card');
-        const navText = document.getElementById('clock-nav-text');
-        if (navCard && navText) {
-            if (nav && (nav.road || (nav.distance_meters !== undefined && nav.distance_meters >= 0))) {
-                let parts = [];
-                if (nav.road) parts.push(nav.road);
-                if (nav.distance_meters !== undefined && nav.distance_meters >= 0) {
-                    const distStr = nav.distance_meters >= 1000
-                        ? `${(nav.distance_meters / 1000).toFixed(1)} km`
-                        : `${Math.round(nav.distance_meters)} m`;
-                    parts.push(`(${distStr})`);
-                }
-                navText.textContent = parts.join(' ');
-                navCard.classList.remove('hidden');
+        // 3. Grid Mode Class Switcher
+        if (grid) {
+            grid.classList.remove('mode-clock-only', 'mode-clock-media', 'mode-nav-grid');
+            if (hasNav) {
+                grid.classList.add('mode-nav-grid');
+            } else if (hasMedia) {
+                grid.classList.add('mode-clock-media');
             } else {
-                navCard.classList.add('hidden');
+                grid.classList.add('mode-clock-only');
             }
         }
     }

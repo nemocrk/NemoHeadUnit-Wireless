@@ -68,13 +68,24 @@ class NavigationChannelHandler:
                 if dist_val >= 0:
                     self.distance_meters = float(dist_val)
 
+                turn_icon = getattr(turn_event, "turn_icon", b"")
+                turn_icon_b64 = ""
+                if turn_icon:
+                    import base64
+                    turn_icon_b64 = f"data:image/png;base64,{base64.b64encode(turn_icon).decode('utf-8')}"
+
+                self.last_maneuver_type = getattr(turn_event, "maneuver_type", 0)
+                self.last_turn_side = getattr(turn_event, "turn_direction", getattr(turn_event, "turn_side", 0))
+
                 event_data = {
                     "road": self.active_road,
-                    "turn_side": getattr(turn_event, "turn_direction", getattr(turn_event, "turn_side", 0)),
+                    "maneuver_type": self.last_maneuver_type,
+                    "turn_side": self.last_turn_side,
+                    "turn_icon": turn_icon_b64,
                     "event_name": getattr(turn_event, "event_name", ""),
                     "distance_meters": self.distance_meters,
                 }
-                self.log.info(f"🧭 [Navigation Channel] Turn event received: road='{event_data['road']}', dist={event_data['distance_meters']}m")
+                self.log.info(f"🧭 [Navigation Channel] Turn event received: road='{event_data['road']}', dist={event_data['distance_meters']}m, maneuver={self.last_maneuver_type}, side={self.last_turn_side}")
                 self.manager.publish("navigation.turn_event", event_data)
                 self.manager._notify_status_changed()
                 return
@@ -90,9 +101,16 @@ class NavigationChannelHandler:
                 elif hasattr(dist_event, "distance_meters"):
                     self.distance_meters = float(dist_event.distance_meters)
 
+                eta_sec = getattr(dist_event, "eta_seconds", getattr(dist_event, "time_to_turn_seconds", 0))
+                eta_text = getattr(dist_event, "eta_text", "")
+
                 dist_data = {
                     "distance_meters": self.distance_meters,
-                    "time_to_turn_seconds": getattr(dist_event, "time_to_turn_seconds", getattr(dist_event, "eta_seconds", 0)),
+                    "eta_seconds": eta_sec,
+                    "eta_text": eta_text,
+                    "road": self.active_road,
+                    "maneuver_type": getattr(self, "last_maneuver_type", 0),
+                    "turn_side": getattr(self, "last_turn_side", 0),
                 }
                 self.log.debug(f"🧭 [Navigation Channel] Distance update: {dist_data}")
                 self.manager.publish("navigation.distance_event", dist_data)

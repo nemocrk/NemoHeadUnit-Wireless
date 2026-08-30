@@ -233,6 +233,7 @@ class Qt6GuiModule(BaseBackendModule):
         self.subscribe("navigation.turn_event", self._on_nav_turn_notify)
         self.subscribe("navigation.distance_event", self._on_nav_dist_notify)
         self.subscribe("media.metadata", self._on_media_metadata_notify)
+        self.subscribe("media.playback_status", self._on_media_playback_status_notify)
 
         # Request video focus from channel_manager / media_server on setup
         self.log.info("⏱ [Boot Trace 6b/7] Publishing media.video.request_focus...")
@@ -359,22 +360,69 @@ class Qt6GuiModule(BaseBackendModule):
 
     def _on_nav_turn_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload
-        if isinstance(data, dict) and self.main_window and self.main_window.clock_widget:
+        if isinstance(data, dict) and self.main_window and self.main_window.nav_widget:
             road = data.get("road", "")
-            self.main_window.clock_widget.update_nav_info(road, -1.0)
+            dist = data.get("distance_meters", -1.0)
+            maneuver = data.get("maneuver_type", 0)
+            side = data.get("turn_side", 0)
+            icon_b64 = data.get("turn_icon", "")
+            self.main_window.nav_widget.update_navigation(
+                road=road,
+                distance_meters=dist,
+                maneuver_type=maneuver,
+                turn_side=side,
+                turn_icon_b64=icon_b64,
+            )
+            has_nav = bool(road or dist >= 0)
+            has_media = self.main_window.has_active_media
+            self.main_window.update_dashboard_state(has_nav=has_nav, has_media=has_media)
 
     def _on_nav_dist_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload
-        if isinstance(data, dict) and self.main_window and self.main_window.clock_widget:
+        if isinstance(data, dict) and self.main_window and self.main_window.nav_widget:
             dist = data.get("distance_meters", -1.0)
-            self.main_window.clock_widget.update_nav_info("", dist)
+            road = data.get("road", "")
+            eta_sec = data.get("eta_seconds", 0)
+            maneuver = data.get("maneuver_type", 0)
+            side = data.get("turn_side", 0)
+            self.main_window.nav_widget.update_navigation(
+                road=road,
+                distance_meters=dist,
+                maneuver_type=maneuver,
+                turn_side=side,
+                eta_seconds=eta_sec,
+            )
+            has_nav = bool(road or dist >= 0)
+            has_media = self.main_window.has_active_media
+            self.main_window.update_dashboard_state(has_nav=has_nav, has_media=has_media)
 
     def _on_media_metadata_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload
-        if isinstance(data, dict) and self.main_window and self.main_window.clock_widget:
+        if isinstance(data, dict) and self.main_window and self.main_window.media_widget:
             title = data.get("title", "")
             artist = data.get("artist", "")
-            self.main_window.clock_widget.update_media_info(title, artist)
+            album = data.get("album", "")
+            art_b64 = data.get("album_art", "")
+            self.main_window.media_widget.update_metadata(
+                title=title,
+                artist=artist,
+                album=album,
+                album_art_b64=art_b64,
+            )
+            has_media = bool(title or artist)
+            has_nav = self.main_window.has_active_nav
+            self.main_window.update_dashboard_state(has_nav=has_nav, has_media=has_media)
+
+    def _on_media_playback_status_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.main_window and self.main_window.media_widget:
+            state = data.get("playback_state", 0)
+            # Update state on media widget
+            self.main_window.media_widget.update_metadata(
+                title=self.main_window.media_widget.title_label.text(),
+                artist=self.main_window.media_widget.artist_label.text(),
+                playback_state=state,
+            )
 
     def _on_mic_control_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload

@@ -67,13 +67,22 @@ class MediaPlaybackChannelHandler:
                 self.artist = getattr(meta, "artist", "")
                 self.album = getattr(meta, "album", "")
                 album_art = getattr(meta, "album_art", b"")
+                album_art_b64 = ""
+                if album_art:
+                    import base64
+                    album_art_b64 = f"data:image/jpeg;base64,{base64.b64encode(album_art).decode('utf-8')}"
+                    self.album_art_b64 = album_art_b64
+                else:
+                    self.album_art_b64 = ""
+
                 meta_dict = {
                     "title": self.track_title,
                     "artist": self.artist,
                     "album": self.album,
                     "has_album_art": bool(album_art),
+                    "album_art": self.album_art_b64,
                 }
-                self.log.info(f"🎵 [Media Playback Channel] Metadata received: title='{self.track_title}', artist='{self.artist}', album='{self.album}'")
+                self.log.info(f"🎵 [Media Playback Channel] Metadata received: title='{self.track_title}', artist='{self.artist}', album='{self.album}', art={len(album_art)}B")
                 self.manager.publish("media.metadata", meta_dict)
                 self.manager._notify_status_changed()
                 return

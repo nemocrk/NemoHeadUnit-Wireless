@@ -68,57 +68,221 @@ body, html {
     pointer-events: none;
 }
 
+/* Dynamic 2x2 Dashboard Container */
+#dashboard-grid {
+    display: grid;
+    width: 88%;
+    max-width: 1080px;
+    height: 72%;
+    max-height: 520px;
+    gap: 24px;
+    transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    align-items: center;
+    justify-content: center;
+}
+
+/* Mode 1: Centered Clock Only */
+#dashboard-grid.mode-clock-only {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+}
+#dashboard-grid.mode-clock-only #dashboard-clock-card {
+    grid-column: 1;
+    grid-row: 1;
+    justify-self: center;
+}
+
+/* Mode 2: 2-Column Split (Clock Left, Media Right) */
+#dashboard-grid.mode-clock-media {
+    grid-template-columns: 1fr 1.2fr;
+    grid-template-rows: 1fr;
+}
+#dashboard-grid.mode-clock-media #dashboard-clock-card {
+    grid-column: 1;
+    grid-row: 1;
+}
+#dashboard-grid.mode-clock-media #dashboard-media-card {
+    grid-column: 2;
+    grid-row: 1;
+}
+
+/* Mode 3: 2x2 Grid (Nav Full Left, Clock Top-Right, Media Bottom-Right) */
+#dashboard-grid.mode-nav-grid {
+    grid-template-columns: 1.2fr 1fr;
+    grid-template-rows: 1fr 1fr;
+}
+#dashboard-grid.mode-nav-grid #dashboard-nav-card {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    height: 100%;
+}
+#dashboard-grid.mode-nav-grid #dashboard-clock-card {
+    grid-column: 2;
+    grid-row: 1;
+}
+#dashboard-grid.mode-nav-grid #dashboard-media-card {
+    grid-column: 2;
+    grid-row: 2;
+}
+
+/* Dashboard Cards Common */
+.dash-card {
+    background: rgba(22, 27, 34, 0.78);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 20px;
+    padding: 24px;
+    display: flex;
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+    transition: all 0.3s ease;
+}
+
+.dash-card.hidden {
+    display: none !important;
+}
+
+#dashboard-clock-card {
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
 .clock-container {
     position: relative;
-    width: 260px;
-    height: 260px;
-    margin-bottom: 24px;
+    width: 220px;
+    height: 220px;
 }
 
 #analog-clock {
     width: 100%;
     height: 100%;
     border-radius: 50%;
-    box-shadow: 0 0 40px rgba(0, 230, 118, 0.15), inset 0 0 20px rgba(0, 0, 0, 0.8);
+    box-shadow: 0 0 35px rgba(0, 230, 118, 0.12), inset 0 0 20px rgba(0, 0, 0, 0.8);
 }
 
 .date-display {
     text-align: center;
-    font-size: 18px;
-    font-weight: 500;
+    font-size: 16px;
+    font-weight: 600;
     color: var(--text-secondary);
-    margin-top: 8px;
-    letter-spacing: 1px;
+    margin-top: 12px;
+    letter-spacing: 1.5px;
 }
 
-.clock-info-card {
-    display: flex;
+/* Nav Card Styling */
+#dashboard-nav-card {
+    flex-direction: column;
+    justify-content: center;
     align-items: center;
-    gap: 8px;
-    margin-top: 10px;
-    padding: 6px 16px;
-    border-radius: 20px;
+    text-align: center;
+    border: 1px solid rgba(0, 230, 118, 0.3);
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(15, 23, 42, 0.85) 100%);
+    gap: 16px;
+}
+
+.dash-nav-icon-container {
+    width: 100px;
+    height: 100px;
+    border-radius: 24px;
+    background: rgba(16, 185, 129, 0.2);
+    border: 1px solid rgba(0, 230, 118, 0.4);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.dash-nav-dist {
+    font-size: 32px;
+    font-weight: 800;
+    color: #00e676;
+    letter-spacing: -0.5px;
+}
+
+.dash-nav-street {
+    font-size: 20px;
+    font-weight: 600;
+    color: #f8fafc;
+    margin-top: 4px;
+    max-width: 320px;
+}
+
+.dash-nav-eta {
     font-size: 14px;
     font-weight: 500;
-    backdrop-filter: blur(8px);
-    transition: all 0.3s ease;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    color: #94a3b8;
+    margin-top: 6px;
 }
 
-.clock-info-card.hidden {
-    display: none;
+/* Media Card Styling */
+#dashboard-media-card {
+    flex-direction: row;
+    align-items: center;
+    gap: 20px;
+    border: 1px solid rgba(88, 166, 255, 0.25);
+    background: linear-gradient(135deg, rgba(30, 41, 59, 0.6) 0%, rgba(15, 23, 42, 0.85) 100%);
 }
 
-#clock-media-card {
-    background: rgba(30, 41, 59, 0.75);
-    border: 1px solid rgba(88, 166, 255, 0.3);
+.dash-media-art {
+    width: 100px;
+    height: 100px;
+    min-width: 100px;
+    border-radius: 16px;
+    background: rgba(13, 17, 23, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background-size: cover;
+    background-position: center;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+}
+
+.default-art-icon {
+    font-size: 32px;
+}
+
+.dash-media-details {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    overflow: hidden;
+}
+
+.dash-badge {
+    font-size: 11px;
+    font-weight: 800;
     color: #58a6ff;
+    letter-spacing: 1.5px;
+    margin-bottom: 4px;
 }
 
-#clock-nav-card {
-    background: rgba(16, 185, 129, 0.15);
-    border: 1px solid rgba(0, 230, 118, 0.3);
-    color: #00e676;
+.dash-media-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #f8fafc;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 260px;
+}
+
+.dash-media-artist {
+    font-size: 14px;
+    font-weight: 500;
+    color: #94a3b8;
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 260px;
+}
+
+.dash-media-album {
+    font-size: 12px;
+    font-weight: 400;
+    color: #64748b;
+    margin-top: 2px;
 }
 
 /* Toast Notifications System */

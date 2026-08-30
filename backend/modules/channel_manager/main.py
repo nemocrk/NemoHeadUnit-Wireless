@@ -272,6 +272,8 @@ class ChannelManagerModule(BaseBackendModule):
                     nav_info = {
                         "road": self.navigation_handler.active_road,
                         "distance_meters": self.navigation_handler.distance_meters,
+                        "maneuver_type": getattr(self.navigation_handler, "last_maneuver_type", 0),
+                        "turn_side": getattr(self.navigation_handler, "last_turn_side", 0),
                     }
 
                 media_info = None
@@ -281,6 +283,7 @@ class ChannelManagerModule(BaseBackendModule):
                         "artist": self.media_playback_handler.artist,
                         "album": self.media_playback_handler.album,
                         "playback_state": self.media_playback_handler.playback_state,
+                        "album_art": getattr(self.media_playback_handler, "album_art_b64", ""),
                     }
 
                 payload = {

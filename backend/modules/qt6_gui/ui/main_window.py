@@ -23,6 +23,8 @@ from .command_bar import CommandBarWidget
 from .drawers.bluetooth_drawer import BluetoothDrawerWidget
 from .drawers.logs_drawer import LogsDrawerWidget
 from .drawers.settings_drawer import SettingsDrawerWidget
+from .media_card_widget import MediaCardWidget
+from .nav_card_widget import NavCardWidget
 from .toast_notification import ToastNotificationWidget
 from .video_viewport import VideoViewportWidget
 from .volume_popover import VolumePopoverWidget
@@ -63,12 +65,19 @@ class MainWindow(QMainWindow):
         self.video_viewport = VideoViewportWidget(self.central_widget)
         self.video_viewport.setGeometry(0, 0, 1280, 720)
 
-        # 2. Overlay Disconnected Clock Screen
+        # 2. Overlay Disconnected Clock Screen with 2x2 Grid Layout
         self.disconnected_screen = QWidget(self.central_widget)
         self.disconnected_screen.setObjectName("disconnected-screen")
         self.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.disconnected_screen.setGeometry(0, 0, 1280, 720)
+
+        # Grid Widgets inside disconnected_screen
         self.clock_widget = AnalogClockWidget(self.disconnected_screen)
+        self.nav_widget = NavCardWidget(self.disconnected_screen)
+        self.media_widget = MediaCardWidget(self.disconnected_screen)
+
+        self.has_active_nav = False
+        self.has_active_media = False
 
         # 3. Floating Bottom Command Bar
         self.command_bar = CommandBarWidget(self.central_widget)
@@ -156,7 +165,7 @@ class MainWindow(QMainWindow):
         # Resize video canvas and disconnected clock screen
         self.video_viewport.setGeometry(0, 0, w, h)
         self.disconnected_screen.setGeometry(0, 0, w, h)
-        self.clock_widget.setGeometry((w - 320) // 2, (h - 360) // 2, 320, 360)
+        self._relayout_dashboard(w, h)
 
         # Position Command Bar (centered at bottom)
         bar_w = 440
@@ -177,6 +186,60 @@ class MainWindow(QMainWindow):
         self.bluetooth_drawer.setGeometry(w - drawer_w, 0, drawer_w, h)
         self.settings_drawer.setGeometry(w - drawer_w, 0, drawer_w, h)
         self.logs_drawer.setGeometry(w - drawer_w, 0, drawer_w, h)
+
+    def _relayout_dashboard(self, w: int, h: int):
+        """Dynamic 2x2 Grid Layout for Connected/Clock Screen."""
+        margin_x = 40
+        margin_y = 40
+        avail_w = w - (margin_x * 2)
+        avail_h = h - (margin_y * 2) - 80  # leave room for bottom command bar
+
+        has_nav = self.has_active_nav
+        has_media = self.has_active_media
+
+        if has_nav:
+            # 2x2 Grid Mode:
+            # Col 1: Full-height Nav Card
+            # Col 2, Row 1: Clock & Date
+            # Col 2, Row 2: Media Card
+            self.nav_widget.show()
+            self.media_widget.show()
+            self.clock_widget.show()
+
+            col_w = (avail_w - 24) // 2
+            row_h = (avail_h - 24) // 2
+
+            self.nav_widget.setGeometry(margin_x, margin_y, col_w, avail_h)
+            self.clock_widget.setGeometry(margin_x + col_w + 24, margin_y, col_w, row_h)
+            self.media_widget.setGeometry(margin_x + col_w + 24, margin_y + row_h + 24, col_w, row_h)
+
+        elif has_media:
+            # 2-Column Split Mode:
+            # Col 1: Clock & Date
+            # Col 2: Media Card
+            self.nav_widget.hide()
+            self.media_widget.show()
+            self.clock_widget.show()
+
+            col_w = (avail_w - 32) // 2
+            self.clock_widget.setGeometry(margin_x, margin_y + (avail_h - 320) // 2, col_w, 320)
+            self.media_widget.setGeometry(margin_x + col_w + 32, margin_y + (avail_h - 200) // 2, col_w, 200)
+
+        else:
+            # Centered Clock Mode:
+            self.nav_widget.hide()
+            self.media_widget.hide()
+            self.clock_widget.show()
+
+            clock_w = 340
+            clock_h = 360
+            self.clock_widget.setGeometry((w - clock_w) // 2, margin_y + (avail_h - clock_h) // 2, clock_w, clock_h)
+
+    def update_dashboard_state(self, has_nav: bool, has_media: bool):
+        """Update active flags and trigger dashboard relayout."""
+        self.has_active_nav = has_nav
+        self.has_active_media = has_media
+        self._relayout_dashboard(self.width(), self.height())
 
     def set_connected_state(self, is_connected: bool):
         """Update connection state: hide clock on projection, re-show on disconnect."""
