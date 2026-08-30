@@ -43,19 +43,40 @@ class NavigationChannelHandler:
                 await self.manager.send_wire_frame(channel_id, MSG.CHANNEL_OPEN_RESPONSE, resp.SerializeToString(), encrypted=True)
                 return
 
-            # Check for NavigationTurnEvent
+            # Handle Instrument Cluster Start (0x8001 / 32769)
+            if message_id in (0x8001, 32769):
+                self.log.info(f"🧭 [Navigation Channel] Instrument Cluster Start on ch={channel_id}")
+                self.active_road = ""
+                self.distance_meters = -1.0
+                return
+
+            # Handle Instrument Cluster Stop (0x8002 / 32770)
+            if message_id in (0x8002, 32770):
+                self.log.info(f"🧭 [Navigation Channel] Instrument Cluster Stop on ch={channel_id}")
+                self.active_road = ""
+                self.distance_meters = -1.0
+                return
+
+            # Check for NavigationTurnEvent / NextTurnDetail
             turn_event = NavigationTurnEvent()
             try:
                 turn_event.ParseFromString(body)
-                if turn_event.road:
-                    self.active_road = turn_event.road
+                road = getattr(turn_event, "road_name", "") or getattr(turn_event, "road", "") or getattr(turn_event, "name", "")
+                if road:
+                    self.active_road = road
+                dist_val = getattr(turn_event, "distance_meters", -1)
+                if dist_val >= 0:
+                    self.distance_meters = float(dist_val)
+
                 event_data = {
-                    "road": turn_event.road or self.active_road,
-                    "turn_side": getattr(turn_event, "turn_side", 0),
+                    "road": self.active_road,
+                    "turn_side": getattr(turn_event, "turn_direction", getattr(turn_event, "turn_side", 0)),
                     "event_name": getattr(turn_event, "event_name", ""),
+                    "distance_meters": self.distance_meters,
                 }
-                self.log.info(f"🧭 [Navigation Channel] Turn event received: road='{event_data['road']}'")
+                self.log.info(f"🧭 [Navigation Channel] Turn event received: road='{event_data['road']}', dist={event_data['distance_meters']}m")
                 self.manager.publish("navigation.turn_event", event_data)
+                self.manager._notify_status_changed()
                 return
             except Exception:
                 pass
@@ -64,20 +85,25 @@ class NavigationChannelHandler:
             dist_event = NavigationDistance()
             try:
                 dist_event.ParseFromString(body)
-                self.distance_meters = dist_event.distance_meters
+                if hasattr(dist_event, "distance") and hasattr(dist_event.distance, "distance_value"):
+                    self.distance_meters = float(dist_event.distance.distance_value)
+                elif hasattr(dist_event, "distance_meters"):
+                    self.distance_meters = float(dist_event.distance_meters)
+
                 dist_data = {
                     "distance_meters": self.distance_meters,
-                    "time_to_turn_seconds": getattr(dist_event, "time_to_turn_seconds", 0),
+                    "time_to_turn_seconds": getattr(dist_event, "time_to_turn_seconds", getattr(dist_event, "eta_seconds", 0)),
                 }
                 self.log.debug(f"🧭 [Navigation Channel] Distance update: {dist_data}")
                 self.manager.publish("navigation.distance_event", dist_data)
+                self.manager._notify_status_changed()
                 return
             except Exception:
                 pass
 
             # Fallback raw publish
-            self.log.debug(f"🧭 [Navigation Channel] Received frame msg_id={message_id}, len={len(body)}")
+            self.log.debug(f"🧭 [Navigation Channel] Received frame msg_id=0x{message_id:04x}, len={len(body)}")
             self.manager.publish("navigation.raw_event", {"msg_id": message_id, "size": len(body)})
 
         except Exception as exc:
-            self.log.warning(f"🧭 [Navigation Channel] Failed to process message {message_id}: {exc}")
+            self.log.warning(f"🧭 [Navigation Channel] Failed to process message 0x{message_id:04x}: {exc}")

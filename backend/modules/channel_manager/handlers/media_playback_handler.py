@@ -52,6 +52,7 @@ class MediaPlaybackChannelHandler:
                 }
                 self.log.info(f"🎵 [Media Playback Channel] Status update: source='{status_dict['media_source']}' state={status_dict['playback_state']}")
                 self.manager.publish("media.playback_status", status_dict)
+                self.manager._notify_status_changed()
                 return
             except Exception:
                 pass
@@ -70,6 +71,7 @@ class MediaPlaybackChannelHandler:
                 }
                 self.log.info(f"🎵 [Media Playback Channel] Metadata received: title='{self.track_title}', artist='{self.artist}'")
                 self.manager.publish("media.metadata", meta_dict)
+                self.manager._notify_status_changed()
                 return
             except Exception:
                 pass
