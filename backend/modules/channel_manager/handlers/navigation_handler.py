@@ -6,6 +6,9 @@ emitting `navigation.turn_event` onto the ZeroMQ bus for HUD/UI widgets.
 """
 
 from typing import TYPE_CHECKING
+from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
+from protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse
+from protos.oaa.common.StatusEnum_pb2 import Status
 from protos.oaa.navigation.NavigationTurnEventMessage_pb2 import NavigationTurnEvent
 from protos.oaa.navigation.NavigationDistanceMessage_pb2 import NavigationDistance
 from protos.oaa.navigation.NavigationStateMessage_pb2 import NavigationState
@@ -17,6 +20,8 @@ from shared.constants import ChannelType
 
 if TYPE_CHECKING:
     from ..main import ChannelManagerModule
+
+MSG = ControlMessage.Enum
 
 
 class NavigationChannelHandler:
@@ -31,13 +36,11 @@ class NavigationChannelHandler:
         """Process incoming navigation payload frames."""
         try:
             # Handle Channel Open Request
-            if message_id == 7:  # MSG.CHANNEL_OPEN_REQUEST
-                from protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse
-                from protos.oaa.common.StatusEnum_pb2 import Status
+            if message_id == MSG.CHANNEL_OPEN_REQUEST:
                 resp = ChannelOpenResponse()
                 resp.status = Status.OK
                 self.log.info(f"🧭 [Navigation Channel] Received ChannelOpenRequest on ch={channel_id} — responding STATUS_OK")
-                await self.manager.send_wire_frame(channel_id, 8, resp.SerializeToString(), encrypted=True)
+                await self.manager.send_wire_frame(channel_id, MSG.CHANNEL_OPEN_RESPONSE, resp.SerializeToString(), encrypted=True)
                 return
 
             # Check for NavigationTurnEvent

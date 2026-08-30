@@ -6,6 +6,9 @@ publishing `media.metadata` and `media.playback_status` to the ZeroMQ bus.
 """
 
 from typing import TYPE_CHECKING
+from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
+from protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse
+from protos.oaa.common.StatusEnum_pb2 import Status
 from protos.oaa.media.MediaPlaybackStatusMessage_pb2 import MediaPlaybackStatus
 from protos.oaa.media.MediaPlaybackMetadataMessage_pb2 import MediaPlaybackMetadata
 from protos.oaa.media.CarLocalMediaPlaybackStatusMessage_pb2 import CarLocalMediaPlaybackStatus
@@ -13,6 +16,8 @@ from shared.constants import ChannelType
 
 if TYPE_CHECKING:
     from ..main import ChannelManagerModule
+
+MSG = ControlMessage.Enum
 
 
 class MediaPlaybackChannelHandler:
@@ -29,13 +34,11 @@ class MediaPlaybackChannelHandler:
         """Process incoming media playback and metadata frames."""
         try:
             # Handle Channel Open Request
-            if message_id == 7:  # MSG.CHANNEL_OPEN_REQUEST
-                from protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse
-                from protos.oaa.common.StatusEnum_pb2 import Status
+            if message_id == MSG.CHANNEL_OPEN_REQUEST:
                 resp = ChannelOpenResponse()
                 resp.status = Status.OK
                 self.log.info(f"🎵 [Media Playback Channel] Received ChannelOpenRequest on ch={channel_id} — responding STATUS_OK")
-                await self.manager.send_wire_frame(channel_id, 8, resp.SerializeToString(), encrypted=True)
+                await self.manager.send_wire_frame(channel_id, MSG.CHANNEL_OPEN_RESPONSE, resp.SerializeToString(), encrypted=True)
                 return
 
             # 1. Try parsing MediaPlaybackStatus
