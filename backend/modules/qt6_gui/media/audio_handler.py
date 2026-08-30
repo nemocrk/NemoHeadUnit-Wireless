@@ -59,7 +59,10 @@ class QtAudioEngine:
         self.source_io: Optional[QIODevice] = None
         self.mic_accumulator = bytearray()
 
-        self.pcm_queue = bytearray()
+        self.channel_queues = {
+            "media": bytearray(),
+            "speech": bytearray(),
+        }
         self._queue_lock = threading.Lock()
 
         # Dedicated background feeding thread (bypasses main UI thread stalls during window move/drag)
@@ -149,15 +152,16 @@ class QtAudioEngine:
         self.frame_count += 1
         if self.frame_count % 50 == 0:
             with self._queue_lock:
-                q_len = len(self.pcm_queue)
-            # 48000 Hz * 2 channels * 2 bytes = 192,000 bytes/sec -> 192 bytes/ms
-            buffer_latency_ms = q_len / 192.0
+                q_media_len = len(self.channel_queues["media"])
+                q_speech_len = len(self.channel_queues["speech"])
+            total_q_len = q_media_len + q_speech_len
+            buffer_latency_ms = total_q_len / 192.0
             bytes_free = self.audio_sink.bytesFree() if self.audio_sink else 0
             sink_status = "active" if (self.sink_io and self.sink_io.isOpen()) else "inactive"
             logger.info(
                 f"Frame processed: {len(audio_bytes)} bytes (cumulative: {self.frame_count}) | "
-                f"Pipeline: sink={sink_status}, buffer={q_len}B ({buffer_latency_ms:.1f}ms), "
-                f"sink_free={bytes_free}B, pre_roll={self.is_pre_rolling}"
+                f"Pipeline: sink={sink_status}, media_buf={q_media_len}B, speech_buf={q_speech_len}B ({buffer_latency_ms:.1f}ms), "
+                f"sink_free={bytes_free}B"
             )
 
         if not self.aac_decoder:
@@ -173,6 +177,7 @@ class QtAudioEngine:
 
         # Detect AAC ADTS frame header (syncword 0xFFF at start of packet)
         is_adts_aac = len(audio_bytes) >= 2 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xF0) == 0xF0
+        stream_key = "media" if is_adts_aac else "speech"
 
         if is_adts_aac and self.aac_decoder:
             try:
@@ -191,7 +196,7 @@ class QtAudioEngine:
             except Exception as exc:
                 logger.debug(f"AAC decode exception: {exc}")
         elif not is_adts_aac:
-            # Channel 5 Speech / Channel 6 System uncompressed Linear PCM (16kHz 16-bit Mono or 48kHz Stereo)
+            # Channel 5 Speech / Channel 6 System uncompressed Linear PCM (16kHz 16-bit Mono)
             # Upsample 16kHz Mono to 48kHz Stereo by duplicating samples 3x across 2 channels
             try:
                 import numpy as np
@@ -204,33 +209,32 @@ class QtAudioEngine:
                 decode_success = True
             except Exception as exc:
                 logger.debug(f"PCM upsample exception: {exc}")
-                # Fallback: duplicate bytes directly
                 decoded_pcm.extend(audio_bytes)
 
         if not decoded_pcm:
             return
 
-        # Enqueue decoded PCM into jitter queue (thread-safe lock)
+        # Push decoded PCM into isolated per-stream jitter buffer (thread-safe lock)
         with self._queue_lock:
-            self.pcm_queue.extend(decoded_pcm)
+            q = self.channel_queues[stream_key]
+            q.extend(decoded_pcm)
 
-            # Cap max buffer to 2.0s latency (48000Hz * 2ch * 2B * 2.0s = 384000 bytes)
-            # Allows headroom during window drags, modal resizing, or UI event loop stalls
-            MAX_QUEUE_LEN = 384000
-            if len(self.pcm_queue) > MAX_QUEUE_LEN:
-                dropped = len(self.pcm_queue) - MAX_QUEUE_LEN
-                del self.pcm_queue[:dropped]
-                logger.warning(f"Pipeline quality: queue overflow! Dropped {dropped} bytes (now at {len(self.pcm_queue)}/{MAX_QUEUE_LEN})")
+            # Cap each isolated stream buffer to 1.5s latency (48000Hz * 2ch * 2B * 1.5s = 288,000 bytes)
+            MAX_QUEUE_LEN = 288000
+            if len(q) > MAX_QUEUE_LEN:
+                dropped = len(q) - MAX_QUEUE_LEN
+                del q[:dropped]
+                logger.warning(f"Audio Mixer ({stream_key}): buffer overflow! Dropped {dropped} bytes (now at {len(q)}/{MAX_QUEUE_LEN})")
 
         if decode_success:
-            logger.debug(f"Pipeline quality: decoded {len(decoded_pcm)} bytes from AAC stream")
+            logger.debug(f"Pipeline quality: decoded {len(decoded_pcm)} bytes for {stream_key} stream")
         else:
             logger.debug(f"Pipeline quality: passed through as raw PCM ({len(decoded_pcm)} bytes)")
 
     def _feed_loop(self):
         """
-        Autonomous background thread continuously feeding QAudioSink independently of Qt UI event loop.
-        Guarantees audio never pauses or jitters when the user moves, drags, or resizes the Qt window.
+        Autonomous background thread continuously feeding mixed audio to QAudioSink.
+        Operates completely independently of Qt UI event loop and window events.
         """
         import time
         while self._running:
@@ -242,47 +246,69 @@ class QtAudioEngine:
             time.sleep(0.005)  # 5ms feeding interval
 
     def _feed_audio_sink(self):
-        """Feed PCM audio chunks dynamically based on QAudioSink.bytesFree() with pre-roll protection."""
+        """
+        Mix active audio streams (Media + Speech/Assistant) dynamically into a single
+        48kHz 16-bit Stereo stream and feed into QAudioSink based on available buffer space.
+        """
         if not self.audio_sink or not self.sink_io or not self.sink_io.isOpen():
             return
 
-        with self._queue_lock:
-            if not self.pcm_queue:
-                return
+        try:
+            bytes_free = self.audio_sink.bytesFree()
+            # Feed while hardware audio buffer has room for at least 10ms (1920 bytes)
+            while bytes_free >= 1920:
+                # 20ms mix slice (48000 * 2ch * 2B * 0.020s = 1920 bytes)
+                slice_bytes = 1920
+                if bytes_free < slice_bytes:
+                    break
 
-            # Pre-roll check: wait until buffer accumulates 60ms before starting playback
-            if self.is_pre_rolling:
-                if len(self.pcm_queue) >= self.pre_roll_threshold_bytes:
-                    self.is_pre_rolling = False
-                    logger.debug("QtAudioEngine: Pre-roll threshold reached (%d bytes), starting playback", len(self.pcm_queue))
+                with self._queue_lock:
+                    q_media = self.channel_queues["media"]
+                    q_speech = self.channel_queues["speech"]
+
+                    has_media = len(q_media) >= slice_bytes
+                    has_speech = len(q_speech) >= slice_bytes
+
+                    if not has_media and not has_speech:
+                        break
+
+                    # Duck media volume to 25% when assistant/speech is actively playing
+                    media_gain = 0.25 if (has_speech or len(q_speech) > 0) else 1.0
+                    speech_gain = 1.0
+
+                    if has_media and has_speech:
+                        import numpy as np
+                        chunk_m = np.frombuffer(q_media[:slice_bytes], dtype=np.int16).astype(np.int32)
+                        chunk_s = np.frombuffer(q_speech[:slice_bytes], dtype=np.int16).astype(np.int32)
+                        del q_media[:slice_bytes]
+                        del q_speech[:slice_bytes]
+
+                        # Software Mix with soft clipping
+                        mixed = (chunk_m * media_gain + chunk_s * speech_gain).astype(np.int32)
+                        # Vectorized soft-clipping saturation
+                        np.clip(mixed, -32768, 32767, out=mixed)
+                        mixed_chunk = mixed.astype(np.int16).tobytes()
+                    elif has_media:
+                        if media_gain < 1.0:
+                            import numpy as np
+                            chunk_m = np.frombuffer(q_media[:slice_bytes], dtype=np.int16).astype(np.int32)
+                            del q_media[:slice_bytes]
+                            mixed_chunk = (chunk_m * media_gain).astype(np.int16).tobytes()
+                        else:
+                            mixed_chunk = bytes(q_media[:slice_bytes])
+                            del q_media[:slice_bytes]
+                    else:  # has_speech
+                        mixed_chunk = bytes(q_speech[:slice_bytes])
+                        del q_speech[:slice_bytes]
+
+                written = self.sink_io.write(mixed_chunk)
+                if written > 0:
+                    bytes_free -= written
                 else:
-                    return  # Keep buffering to prevent underruns
+                    break
+        except Exception as exc:
+            logger.debug("Audio mixer feed exception: %s", exc)
 
-            try:
-                bytes_free = self.audio_sink.bytesFree()
-                # Feed while hardware audio buffer has room for at least 10ms (1920 bytes)
-                while bytes_free >= 1920 and self.pcm_queue:
-                    to_write = min(len(self.pcm_queue), bytes_free)
-                    # Align to 4-byte sample boundaries (16-bit stereo = 4 bytes per frame)
-                    to_write = (to_write // 4) * 4
-                    if to_write == 0:
-                        break
-
-                    chunk = bytes(self.pcm_queue[:to_write])
-                    written = self.sink_io.write(chunk)
-                    if written > 0:
-                        del self.pcm_queue[:written]
-                        bytes_free -= written
-                        logger.debug(f"Pipeline quality: wrote {written} bytes (free: {bytes_free}, queue now: {len(self.pcm_queue)})")
-                    else:
-                        break
-
-                # Only re-enter pre-roll state if both software queue AND hardware buffer are starved
-                if len(self.pcm_queue) == 0 and bytes_free >= 90000:
-                    self.is_pre_rolling = True
-
-            except Exception as exc:
-                logger.warning(f"Sink write exception: {exc}")
 
 
 
