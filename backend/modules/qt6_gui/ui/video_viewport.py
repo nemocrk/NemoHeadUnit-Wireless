@@ -68,6 +68,19 @@ class VideoViewportWidget(QOpenGLWidget):
         GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
         logger.info("🔍 [Video Viewport Trace] initializeGL() completed cleanly!")
 
+    def cleanupGL(self):
+        """Safely delete OpenGL texture while context is valid on the main GUI thread."""
+        if HAS_OPENGL and self.texture_id:
+            try:
+                if self.isValid():
+                    self.makeCurrent()
+                    GL.glDeleteTextures([self.texture_id])
+                    self.doneCurrent()
+            except Exception as exc:
+                logger.debug("cleanupGL notice: %s", exc)
+            self.texture_id = 0
+            self.current_frame_data = None
+
     def resizeGL(self, w: int, h: int):
         if HAS_OPENGL:
             GL.glViewport(0, 0, w, h)

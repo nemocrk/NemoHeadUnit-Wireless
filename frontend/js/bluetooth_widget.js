@@ -12,6 +12,8 @@ export class BluetoothWidget {
     this.activeDevice = null;
     this.pairingPendingDevice = null;
     this.scanInterval = null;
+    this.knownDevices = [];
+    this.ignoredDevices = [];
   }
 
   renderShell() {
@@ -103,6 +105,13 @@ export class BluetoothWidget {
                 : "bt-dot";
             if (scanBtn) scanBtn.classList.remove("scanning");
             if (scanLabel) scanLabel.textContent = "Scan Devices";
+          }
+
+          if (data.known_aa_devices) {
+            this.knownDevices = data.known_aa_devices;
+          }
+          if (data.ignored_devices) {
+            this.ignoredDevices = data.ignored_devices;
           }
 
           // Render paired and discovered lists directly from streamed payload
@@ -221,6 +230,13 @@ export class BluetoothWidget {
         if (scanLabel) scanLabel.textContent = "Scan Devices";
       }
 
+      if (data.known_aa_devices) {
+        this.knownDevices = data.known_aa_devices;
+      }
+      if (data.ignored_devices) {
+        this.ignoredDevices = data.ignored_devices;
+      }
+
       // Auto-trigger or update PIN modal if incoming/outgoing pairing request has a PIN
       if (data.pairing_pin && data.pairing_device) {
         const currentName =
@@ -303,12 +319,20 @@ export class BluetoothWidget {
     let html = "";
     devices.forEach((dev) => {
       const isConnected = dev.connected;
+      const isKnown = this.knownDevices && this.knownDevices.includes(dev.address);
+      const isIgnored = this.ignoredDevices && this.ignoredDevices.includes(dev.address);
+      const badgeHtml = isKnown
+        ? `<span class="bt-badge-tag known-aa">⭐ AA Ready</span>`
+        : isIgnored
+        ? `<span class="bt-badge-tag ignored">🚫 Ignored</span>`
+        : "";
+
       html += `
                     <div class="bt-device-card ${isConnected ? "connected" : ""}">
                         <div class="bt-device-info">
                             <span class="bt-device-icon">${isConnected ? "📱" : "📲"}</span>
                             <div>
-                                <div class="bt-device-name">${this.escapeHtml(dev.name || dev.address)}</div>
+                                <div class="bt-device-name">${this.escapeHtml(dev.name || dev.address)} ${badgeHtml}</div>
                                 <div class="bt-device-mac">${dev.address}</div>
                             </div>
                         </div>
@@ -317,6 +341,11 @@ export class BluetoothWidget {
                               isConnected
                                 ? `<button class="bt-action-btn disconnect" data-addr="${dev.address}">Disconnect</button>`
                                 : `<button class="bt-action-btn connect" data-addr="${dev.address}">Connect</button>`
+                            }
+                            ${
+                              isIgnored
+                                ? `<button class="bt-action-btn unignore" data-addr="${dev.address}" title="Enable autoconnect">Enable</button>`
+                                : `<button class="bt-action-btn ignore" data-addr="${dev.address}" title="Ignore for autoconnect">Ignore</button>`
                             }
                             <button class="bt-action-btn remove" data-addr="${dev.address}" title="Forget Device">🗑️</button>
                         </div>
@@ -338,6 +367,18 @@ export class BluetoothWidget {
     parentEl.querySelectorAll(".bt-action-btn.disconnect").forEach((btn) => {
       btn.addEventListener("click", (e) =>
         this.disconnectDevice(e.target.dataset.addr),
+      );
+    });
+
+    parentEl.querySelectorAll(".bt-action-btn.ignore").forEach((btn) => {
+      btn.addEventListener("click", (e) =>
+        this.ignoreDevice(e.target.dataset.addr),
+      );
+    });
+
+    parentEl.querySelectorAll(".bt-action-btn.unignore").forEach((btn) => {
+      btn.addEventListener("click", (e) =>
+        this.unignoreDevice(e.target.dataset.addr),
       );
     });
 
@@ -513,6 +554,42 @@ export class BluetoothWidget {
       });
     } catch (err) {
       console.error("Remove paired device call failed:", err);
+    } finally {
+      await this.refreshAll();
+    }
+  }
+
+  async ignoreDevice(address) {
+    try {
+      const res = await fetch("/api/connectivity/devices/ignore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_address: address }),
+      });
+      const data = await res.json();
+      if (data.ignored_devices) {
+        this.ignoredDevices = data.ignored_devices;
+      }
+    } catch (err) {
+      console.error("Ignore device call failed:", err);
+    } finally {
+      await this.refreshAll();
+    }
+  }
+
+  async unignoreDevice(address) {
+    try {
+      const res = await fetch("/api/connectivity/devices/unignore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_address: address }),
+      });
+      const data = await res.json();
+      if (data.ignored_devices) {
+        this.ignoredDevices = data.ignored_devices;
+      }
+    } catch (err) {
+      console.error("Unignore device call failed:", err);
     } finally {
       await this.refreshAll();
     }

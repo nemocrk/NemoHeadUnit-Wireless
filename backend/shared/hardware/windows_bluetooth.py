@@ -132,6 +132,47 @@ class BLUETOOTH_DEVICE_SEARCH_PARAMS(ctypes.Structure):
     ]
 
 
+class WinRTSocketAdapter:
+    """Bridge WinRT StreamSocket to native Python blocking socket interface."""
+    def __init__(self, stream_sock):
+        import winrt.windows.storage.streams as streams
+        self.sock = stream_sock
+        self.reader = streams.DataReader(stream_sock.input_stream)
+        self.reader.input_stream_options = streams.InputStreamOptions.PARTIAL
+        self.writer = streams.DataWriter(stream_sock.output_stream)
+        self.loop = asyncio.new_event_loop()
+
+    def setblocking(self, flag): pass
+    def settimeout(self, timeout): pass
+
+    def recv(self, bufsize: int) -> bytes:
+        async def _recv():
+            try:
+                await self.reader.load_async(bufsize)
+                length = self.reader.unconsumed_buffer_length
+                if length == 0:
+                    return b""
+                import winrt.windows.security.cryptography as crypto
+                ibuffer = self.reader.read_buffer(length)
+                return bytes(crypto.CryptographicBuffer.copy_to_byte_array(ibuffer))
+            except Exception:
+                return b""
+        return self.loop.run_until_complete(_recv())
+
+    def sendall(self, data: bytes) -> None:
+        async def _send():
+            self.writer.write_bytes(bytearray(data))
+            await self.writer.store_async()
+        self.loop.run_until_complete(_send())
+
+    def close(self):
+        try:
+            self.sock.close()
+            self.loop.close()
+        except Exception:
+            pass
+
+
 def _win32_enumerate_devices(
     return_remembered: bool = True,
     return_connected: bool = True,
@@ -524,10 +565,12 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
 
                     # Try connecting to services in order of preference
                     for preferred_uuid in TARGET_UUIDS:
-                        if connected_successfully:
+                        if not self._running or connected_successfully:
                             break
                             
                         for svc in services_list:
+                            if not self._running:
+                                break
                             svc_uuid = str(svc.service_id.uuid).lower().replace("-", "").replace("{", "").replace("}", "")
                             if svc_uuid == preferred_uuid:
                                 log.info(f"Attempting WinRT StreamSocket connect to service ({svc_uuid}) on {address}...")
@@ -828,59 +871,29 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
                             pass
 
                         def on_connection(sender, args):
+                            if not self._running:
+                                try:
+                                    args.socket.close()
+                                except Exception:
+                                    pass
+                                return
                             try:
-                                remote_host = args.socket.information.remote_host_name.raw_name
+                                remote_host = args.socket.information.remote_address.display_name.upper()
                             except Exception:
-                                remote_host = "Unknown"
-                            log.info(f"🔵 [BT Stage 1/5] 🎉 RFCOMM Profile Connection accepted from {remote_host}!")
-
-                            # Bridge WinRT StreamSocket to native Python socket interface
-                            class WinRTSocketAdapter:
-                                def __init__(self, stream_sock):
-                                    import winrt.windows.storage.streams as streams
-                                    import asyncio
-                                    self.sock = stream_sock
-                                    self.reader = streams.DataReader(stream_sock.input_stream)
-                                    self.reader.input_stream_options = streams.InputStreamOptions.PARTIAL
-                                    self.writer = streams.DataWriter(stream_sock.output_stream)
-                                    self.loop = asyncio.new_event_loop()
-
-                                def setblocking(self, flag): pass
-                                def settimeout(self, timeout): pass
-
-                                def recv(self, bufsize: int) -> bytes:
-                                    async def _recv():
-                                        try:
-                                            await self.reader.load_async(bufsize)
-                                            length = self.reader.unconsumed_buffer_length
-                                            if length == 0:
-                                                return b""
-                                            import winrt.windows.security.cryptography as crypto
-                                            ibuffer = self.reader.read_buffer(length)
-                                            return bytes(crypto.CryptographicBuffer.copy_to_byte_array(ibuffer))
-                                        except Exception:
-                                            return b""
-                                    return self.loop.run_until_complete(_recv())
-
-                                def sendall(self, data: bytes) -> None:
-                                    async def _send():
-                                        self.writer.write_bytes(bytearray(data))
-                                        await self.writer.store_async()
-                                    self.loop.run_until_complete(_send())
-
-                                def close(self):
-                                    try:
-                                        self.sock.close()
-                                        self.loop.close()
-                                    except Exception:
-                                        pass
-
-                            cb = getattr(self, "_on_connection_cb", None) or getattr(self, "_server_sock_cb", None)
-                            if cb is not None:
+                                try:
+                                    remote_host = args.socket.information.remote_host_name.raw_name
+                                except Exception:
+                                    remote_host = "Unknown"
+                            log.info(f"🔵 [BT Stage 1/5] 🎉 RFCOMM Profile Connection accepted from ({remote_host})!")
+                            cb = self._on_connection_cb
+                            if cb and self._running:
                                 adapted_sock = WinRTSocketAdapter(args.socket)
                                 cb(adapted_sock, remote_host)
                             else:
-                                args.socket.close()
+                                try:
+                                    args.socket.close()
+                                except Exception:
+                                    pass
 
                         listener.add_connection_received(on_connection)
                         await listener.bind_service_name_async(provider.service_id.as_string())
@@ -943,6 +956,27 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
 
     async def teardown(self) -> None:
         self._running = False
+        self._on_connection_cb = None
+        if hasattr(self, "_winrt_provider") and self._winrt_provider:
+            try:
+                self._winrt_provider.stop_advertising()
+            except Exception as e:
+                log.debug(f"WinRT stop_advertising exception: {e}")
+            self._winrt_provider = None
+        if hasattr(self, "_winrt_listener") and self._winrt_listener:
+            try:
+                self._winrt_listener.close()
+            except Exception as e:
+                log.debug(f"WinRT listener close exception: {e}")
+            self._winrt_listener = None
+        for addr, s in list(self._active_outbound_sockets.items()):
+            try:
+                s.close()
+            except Exception:
+                pass
+        self._active_outbound_sockets.clear()
+        self._active_device_handles.clear()
+
         if self._server_sock:
             try:
                 self._server_sock.close()

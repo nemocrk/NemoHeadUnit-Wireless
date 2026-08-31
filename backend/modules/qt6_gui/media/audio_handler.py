@@ -402,7 +402,8 @@ class QtAudioEngine:
         self._feed_thread = None
 
         with self._queue_lock:
-            self.pcm_queue.clear()
+            for q in self.channel_queues.values():
+                q.clear()
 
         if self.audio_sink:
             try:

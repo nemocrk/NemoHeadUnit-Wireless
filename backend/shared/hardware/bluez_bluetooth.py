@@ -395,6 +395,8 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
 
 
     async def connect_device(self, address: str) -> tuple[bool, str]:
+        if not getattr(self, "_initialized", True):
+            return False, "Adapter not initialized / shutting down"
         import dbus
         log.info(f"Connecting to {address} on BlueZ")
         self._disconnected_override_addrs.discard(address)
@@ -424,6 +426,8 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
 
 
     async def disconnect_device(self, address: str) -> bool:
+        if not getattr(self, "_initialized", True):
+            return False
         import dbus
         log.info(f"Disconnecting {address} on BlueZ")
         self._disconnected_override_addrs.add(address)
@@ -440,6 +444,8 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             return False
 
     async def remove_paired_device(self, address: str) -> bool:
+        if not getattr(self, "_initialized", True):
+            return False
         import dbus
         log.info(f"Removing paired device: {address}")
         try:
@@ -454,6 +460,8 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             return False
 
     async def get_paired_devices(self) -> list[dict]:
+        if not getattr(self, "_initialized", True):
+            return []
         import dbus
         try:
             manager = dbus.Interface(self._bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager")
@@ -501,6 +509,13 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
                 sock = socket.fromfd(raw_fd, family, socket.SOCK_STREAM, proto)
                 os.close(raw_fd)
 
+                if not getattr(self, "_initialized", True) or not self._cb:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+                    return
+
                 device_mac = str(device).split("dev_")[-1].replace("_", ":").upper()
                 log.info(f"🔵 [BT Stage 1/5] 🎉 RFCOMM Profile Connection accepted from {device_mac}!")
                 self._cb(sock, device_mac)
@@ -524,6 +539,8 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             return False
 
     async def teardown(self) -> None:
+        self._initialized = False
+        self._active_rfcomm_cb = None
         if self._glib_loop and self._glib_loop.is_running():
             self._glib_loop.quit()
         try:
@@ -534,7 +551,6 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             self._agent_mgr.UnregisterAgent("/org/nemo/agent")
         except Exception:
             pass
-        self._initialized = False
         log.info("BlueZ Bluetooth adapter shutdown complete")
 
 

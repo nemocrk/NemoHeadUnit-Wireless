@@ -313,8 +313,20 @@ class Qt6GuiModule(BaseBackendModule):
         if self.shm_engine:
             self.shm_engine.close()
         if self.main_window:
-            self.main_window.close()
+            if hasattr(self.main_window, "video_viewport") and hasattr(self.main_window.video_viewport, "cleanupGL"):
+                self.main_window.video_viewport.cleanupGL()
+            try:
+                self.main_window.close()
+                self.main_window.deleteLater()
+            except Exception:
+                pass
             self.main_window = None
+
+        if self.app:
+            try:
+                self.app.processEvents()
+            except Exception:
+                pass
 
 
     # ------------------------------------------------------------------
@@ -490,8 +502,23 @@ class Qt6GuiModule(BaseBackendModule):
             self.audio_engine.close()
         if self.shm_engine:
             self.shm_engine.close()
+
+        if self.main_window:
+            if hasattr(self.main_window, "video_viewport") and hasattr(self.main_window.video_viewport, "cleanupGL"):
+                self.main_window.video_viewport.cleanupGL()
+            try:
+                self.main_window.close()
+                self.main_window.deleteLater()
+            except Exception:
+                pass
+            self.main_window = None
+
         if self.app:
-            self.app.quit()
+            try:
+                self.app.processEvents()
+                self.app.quit()
+            except Exception:
+                pass
 
 
 

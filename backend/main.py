@@ -148,7 +148,7 @@ def _terminate_all(handles: list[ModuleHandle]) -> None:
             if not h.thread.is_alive():
                 continue
             remaining = max(0.1, deadline - time.monotonic())
-            h.thread.join(timeout=min(remaining, 2.0))
+            h.thread.join(timeout=min(remaining, 5.0))
             if h.thread.is_alive():
                 log.warning(f"Module thread '{h.label}' did not finish after join timeout.")
             else:

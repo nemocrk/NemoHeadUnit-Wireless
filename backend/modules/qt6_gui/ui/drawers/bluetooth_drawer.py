@@ -65,6 +65,28 @@ class BluetoothScanThread(QThread):
         self.scan_finished.emit()
 
 
+class BluetoothActionThread(QThread):
+    """Asynchronous thread for posting action requests to /api/connectivity."""
+    action_finished = pyqtSignal()
+
+    def __init__(self, endpoint: str, payload: dict, host_port: str = "127.0.0.1:8000"):
+        super().__init__()
+        self.endpoint = endpoint
+        self.payload = payload
+        self.host_port = host_port
+
+    def run(self):
+        try:
+            url = f"http://{self.host_port}/api/connectivity/{self.endpoint.lstrip('/')}"
+            data_bytes = json.dumps(self.payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data_bytes, headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                pass
+        except Exception:
+            pass
+        self.action_finished.emit()
+
+
 class BluetoothDrawerWidget(QWidget):
     """
     Bluetooth Manager Drawer with Real-Time SSE Stream Integration.
@@ -79,6 +101,9 @@ class BluetoothDrawerWidget(QWidget):
         self.setMinimumWidth(340)
 
         self.stream_thread = None
+        self.action_thread = None
+        self.known_devices = []
+        self.ignored_devices = []
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(16, 16, 16, 16)
@@ -133,11 +158,55 @@ class BluetoothDrawerWidget(QWidget):
                 border-bottom: 1px solid #21262d;
                 color: #e6edf3;
             }
+            QListWidget::item:selected {
+                background-color: #1f6feb;
+                color: #ffffff;
+            }
             QListWidget::item:hover {
                 background-color: #161b22;
             }
         """)
         self.layout.addWidget(self.device_list)
+
+        # Action Buttons Layout
+        actions_layout = QHBoxLayout()
+        actions_layout.setSpacing(8)
+
+        self.toggle_ignore_btn = QPushButton("🚫 Toggle Ignore", self)
+        self.toggle_ignore_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #21262d;
+                color: #e6edf3;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 8px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: #30363d;
+            }
+        """)
+        self.toggle_ignore_btn.clicked.connect(self._on_toggle_ignore_clicked)
+        actions_layout.addWidget(self.toggle_ignore_btn)
+
+        self.remove_btn = QPushButton("🗑️ Forget", self)
+        self.remove_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(239, 68, 68, 0.15);
+                color: #f87171;
+                border: 1px solid rgba(239, 68, 68, 0.3);
+                border-radius: 6px;
+                padding: 8px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background-color: rgba(239, 68, 68, 0.3);
+            }
+        """)
+        self.remove_btn.clicked.connect(self._on_remove_clicked)
+        actions_layout.addWidget(self.remove_btn)
+
+        self.layout.addLayout(actions_layout)
 
         self.hide()
 
@@ -166,10 +235,40 @@ class BluetoothDrawerWidget(QWidget):
         self.scan_thread = BluetoothScanThread()
         self.scan_thread.start()
 
+    def _on_toggle_ignore_clicked(self):
+        selected_item = self.device_list.currentItem()
+        if not selected_item:
+            self.lbl_status.setText("⚠️ Select a device to toggle ignore")
+            return
+        addr = selected_item.data(Qt.ItemDataRole.UserRole)
+        if not addr:
+            return
+
+        is_currently_ignored = addr in self.ignored_devices
+        endpoint = "devices/unignore" if is_currently_ignored else "devices/ignore"
+        self.lbl_status.setText(f"{'Enabling' if is_currently_ignored else 'Ignoring'} {addr}...")
+        self.action_thread = BluetoothActionThread(endpoint, {"device_address": addr})
+        self.action_thread.start()
+
+    def _on_remove_clicked(self):
+        selected_item = self.device_list.currentItem()
+        if not selected_item:
+            self.lbl_status.setText("⚠️ Select a device to forget/remove")
+            return
+        addr = selected_item.data(Qt.ItemDataRole.UserRole)
+        if not addr:
+            return
+
+        self.lbl_status.setText(f"Removing device {addr}...")
+        self.action_thread = BluetoothActionThread("paired/remove", {"device_address": addr})
+        self.action_thread.start()
+
     def _on_status_updated(self, data: dict):
         discovering = data.get("discovering", False)
         rfcomm_connected = data.get("rfcomm_connected", False)
         stage_label = data.get("stage_label", "Bluetooth Ready")
+        self.known_devices = data.get("known_aa_devices", [])
+        self.ignored_devices = data.get("ignored_devices", [])
 
         if discovering:
             self.lbl_status.setText("🔍 Scanning for nearby Bluetooth devices...")
@@ -187,10 +286,8 @@ class BluetoothDrawerWidget(QWidget):
         if toast_msg and hasattr(self.window(), "toast_widget") and self.window().toast_widget:
             self.window().toast_widget.show_toast(toast_msg, icon="📶")
 
-
         paired = data.get("paired_devices", [])
         discovered = data.get("discovered_devices", [])
-
 
         # Combine paired and discovered devices, marking connection state
         all_devices = []
@@ -203,6 +300,10 @@ class BluetoothDrawerWidget(QWidget):
                 dev["connected"] = False
                 all_devices.append(dev)
 
+        current_selected_addr = None
+        if self.device_list.currentItem():
+            current_selected_addr = self.device_list.currentItem().data(Qt.ItemDataRole.UserRole)
+
         self.device_list.clear()
         if not all_devices:
             self.device_list.addItem(QListWidgetItem("No Bluetooth devices found."))
@@ -212,6 +313,13 @@ class BluetoothDrawerWidget(QWidget):
             name = dev.get("name", "Unknown Device")
             addr = dev.get("address", "")
             connected = dev.get("connected", False)
+            is_known = addr in self.known_devices
+            is_ignored = addr in self.ignored_devices
+
+            tag = " [⭐ AA Ready]" if is_known else (" [🚫 Ignored]" if is_ignored else "")
             status_text = " 🟢 Connected" if connected else " ⚪ Paired / Discovered"
-            item = QListWidgetItem(f"📱 {name}\n   [{addr}]{status_text}")
+            item = QListWidgetItem(f"📱 {name}{tag}\n   [{addr}]{status_text}")
+            item.setData(Qt.ItemDataRole.UserRole, addr)
             self.device_list.addItem(item)
+            if current_selected_addr and addr == current_selected_addr:
+                self.device_list.setCurrentItem(item)

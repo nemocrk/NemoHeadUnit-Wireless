@@ -9,7 +9,7 @@ from typing import Any, Optional
 from aiohttp import web
 
 from shared.base_module import BaseBackendModule, run_module
-from shared.config_schema import field_bool, field_int, field_string, field_enum
+from shared.config_schema import field_bool, field_int, field_string, field_enum, ConfigFieldList
 
 from shared.hardware.bluez_bluetooth import BluezBluetoothAdapter
 from shared.hardware.apmanager_wifi_ap import APManagerWifiApAdapter
@@ -44,6 +44,7 @@ class ConnectivityManagerModule(BaseBackendModule):
         # Autoconnect loop state
         self._autoconnect_task = None
         self._autoconnect_event = asyncio.Event()
+        self._autoconnect_cursor = 0
 
     def get_default_config(self) -> dict[str, Any]:
         return {
@@ -61,6 +62,8 @@ class ConnectivityManagerModule(BaseBackendModule):
             "autoconnect_connect_timeout_s": 8,
             "autoconnect_backoff_initial_s": 5,
             "autoconnect_backoff_cap_s": 60,
+            "known_aa_devices": [],
+            "ignored_devices": [],
         }
 
     def get_schema(self) -> dict[str, Any]:
@@ -79,6 +82,8 @@ class ConnectivityManagerModule(BaseBackendModule):
             "autoconnect_connect_timeout_s": field_int(default=8, min=2, max=30),
             "autoconnect_backoff_initial_s": field_int(default=5, min=1, max=30),
             "autoconnect_backoff_cap_s": field_int(default=60, min=10, max=300),
+            "known_aa_devices": ConfigFieldList(item_schema=field_string(), default=[]),
+            "ignored_devices": ConfigFieldList(item_schema=field_string(), default=[]),
         }
 
     async def setup(self) -> None:
@@ -95,6 +100,8 @@ class ConnectivityManagerModule(BaseBackendModule):
         self.add_http_route("POST", "/paired/remove", self.handle_post_remove)
         self.add_http_route("POST", "/connect", self.handle_post_connect)
         self.add_http_route("POST", "/disconnect", self.handle_post_disconnect)
+        self.add_http_route("POST", "/devices/ignore", self.handle_post_ignore_device)
+        self.add_http_route("POST", "/devices/unignore", self.handle_post_unignore_device)
         self.add_http_route("POST", "/wifi/start", self.handle_wifi_start)
         self.add_http_route("POST", "/wifi/stop", self.handle_wifi_stop)
 
@@ -185,9 +192,9 @@ class ConnectivityManagerModule(BaseBackendModule):
     async def _autoconnect_loop(self) -> None:
         backoff = int(self.config.get("autoconnect_backoff_initial_s", 5))
         cap = int(self.config.get("autoconnect_backoff_cap_s", 60))
-        
+
         self.log.info("Connectivity autoconnect background loop started")
-        
+
         while self._running:
             # Wait for backoff interval OR immediate manual trigger event
             try:
@@ -197,42 +204,82 @@ class ConnectivityManagerModule(BaseBackendModule):
             except asyncio.TimeoutError:
                 pass
 
+            if not self._running:
+                break
+
             if self._rfcomm_connected or self._wifi_credentials is not None:
                 # Active Android Auto Wireless session in progress — do not connect other devices
                 continue
 
             try:
                 devices = await self._bt_adapter.get_paired_devices()
-                if not devices:
+                if not devices or not self._running:
                     continue
 
-                for dev in devices:
-                    if self._rfcomm_connected or self._wifi_credentials is not None:
+                ignored = set(self.config.get("ignored_devices", []))
+                known_aa = list(self.config.get("known_aa_devices", []))
+
+                # Filter out ignored devices (e.g. BT speakers)
+                candidates = [d for d in devices if d.get("address") not in ignored]
+                if not candidates or not self._running:
+                    continue
+
+                # Prioritize known AA devices, maintaining relative order
+                candidates.sort(key=lambda d: 0 if d.get("address") in known_aa else 1)
+
+                num_candidates = len(candidates)
+                self._autoconnect_cursor = self._autoconnect_cursor % num_candidates
+                ordered_candidates = candidates[self._autoconnect_cursor:] + candidates[:self._autoconnect_cursor]
+
+                for dev in ordered_candidates:
+                    if not self._running or self._rfcomm_connected or self._wifi_credentials is not None:
                         break
-                    
+
                     addr = dev["address"]
                     name = dev.get("name", "Unknown")
                     is_already_connected = dev.get("connected", False)
+                    is_known = addr in known_aa
 
-                    self.log.info(f"Autoconnect: checking paired device {addr} ({name}) [already_connected={is_already_connected}]")
-                    
+                    self.log.info(f"Autoconnect: checking paired device {addr} ({name}) [already_connected={is_already_connected}, known_aa={is_known}]")
+
                     # Connect to profiles / initiate RFCOMM trigger
                     success, err = await self._bt_adapter.connect_device(addr)
                     if success:
                         self.log.info(f"Autoconnect: successfully connected device profiles for {addr}")
                         self.publish("bluetooth_manager.paired.connected", {"device_address": addr})
+                        self._autoconnect_cursor = (self._autoconnect_cursor + 1) % num_candidates
                         backoff = int(self.config.get("autoconnect_backoff_initial_s", 5))
                         break
                     else:
                         self.log.debug(f"Autoconnect: connect_device notice for {addr} — {err}")
+                        self._autoconnect_cursor = (self._autoconnect_cursor + 1) % num_candidates
             except Exception as e:
                 self.log.error(f"Error in autoconnect loop round: {e}")
 
             # Apply exponential backoff
             backoff = min(backoff * 2, cap)
 
+    def _record_known_device(self, addr: str) -> None:
+        """Persist newly verified Android Auto device to known_aa_devices in config."""
+        known = list(self.config.get("known_aa_devices", []))
+        if addr not in known:
+            known.append(addr)
+            self.config["known_aa_devices"] = known
+            self.publish("config.set", {"module": self.name, "key": "known_aa_devices", "value": known})
+            self.log.info(f"💾 Added {addr} to known Android Auto devices and saved to config")
+            this_notify = getattr(self, "_notify_status_changed", lambda: None)
+            this_notify()
+
     def _on_rfcomm_connection(self, sock: object, device_address: str) -> None:
         """Callback triggered when phone connects over RFCOMM."""
+        if not self._running or not self._rfcomm_listening:
+            self.log.info(f"Ignoring RFCOMM connection from {device_address} because ConnectivityManager is stopping")
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return
+
         self.log.info(f"🔵 [BT Stage 1/5] ConnectivityManager accepted RFCOMM from {device_address} — starting WiFi AP & Handshake thread...")
         self._rfcomm_connected = True
         self._active_device = device_address
@@ -245,6 +292,12 @@ class ConnectivityManagerModule(BaseBackendModule):
         asyncio.run_coroutine_threadsafe(self._start_ap_and_handshake(sock, device_address), loop)
 
     async def _start_ap_and_handshake(self, sock: object, device_address: str) -> None:
+        if not self._running or not self._rfcomm_listening:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return
         self.current_stage_index = 2
         self._notify_status_changed()
         ap_config = {
@@ -307,6 +360,7 @@ class ConnectivityManagerModule(BaseBackendModule):
                 self.current_stage_index = 6
                 self._notify_status_changed()
                 self.log.info(f"🤝 [Handshake Stage 3/5] 🎉 RFCOMM Handshake completed successfully! Phone IP: {res.phone_ip}")
+                self._record_known_device(device_address)
                 self.publish("rfcomm.handshake.completed", {
                     "device_address": device_address,
                     "phone_ip": res.phone_ip
@@ -357,7 +411,45 @@ class ConnectivityManagerModule(BaseBackendModule):
             "wifi_ap_credentials": self._wifi_credentials,
             "pairing_pin": self._pairing_pin,
             "pairing_device": self._pairing_device,
+            "known_aa_devices": self.config.get("known_aa_devices", []),
+            "ignored_devices": self.config.get("ignored_devices", []),
         })
+
+    async def handle_post_ignore_device(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        addr = body.get("address") or body.get("device_address")
+        if not addr:
+            return web.json_response({"status": "error", "message": "Missing 'address' parameter"}, status=400)
+        ignored = list(self.config.get("ignored_devices", []))
+        if addr not in ignored:
+            ignored.append(addr)
+            self.config["ignored_devices"] = ignored
+            self.publish("config.set", {"module": self.name, "key": "ignored_devices", "value": ignored})
+            self.log.info(f"🚫 Added {addr} to ignored Bluetooth devices")
+        this_notify = getattr(self, "_notify_status_changed", lambda: None)
+        this_notify()
+        return web.json_response({"status": "ok", "ignored_devices": ignored})
+
+    async def handle_post_unignore_device(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        addr = body.get("address") or body.get("device_address")
+        if not addr:
+            return web.json_response({"status": "error", "message": "Missing 'address' parameter"}, status=400)
+        ignored = list(self.config.get("ignored_devices", []))
+        if addr in ignored:
+            ignored.remove(addr)
+            self.config["ignored_devices"] = ignored
+            self.publish("config.set", {"module": self.name, "key": "ignored_devices", "value": ignored})
+            self.log.info(f"✅ Removed {addr} from ignored Bluetooth devices")
+        this_notify = getattr(self, "_notify_status_changed", lambda: None)
+        this_notify()
+        return web.json_response({"status": "ok", "ignored_devices": ignored})
 
     async def handle_get_paired(self, request: web.Request) -> web.Response:
         devices = await self._bt_adapter.get_paired_devices()
@@ -583,6 +675,8 @@ class ConnectivityManagerModule(BaseBackendModule):
                     "discovered_devices": self._discovered_devices,
                     "pairing_pin": self._pairing_pin,
                     "pairing_device": self._pairing_device,
+                    "known_aa_devices": self.config.get("known_aa_devices", []),
+                    "ignored_devices": self.config.get("ignored_devices", []),
                 }
                 data = f"data: {json.dumps(payload)}\n\n"
                 await response.write(data.encode('utf-8'))
@@ -602,12 +696,17 @@ class ConnectivityManagerModule(BaseBackendModule):
 
     async def teardown(self) -> None:
         self.log.info("Teardown ConnectivityManagerModule...")
+        self._running = False
+        self._rfcomm_listening = False
+        self._autoconnect_event.set()
+        self._status_changed_evt.set()
         if self._autoconnect_task:
             self._autoconnect_task.cancel()
             try:
                 await self._autoconnect_task
             except asyncio.CancelledError:
                 pass
+            self._autoconnect_task = None
         if self._bt_adapter:
             await self._bt_adapter.teardown()
         if self._wifi_adapter:

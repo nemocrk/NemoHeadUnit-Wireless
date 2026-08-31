@@ -258,5 +258,10 @@ class MainWindow(QMainWindow):
             self.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
 
     def closeEvent(self, event):
+        if hasattr(self, "video_viewport") and hasattr(self.video_viewport, "cleanupGL"):
+            try:
+                self.video_viewport.cleanupGL()
+            except Exception:
+                pass
         self.close_app_requested.emit()
         super().closeEvent(event)
