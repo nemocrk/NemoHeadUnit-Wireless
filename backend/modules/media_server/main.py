@@ -449,8 +449,8 @@ class MediaServerModule(BaseBackendModule):
             if len(binary_data) >= 9:
                 from shared.nal_utils import unpack_media_frame
                 channel_id, timestamp_us, pcm_payload = unpack_media_frame(binary_data)
-                # StreamType 1 = STREAM_TYPE_AUDIO
-                shm_offset = self.shm.downstream.write_frame(1, timestamp_us, pcm_payload)
+                # Write to SHM with preserved channel_id
+                shm_offset = self.shm.downstream.write_frame(channel_id, timestamp_us, pcm_payload)
                 if shm_offset >= 0:
                     self.publish("media.audio.frame_shm", {
                         "shm_offset": shm_offset,

@@ -361,14 +361,15 @@ class Qt6GuiModule(BaseBackendModule):
         data = payload if payload is not None else topic_or_payload
         offset = data.get("shm_offset", -1) if isinstance(data, dict) else -1
         if offset >= 0 and self.shm_engine:
-            self.shm_engine.process_downstream_frame(offset)
+            self.shm_engine.process_downstream_video(offset)
 
     def _on_shm_audio_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         """Synchronous callback invoked directly on ZMQ sub thread to avoid asyncio loop drag stalls."""
         data = payload if payload is not None else topic_or_payload
         offset = data.get("shm_offset", -1) if isinstance(data, dict) else -1
+        channel_id = data.get("channel_id") if isinstance(data, dict) else None
         if offset >= 0 and self.shm_engine:
-            self.shm_engine.process_downstream_frame(offset)
+            self.shm_engine.process_downstream_audio(offset, channel_id=channel_id)
 
     def _on_nav_turn_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload
@@ -465,10 +466,9 @@ class Qt6GuiModule(BaseBackendModule):
             self.main_window.video_viewport.update_frame(rgba_bytes, w, h)
 
 
-    def _on_audio_frame_from_shm(self, pcm_bytes: bytes, ts_us: int):
-
+    def _on_audio_frame_from_shm(self, pcm_bytes: bytes, channel_id: int, ts_us: int):
         if self.audio_engine:
-            self.audio_engine.play_pcm_frame(pcm_bytes)
+            self.audio_engine.play_pcm_frame(pcm_bytes, channel_id=channel_id)
 
     def _on_mic_data_captured(self, pcm_chunk: bytes):
         if self.shm_engine:

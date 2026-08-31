@@ -208,7 +208,31 @@ sudo apt-get install -f # Install system dependencies if missing
 
 ---
 
-### 2. Automated Remote SSH Deployment
+### 2. Arch Linux Package Creation (`.pkg.tar.zst`)
+
+You can package the application for Arch Linux using `fpm` with the Pacman backend.
+
+#### Prerequisites (Build Host)
+* Ruby & FPM: `gem install fpm`
+* `zstd` and `tar`
+
+#### Build Command
+```bash
+# Build for x86_64 architecture (default output in dist/)
+bash packaging/build_arch.sh
+
+# Build for aarch64 target architecture
+bash packaging/build_arch.sh --arch aarch64 --output-dir dist
+```
+
+#### Installing on Target Hardware
+```bash
+sudo pacman -U dist/nemo-headunit-<version>-1-<arch>.pkg.tar.zst
+```
+
+---
+
+### 3. Automated Remote SSH Deployment
 
 #### Automated Package Deployment (`scripts/deploy_remote_deb.sh`)
 Builds the `.deb` package locally, transfers it over SSH to the target device, installs it via APT (automatically triggering platform hardware fixes), and launches the app in the background (`nohup`) while streaming live logs to your terminal:

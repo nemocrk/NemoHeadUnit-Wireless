@@ -20,7 +20,7 @@ log() { echo "[nemo-headunit prerm] $*"; }
 
 case "$1" in
 
-remove)
+remove|pre_remove|[0-9]*|"")
     log "Stopping and disabling ${SERVICE_NAME}"
     systemctl stop    "${SERVICE_NAME}" 2>/dev/null || true
     systemctl disable "${SERVICE_NAME}" 2>/dev/null || true

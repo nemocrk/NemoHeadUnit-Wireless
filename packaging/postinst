@@ -37,7 +37,7 @@ find_micromamba() {
 
 case "$1" in
 
-configure)
+configure|post_install|post_upgrade|[0-9]*|"")
     # ------------------------------------------------------------------
     # 1. Create system groups and add standard human users automatically
     # ------------------------------------------------------------------
