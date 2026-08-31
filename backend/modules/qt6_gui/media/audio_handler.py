@@ -64,20 +64,30 @@ class DynamicChannelAudioSink:
         self._is_aac: Optional[bool] = None
         self.frame_count = 0
 
-    def _init_aac_decoder(self):
+    def _init_aac_decoder(self, target_sample_rate: int = 48000, target_channel_count: int = 2):
         """Initialize per-channel PyAV FFmpeg AAC decoder."""
         try:
             import av
             self.aac_decoder = av.CodecContext.create("aac", "r")
-            self.resampler = av.AudioResampler(format="s16", layout="stereo", rate=48000)
-            logger.info(f"Audio Channel {self.channel_id}: AAC decoder initialized (48kHz Int16 Stereo)")
+            layout = "stereo" if target_channel_count == 2 else "mono"
+            self.resampler = av.AudioResampler(format="s16", layout=layout, rate=target_sample_rate)
+            logger.info(f"Audio Channel {self.channel_id}: AAC decoder initialized ({target_sample_rate}Hz Int16 {layout})")
         except Exception as exc:
             logger.warning(f"Audio Channel {self.channel_id}: AAC decoder init failed: {exc}")
 
     def _init_playback(self, sample_rate: int, channel_count: int):
-        """Initialize QAudioSink with specified rate and channels."""
+        """Initialize or reconfigure QAudioSink with specified rate and channels."""
         if self.sink_io and self.sink_io.isOpen():
-            return
+            if self.sample_rate == sample_rate and self.channel_count == channel_count:
+                return
+            # Format changed — stop previous sink and recreate
+            try:
+                if self.audio_sink:
+                    self.audio_sink.stop()
+            except Exception:
+                pass
+            self.sink_io = None
+            self.audio_sink = None
 
         self.sample_rate = sample_rate
         self.channel_count = channel_count
@@ -102,6 +112,26 @@ class DynamicChannelAudioSink:
         except Exception as exc:
             logger.warning(f"Failed to initialize QAudioSink for channel {self.channel_id}: {exc}")
 
+    def configure_codec(
+        self,
+        codec: str,
+        sample_rate: int = 48000,
+        channel_count: int = 2,
+        bit_depth: int = 16,
+    ):
+        """Explicitly configure codec, sample rate, and channel count from AVChannelSetupRequest."""
+        self.sample_rate = sample_rate
+        self.channel_count = channel_count
+        self.bit_depth = bit_depth
+        c = str(codec).upper()
+        if "AAC" in c:
+            self._is_aac = True
+            self._init_aac_decoder(target_sample_rate=sample_rate, target_channel_count=channel_count)
+            self._init_playback(sample_rate, channel_count)
+        elif "PCM" in c:
+            self._is_aac = False
+            self._init_playback(sample_rate, channel_count)
+
     def push_frame(self, audio_bytes: bytes):
         """Decode or buffer incoming audio frame."""
         if not audio_bytes or len(audio_bytes) < 100:
@@ -114,13 +144,10 @@ class DynamicChannelAudioSink:
             is_adts_aac = len(audio_bytes) >= 2 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xF0) == 0xF0
             self._is_aac = is_adts_aac
             if self._is_aac:
-                self._init_aac_decoder()
-                self._init_playback(48000, 2)
+                self._init_aac_decoder(target_sample_rate=self.sample_rate, target_channel_count=self.channel_count)
+                self._init_playback(self.sample_rate, self.channel_count)
             else:
-                # Default PCM to 16kHz 1-ch if ~64ms packet (2048B) or 16k mono size, else 48k 2-ch
-                rate = 16000 if len(audio_bytes) in (640, 1024, 2048, 4096) else 48000
-                channels = 1 if rate == 16000 else 2
-                self._init_playback(rate, channels)
+                self._init_playback(self.sample_rate, self.channel_count)
 
         decoded_pcm = bytearray()
         if self._is_aac and self.aac_decoder:
@@ -227,6 +254,35 @@ class QtAudioEngine:
             self._feed_thread = threading.Thread(target=self._feed_loop, daemon=True, name="QtAudioFeedThread")
             self._feed_thread.start()
 
+    def configure_channel_codec(
+        self,
+        channel_id: int,
+        codec: str,
+        sample_rate: int = 48000,
+        channel_count: int = 2,
+        bit_depth: int = 16,
+    ):
+        """Explicitly configure channel codec, sample rate, and channel count ahead of stream delivery."""
+        with self._sinks_lock:
+            sink = self.sinks.get(channel_id)
+            if sink is None:
+                sink = DynamicChannelAudioSink(
+                    channel_id,
+                    sample_rate=sample_rate,
+                    channel_count=channel_count,
+                )
+                self.sinks[channel_id] = sink
+                logger.info(
+                    f"🔊 Registered new dynamic audio sink for channel {channel_id} "
+                    f"(codec={codec}, rate={sample_rate}Hz, channels={channel_count})"
+                )
+        sink.configure_codec(
+            codec=codec,
+            sample_rate=sample_rate,
+            channel_count=channel_count,
+            bit_depth=bit_depth,
+        )
+
     def play_pcm_frame(self, audio_bytes: bytes, channel_id: int = 0):
         """Dispatch audio frame to its dedicated channel sink."""
         if not audio_bytes:
@@ -235,9 +291,19 @@ class QtAudioEngine:
         with self._sinks_lock:
             sink = self.sinks.get(channel_id)
             if sink is None:
-                sink = DynamicChannelAudioSink(channel_id)
+                # Default rate based on standard Android Auto channel map
+                default_rate = 16000 if channel_id in (5, 6, 7) else 48000
+                default_ch = 1 if channel_id in (5, 6, 7) else 2
+                sink = DynamicChannelAudioSink(
+                    channel_id,
+                    sample_rate=default_rate,
+                    channel_count=default_ch,
+                )
                 self.sinks[channel_id] = sink
-                logger.info(f"🔊 Registered new dynamic audio sink for channel {channel_id}")
+                logger.info(
+                    f"🔊 Registered fallback dynamic audio sink for channel {channel_id} "
+                    f"({default_rate}Hz, {default_ch}ch)"
+                )
 
         sink.push_frame(audio_bytes)
 

@@ -82,6 +82,22 @@ class VideoChannelHandler:
 
     async def _handle_setup_request(self, channel_id: int, body: bytes) -> None:
         self.log.info(f"VideoChannel (ch{channel_id}): Received AVChannelSetupRequest — responding OK (max_unacked=10)...")
+        if body:
+            try:
+                from protos.oaa.av.AVChannelSetupRequestMessage_pb2 import AVChannelSetupRequest
+                from protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType
+                setup_req = AVChannelSetupRequest()
+                setup_req.ParseFromString(body)
+                self.codec_enum = setup_req.media_codec_type
+                self.codec_name = MediaCodecType.Enum.Name(setup_req.media_codec_type) if hasattr(MediaCodecType.Enum, "Name") else str(setup_req.media_codec_type)
+                self.log.info(f"📹 VideoChannel (ch{channel_id}): AVChannelSetupRequest codec={self.codec_name} ({self.codec_enum})")
+                if channel_id in self.manager.active_channels:
+                    av_conf = self.manager.active_channels[channel_id].setdefault("av_channel", {})
+                    av_conf["codec"] = self.codec_name
+                await self.manager.broadcast_ws_json(self.manager.get_stream_config_dict())
+            except Exception as exc:
+                self.log.warning(f"VideoChannel (ch{channel_id}): Setup request parse warning: {exc}")
+
         resp = AVChannelSetupResponse()
         resp.media_status = AVChannelSetupStatus.Enum.OK
         resp.max_unacked = UNACKED_FRAMES_THRESHOLD
@@ -102,11 +118,18 @@ class VideoChannelHandler:
                 self.log.info(f"📹 VideoChannel (ch{channel_id}): Extracted start session_id={self.session_id}")
             except Exception as exc:
                 self.log.warning(f"VideoChannel (ch{channel_id}): Failed to parse start indication session_id: {exc}")
-        self.manager.publish("video.stream_start", {"session_id": self.session_id})
+        self.manager.publish("video.stream_start", {
+            "session_id": self.session_id,
+            "codec": getattr(self, "codec_name", "MEDIA_CODEC_VIDEO_H264_BP"),
+            "codec_enum": getattr(self, "codec_enum", 3),
+        })
 
     async def _handle_stop_indication(self, channel_id: int, body: bytes) -> None:
         self.log.info(f"VideoChannel (ch{channel_id}): Received AVChannelStopIndication — video stream STOPPED")
-        self.manager.publish("video.stream_stop", {"session_id": self.session_id})
+        self.manager.publish("video.stream_stop", {
+            "session_id": self.session_id,
+            "codec": getattr(self, "codec_name", "MEDIA_CODEC_VIDEO_H264_BP"),
+        })
 
 
     async def _handle_focus_request(self, channel_id: int, body: bytes) -> None:

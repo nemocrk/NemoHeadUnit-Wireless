@@ -77,6 +77,7 @@ class MediaServerModule(BaseBackendModule):
         self._transport: Optional[BaseVideoTransport] = None
         self._transport_lock = asyncio.Lock()
         self._active_transport_name: str = "h264"
+        self._active_video_codec: str = "H264"
         self.audio_adapter = get_audio_adapter()
         self.shm = BidirectionalMediaSHM(create=False)
         self.ws_clients: set = set()
@@ -215,6 +216,7 @@ class MediaServerModule(BaseBackendModule):
         self.subscribe("media.video.raw_nal_shm", self._on_raw_nal_shm)
         self.subscribe("media.audio.frame", self._on_audio_frame)
         self.subscribe("media.audio.mic_control", self._on_mic_control)
+        self.subscribe("video.stream_start", self._on_video_stream_start)
 
         configured_mode = self.config.get("transport_mode", "auto")
         if configured_mode == "auto":
@@ -228,9 +230,31 @@ class MediaServerModule(BaseBackendModule):
             f"VideoDecoder: Available transport modes on this platform: {available}"
         )
 
+    def _on_video_stream_start(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        """Handle video.stream_start event to dynamically reconfigure video transport for negotiated codec."""
+        data = payload if payload is not None else topic_or_payload
+        if not isinstance(data, dict):
+            return
+
+        codec = data.get("codec", "MEDIA_CODEC_VIDEO_H264_BP")
+        short_codec = "H264"
+        c = str(codec).upper()
+        if "H265" in c or "HEVC" in c:
+            short_codec = "H265"
+        elif "VP9" in c:
+            short_codec = "VP9"
+        elif "AV1" in c:
+            short_codec = "AV1"
+
+        if short_codec != self._active_video_codec:
+            self.log.info(f"MediaServer: Negotiated video codec '{short_codec}' — reconfiguring video transport")
+            self._active_video_codec = short_codec
+            asyncio.create_task(self._switch_transport(self._active_transport_name))
+
     async def run(self) -> None:
         self.log.info(
             f"VideoDecoder active — transport='{self._active_transport_name}', "
+            f"codec='{self._active_video_codec}', "
             f"quality={self.config.get('jpeg_quality', 75)}, "
             f"scale='{self.config.get('video_scale', '') or 'native'}'"
         )
@@ -265,7 +289,11 @@ class MediaServerModule(BaseBackendModule):
                         )
                         continue
 
-                    transport = transport_cls(jpeg_quality=quality, video_scale=scale)
+                    transport = transport_cls(
+                        jpeg_quality=quality,
+                        video_scale=scale,
+                        video_codec=self._active_video_codec,
+                    )
                     transport.on_frame_ready = self._on_frame_ready
                     await transport.start()
 

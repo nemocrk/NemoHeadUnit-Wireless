@@ -191,15 +191,46 @@ def classify_channel_descriptor(descriptor_dict: dict) -> ChannelType:
     return ChannelType.UNKNOWN
 
 
+CODEC_ALIASES: dict[str, str] = {
+    "H264": "MEDIA_CODEC_VIDEO_H264_BP",
+    "H264_BP": "MEDIA_CODEC_VIDEO_H264_BP",
+    "H265": "MEDIA_CODEC_VIDEO_H265",
+    "HEVC": "MEDIA_CODEC_VIDEO_H265",
+    "VP9": "MEDIA_CODEC_VIDEO_VP9",
+    "AV1": "MEDIA_CODEC_VIDEO_AV1",
+    "AAC": "MEDIA_CODEC_AUDIO_AAC_LC",
+    "AAC_LC": "MEDIA_CODEC_AUDIO_AAC_LC",
+    "AAC_ADTS": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS",
+    "AAC_LC_ADTS": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS",
+    "PCM": "MEDIA_CODEC_AUDIO_PCM",
+}
+
+
 def build_service_discovery_response(
     cfg: dict | None = None,
     bt_mac: str = "00:00:00:00:00:00",
     wifi_bssid: str = "",
 ) -> tuple[bytes, dict, dict[int, str]]:
     """Build full binary ServiceDiscoveryResponse protobuf payload and return (bytes, dict, channel_type_map)."""
-    config_tree = dict(SEMANTIC_DEFAULTS)
+    import copy
+    config_tree = copy.deepcopy(SEMANTIC_DEFAULTS)
     if cfg:
         config_tree.update(cfg)
+
+    # Apply global video_codec and audio_codec overrides if configured
+    video_codec_pref = cfg.get("video_codec") if cfg else None
+    audio_codec_pref = cfg.get("audio_codec") if cfg else None
+
+    if video_codec_pref or audio_codec_pref:
+        v_codec_str = CODEC_ALIASES.get(str(video_codec_pref).upper(), video_codec_pref)
+        a_codec_str = CODEC_ALIASES.get(str(audio_codec_pref).upper(), audio_codec_pref)
+        for ch in config_tree.get("channels", []):
+            if "av_channel" in ch:
+                av = ch["av_channel"]
+                if "video_configs" in av and v_codec_str:
+                    av["codec"] = v_codec_str
+                elif "audio_configs" in av and a_codec_str and av.get("audio_type") == "MEDIA":
+                    av["codec"] = a_codec_str
 
     resp = ServiceDiscoveryResponse()
     dict_to_proto(resp, config_tree)

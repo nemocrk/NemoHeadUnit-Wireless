@@ -36,9 +36,10 @@ class GStreamerMjpegTransport(GStreamerBaseTransport):
 
     def _build_pipeline_string(self) -> str:
         scale_frag = self._scale_caps_fragment("I420")
+        parser = self._get_parser_element()
         return (
             "appsrc name=src is-live=true format=time do-timestamp=true "
-            "! h264parse "
+            f"! {parser} "
             "! decodebin name=dec "
             "! videoconvert "
             f"{scale_frag}"

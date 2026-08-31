@@ -30,15 +30,17 @@ class BaseVideoTransport(ABC):
     transport_name: str  # e.g. "h264", "mjpeg", "yuv420", "rgba", "webp"
     wire_format: str     # What the frontend receives — same as transport_name for most modes
 
-    def __init__(self, jpeg_quality: int = 75, video_scale: str = "") -> None:
+    def __init__(self, jpeg_quality: int = 75, video_scale: str = "", video_codec: str = "H264") -> None:
         """
         Args:
             jpeg_quality: JPEG/WebP encode quality (50-95). Ignored for raw/passthrough modes.
             video_scale:  Target resolution for videoscale element, e.g. "960x540".
                           Empty string = native resolution. Ignored for h264/ffmpeg modes.
+            video_codec:  Active video codec: 'H264', 'H265', 'VP9', 'AV1'.
         """
         self.jpeg_quality = max(50, min(95, jpeg_quality))
         self.video_scale = video_scale.strip()
+        self.video_codec = video_codec.strip().upper()
         self.on_frame_ready: Optional[Callable[[bytes, int, str], Awaitable[None]]] = None
 
     @staticmethod

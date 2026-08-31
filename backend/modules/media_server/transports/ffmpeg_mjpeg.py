@@ -47,8 +47,8 @@ class FFmpegMjpegTransport(BaseVideoTransport):
     # JPEG quality maps to ffmpeg -q:v (1=best, 31=worst; invert our 50-95 range)
     _QSCALE_MAP = {50: 20, 60: 16, 70: 12, 75: 10, 80: 8, 85: 6, 90: 4, 95: 2}
 
-    def __init__(self, jpeg_quality: int = 75, video_scale: str = "") -> None:
-        super().__init__(jpeg_quality, video_scale)
+    def __init__(self, jpeg_quality: int = 75, video_scale: str = "", video_codec: str = "H264") -> None:
+        super().__init__(jpeg_quality, video_scale, video_codec)
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._reader_task: Optional[asyncio.Task] = None
         self._stderr_task: Optional[asyncio.Task] = None
@@ -68,11 +68,20 @@ class FFmpegMjpegTransport(BaseVideoTransport):
 
     def _build_ffmpeg_args(self) -> list[str]:
         qscale = self._quality_to_qscale()
+        codec_demux = "h264"
+        c = self.video_codec.upper()
+        if "H265" in c or "HEVC" in c:
+            codec_demux = "hevc"
+        elif "VP9" in c:
+            codec_demux = "vp9"
+        elif "AV1" in c:
+            codec_demux = "av1"
+
         args = [
             "ffmpeg",
             "-loglevel", "info",
             "-hwaccel", "auto",
-            "-f", "h264",
+            "-f", codec_demux,
             "-i", "pipe:0",
         ]
         # Optional scaling

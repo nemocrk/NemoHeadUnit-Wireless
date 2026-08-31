@@ -64,6 +64,27 @@ class AudioChannelHandler:
                 if channel_id in self.manager.active_channels:
                     av_conf = self.manager.active_channels[channel_id].setdefault("av_channel", {})
                     av_conf["codec"] = codec_name
+                av_desc = self.manager.active_channels.get(channel_id, {}).get("av_channel", {})
+                audio_configs = av_desc.get("audio_configs", [])
+                sample_rate = 48000
+                channel_count = 2
+                bit_depth = 16
+                if audio_configs:
+                    cfg0 = audio_configs[0]
+                    sample_rate = cfg0.get("sample_rate", 48000)
+                    channel_count = cfg0.get("channel_count", 2)
+                    bit_depth = cfg0.get("bit_depth", 16)
+                audio_type = av_desc.get("audio_type", "MEDIA")
+
+                self.manager.publish("media.audio.channel_configured", {
+                    "channel_id": channel_id,
+                    "codec": codec_name,
+                    "codec_enum": setup_req.media_codec_type,
+                    "sample_rate": sample_rate,
+                    "channel_count": channel_count,
+                    "bit_depth": bit_depth,
+                    "audio_type": audio_type,
+                })
                 await self.manager.broadcast_ws_json(self.manager.get_stream_config_dict())
             except Exception as exc:
                 self.log.warning(f"AudioChannel (ch{channel_id}): Setup request parse warning: {exc}")

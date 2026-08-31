@@ -227,6 +227,7 @@ class Qt6GuiModule(BaseBackendModule):
         self.log.info("⏱ [Boot Trace 6a/7] Subscribing to ZMQ topics...")
         self.subscribe("media.video.transport_frame_shm", self._on_shm_video_notify)
         self.subscribe("media.audio.frame_shm", self._on_shm_audio_notify)
+        self.subscribe("media.audio.channel_configured", self._on_audio_channel_configured)
         self.subscribe("media.audio.mic_control", self._on_mic_control_notify)
         self.subscribe("video.stream_start", self._on_stream_start)
         self.subscribe("video.stream_stop", self._on_stream_stop)
@@ -370,6 +371,23 @@ class Qt6GuiModule(BaseBackendModule):
         channel_id = data.get("channel_id") if isinstance(data, dict) else None
         if offset >= 0 and self.shm_engine:
             self.shm_engine.process_downstream_audio(offset, channel_id=channel_id)
+
+    def _on_audio_channel_configured(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        """Handle dynamic audio channel codec configuration from AVChannelSetupRequest."""
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.audio_engine:
+            channel_id = data.get("channel_id", 0)
+            codec = data.get("codec", "")
+            sample_rate = data.get("sample_rate", 48000)
+            channel_count = data.get("channel_count", 2)
+            bit_depth = data.get("bit_depth", 16)
+            self.audio_engine.configure_channel_codec(
+                channel_id=channel_id,
+                codec=codec,
+                sample_rate=sample_rate,
+                channel_count=channel_count,
+                bit_depth=bit_depth,
+            )
 
     def _on_nav_turn_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload

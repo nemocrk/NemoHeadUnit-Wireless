@@ -77,8 +77,8 @@ class GStreamerBaseTransport(BaseVideoTransport):
         - An appsink element named "sink" (for pulling decoded/encoded frames)
     """
 
-    def __init__(self, jpeg_quality: int = 75, video_scale: str = "") -> None:
-        super().__init__(jpeg_quality, video_scale)
+    def __init__(self, jpeg_quality: int = 75, video_scale: str = "", video_codec: str = "H264") -> None:
+        super().__init__(jpeg_quality, video_scale, video_codec)
         self._pipeline = None
         self._appsrc = None
         self._appsink = None
@@ -88,6 +88,18 @@ class GStreamerBaseTransport(BaseVideoTransport):
         self._detected_decoder: str = "decodebin (dynamic)"
         self._is_hw_accelerated: bool = True
         self._decoder_type_desc: str = "GStreamer dynamic decodebin"
+
+    def _get_parser_element(self) -> str:
+        """Return the appropriate GStreamer parser element for the active video codec."""
+        c = self.video_codec.upper()
+        if "H265" in c or "HEVC" in c:
+            return "h265parse"
+        elif "VP9" in c:
+            return "vp9parse"
+        elif "AV1" in c:
+            return "av1parse"
+        else:
+            return "h264parse"
 
     def _build_pipeline_string(self) -> str:
         """Return the GStreamer pipeline description string. Must be overridden by subclasses."""

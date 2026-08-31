@@ -423,58 +423,72 @@ export class WebCodecsPlayer {
       nalOffset = 3;
     }
 
-    const nalType = payload[nalOffset] & 0x1f;
-    const nalName =
-      nalType === 5
-        ? "IDR-Keyframe"
-        : nalType === 7
-          ? "SPS"
-          : nalType === 8
-            ? "PPS"
-            : "P-DeltaFrame";
+    const config = this.streamConfigs[channelId];
+    const codecStr = (config && config.codec ? config.codec : "avc1.42E01E").toLowerCase();
+
+    let isKey = false;
+    let isHeader = false;
+    let nalType = 0;
+
+    if (codecStr.includes("hev") || codecStr.includes("h265") || codecStr.includes("hvc")) {
+      // H.265 / HEVC NAL Parsing
+      nalType = (payload[nalOffset] >> 1) & 0x3f;
+      isKey = nalType === 19 || nalType === 20 || nalType === 21; // IDR_W_RADL, IDR_N_LP, CRA_NUT
+      isHeader = nalType === 32 || nalType === 33 || nalType === 34; // VPS, SPS, PPS
+    } else if (codecStr.includes("vp09") || codecStr.includes("vp9")) {
+      // VP9 Frame Tag
+      const frameMarker = (payload[0] >> 6) & 0x03;
+      const frameType = (payload[0] >> 2) & 0x01;
+      isKey = frameMarker === 0x02 ? frameType === 0 : true;
+      nalType = isKey ? 0 : 1;
+    } else if (codecStr.includes("av01") || codecStr.includes("av1")) {
+      // AV1 OBU Header
+      const obuType = (payload[nalOffset] >> 3) & 0x0f;
+      isHeader = obuType === 1; // OBU_SEQUENCE_HEADER
+      isKey = obuType === 1 || obuType === 3 || obuType === 6;
+      nalType = obuType;
+    } else {
+      // Default: H.264
+      nalType = payload[nalOffset] & 0x1f;
+      isKey = nalType === 5;
+      isHeader = nalType === 7 || nalType === 8;
+    }
 
     if (!this.receivedNalCount) this.receivedNalCount = 0;
     this.receivedNalCount++;
 
     if (
       this.receivedNalCount <= 5 ||
-      nalType === 5 ||
+      isKey ||
       this.receivedNalCount % 50 === 0
     ) {
       console.info(
-        `[WebCodecsPlayer ch${channelId}] NAL Unit #${this.receivedNalCount} parsed: nalType=${nalType} (${nalName}), payloadLen=${payload.length}`,
+        `[WebCodecsPlayer ch${channelId}] Video Frame #${this.receivedNalCount} parsed: type=${nalType} (isKey=${isKey}, isHeader=${isHeader}), codec=${codecStr}, len=${payload.length}`,
       );
     }
 
-    // 1. Buffer Parameter Sets (SPS / PPS)
-    if (nalType === 7) {
+    // 1. Buffer Parameter Sets (SPS / PPS / VPS)
+    if (isHeader) {
       this.latestSps = payload;
       console.info(
-        `[WebCodecsPlayer ch${channelId}] Stored H.264 SPS parameter set (${payload.length} bytes)`,
-      );
-      return;
-    }
-    if (nalType === 8) {
-      this.latestPps = payload;
-      console.info(
-        `[WebCodecsPlayer ch${channelId}] Stored H.264 PPS parameter set (${payload.length} bytes)`,
+        `[WebCodecsPlayer ch${channelId}] Stored parameter set (${payload.length} bytes)`,
       );
       return;
     }
 
-    // 2. Keyframe Gate: Drop P-frames (nalType 1, 2, 3, 4) until an IDR frame (nalType 5) arrives
+    // 2. Keyframe Gate: Drop delta frames until first keyframe arrives
     if (!this.hasReceivedKeyframe) {
-      if (nalType === 5) {
+      if (isKey) {
         this.hasReceivedKeyframe = true;
         console.info(
-          `[WebCodecsPlayer ch${channelId}] IDR Keyframe (nalType=5, byte=0x${payload[nalOffset].toString(16)}) received -> Unlocking VideoDecoder`,
+          `[WebCodecsPlayer ch${channelId}] Keyframe (type=${nalType}) received -> Unlocking VideoDecoder`,
         );
       } else {
         if (!this.droppedDeltaCount) this.droppedDeltaCount = 0;
         this.droppedDeltaCount++;
         if (this.droppedDeltaCount <= 5 || this.droppedDeltaCount % 30 === 0) {
           console.warn(
-            `[WebCodecsPlayer ch${channelId}] Dropping pre-keyframe delta NAL unit #${this.droppedDeltaCount} (nalType=${nalType}, byte=0x${payload[nalOffset].toString(16)}) prior to first IDR frame`,
+            `[WebCodecsPlayer ch${channelId}] Dropping pre-keyframe delta frame #${this.droppedDeltaCount} (type=${nalType}) prior to first keyframe`,
           );
         }
         return;
@@ -490,14 +504,14 @@ export class WebCodecsPlayer {
         this.initVideoDecoder();
       }
 
-      const codecStr = config && config.codec ? config.codec : "avc1.42E01E";
-      const chosenConfig = { codec: codecStr, optimizeForLatency: true };
+      const activeCodec = config && config.codec ? config.codec : "avc1.42E01E";
+      const chosenConfig = { codec: activeCodec, optimizeForLatency: true };
 
       try {
         this.videoDecoder.configure(chosenConfig);
         this.isConfigured = true;
         console.info(
-          `[WebCodecsPlayer ch${channelId}] VideoDecoder configured synchronously with ${codecStr}.`,
+          `[WebCodecsPlayer ch${channelId}] VideoDecoder configured synchronously with ${activeCodec}.`,
         );
         if ("VideoDecoder" in window && typeof VideoDecoder.isConfigSupported === "function") {
           VideoDecoder.isConfigSupported(chosenConfig).then((res) => {
@@ -506,11 +520,10 @@ export class WebCodecsPlayer {
             );
           }).catch(() => {});
         }
-        this.updateStatus(`VideoDecoder Configured (${codecStr})`);
+        this.updateStatus(`VideoDecoder Configured (${activeCodec})`);
       } catch (e) {
-
         console.error(
-          `[WebCodecsPlayer ch${channelId}] Failed to configure VideoDecoder with ${codecStr}:`,
+          `[WebCodecsPlayer ch${channelId}] Failed to configure VideoDecoder with ${activeCodec}:`,
           e,
         );
         this.updateStatus(`VideoDecoder Error: ${e.message}`, true);
@@ -518,28 +531,15 @@ export class WebCodecsPlayer {
       }
     }
 
-    // 4. Assemble Chunk Payload (Prepend SPS/PPS to IDR keyframe units)
+    // 4. Assemble Chunk Payload
     let chunkData = payload;
-    let chunkType = "delta";
+    let chunkType = isKey ? "key" : "delta";
 
-    if (nalType === 5) {
-      chunkType = "key";
-      if (this.latestSps || this.latestPps) {
-        const parts = [];
-        if (this.latestSps) parts.push(this.latestSps);
-        if (this.latestPps) parts.push(this.latestPps);
-        parts.push(payload);
-
-        let totalLen = 0;
-        for (const p of parts) totalLen += p.length;
-        const combined = new Uint8Array(totalLen);
-        let offset = 0;
-        for (const p of parts) {
-          combined.set(p, offset);
-          offset += p.length;
-        }
-        chunkData = combined;
-      }
+    if (isKey && this.latestSps) {
+      const combined = new Uint8Array(this.latestSps.length + payload.length);
+      combined.set(this.latestSps, 0);
+      combined.set(payload, this.latestSps.length);
+      chunkData = combined;
     }
 
     try {
