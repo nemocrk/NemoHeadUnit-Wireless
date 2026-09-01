@@ -105,7 +105,11 @@ def test_qaudiosink(device_name: str, freq: float, duration: float, push_mode: b
     from PyQt6.QtCore import QCoreApplication, QIODevice, QTimer
     from PyQt6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices, QAudioDevice, QAudio
 
-    app = QCoreApplication(sys.argv)
+    app = QCoreApplication.instance()
+    created_app = False
+    if app is None:
+        app = QCoreApplication(sys.argv)
+        created_app = True
 
     devices = QMediaDevices.audioOutputs()
     print(f"Detected {len(devices)} Qt6 audio output devices:")
@@ -183,7 +187,11 @@ def test_qaudiosink(device_name: str, freq: float, duration: float, push_mode: b
             def readData(self, max_len: int) -> bytes:
                 if max_len <= 0 or self._offset >= len(self._data):
                     return b""
-                chunk = bytes(self._data[self._offset : self._offset + max_len])
+                take = min(len(self._data) - self._offset, max_len)
+                take = (take // 4) * 4
+                if take == 0:
+                    return b""
+                chunk = bytes(self._data[self._offset : self._offset + take])
                 self._offset += len(chunk)
                 return chunk
 
@@ -195,9 +203,12 @@ def test_qaudiosink(device_name: str, freq: float, duration: float, push_mode: b
         sink.start(pull_stream)
         print("Pull mode: Started QAudioSink with custom PullStream.")
 
-    # Timer to quit app after duration + 1 second
-    QTimer.singleShot(int((duration + 1.0) * 1000), app.quit)
-    app.exec()
+    if created_app:
+        # Timer to quit app after duration + 1 second
+        QTimer.singleShot(int((duration + 1.0) * 1000), app.quit)
+        app.exec()
+    else:
+        time.sleep(duration + 0.5)
 
     sink.stop()
     print("✔ QAudioSink test completed.")

@@ -101,24 +101,58 @@ def _setup_windows_dll_path():
 _setup_windows_dll_path()
 
 import json
+import threading
 import urllib.request
 
 try:
-    from PyQt6.QtCore import QTimer, QThread, pyqtSignal
+    from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, pyqtSlot, QObject, qInstallMessageHandler, QtMsgType
     from PyQt6.QtWidgets import QApplication
     HAS_PYQT6 = True
 except ImportError as err:
     HAS_PYQT6 = False
+    Qt = None
     QTimer = None
     QThread = object
+    QObject = object
     pyqtSignal = lambda *a: None
+    pyqtSlot = lambda *a, **k: (lambda f: f)
     QApplication = None
+    qInstallMessageHandler = lambda *a: None
+    QtMsgType = None
     logging.warning(
         "Failed to import PyQt6 modules on %s: %s. "
         "Fix for Windows: pip install --force-reinstall PyQt6 PyQt6-Qt6",
         sys.platform,
         err,
     )
+
+
+if HAS_PYQT6 and qInstallMessageHandler:
+    import traceback
+
+    def _qt_diagnostic_message_handler(msg_type, context, message):
+        try:
+            if "QBasicTimer" in message or "Timers cannot be started" in message:
+                cur_thread = threading.current_thread()
+                stack = "".join(traceback.format_stack())
+                logging.error(
+                    f"\n🔥 [DETERMINISTIC QTIMER TRACE]\n"
+                    f"  Message: {message}\n"
+                    f"  Thread: {cur_thread.name} (ident={cur_thread.ident}, is_main={cur_thread is threading.main_thread()})\n"
+                    f"  Qt Context: file={context.file}:{context.line} func={context.function}\n"
+                    f"  Python Stack:\n{stack}"
+                )
+            elif msg_type == QtMsgType.QtWarningMsg:
+                logging.warning(f"[QtWarning] {message} ({context.file}:{context.line})")
+            elif msg_type in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+                logging.error(f"[QtCritical] {message} ({context.file}:{context.line})")
+        except Exception:
+            pass
+
+    try:
+        qInstallMessageHandler(_qt_diagnostic_message_handler)
+    except Exception as exc:
+        logging.debug(f"Failed to install Qt message handler: {exc}")
 
 
 
@@ -129,7 +163,96 @@ from backend.modules.qt6_gui.ui.main_window import MainWindow
 logger = logging.getLogger("qt6_gui")
 
 
+class GuiEventBridge(QObject):
+    """
+    Qt Signal Bridge for thread-safe cross-thread event dispatching.
+    Emits PyQt signals from ZMQ background subscriber threads so slots execute
+    strictly on the Qt GUI main event loop via Qt.ConnectionType.QueuedConnection.
+    """
+    connectivity_updated = pyqtSignal(dict)
+    channel_status_updated = pyqtSignal(dict)
+    shm_video_notify = pyqtSignal(dict)
+    shm_audio_notify = pyqtSignal(dict)
+    audio_channel_configured = pyqtSignal(dict)
+    audio_sink_changed = pyqtSignal(dict)
+    mic_control_notify = pyqtSignal(dict)
+    nav_turn_notify = pyqtSignal(dict)
+    nav_dist_notify = pyqtSignal(dict)
+    media_metadata_notify = pyqtSignal(dict)
+    media_playback_status_notify = pyqtSignal(dict)
+    phone_status_notify = pyqtSignal(dict)
+    notification_post = pyqtSignal(dict)
+    notification_dismiss = pyqtSignal(dict)
+    media_tree_updated = pyqtSignal(dict)
+    diagnostic_audio_test = pyqtSignal(dict)
 
+    def __init__(self, module: "Qt6GuiModule", parent=None):
+        super().__init__(parent)
+        self._module = module
+
+    @pyqtSlot(dict)
+    def on_connectivity_updated(self, data: dict):
+        self._module._on_connectivity_status_updated(data)
+
+    @pyqtSlot(dict)
+    def on_channel_status_updated(self, data: dict):
+        self._module._on_channel_status_updated(data)
+
+    @pyqtSlot(dict)
+    def on_shm_video_notify(self, data: dict):
+        self._module._on_shm_video_notify(data)
+
+    @pyqtSlot(dict)
+    def on_shm_audio_notify(self, data: dict):
+        self._module._on_shm_audio_notify(data)
+
+    @pyqtSlot(dict)
+    def on_audio_channel_configured(self, data: dict):
+        self._module._on_audio_channel_configured(data)
+
+    @pyqtSlot(dict)
+    def on_audio_sink_changed(self, data: dict):
+        self._module._on_audio_sink_changed(data)
+
+    @pyqtSlot(dict)
+    def on_mic_control_notify(self, data: dict):
+        self._module._on_mic_control_notify(data)
+
+    @pyqtSlot(dict)
+    def on_nav_turn_notify(self, data: dict):
+        self._module._on_nav_turn_notify(data)
+
+    @pyqtSlot(dict)
+    def on_nav_dist_notify(self, data: dict):
+        self._module._on_nav_dist_notify(data)
+
+    @pyqtSlot(dict)
+    def on_media_metadata_notify(self, data: dict):
+        self._module._on_media_metadata_notify(data)
+
+    @pyqtSlot(dict)
+    def on_media_playback_status_notify(self, data: dict):
+        self._module._on_media_playback_status_notify(data)
+
+    @pyqtSlot(dict)
+    def on_phone_status_notify(self, data: dict):
+        self._module._on_phone_status_notify(data)
+
+    @pyqtSlot(dict)
+    def on_notification_post(self, data: dict):
+        self._module._on_notification_post_notify(data)
+
+    @pyqtSlot(dict)
+    def on_notification_dismiss(self, data: dict):
+        self._module._on_notification_dismiss_notify(data)
+
+    @pyqtSlot(dict)
+    def on_media_tree_updated(self, data: dict):
+        self._module._on_media_tree_updated_notify(data)
+
+    @pyqtSlot(dict)
+    def on_diagnostic_audio_test(self, data: dict):
+        self._module._on_diagnostic_audio_test(data)
 
 
 class Qt6GuiModule(BaseBackendModule):
@@ -147,6 +270,7 @@ class Qt6GuiModule(BaseBackendModule):
         self.main_window: Optional[MainWindow] = None
         self.shm_engine: Optional[QtSHMMediaEngine] = None
         self.audio_engine: Optional[QtAudioEngine] = None
+        self.bridge: Optional[GuiEventBridge] = None
         self._sse_tasks: list[asyncio.Task] = []
         self._last_toast_message = ""
 
@@ -154,17 +278,23 @@ class Qt6GuiModule(BaseBackendModule):
 
     def get_default_config(self) -> dict[str, Any]:
         return {
-            "fullscreen": False,
+            "fullscreen": True,
             "theme": "dark",
             "enable_mic": True,
         }
 
     def get_schema(self) -> dict[str, Any]:
         return {
-            "fullscreen": field_bool(default=False),
+            "fullscreen": field_bool(default=True),
             "theme": field_enum(default="dark", choices=["dark", "light"]),
             "enable_mic": field_bool(default=True),
         }
+
+    def on_config_updated(self, new_config: dict[str, Any]) -> None:
+        super().on_config_updated(new_config)
+        if self.main_window and "fullscreen" in new_config:
+            is_fs = bool(new_config["fullscreen"])
+            self.main_window.fullscreen_change_requested.emit(is_fs)
 
     async def setup(self) -> None:
         """Initialize QApplication, UI components, ZMQ bus subscriptions, and SHM engine."""
@@ -178,6 +308,15 @@ class Qt6GuiModule(BaseBackendModule):
         # Create QApplication if not created
         t1 = time.time()
         if not QApplication.instance():
+            os.environ.setdefault("QT_WIDGETS_RHI", "0")
+            try:
+                from PyQt6.QtGui import QSurfaceFormat
+                fmt = QSurfaceFormat()
+                fmt.setDepthBufferSize(24)
+                fmt.setStencilBufferSize(8)
+                QSurfaceFormat.setDefaultFormat(fmt)
+            except Exception as exc:
+                self.log.debug(f"QSurfaceFormat setup notice: {exc}")
             self.app = QApplication(sys.argv)
         else:
             self.app = QApplication.instance()
@@ -213,40 +352,74 @@ class Qt6GuiModule(BaseBackendModule):
         self.shm_engine.connect_shm()
         self.log.info(f"⏱ [Boot Trace 4f/7] SHM engine connected (is_connected={self.shm_engine.is_connected})!")
 
-        self.log.info("⏱ [Boot Trace 4g/7] Instantiating QtAudioEngine...")
         self.audio_engine = QtAudioEngine()
         self.audio_engine.mic_data_captured.connect(self._on_mic_data_captured)
         self.log.info(f"⏱ [Boot Trace 5/7] SHM & Audio engines initialized in {(time.time()-t4)*1000:.1f}ms")
 
         # Connect Window Signals
         t5 = time.time()
-        self.main_window.video_focus_toggled.connect(self._on_video_focus_toggled)
+        self.main_window.focus_toggle_requested.connect(self._on_video_focus_toggled)
+        self.main_window.phone_action_requested.connect(self._on_phone_action_requested)
+        self.main_window.media_playpause_requested.connect(self._on_media_playpause_requested)
         self.log.info(f"⏱ [Boot Trace 6/7] Window signals connected in {(time.time()-t5)*1000:.1f}ms")
 
-        # ZMQ Topic Subscriptions
+        # Initialize GuiEventBridge and wire slots onto main GUI thread with QueuedConnection
+        self.bridge = GuiEventBridge(self)
+        self.bridge.connectivity_updated.connect(self.bridge.on_connectivity_updated, Qt.ConnectionType.QueuedConnection)
+        self.bridge.channel_status_updated.connect(self.bridge.on_channel_status_updated, Qt.ConnectionType.QueuedConnection)
+        self.bridge.shm_video_notify.connect(self.bridge.on_shm_video_notify, Qt.ConnectionType.QueuedConnection)
+        self.bridge.shm_audio_notify.connect(self.bridge.on_shm_audio_notify, Qt.ConnectionType.QueuedConnection)
+        self.bridge.audio_channel_configured.connect(self.bridge.on_audio_channel_configured, Qt.ConnectionType.QueuedConnection)
+        self.bridge.audio_sink_changed.connect(self.bridge.on_audio_sink_changed, Qt.ConnectionType.QueuedConnection)
+        self.bridge.mic_control_notify.connect(self.bridge.on_mic_control_notify, Qt.ConnectionType.QueuedConnection)
+        self.bridge.nav_turn_notify.connect(self.bridge.on_nav_turn_notify, Qt.ConnectionType.QueuedConnection)
+        self.bridge.nav_dist_notify.connect(self.bridge.on_nav_dist_notify, Qt.ConnectionType.QueuedConnection)
+        self.bridge.media_metadata_notify.connect(self.bridge.on_media_metadata_notify, Qt.ConnectionType.QueuedConnection)
+        self.bridge.media_playback_status_notify.connect(self.bridge.on_media_playback_status_notify, Qt.ConnectionType.QueuedConnection)
+        self.bridge.phone_status_notify.connect(self.bridge.on_phone_status_notify, Qt.ConnectionType.QueuedConnection)
+        self.bridge.notification_post.connect(self.bridge.on_notification_post, Qt.ConnectionType.QueuedConnection)
+        self.bridge.notification_dismiss.connect(self.bridge.on_notification_dismiss, Qt.ConnectionType.QueuedConnection)
+        self.bridge.media_tree_updated.connect(self.bridge.on_media_tree_updated, Qt.ConnectionType.QueuedConnection)
+        self.bridge.diagnostic_audio_test.connect(self.bridge.on_diagnostic_audio_test, Qt.ConnectionType.QueuedConnection)
+
+        def _bridge_emit(sig, top_or_pay, pay=None):
+            data = pay if pay is not None else top_or_pay
+            if isinstance(data, dict):
+                sig.emit(data)
+
+        # ZMQ Topic Subscriptions (bridged thread-safely into Qt main thread)
         self.log.info("⏱ [Boot Trace 6a/7] Subscribing to ZMQ topics...")
-        self.subscribe("media.video.transport_frame_shm", self._on_shm_video_notify)
-        self.subscribe("media.audio.frame_shm", self._on_shm_audio_notify)
-        self.subscribe("media.audio.channel_configured", self._on_audio_channel_configured)
-        self.subscribe("media.audio.mic_control", self._on_mic_control_notify)
+        self.subscribe("media.video.transport_frame_shm", lambda top, pay=None: _bridge_emit(self.bridge.shm_video_notify, top, pay))
+        self.subscribe("media.audio.frame_shm", lambda top, pay=None: _bridge_emit(self.bridge.shm_audio_notify, top, pay))
+        self.subscribe("media.audio.channel_configured", lambda top, pay=None: _bridge_emit(self.bridge.audio_channel_configured, top, pay))
+        self.subscribe("media.audio.mic_control", lambda top, pay=None: _bridge_emit(self.bridge.mic_control_notify, top, pay))
         self.subscribe("video.stream_start", self._on_stream_start)
         self.subscribe("video.stream_stop", self._on_stream_stop)
-        self.subscribe("navigation.turn_event", self._on_nav_turn_notify)
-        self.subscribe("navigation.distance_event", self._on_nav_dist_notify)
-        self.subscribe("media.metadata", self._on_media_metadata_notify)
-        self.subscribe("media.playback_status", self._on_media_playback_status_notify)
+        self.subscribe("navigation.turn_event", lambda top, pay=None: _bridge_emit(self.bridge.nav_turn_notify, top, pay))
+        self.subscribe("navigation.distance_event", lambda top, pay=None: _bridge_emit(self.bridge.nav_dist_notify, top, pay))
+        self.subscribe("media.metadata", lambda top, pay=None: _bridge_emit(self.bridge.media_metadata_notify, top, pay))
+        self.subscribe("media.playback_status", lambda top, pay=None: _bridge_emit(self.bridge.media_playback_status_notify, top, pay))
+        self.subscribe("phone.status", lambda top, pay=None: _bridge_emit(self.bridge.phone_status_notify, top, pay))
+        self.subscribe("connectivity.status", lambda top, pay=None: _bridge_emit(self.bridge.connectivity_updated, top, pay))
+        self.subscribe("channel.status", lambda top, pay=None: _bridge_emit(self.bridge.channel_status_updated, top, pay))
+        self.subscribe("notification.post", lambda top, pay=None: _bridge_emit(self.bridge.notification_post, top, pay))
+        self.subscribe("notification.dismiss", lambda top, pay=None: _bridge_emit(self.bridge.notification_dismiss, top, pay))
+        self.subscribe("media.browser.tree_updated", lambda top, pay=None: _bridge_emit(self.bridge.media_tree_updated, top, pay))
+        self.subscribe("media.audio.sink_changed", lambda top, pay=None: _bridge_emit(self.bridge.audio_sink_changed, top, pay))
+        self.subscribe("diagnostic.audio.in_process_test", lambda top, pay=None: _bridge_emit(self.bridge.diagnostic_audio_test, top, pay))
 
         # Request video focus from channel_manager / media_server on setup
         self.log.info("⏱ [Boot Trace 6b/7] Publishing media.video.request_focus...")
         self.publish("media.video.request_focus", {"sender": "qt6_gui"})
 
         # Show Window & Process Initial Render Events
-        self.log.info("⏱ [Boot Trace 6c/7] Calling main_window.show()...")
-        if self.config.get("fullscreen", False):
-            self.main_window.showFullScreen()
+        is_fs = self.config.get("fullscreen", True)
+        if is_fs:
+            self.log.info("⏱ [Boot Trace 6c/7] Showing Frameless Fullscreen Window...")
         else:
-            self.main_window.show()
-        self.log.info("⏱ [Boot Trace 6d/7] main_window.show() returned!")
+            self.log.info("⏱ [Boot Trace 6c/7] Calling main_window.show() in windowed mode...")
+        self.main_window.set_fullscreen(is_fs)
+        self.log.info("⏱ [Boot Trace 6d/7] main_window display initialized!")
 
         if self.app:
             self.log.info("⏱ [Boot Trace 6e/7] Processing initial Qt events via app.processEvents()...")
@@ -256,58 +429,19 @@ class Qt6GuiModule(BaseBackendModule):
         self.log.info(f"⏱ [Boot Trace 7/7] Total setup() completed cleanly in {(time.time()-t0)*1000:.1f}ms")
 
     async def run(self) -> None:
-        """Run asyncio loop processing Qt events periodically and SSE status streams."""
+        """Run asyncio loop processing Qt events smoothly."""
         self.log.info("Qt6 GUI Module running...")
-
-        # Spawn pure Python asyncio SSE stream background tasks
-        task1 = asyncio.create_task(self._read_sse_loop("/api/connectivity/stream_status", self._on_connectivity_status_updated))
-        task2 = asyncio.create_task(self._read_sse_loop("/api/channels/stream_status", self._on_channel_status_updated))
-        self._sse_tasks = [task1, task2]
 
         while self._running:
             if self.app:
                 self.app.processEvents()
             await asyncio.sleep(0.016)  # ~60 FPS Qt event processing cycle
 
-    async def _read_sse_loop(self, path: str, callback: Callable[[dict], None]) -> None:
-        """Pure Python asyncio loop reading SSE streams without C++ QThread locks."""
-        await asyncio.sleep(1.0)  # Wait for web servers to bind
-        url = f"http://127.0.0.1:8000{path}"
-        while self._running:
-            try:
-                import urllib.request
-                req = urllib.request.Request(url, headers={"Accept": "text/event-stream"})
-                # Run blocking line reading in asyncio executor thread
-                def _fetch():
-                    lines = []
-                    with urllib.request.urlopen(req, timeout=3.0) as resp:
-                        for line in resp:
-                            if not self._running:
-                                break
-                            lines.append(line.decode("utf-8", errors="ignore").strip())
-                            if len(lines) >= 5:
-                                break
-                    return lines
-
-                lines = await asyncio.to_thread(_fetch)
-                for line_str in lines:
-                    if line_str.startswith("data:"):
-                        json_str = line_str[5:].strip()
-                        if json_str:
-                            data = json.loads(json_str)
-                            callback(data)
-            except Exception:
-                await asyncio.sleep(2.0)
-
     async def teardown(self) -> None:
         """Clean up Qt window, SHM engine, and audio resources."""
         self.log.info("Tearing down Qt6 GUI Module...")
         self.publish("system.shutdown", {"sender": "qt6_gui", "reason": "gui_teardown"})
         self.publish("system.stop", {"sender": "qt6_gui", "reason": "gui_teardown"})
-
-        for t in self._sse_tasks:
-            t.cancel()
-        self._sse_tasks.clear()
 
         if self.audio_engine:
             self.audio_engine.close()
@@ -335,6 +469,12 @@ class Qt6GuiModule(BaseBackendModule):
     # ------------------------------------------------------------------
 
     def _on_connectivity_status_updated(self, data: dict):
+        stage_idx = data.get("stage_index", 0)
+        is_online = (stage_idx == 10) or data.get("connected", False) or (data.get("state") == "CONNECTED")
+        if self.main_window:
+            self.main_window.command_bar.set_online_status(is_online)
+            if is_online and not self.main_window._is_connected:
+                self.main_window.set_connected_state(True)
 
         toast_msg = data.get("toast_message")
         pairing_pin = data.get("pairing_pin")
@@ -344,7 +484,6 @@ class Qt6GuiModule(BaseBackendModule):
 
         if toast_msg and toast_msg != self._last_toast_message and self.main_window:
             self._last_toast_message = toast_msg
-            stage_idx = data.get("stage_index", 0)
             toast_type = "success" if stage_idx == 10 else "warning"
             self.main_window.toast_widget.show_toast(toast_msg, toast_type)
 
@@ -355,7 +494,9 @@ class Qt6GuiModule(BaseBackendModule):
     def _on_channel_status_updated(self, data: dict):
         is_connected = data.get("connected", False)
         if self.main_window:
-            self.main_window.set_connected_state(is_connected)
+            self.main_window.command_bar.set_online_status(is_connected)
+            if is_connected:
+                self.main_window.set_connected_state(True)
 
     def _on_shm_video_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         """Synchronous callback invoked directly on ZMQ sub thread to avoid asyncio loop drag stalls."""
@@ -388,6 +529,38 @@ class Qt6GuiModule(BaseBackendModule):
                 channel_count=channel_count,
                 bit_depth=bit_depth,
             )
+
+    def _on_audio_sink_changed(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        """Handle audio output sink or input source changes broadcast from media_server."""
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.audio_engine:
+            sink = data.get("sink")
+            source = data.get("source")
+            if sink is not None:
+                self.audio_engine.set_output_sink(sink)
+            if source is not None:
+                self.audio_engine.set_input_source(source)
+
+    def _on_diagnostic_audio_test(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        data = payload if payload is not None else topic_or_payload
+        if not isinstance(data, dict):
+            return
+        freq = float(data.get("freq", 440.0))
+        duration_sec = float(data.get("duration", 2.0))
+        push_mode = bool(data.get("push", False))
+        device_name = str(data.get("device", ""))
+        self.log.info(f"🔊 Executing In-Process Direct Audio Test on Qt Main Thread ({freq}Hz, {duration_sec}s, push={push_mode})...")
+        try:
+            import pathlib
+            scripts_dir = pathlib.Path(__file__).resolve().parent.parent.parent.parent / "scripts"
+            if not scripts_dir.exists():
+                scripts_dir = pathlib.Path("/opt/nemo-headunit/scripts")
+            if str(scripts_dir) not in sys.path:
+                sys.path.insert(0, str(scripts_dir))
+            import test_audio_cli
+            test_audio_cli.test_qaudiosink(device_name, freq, duration_sec, push_mode)
+        except Exception as e:
+            self.log.error(f"In-process audio test failed on main thread: {e}", exc_info=True)
 
     def _on_nav_turn_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload
@@ -448,12 +621,129 @@ class Qt6GuiModule(BaseBackendModule):
         data = payload if payload is not None else topic_or_payload
         if isinstance(data, dict) and self.main_window and self.main_window.media_widget:
             state = data.get("playback_state", 0)
-            # Update state on media widget
+            source = data.get("media_source", "")
+            pos = data.get("position_seconds", 0)
             self.main_window.media_widget.update_metadata(
-                title=self.main_window.media_widget.title_label.text(),
-                artist=self.main_window.media_widget.artist_label.text(),
                 playback_state=state,
+                media_source=source,
+                position_seconds=pos,
             )
+
+    def _on_phone_status_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.main_window:
+            is_in_call = data.get("is_in_call", False)
+            call_state = data.get("call_state", "IDLE")
+            name = data.get("caller_name", "")
+            number = data.get("caller_number", "")
+            duration = data.get("call_duration_seconds", 0)
+            signal = data.get("signal_strength", 4)
+            battery = data.get("battery_level", 85)
+            charging = data.get("is_charging", False)
+
+            operator = data.get("operator_name", "")
+            roaming = bool(data.get("is_roaming", False))
+
+            # Update command bar signal & battery indicators and in-call control pill
+            self.main_window.command_bar.update_phone_status(
+                signal=signal,
+                battery=battery,
+                is_charging=charging,
+                operator_name=operator,
+                is_roaming=roaming,
+            )
+            self.main_window.command_bar.update_call_state(
+                is_in_call=is_in_call,
+                call_state=call_state,
+                caller_name=name,
+                caller_number=number,
+                duration_seconds=duration,
+            )
+
+            # Update call widget
+            self.main_window.phone_call_widget.update_call_state(
+                is_in_call=is_in_call,
+                call_state=call_state,
+                caller_name=name,
+                caller_number=number,
+                duration_seconds=duration,
+            )
+
+            has_nav = self.main_window.has_active_nav
+            has_media = self.main_window.has_active_media
+            self.main_window.update_dashboard_state(has_nav=has_nav, has_media=has_media, has_call=is_in_call)
+
+    def _on_notification_post_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.main_window:
+            nid = data.get("id", "")
+            app_name = data.get("app_name", "Alert")
+            title = data.get("title", "")
+            text = data.get("text", "")
+
+            # Show floating toast
+            self.main_window.notification_toast.show_notification(
+                notif_id=nid,
+                title=title,
+                text=text,
+                app_name=app_name,
+            )
+            # Add to persistent card
+            self.main_window.notification_card.add_notification(
+                notif_id=nid,
+                title=title,
+                text=text,
+                app_name=app_name,
+            )
+
+    def _on_notification_dismiss_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.main_window:
+            nid = data.get("id", "")
+            self.main_window.notification_card.remove_notification(nid)
+
+    def _on_media_tree_updated_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.main_window and self.main_window.media_widget:
+            path = data.get("path", "/")
+            items = data.get("items", [])
+            self.main_window.media_widget.set_browser_items(path, items)
+
+    def _on_phone_action_requested(self, action: str):
+        self.log.info(f"Phone action requested: {action}")
+        asyncio.create_task(self._send_phone_action(action))
+
+    async def _send_phone_action(self, action: str):
+        try:
+            import urllib.request, json
+            req = urllib.request.Request(
+                "http://127.0.0.1:8000/api/channels/phone/action",
+                data=json.dumps({"action": action}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                pass
+        except Exception as exc:
+            self.log.debug(f"Failed to post phone action: {exc}")
+
+    def _on_media_playpause_requested(self):
+        self.log.info("Media Play/Pause key pressed")
+        asyncio.create_task(self._send_media_key(85))
+
+    async def _send_media_key(self, key_code: int = 85):
+        try:
+            import urllib.request, json
+            req = urllib.request.Request(
+                "http://127.0.0.1:8000/api/channels/input/media",
+                data=json.dumps({"key_code": key_code}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                self.log.info(f"🎮 Dispatched media key {key_code} -> HTTP {resp.status}")
+        except Exception as exc:
+            self.log.warning(f"Failed to post media key {key_code}: {exc}")
 
     def _on_mic_control_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload
@@ -466,15 +756,14 @@ class Qt6GuiModule(BaseBackendModule):
                 self.audio_engine.stop_microphone()
 
     async def _on_stream_start(self, payload: dict) -> None:
-        self.log.info("Video stream started -> Switching Qt GUI to connected state")
+        self.log.info("Video stream started -> Switching Qt GUI to projected state")
         if self.main_window:
+            self.main_window.isVideoFocused = True
             self.main_window.set_connected_state(True)
         self.publish("media.video.request_focus", {"sender": "qt6_gui"})
 
     async def _on_stream_stop(self, payload: dict) -> None:
-        self.log.info("Video stream stopped -> Switching Qt GUI to disconnected clock state")
-        if self.main_window:
-            self.main_window.set_connected_state(False)
+        self.log.info("Video stream temporarily stopped/paused by phone")
 
     def _on_video_frame_from_shm(self, rgba_bytes: bytes, w: int, h: int, ts_us: int):
         if self.main_window:
@@ -510,11 +799,6 @@ class Qt6GuiModule(BaseBackendModule):
         self.publish("system.shutdown", {"sender": "qt6_gui", "reason": "gui_close"})
         self.publish("system.stop", {"sender": "qt6_gui", "reason": "gui_close"})
         self._running = False
-
-        for t in self._sse_tasks:
-            t.cancel()
-        self._sse_tasks.clear()
-
 
         if self.audio_engine:
             self.audio_engine.close()
