@@ -7,10 +7,13 @@ and inter-stream jitter distortion.
 """
 
 import logging
+import os
+import shutil
+import subprocess
 import threading
 import time
 from typing import Callable, Dict, Optional
-from PyQt6.QtCore import QByteArray, QIODevice, QObject, QTimer, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, QByteArray, QIODevice, QObject, QTimer, pyqtSignal, pyqtSlot, QThread
 from shared.logger import get_logger
 
 
@@ -44,28 +47,125 @@ class Signal:
                 logger.warning("Signal emit exception: %s", exc)
 
 
-class DynamicChannelAudioSink:
+def find_audio_output_device(name: str):
+    if not HAS_MULTIMEDIA or not QMediaDevices:
+        return None
+    if not name or name == "default":
+        return QMediaDevices.defaultAudioOutput()
+    for dev in QMediaDevices.audioOutputs():
+        if name.lower() in dev.description().lower() or name.lower() in str(dev.id()).lower():
+            return dev
+    return QMediaDevices.defaultAudioOutput()
+
+
+def find_audio_input_device(name: str):
+    if not HAS_MULTIMEDIA or not QMediaDevices:
+        return None
+    if not name or name == "default":
+        return QMediaDevices.defaultAudioInput()
+    for dev in QMediaDevices.audioInputs():
+        if name.lower() in dev.description().lower() or name.lower() in str(dev.id()).lower():
+            return dev
+    return QMediaDevices.defaultAudioInput()
+
+
+class AudioPcmStream(QIODevice):
     """
-    Dedicated QAudioSink pipeline for an individual audio channel.
-    Manages format detection (AAC ADTS vs PCM), dedicated decoding contexts, and jitter buffering.
+    Thread-Safe Pull-Mode QIODevice for QAudioSink.
+    Feeds decoded Int16 PCM samples directly to QAudioSink at hardware DAC clock speed.
+    Pads with digital silence during active stream micro-gaps to prevent ALSA/PipeWire DMA underruns.
     """
 
-    def __init__(self, channel_id: int, sample_rate: int = 48000, channel_count: int = 2):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self._is_active = False
+
+    def isSequential(self) -> bool:
+        return True
+
+    def bytesAvailable(self) -> int:
+        with self._lock:
+            avail = len(self._buffer)
+        return avail + super().bytesAvailable()
+
+    def write_pcm(self, pcm_bytes: bytes, max_buffer_bytes: int = 192000):
+        """Append incoming PCM frames from decoder thread."""
+        with self._lock:
+            self._buffer.extend(pcm_bytes)
+            if len(self._buffer) > max_buffer_bytes:
+                dropped = len(self._buffer) - max_buffer_bytes
+                del self._buffer[:dropped]
+            self._is_active = True
+        self.readyRead.emit()
+
+    def readData(self, max_len: int) -> bytes:
+        """Called synchronously by QAudioSink to pull PCM samples at DAC clock speed."""
+        if max_len <= 0:
+            return b""
+        with self._lock:
+            if self._buffer:
+                take = min(len(self._buffer), max_len)
+                chunk = bytes(self._buffer[:take])
+                del self._buffer[:take]
+                return chunk
+            elif self._is_active:
+                # Pad with silence during active stream micro-gaps to prevent PipeWire/ALSA EPIPE
+                return b"\x00" * min(max_len, 512)
+            else:
+                return b""
+
+    def writeData(self, data: bytes) -> int:
+        """Required pure virtual method implementation for QIODevice."""
+        return -1
+
+    def clear(self):
+        with self._lock:
+            self._buffer.clear()
+            self._is_active = False
+
+
+class DynamicChannelAudioSink(QObject):
+    """
+    Dedicated audio playback pipeline for an individual audio channel.
+    Uses PyQt6 QAudioSink in Pull Mode via AudioPcmStream QIODevice for zero-jitter,
+    underrun-free ALSA/PipeWire playback.
+    """
+
+    _start_signal = pyqtSignal()
+    _stop_signal = pyqtSignal()
+
+    def __init__(self, channel_id: int, sample_rate: int = 48000, channel_count: int = 2, target_device: str = "default", parent=None):
+        super().__init__(parent)
         self.channel_id = channel_id
         self.sample_rate = sample_rate
         self.channel_count = channel_count
+        self.bit_depth = 16
+        self.target_device = target_device
+
+        self._start_signal.connect(self._do_start, Qt.ConnectionType.QueuedConnection)
+        self._stop_signal.connect(self._do_stop, Qt.ConnectionType.QueuedConnection)
+
+        self.pcm_stream = AudioPcmStream(self)
+        self.pcm_stream.open(QIODevice.OpenModeFlag.ReadOnly)
+
         self.audio_sink: Optional[QAudioSink] = None
-        self.sink_io: Optional[QIODevice] = None
-        self.queue = bytearray()
-        self.queue_lock = threading.Lock()
+        self._is_started: bool = False
 
         self.aac_decoder = None
         self.resampler = None
         self._is_aac: Optional[bool] = None
         self.frame_count = 0
+        self.total_bytes_in = 0
+        self.total_bytes_out = 0
+        self.last_frame_time = 0.0
+        self._last_log_time = 0.0
 
     def _init_aac_decoder(self, target_sample_rate: int = 48000, target_channel_count: int = 2):
         """Initialize per-channel PyAV FFmpeg AAC decoder."""
+        if self.aac_decoder is not None:
+            return
         try:
             import av
             self.aac_decoder = av.CodecContext.create("aac", "r")
@@ -76,19 +176,11 @@ class DynamicChannelAudioSink:
             logger.warning(f"Audio Channel {self.channel_id}: AAC decoder init failed: {exc}")
 
     def _init_playback(self, sample_rate: int, channel_count: int):
-        """Initialize or reconfigure QAudioSink with specified rate and channels."""
-        if self.sink_io and self.sink_io.isOpen():
-            if self.sample_rate == sample_rate and self.channel_count == channel_count:
-                return
-            # Format changed — stop previous sink and recreate
-            try:
-                if self.audio_sink:
-                    self.audio_sink.stop()
-            except Exception:
-                pass
-            self.sink_io = None
-            self.audio_sink = None
+        """Configure QAudioSink for specified rate and channels."""
+        if self.audio_sink and self.sample_rate == sample_rate and self.channel_count == channel_count:
+            return
 
+        self._close_sink()
         self.sample_rate = sample_rate
         self.channel_count = channel_count
 
@@ -98,19 +190,14 @@ class DynamicChannelAudioSink:
             fmt.setChannelCount(channel_count)
             fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
 
-            default_device = QMediaDevices.defaultAudioOutput()
-            if not default_device or not default_device.isFormatSupported(fmt):
-                logger.debug(f"Audio Channel {self.channel_id}: Format {sample_rate}Hz {channel_count}ch falling back to preferred")
-                if default_device:
-                    fmt = default_device.preferredFormat()
-
-            self.audio_sink = QAudioSink(default_device, fmt)
-            # 500ms hardware buffer
+            output_device = find_audio_output_device(self.target_device)
+            self.audio_sink = QAudioSink(output_device, fmt, self)
+            self.audio_sink.setVolume(1.0)
             self.audio_sink.setBufferSize(sample_rate * channel_count * 2 // 2)
-            self.sink_io = self.audio_sink.start()
-            logger.info(f"🔊 Audio Channel {self.channel_id}: QAudioSink opened ({sample_rate}Hz, {channel_count}ch)")
+            dev_desc = output_device.description() if output_device else "Default"
+            logger.info(f"🔊 Audio Channel {self.channel_id}: QAudioSink Pull-Mode configured for '{dev_desc}' ({sample_rate}Hz, {channel_count}ch, Int16)")
         except Exception as exc:
-            logger.warning(f"Failed to initialize QAudioSink for channel {self.channel_id}: {exc}")
+            logger.warning(f"Failed to configure QAudioSink for channel {self.channel_id}: {exc}")
 
     def configure_codec(
         self,
@@ -120,6 +207,9 @@ class DynamicChannelAudioSink:
         bit_depth: int = 16,
     ):
         """Explicitly configure codec, sample rate, and channel count from AVChannelSetupRequest."""
+        if self.sample_rate == sample_rate and self.channel_count == channel_count and self._is_aac is not None:
+            return
+
         self.sample_rate = sample_rate
         self.channel_count = channel_count
         self.bit_depth = bit_depth
@@ -132,12 +222,29 @@ class DynamicChannelAudioSink:
             self._is_aac = False
             self._init_playback(sample_rate, channel_count)
 
+    @pyqtSlot()
+    def _do_start(self):
+        """Executed strictly on Main Qt Thread to start QAudioSink timer safely."""
+        if not self.audio_sink:
+            self._init_playback(self.sample_rate, self.channel_count)
+        if self.audio_sink and not self._is_started:
+            self.audio_sink.start(self.pcm_stream)
+            self._is_started = True
+            logger.info(f"🔊 [Audio Ch{self.channel_id}] Stream ACTIVE — QAudioSink started in Pull Mode on '{self.target_device}'")
+
+    def _ensure_started(self):
+        """Lazily activate hardware audio sink in Pull Mode via thread-safe QueuedConnection signal."""
+        if not self._is_started:
+            self._start_signal.emit()
+
     def push_frame(self, audio_bytes: bytes):
-        """Decode or buffer incoming audio frame."""
-        if not audio_bytes or len(audio_bytes) < 100:
+        """Decode and buffer incoming audio frame into the pull-mode PCM stream."""
+        if not audio_bytes:
             return
 
         self.frame_count += 1
+        self.total_bytes_in += len(audio_bytes)
+        self.last_frame_time = time.time()
 
         # Detect format on first frame if not yet determined
         if self._is_aac is None:
@@ -145,9 +252,6 @@ class DynamicChannelAudioSink:
             self._is_aac = is_adts_aac
             if self._is_aac:
                 self._init_aac_decoder(target_sample_rate=self.sample_rate, target_channel_count=self.channel_count)
-                self._init_playback(self.sample_rate, self.channel_count)
-            else:
-                self._init_playback(self.sample_rate, self.channel_count)
 
         decoded_pcm = bytearray()
         if self._is_aac and self.aac_decoder:
@@ -171,54 +275,50 @@ class DynamicChannelAudioSink:
         if not decoded_pcm:
             return
 
-        with self.queue_lock:
-            self.queue.extend(decoded_pcm)
-            # Cap buffer to 1.5s max
-            max_bytes = self.sample_rate * self.channel_count * 2 * 3 // 2
-            if len(self.queue) > max_bytes:
-                dropped = len(self.queue) - max_bytes
-                del self.queue[:dropped]
-                logger.warning(f"Audio Channel {self.channel_id}: buffer overflow! Dropped {dropped}B")
+        max_bytes = self.sample_rate * self.channel_count * 2 * 3 // 2
+        self.pcm_stream.write_pcm(bytes(decoded_pcm), max_buffer_bytes=max_bytes)
+        self.total_bytes_out += len(decoded_pcm)
+        self._ensure_started()
 
-    def feed(self):
-        """Write available audio slices directly to QAudioSink."""
-        if not self.audio_sink or not self.sink_io or not self.sink_io.isOpen():
-            return
-
-        try:
-            bytes_free = self.audio_sink.bytesFree()
-            slice_bytes = int(self.sample_rate * self.channel_count * 2 * 0.02)  # 20ms slice
-            if slice_bytes <= 0:
-                slice_bytes = 640
-
-            while bytes_free >= slice_bytes:
-                with self.queue_lock:
-                    if len(self.queue) < slice_bytes:
-                        break
-                    chunk = bytes(self.queue[:slice_bytes])
-                    del self.queue[:slice_bytes]
-
-                written = self.sink_io.write(chunk)
-                if written > 0:
-                    bytes_free -= written
-                else:
-                    break
-        except Exception as exc:
-            logger.debug(f"Audio Channel {self.channel_id} feed exception: {exc}")
-
-    def close(self):
-        """Release audio sink and decoder resources."""
-        with self.queue_lock:
-            self.queue.clear()
-
-        if self.audio_sink:
+    @pyqtSlot()
+    def _do_stop(self):
+        """Executed strictly on Main Qt Thread to stop QAudioSink timer safely."""
+        if self.audio_sink and self._is_started:
             try:
                 self.audio_sink.stop()
             except Exception:
                 pass
-            self.audio_sink = None
-            self.sink_io = None
+            self._is_started = False
+        self.pcm_stream.clear()
 
+    def _close_sink(self):
+        """Safely terminate QAudioSink and reset PCM stream via QueuedConnection."""
+        self._stop_signal.emit()
+
+    def feed(self):
+        """Periodic maintenance and telemetry check."""
+        now = time.time()
+        # Suspend idle sink after 3.0s of silence to avoid ALSA starvation
+        if self._is_started and (now - self.last_frame_time > 3.0):
+            self._close_sink()
+            logger.info(f"🔊 [Audio Ch{self.channel_id}] Stream IDLE (>3s) — suspended QAudioSink to release ALSA")
+            return
+
+        # Periodic throughput telemetry (every 5 seconds)
+        if now - self._last_log_time >= 5.0:
+            self._last_log_time = now
+            state = self.audio_sink.state() if self.audio_sink else "None"
+            logger.info(
+                f"🔊 [Audio Ch{self.channel_id}] Metrics: backend=QAudioSink(Pull), frames={self.frame_count}, "
+                f"in={self.total_bytes_in // 1024}KB, out={self.total_bytes_out // 1024}KB, "
+                f"buf={self.pcm_stream.bytesAvailable()}B, state={state}"
+            )
+
+    def close(self):
+        """Release audio sink and decoder resources."""
+        self._close_sink()
+        if self.audio_sink:
+            self.audio_sink = None
         self.aac_decoder = None
         self.resampler = None
 
@@ -234,25 +334,35 @@ class QtAudioEngine:
         logger.info("🔍 [Audio Engine Trace] Entering QtAudioEngine.__init__...")
         self.mic_data_captured = Signal()
 
+        self.target_output_sink: str = "default"
+        self.target_input_source: str = "default"
+
         self.audio_source: Optional[QAudioSource] = None
         self.source_io: Optional[QIODevice] = None
         self.mic_accumulator = bytearray()
 
         self.sinks: Dict[int, DynamicChannelAudioSink] = {}
         self._sinks_lock = threading.Lock()
-
-        # Dedicated background feeding thread
-        self._feed_thread: Optional[threading.Thread] = None
         self._running: bool = True
 
-        self._start_feed_thread()
-        logger.info("🔍 [Audio Engine Trace] QtAudioEngine initialized with dynamic multi-sink backend!")
+        logger.info("🔍 [Audio Engine Trace] QtAudioEngine initialized with event-driven pull-mode audio backend!")
 
-    def _start_feed_thread(self):
-        if not self._feed_thread or not self._feed_thread.is_alive():
-            self._running = True
-            self._feed_thread = threading.Thread(target=self._feed_loop, daemon=True, name="QtAudioFeedThread")
-            self._feed_thread.start()
+    def set_output_sink(self, sink_name: str):
+        """Reconfigure target audio output device for all channel sinks."""
+        self.target_output_sink = sink_name or "default"
+        with self._sinks_lock:
+            for sink in self.sinks.values():
+                sink.target_device = self.target_output_sink
+                sink._init_playback(sink.sample_rate, sink.channel_count)
+        logger.info(f"QtAudioEngine target output sink set to '{self.target_output_sink}'")
+
+    def set_input_source(self, source_name: str):
+        """Reconfigure target audio input source for microphone capture."""
+        self.target_input_source = source_name or "default"
+        if self.audio_source:
+            self.stop_microphone()
+            self.start_microphone()
+        logger.info(f"QtAudioEngine target input source set to '{self.target_input_source}'")
 
     def configure_channel_codec(
         self,
@@ -270,6 +380,7 @@ class QtAudioEngine:
                     channel_id,
                     sample_rate=sample_rate,
                     channel_count=channel_count,
+                    target_device=self.target_output_sink,
                 )
                 self.sinks[channel_id] = sink
                 logger.info(
@@ -285,7 +396,7 @@ class QtAudioEngine:
 
     def play_pcm_frame(self, audio_bytes: bytes, channel_id: int = 0):
         """Dispatch audio frame to its dedicated channel sink."""
-        if not audio_bytes:
+        if not audio_bytes or not self._running:
             return
 
         with self._sinks_lock:
@@ -298,6 +409,7 @@ class QtAudioEngine:
                     channel_id,
                     sample_rate=default_rate,
                     channel_count=default_ch,
+                    target_device=self.target_output_sink,
                 )
                 self.sinks[channel_id] = sink
                 logger.info(
@@ -307,33 +419,18 @@ class QtAudioEngine:
 
         sink.push_frame(audio_bytes)
 
-    def _feed_loop(self):
-        """Autonomous background thread feeding all active channel sinks."""
-        while self._running:
-            try:
-                with self._sinks_lock:
-                    active_sinks = list(self.sinks.values())
-
-                for sink in active_sinks:
-                    sink.feed()
-
-                self._poll_mic()
-            except Exception as exc:
-                logger.warning("Audio feed loop exception: %s", exc)
-            time.sleep(0.005)  # 5ms feeding interval
-
     def start_microphone(self) -> bool:
-        """Start capturing 16kHz 16-bit Mono PCM mic audio from default input device."""
+        """Start capturing 16kHz 16-bit Mono PCM mic audio from default or target input device."""
         if self.audio_source:
             return True
 
         try:
-            default_device = QMediaDevices.defaultAudioInput()
-            if not default_device or default_device.isNull():
-                logger.warning("🎤 [Microphone] No default audio input device found!")
+            input_device = find_audio_input_device(self.target_input_source)
+            if not input_device or input_device.isNull():
+                logger.warning("🎤 [Microphone] No audio input device found!")
                 return False
 
-            dev_name = default_device.description()
+            dev_name = input_device.description()
             logger.info(f"🎤 [Microphone] Starting microphone on input device: '{dev_name}'")
 
             fmt = QAudioFormat()
@@ -341,12 +438,12 @@ class QtAudioEngine:
             fmt.setChannelCount(1)
             fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
 
-            if not default_device.isFormatSupported(fmt):
-                pref_fmt = default_device.preferredFormat()
+            if not input_device.isFormatSupported(fmt):
+                pref_fmt = input_device.preferredFormat()
                 logger.info(f"🎤 [Microphone] Fallback format: {pref_fmt.sampleFormat()} (rate={pref_fmt.sampleRate()}, ch={pref_fmt.channelCount()})")
                 fmt = pref_fmt
 
-            self.audio_source = QAudioSource(default_device, fmt)
+            self.audio_source = QAudioSource(input_device, fmt)
             self.source_io = self.audio_source.start()
             if self.source_io:
                 self.source_io.readyRead.connect(self._on_mic_ready_read)
@@ -400,15 +497,9 @@ class QtAudioEngine:
             logger.info("🎤 [Microphone] Uplink stream STOPPED")
 
     def close(self):
-        """Cleanly stop all audio sinks, microphone capture, and background threads."""
+        """Cleanly stop all audio sinks and microphone capture."""
         self._running = False
         self.stop_microphone()
-        if self._feed_thread and self._feed_thread.is_alive() and threading.current_thread() != self._feed_thread:
-            try:
-                self._feed_thread.join(timeout=0.2)
-            except Exception:
-                pass
-            self._feed_thread = None
 
         with self._sinks_lock:
             for sink in self.sinks.values():
