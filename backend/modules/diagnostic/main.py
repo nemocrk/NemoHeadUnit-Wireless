@@ -85,42 +85,38 @@ class DiagnosticModule(BaseBackendModule):
     # Bus Event Handlers
     # ------------------------------------------------------------------
 
-    def _on_audio_frame(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
-        data = payload if payload is not None else topic_or_payload
+    async def _on_audio_frame(self, topic: str, data: dict) -> None:
         if isinstance(data, dict) and data.get("synthetic"):
-            asyncio.create_task(self._broadcast_ws({
+            await self._broadcast_ws({
                 "type": "audio_frame_injected",
                 "format": data.get("format", "pcm"),
                 "len": data.get("len", 0),
                 "timestamp": time.time(),
-            }))
+            })
 
-    def _on_mic_audio(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
-        data = payload if payload is not None else topic_or_payload
+    async def _on_mic_audio(self, topic: str, data: dict) -> None:
         if isinstance(data, dict):
             length = data.get("len", 0)
-            asyncio.create_task(self._broadcast_ws({
+            await self._broadcast_ws({
                 "type": "mic_level",
                 "len": length,
                 "timestamp": time.time(),
-            }))
+            })
 
-    def _on_sink_changed(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
-        data = payload if payload is not None else topic_or_payload
+    async def _on_sink_changed(self, topic: str, data: dict) -> None:
         if isinstance(data, dict):
-            asyncio.create_task(self._broadcast_ws({
+            await self._broadcast_ws({
                 "type": "device_changed",
                 "sink": data.get("sink"),
                 "source": data.get("source"),
-            }))
+            })
 
-    def _on_video_transport_active(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
-        data = payload if payload is not None else topic_or_payload
+    async def _on_video_transport_active(self, topic: str, data: dict) -> None:
         if isinstance(data, dict):
-            asyncio.create_task(self._broadcast_ws({
+            await self._broadcast_ws({
                 "type": "video_transport_active",
                 "transport_name": data.get("transport_name"),
-            }))
+            })
 
     # ------------------------------------------------------------------
     # REST Endpoints
