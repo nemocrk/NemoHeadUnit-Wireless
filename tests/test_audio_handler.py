@@ -6,7 +6,7 @@ from backend.modules.qt6_gui.media.audio_handler import QtAudioEngine, AudioPcmS
 
 class TestAudioHandler(unittest.TestCase):
     def test_audio_pcm_stream_io(self):
-        stream = AudioPcmStream()
+        stream = AudioPcmStream(prebuffer_ms=0)
         # Verify pure virtual methods implemented
         self.assertTrue(stream.isSequential())
         self.assertEqual(stream.writeData(b"123"), -1)
