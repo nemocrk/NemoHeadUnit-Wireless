@@ -207,11 +207,24 @@ def test_qaudiosink(device_name: str, freq: float, duration: float, push_mode: b
         # Timer to quit app after duration + 1 second
         QTimer.singleShot(int((duration + 1.0) * 1000), app.quit)
         app.exec()
+        sink.stop()
+        print("✔ QAudioSink test completed.")
     else:
-        time.sleep(duration + 0.5)
+        # Non-blocking async timer for existing Qt event loop; keep objects alive
+        test_qaudiosink._active_sink = sink
+        test_qaudiosink._active_stream = pull_stream if not push_mode else None
 
-    sink.stop()
-    print("✔ QAudioSink test completed.")
+        def _cleanup():
+            try:
+                sink.stop()
+            except Exception:
+                pass
+            test_qaudiosink._active_sink = None
+            test_qaudiosink._active_stream = None
+            print("✔ In-process QAudioSink test completed.")
+
+        QTimer.singleShot(int((duration + 0.5) * 1000), _cleanup)
+
     return True
 
 

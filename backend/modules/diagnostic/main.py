@@ -221,16 +221,24 @@ class DiagnosticModule(BaseBackendModule):
                 freq = float(params.get("freq", params.get("tone_hz", 440)))
                 duration_sec = float(params.get("duration_sec", params.get("duration_ms", 2000) / 1000.0))
 
+                import os
+                env = dict(os.environ)
                 cmd = [sys.executable, str(script_path), "--mode", "qaudiosink", "--freq", str(freq), "--duration", str(duration_sec)]
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    env=env,
                 )
                 stdout, stderr = await proc.communicate()
+                stdout_str = stdout.decode("utf-8", errors="ignore")
+                stderr_str = stderr.decode("utf-8", errors="ignore")
+                self.log.info(f"🔊 Subprocess Audio Test Output (returncode={proc.returncode}):\n{stdout_str}")
+                if stderr_str:
+                    self.log.warning(f"🔊 Subprocess Audio Test Stderr:\n{stderr_str}")
                 results["cmd"] = " ".join(cmd)
-                results["stdout"] = stdout.decode("utf-8", errors="ignore")
-                results["stderr"] = stderr.decode("utf-8", errors="ignore")
+                results["stdout"] = stdout_str
+                results["stderr"] = stderr_str
                 results["returncode"] = proc.returncode
                 if proc.returncode != 0:
                     results["status"] = "failed"
