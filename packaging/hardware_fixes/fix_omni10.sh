@@ -83,9 +83,19 @@ if [ -f "$GRUB_FILE" ]; then
         echo -n "  [hw-fix] Aggiornamento GRUB... "
         if command -v update-grub &>/dev/null; then
             update-grub >/dev/null 2>&1
-            echo -e "${GREEN}OK.${NC}"
+            echo -e "${GREEN}OK (update-grub).${NC}"
+        elif command -v grub-mkconfig &>/dev/null; then
+            local grub_cfg="/boot/grub/grub.cfg"
+            if [ -f "/boot/efi/EFI/arch/grub.cfg" ]; then
+                grub_cfg="/boot/efi/EFI/arch/grub.cfg"
+            fi
+            grub-mkconfig -o "$grub_cfg" >/dev/null 2>&1
+            echo -e "${GREEN}OK (grub-mkconfig -> $grub_cfg).${NC}"
+        elif command -v grub2-mkconfig &>/dev/null; then
+            grub2-mkconfig -o /boot/grub2/grub.cfg >/dev/null 2>&1
+            echo -e "${GREEN}OK (grub2-mkconfig).${NC}"
         else
-            echo -e "${YELLOW}WARNING: update-grub non trovato.${NC}"
+            echo -e "${YELLOW}WARNING: update-grub o grub-mkconfig non trovato.${NC}"
         fi
     else
         echo -e "${GREEN}già configurato.${NC}"
