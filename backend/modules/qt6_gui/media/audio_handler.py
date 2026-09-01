@@ -106,6 +106,9 @@ class AudioPcmStream(QIODevice):
         with self._lock:
             if self._buffer:
                 take = min(len(self._buffer), max_len)
+                take = (take // 4) * 4
+                if take == 0:
+                    return b""
                 chunk = bytes(self._buffer[:take])
                 del self._buffer[:take]
                 return chunk
@@ -150,7 +153,7 @@ class DynamicChannelAudioSink(QObject):
 
         self.aac_decoder = None
         self.resampler = None
-        self._is_aac: Optional[bool] = None
+        self._is_aac: bool = False
         self.frame_count = 0
         self.total_bytes_in = 0
         self.total_bytes_out = 0
@@ -195,7 +198,6 @@ class DynamicChannelAudioSink(QObject):
             output_device = find_audio_output_device(self.target_device)
             self.audio_sink = QAudioSink(output_device, fmt, self)
             self.audio_sink.setVolume(1.0)
-            self.audio_sink.setBufferSize(sample_rate * channel_count * 2 // 2)
 
             def _on_state_changed(state):
                 err = self.audio_sink.error() if self.audio_sink else "None"
