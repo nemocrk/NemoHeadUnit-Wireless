@@ -40,7 +40,7 @@ SERVICE_RECORD = """
     </sequence>
   </attribute>
   <attribute id="0x0100">
-    <text value="NemoHeadUnit AA"/>
+    <text value="Android Auto"/>
   </attribute>
 </record>
 """
@@ -59,6 +59,7 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         self._active_rfcomm_cb = None
         self._on_pin_requested_cb = None
         self._on_connection_cb: Optional[Callable[[str, bool], None]] = None
+        self._on_battery_cb: Optional[Callable[[str, int, int], None]] = None
         
         # State trackers for pairing and connection state
         self._dbus_reply_handler = None
@@ -76,19 +77,94 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         """Register a persistent global callback for device connection state changes."""
         self._on_connection_cb = on_conn_cb
 
+    def set_on_battery_callback(self, on_bat_cb: Callable[[str, int, int], None]) -> None:
+        """Register a callback for battery level (%) and signal strength (bars 0-5) updates."""
+        self._on_battery_cb = on_bat_cb
+
     def get_adapter_address(self) -> str:
         """Get the local BlueZ Bluetooth adapter MAC address."""
         return self._adapter_address
 
+    @staticmethod
+    def _rssi_to_bars(rssi: int) -> int:
+        if rssi >= -60:
+            return 5
+        elif rssi >= -70:
+            return 4
+        elif rssi >= -80:
+            return 3
+        elif rssi >= -90:
+            return 2
+        else:
+            return 1
+
+    def _check_device_telemetry(self, dev_path: str, mac: str) -> None:
+        if not self._on_battery_cb or not self._bus:
+            return
+        import dbus
+        try:
+            props_iface = dbus.Interface(self._bus.get_object("org.bluez", dev_path), "org.freedesktop.DBus.Properties")
+            battery_pct = -1
+            signal_bars = 4
+            operator_name = ""
+            is_roaming = False
+            try:
+                battery_pct = int(props_iface.Get("org.bluez.Battery1", "Percentage"))
+            except Exception:
+                pass
+            try:
+                rssi = int(props_iface.Get("org.bluez.Device1", "RSSI"))
+                signal_bars = self._rssi_to_bars(rssi)
+            except Exception:
+                pass
+
+            # Detect oFono NetworkRegistration if available on system
+            try:
+                modem_path = dev_path.replace("/org/bluez/", "/")
+                modem_obj = self._bus.get_object("org.ofono", modem_path)
+                net_reg = dbus.Interface(modem_obj, "org.ofono.NetworkRegistration")
+                net_props = net_reg.GetProperties()
+                operator_name = str(net_props.get("Name", ""))
+                is_roaming = (str(net_props.get("Status", "")).lower() == "roaming")
+                strength = int(net_props.get("Strength", -1))
+                if strength >= 0:
+                    signal_bars = max(0, min(5, int(strength / 20)))
+            except Exception:
+                pass
+
+            if battery_pct >= 0 or signal_bars > 0 or operator_name:
+                self._on_battery_cb(mac, battery_pct, signal_bars, operator_name, is_roaming)
+        except Exception:
+            pass
+
     def _on_dbus_properties_changed(self, interface: str, changed: dict, invalidated: list, path: str) -> None:
-        if interface == "org.bluez.Device1" and "Connected" in changed:
-            is_conn = bool(changed["Connected"])
-            mac = path.split("dev_")[-1].replace("_", ":").upper()
-            log.info(f"🔵 D-Bus Device1 connection state changed: {mac} connected={is_conn}")
-            if is_conn:
-                self._disconnected_override_addrs.discard(mac)
-            if self._on_connection_cb:
-                self._on_connection_cb(mac, is_conn)
+        mac = path.split("dev_")[-1].replace("_", ":").upper() if "dev_" in path else ""
+        if interface == "org.bluez.Device1":
+            if "Connected" in changed:
+                is_conn = bool(changed["Connected"])
+                log.info(f"🔵 D-Bus Device1 connection state changed: {mac} connected={is_conn}")
+                if is_conn:
+                    self._disconnected_override_addrs.discard(mac)
+                    self._check_device_telemetry(path, mac)
+                if self._on_connection_cb:
+                    self._on_connection_cb(mac, is_conn)
+            if "RSSI" in changed and self._on_battery_cb and mac:
+                rssi = int(changed["RSSI"])
+                bars = self._rssi_to_bars(rssi)
+                self._on_battery_cb(mac, -1, bars, "", False)
+        elif interface == "org.bluez.Battery1":
+            if "Percentage" in changed and self._on_battery_cb and mac:
+                pct = int(changed["Percentage"])
+                log.info(f"🔋 BlueZ Battery1 telemetry: {mac} battery={pct}%")
+                self._on_battery_cb(mac, pct, -1, "", False)
+        elif interface == "org.ofono.NetworkRegistration":
+            if self._on_battery_cb and mac:
+                op_name = str(changed.get("Name", ""))
+                roam = (str(changed.get("Status", "")).lower() == "roaming")
+                bars = -1
+                if "Strength" in changed:
+                    bars = max(0, min(5, int(int(changed["Strength"]) / 20)))
+                self._on_battery_cb(mac, -1, bars, op_name, roam)
 
     async def setup(self, adapter_name: str, discoverable: bool, discoverable_timeout: int) -> None:
         import dbus
@@ -98,8 +174,8 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             from gi.repository import GLib
             if self._glib_loop is None:
                 self._glib_loop = GLib.MainLoop()
-                threading.Thread(target=self._glib_loop.run, daemon=True, name="glib-main").start()
-                log.info("GLib D-Bus mainloop started successfully in background thread")
+                threading.Thread(target=self._glib_loop.run, daemon=True, name="glib-bluez").start()
+                log.info("GLib D-Bus mainloop started successfully with default context")
         except Exception as e:
             log.warning(f"GLib D-Bus mainloop setup failed: {e}")
 
@@ -160,17 +236,7 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
 
         log.info(f"Linux BlueZ Bluetooth Adapter setup alias: {adapter_name}")
 
-        # Register standard profiles (HFP/HSP)
-        try:
-            opts = dbus.Dictionary(
-                {"Channel": dbus.UInt16(HFP_HSP_CHANNEL), "AutoConnect": dbus.Boolean(True)},
-                signature="sv",
-            )
-            self._profile_mgr.RegisterProfile("/org/bluez/profile/hfp", HFP_UUID, opts)
-            self._profile_mgr.RegisterProfile("/org/bluez/profile/hsp", HSP_UUID, opts)
-        except Exception as e:
-            if "UUID already registered" not in str(e):
-                log.warning(f"Standard HFP/HSP registration error: {e}")
+        # Note: Native A2DP/HFP profiles and endpoints are managed by WirePlumber/PipeWire/PulseAudio.
 
         # Register Pairing Agent
         self._register_pairing_agent()
@@ -405,13 +471,34 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             if not path:
                 log.warning(f"Connect device failed: {address} not found")
                 return False, "Device not found"
+
+            props = dbus.Interface(self._bus.get_object("org.bluez", path), "org.freedesktop.DBus.Properties")
+            is_already_conn = bool(props.Get("org.bluez.Device1", "Connected"))
+            if is_already_conn:
+                log.info(f"Device {address} is already connected in BlueZ — skipping redundant Device1.Connect()")
+                return True, ""
+
             device = dbus.Interface(self._bus.get_object("org.bluez", path), "org.bluez.Device1")
 
             def _on_conn_success():
                 log.info(f"🎉 BlueZ connection to {address} established!")
 
             def _on_conn_error(err):
-                log.warning(f"BlueZ connection to {address} notice/error: {err}")
+                err_str = str(err)
+                log.info(f"BlueZ Device1.Connect() to {address} notice: {err}")
+                # Fallback: connect HFP/HSP Handsfree profile specifically if full monolithic Connect failed on A2DP
+                if "br-connection-unknown" in err_str or "Failed" in err_str or "Protocol not available" in err_str:
+                    try:
+                        HFP_AG_UUID = "0000111f-0000-1000-8000-00805f9b34fb"
+                        log.info(f"Attempting profile-specific connection (HFP Handsfree) for {address}...")
+                        device.ConnectProfile(
+                            HFP_AG_UUID,
+                            reply_handler=lambda: log.info(f"🎉 BlueZ HFP profile connection to {address} established!"),
+                            error_handler=lambda pe: log.debug(f"HFP profile connect notice for {address}: {pe}"),
+                            timeout=15,
+                        )
+                    except Exception as pe:
+                        log.debug(f"Fallback ConnectProfile notice for {address}: {pe}")
 
             device.Connect(
                 reply_handler=_on_conn_success,
@@ -491,11 +578,12 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         import dbus.service
 
         self._active_rfcomm_cb = on_connection_cb
+        parent_adapter = self
 
         class Profile(dbus.service.Object):
-            def __init__(self, conn, path, callback):
+            def __init__(self, conn, path, adapter):
                 super().__init__(conn, path)
-                self._cb = callback
+                self._adapter = adapter
 
             @dbus.service.method("org.bluez.Profile1", in_signature="", out_signature="")
             def Release(self):
@@ -509,7 +597,8 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
                 sock = socket.fromfd(raw_fd, family, socket.SOCK_STREAM, proto)
                 os.close(raw_fd)
 
-                if not getattr(self, "_initialized", True) or not self._cb:
+                cb = self._adapter._active_rfcomm_cb if self._adapter else None
+                if not getattr(self._adapter, "_initialized", True) or not cb:
                     try:
                         sock.close()
                     except Exception:
@@ -518,14 +607,14 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
 
                 device_mac = str(device).split("dev_")[-1].replace("_", ":").upper()
                 log.info(f"🔵 [BT Stage 1/5] 🎉 RFCOMM Profile Connection accepted from {device_mac}!")
-                self._cb(sock, device_mac)
+                cb(sock, device_mac)
 
         try:
-            self._profile = Profile(self._bus, PROFILE_PATH, self._active_rfcomm_cb)
+            self._profile = Profile(self._bus, PROFILE_PATH, parent_adapter)
             opts = dbus.Dictionary({
                 "Channel": dbus.UInt16(RFCOMM_CHANNEL),
                 "Role": dbus.String("server"),
-                "Name": dbus.String("NemoHeadUnit AA"),
+                "Name": dbus.String("Android Auto"),
                 "ServiceRecord": dbus.String(SERVICE_RECORD),
                 "RequireAuthentication": dbus.Boolean(False),
                 "RequireAuthorization": dbus.Boolean(False),

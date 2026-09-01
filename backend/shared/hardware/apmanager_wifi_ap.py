@@ -43,9 +43,10 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
 
             # Start GLib Loop for receiving DBus signals (APStarted, APStopped, etc.)
             from gi.repository import GLib
-            self._glib_loop = GLib.MainLoop()
-            self._glib_thread = threading.Thread(target=self._glib_loop.run, daemon=True, name="apmanager-glib")
-            self._glib_thread.start()
+            if self._glib_loop is None:
+                self._glib_loop = GLib.MainLoop()
+                self._glib_thread = threading.Thread(target=self._glib_loop.run, daemon=True, name="apmanager-glib")
+                self._glib_thread.start()
 
             # Subscribe to signals
             self._bus.add_signal_receiver(
@@ -84,7 +85,16 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
             "gateway_ip": str(config_dict.get("gateway_ip", "10.0.0.1")),
             "security_mode": int(config_dict.get("security_mode", 8)),
             "ap_type": int(config_dict.get("ap_type", 1)),
+            "mode": str(config_dict.get("mode", "ap")),
         }
+        # If key was omitted from signal, retrieve via Status()
+        if not self._started_credentials.get("key"):
+            try:
+                _, creds = self._fetch_running_status({})
+                if creds.get("key"):
+                    self._started_credentials["key"] = creds["key"]
+            except Exception:
+                pass
         # Run thread-safe event setting in loop
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._ready_event.set)
@@ -105,7 +115,7 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
         log.info(f"📶 [WiFi Stage 2/5] Initiating Linux WiFi AP launch via APManager D-Bus (SSID='{ssid}'). Config: {config}")
         dbus_config = dbus.Dictionary(
             {
-                k: dbus.String(str(v)) if not isinstance(v, int) else dbus.Int32(v)
+                k: dbus.Boolean(v) if isinstance(v, bool) else (dbus.Int32(v) if isinstance(v, int) else dbus.String(str(v)))
                 for k, v in config.items()
             },
             signature="sv",
@@ -151,7 +161,8 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
                 "interface": str(config.get("interface", "wlan0")),
                 "gateway_ip": str(gateway_ip),
                 "security_mode": 8,
-                "ap_type": 1,
+                "ap_type": 2 if ("join" in str(state) or not str(key).startswith("gen_")) else 1,
+                "mode": "join" if ("join" in str(state)) else "ap",
             }
             if is_active or ssid:
                 self._active = True
