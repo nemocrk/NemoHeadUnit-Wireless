@@ -129,60 +129,37 @@ def register_diagnostic_routes(media_module) -> None:
         channel_id = int(data.get("channel_id", 4))  # 4 = MEDIA Audio channel
 
         if fmt == "pcm":
-            chunk_duration_ms = 40
-            chunk_samples = int(rate * (chunk_duration_ms / 1000.0))
-            total_samples = int(rate * (duration_ms / 1000.0))
-            max_amp = int(32767 * 0.75)  # 75% volume for clear audible playback
-            total_bytes_sent = 0
+            pcm_bytes = _generate_pcm_sine(freq, duration_ms, rate, channels, amplitude=0.75)
 
-            sample_idx = 0
-            while sample_idx < total_samples:
-                cur_chunk_samples = min(chunk_samples, total_samples - sample_idx)
-                buf = bytearray()
-                for i in range(cur_chunk_samples):
-                    t = float(sample_idx + i) / float(rate)
-                    val = int(max_amp * math.sin(2.0 * math.pi * freq * t))
-                    val = max(-32768, min(32767, val))
-                    sample_bytes = struct.pack("<h", val)
-                    for _ in range(channels):
-                        buf.extend(sample_bytes)
-                sample_idx += cur_chunk_samples
+            # Write directly to downstream audio SHM if available
+            offset = -1
+            if hasattr(media_module, "shm") and media_module.shm and hasattr(media_module.shm, "downstream"):
+                try:
+                    offset = media_module.shm.downstream.write_frame(channel_id, 0, pcm_bytes)
+                except Exception as exc:
+                    media_module.log.warning(f"Diagnostic SHM audio write notice: {exc}")
 
-                pcm_chunk = bytes(buf)
-                total_bytes_sent += len(pcm_chunk)
-
-                # Write directly to downstream audio SHM if available
-                offset = -1
-                if hasattr(media_module, "shm") and media_module.shm and hasattr(media_module.shm, "downstream"):
-                    try:
-                        offset = media_module.shm.downstream.write_frame(channel_id, 0, pcm_chunk)
-                    except Exception as exc:
-                        media_module.log.warning(f"Diagnostic SHM audio write notice: {exc}")
-
-                # Notify GUI and bus consumers
-                media_module.publish("media.audio.frame_shm", {
-                    "channel_id": channel_id,
-                    "shm_offset": offset,
-                    "len": len(pcm_chunk),
-                    "sample_rate": rate,
-                    "channels": channels,
-                    "format": "pcm",
-                    "synthetic": True,
-                })
-                media_module.publish("media.audio.frame", {
-                    "channel_id": channel_id,
-                    "len": len(pcm_chunk),
-                    "format": "pcm",
-                    "synthetic": True,
-                })
-
-                if sample_idx < total_samples:
-                    await asyncio.sleep(chunk_duration_ms / 1000.0 * 0.95)
+            # Notify GUI and bus consumers
+            media_module.publish("media.audio.frame_shm", {
+                "channel_id": channel_id,
+                "shm_offset": offset,
+                "len": len(pcm_bytes),
+                "sample_rate": rate,
+                "channels": channels,
+                "format": "pcm",
+                "synthetic": True,
+            })
+            media_module.publish("media.audio.frame", {
+                "channel_id": channel_id,
+                "len": len(pcm_bytes),
+                "format": "pcm",
+                "synthetic": True,
+            })
 
             return web.json_response({
                 "status": "ok",
                 "format": "pcm",
-                "bytes_generated": total_bytes_sent,
+                "bytes_generated": len(pcm_bytes),
                 "duration_ms": duration_ms,
                 "channel_id": channel_id,
             })

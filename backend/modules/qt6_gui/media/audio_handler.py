@@ -272,7 +272,7 @@ class DynamicChannelAudioSink(QObject):
         if not decoded_pcm:
             return
 
-        max_bytes = self.sample_rate * self.channel_count * 2 * 3 // 2
+        max_bytes = max(self.sample_rate * self.channel_count * 2 * 3, len(decoded_pcm) * 2)
         self.pcm_stream.write_pcm(bytes(decoded_pcm), max_buffer_bytes=max_bytes)
         self.total_bytes_out += len(decoded_pcm)
         self._ensure_started()
