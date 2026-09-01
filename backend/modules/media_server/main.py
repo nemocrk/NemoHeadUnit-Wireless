@@ -42,9 +42,11 @@ try:
         TransportUnavailableError,
     )
     from modules.media_server.transports.base import BaseVideoTransport
+    from modules.media_server.diagnostic_routes import register_diagnostic_routes
 except ImportError:
     from transports import get_transport_class, get_available_modes, TransportUnavailableError
     from transports.base import BaseVideoTransport
+    from diagnostic_routes import register_diagnostic_routes
 
 
 # Fallback chain for auto-negotiation when a transport fails
@@ -81,14 +83,21 @@ class MediaServerModule(BaseBackendModule):
         self.audio_adapter = get_audio_adapter()
         self.shm = BidirectionalMediaSHM(create=False)
         self.ws_clients: set = set()
+        self._status_changed_evt = asyncio.Event()
 
     async def _handle_volume(self, request):
         from aiohttp import web
         if request.method == "POST":
-            data = await request.json()
-            action = data.get("action")
-            step = data.get("step", 5)
-            val = data.get("volume")
+            data = {}
+            try:
+                if request.can_read_body:
+                    data = await request.json()
+            except Exception:
+                data = {}
+
+            action = data.get("action") or request.query.get("action")
+            step = int(data.get("step") or request.query.get("step") or 5)
+            val = data.get("volume") or request.query.get("volume")
 
             if action == "up":
                 res = await self.audio_adapter.volume_up(step)
@@ -163,6 +172,38 @@ class MediaServerModule(BaseBackendModule):
                 self.log.warning(f"_handle_stream_status notice: {exc}")
         return response
 
+    async def _handle_audio_devices(self, request: web.Request) -> web.Response:
+        """REST endpoint GET/POST /api/media/audio_devices to list and select audio sinks/sources."""
+        if request.method == "POST":
+            data = {}
+            try:
+                if request.can_read_body:
+                    data = await request.json()
+            except Exception:
+                pass
+            sink = data.get("sink") or request.query.get("sink")
+            source = data.get("source") or request.query.get("source")
+            if sink is not None:
+                await self.audio_adapter.set_active_sink(sink)
+            if source is not None:
+                await self.audio_adapter.set_active_source(source)
+            self.publish("media.audio.sink_changed", {
+                "sink": sink or self.config.get("audio_output_sink", "default"),
+                "source": source or self.config.get("audio_input_source", "default"),
+            })
+
+        sinks = await self.audio_adapter.get_available_sinks()
+        sources = await self.audio_adapter.get_available_sources()
+        vol_info = await self.audio_adapter.get_volume()
+        return web.json_response({
+            "sinks": sinks,
+            "sources": sources,
+            "active_sink": self.config.get("audio_output_sink", "default"),
+            "active_source": self.config.get("audio_input_source", "default"),
+            "volume": vol_info.get("volume", 80),
+            "muted": vol_info.get("muted", False),
+        })
+
     # ------------------------------------------------------------------
     # Config Schema
     # ------------------------------------------------------------------
@@ -172,6 +213,8 @@ class MediaServerModule(BaseBackendModule):
             "transport_mode": "auto",
             "jpeg_quality": 75,
             "video_scale": "",
+            "audio_output_sink": "default",
+            "audio_input_source": "default",
         }
 
     def get_schema(self) -> dict[str, Any]:
@@ -182,10 +225,12 @@ class MediaServerModule(BaseBackendModule):
             ),
             "jpeg_quality": field_int(default=75, min=50, max=95),
             "video_scale": field_string(default=""),
+            "audio_output_sink": field_string(default="default"),
+            "audio_input_source": field_string(default="default"),
         }
 
     def on_config_updated(self, new_config: dict[str, Any]) -> None:
-        """Hot-swap transport mode when config changes at runtime."""
+        """Hot-swap transport mode and audio sinks when config changes at runtime."""
         configured_mode = new_config.get("transport_mode", "auto")
         if configured_mode != "auto":
             # Thread-safe schedule back to main loop without asyncio.get_event_loop()
@@ -194,9 +239,25 @@ class MediaServerModule(BaseBackendModule):
                     self._switch_transport(new_config.get("transport_mode")), 
                     self.loop
                 )
-            self.log.info(f"VideoDecoder: Config updated — transport_mode={configured_mode}, "
-                          f"jpeg_quality={new_config.get('jpeg_quality', 75)}, "
-                          f"video_scale='{new_config.get('video_scale', '')}'")
+
+        sink = new_config.get("audio_output_sink")
+        source = new_config.get("audio_input_source")
+        if (sink is not None or source is not None) and hasattr(self, 'loop') and self.loop:
+            async def _apply_audio():
+                if sink is not None:
+                    await self.audio_adapter.set_active_sink(sink)
+                if source is not None:
+                    await self.audio_adapter.set_active_source(source)
+                self.publish("media.audio.sink_changed", {
+                    "sink": sink or "default",
+                    "source": source or "default",
+                })
+            asyncio.run_coroutine_threadsafe(_apply_audio(), self.loop)
+
+        self.log.info(f"MediaServer: Config updated — transport_mode={configured_mode}, "
+                      f"sink='{sink}', source='{source}', "
+                      f"jpeg_quality={new_config.get('jpeg_quality', 75)}, "
+                      f"video_scale='{new_config.get('video_scale', '')}'")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -204,14 +265,26 @@ class MediaServerModule(BaseBackendModule):
 
     async def setup(self) -> None:
         """Subscribe to ZMQ topics and initialize the default transport."""
-        # REST endpoints for volume and status controls
+        # REST endpoints for volume, devices, and status controls
         self.add_http_route("GET", "/volume", self._handle_volume)
         self.add_http_route("POST", "/volume", self._handle_volume)
+        self.add_http_route("GET", "/audio_devices", self._handle_audio_devices)
+        self.add_http_route("POST", "/audio_devices", self._handle_audio_devices)
         self.add_http_route("GET", "/status", self.handle_get_status)
         # Per-module SSE status stream endpoint
         self.add_http_route("GET", "/stream_status", self._handle_stream_status)
         # Unified Direct WebSocket Stream Endpoint for Frontend WebCodecsPlayer
         self.add_ws_route("/stream", self.handle_ws_stream)
+        # Register diagnostic subsystem endpoints
+        register_diagnostic_routes(self)
+
+        # Initialize active audio sink/source from config
+        initial_sink = self.config.get("audio_output_sink", "default")
+        initial_source = self.config.get("audio_input_source", "default")
+        if initial_sink and initial_sink != "default":
+            await self.audio_adapter.set_active_sink(initial_sink)
+        if initial_source and initial_source != "default":
+            await self.audio_adapter.set_active_source(initial_source)
 
         self.subscribe("media.video.raw_nal_shm", self._on_raw_nal_shm)
         self.subscribe("media.audio.frame", self._on_audio_frame)
