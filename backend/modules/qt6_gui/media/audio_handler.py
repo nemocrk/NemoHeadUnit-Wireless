@@ -175,7 +175,14 @@ class DynamicChannelAudioSink(QObject):
         if self.audio_sink and self.sample_rate == sample_rate and self.channel_count == channel_count:
             return
 
-        self._close_sink()
+        if self.audio_sink:
+            try:
+                self.audio_sink.stop()
+            except Exception:
+                pass
+            self.audio_sink = None
+            self._is_started = False
+
         self.sample_rate = sample_rate
         self.channel_count = channel_count
 
@@ -189,6 +196,13 @@ class DynamicChannelAudioSink(QObject):
             self.audio_sink = QAudioSink(output_device, fmt, self)
             self.audio_sink.setVolume(1.0)
             self.audio_sink.setBufferSize(sample_rate * channel_count * 2 // 2)
+
+            def _on_state_changed(state):
+                err = self.audio_sink.error() if self.audio_sink else "None"
+                logger.info(f"🔊 [Audio Ch{self.channel_id}] QAudioSink state: {state} (error={err})")
+
+            self.audio_sink.stateChanged.connect(_on_state_changed)
+
             dev_desc = output_device.description() if output_device else "Default"
             logger.info(f"🔊 Audio Channel {self.channel_id}: QAudioSink Pull-Mode configured for '{dev_desc}' ({sample_rate}Hz, {channel_count}ch, Int16)")
         except Exception as exc:
