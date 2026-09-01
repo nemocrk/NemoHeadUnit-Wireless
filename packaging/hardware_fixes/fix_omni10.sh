@@ -62,11 +62,16 @@ GRUB_FILE="/etc/default/grub"
 echo -n "  [hw-fix] GRUB configuration... "
 
 if [ -f "$GRUB_FILE" ]; then
-    # Add intel_idle.max_cstate=1 if missing
+    # Add intel_idle.max_cstate=1 and i915.enable_rc6=0 if missing
     if ! grep -q "intel_idle.max_cstate=1" "$GRUB_FILE"; then
-        # Accommodates both double (") and single (') quotes commonly found in GRUB files
         sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 intel_idle.max_cstate=1"/' "$GRUB_FILE"
         sed -i "s/^\(GRUB_CMDLINE_LINUX_DEFAULT='[^']*\)'/\1 intel_idle.max_cstate=1'/" "$GRUB_FILE"
+        GRUB_CHANGED=1
+    fi
+
+    if ! grep -q "i915.enable_rc6=0" "$GRUB_FILE"; then
+        sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 i915.enable_rc6=0"/' "$GRUB_FILE"
+        sed -i "s/^\(GRUB_CMDLINE_LINUX_DEFAULT='[^']*\)'/\1 i915.enable_rc6=0'/" "$GRUB_FILE"
         GRUB_CHANGED=1
     fi
 
