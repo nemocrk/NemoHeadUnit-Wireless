@@ -82,8 +82,10 @@ class DiagnosticsDrawerWidget(QWidget):
         self.btn_pcm_1000 = QPushButton("▶ PCM Tone (1kHz)", self)
         self.btn_aac_chime = QPushButton("▶ AAC Chime", self)
         self.btn_mic_test = QPushButton("🎤 Mic Level Test", self)
+        self.btn_cli_proc = QPushButton("⚙️ Subprocess Tone", self)
+        self.btn_in_proc = QPushButton("⚡ In-Process Tone", self)
 
-        for btn in (self.btn_pcm_440, self.btn_pcm_1000, self.btn_aac_chime, self.btn_mic_test):
+        for btn in (self.btn_pcm_440, self.btn_pcm_1000, self.btn_aac_chime, self.btn_mic_test, self.btn_cli_proc, self.btn_in_proc):
             btn.setStyleSheet("""
                 QPushButton {
                     background-color: #21262d;
@@ -105,11 +107,15 @@ class DiagnosticsDrawerWidget(QWidget):
         self.btn_pcm_1000.clicked.connect(lambda: self._run_test("audio_pcm", {"tone_hz": 1000, "duration_ms": 1500}))
         self.btn_aac_chime.clicked.connect(lambda: self._run_test("audio_aac", {"duration_ms": 1500}))
         self.btn_mic_test.clicked.connect(lambda: self._run_test("audio_mic", {"duration_ms": 3000}))
+        self.btn_cli_proc.clicked.connect(lambda: self._run_test("audio_standalone_proc", {"freq": 440, "duration_sec": 2.0}))
+        self.btn_in_proc.clicked.connect(lambda: self._run_test("audio_in_process", {"freq": 440, "duration_sec": 2.0, "push": False}))
 
         audio_btn_grid.addWidget(self.btn_pcm_440, 0, 0)
         audio_btn_grid.addWidget(self.btn_pcm_1000, 0, 1)
         audio_btn_grid.addWidget(self.btn_aac_chime, 1, 0)
         audio_btn_grid.addWidget(self.btn_mic_test, 1, 1)
+        audio_btn_grid.addWidget(self.btn_cli_proc, 2, 0)
+        audio_btn_grid.addWidget(self.btn_in_proc, 2, 1)
         audio_layout.addLayout(audio_btn_grid)
 
         # VU / Mic Meter

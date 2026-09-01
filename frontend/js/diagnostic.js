@@ -22,6 +22,8 @@ export class DiagnosticWidget {
                         <button class="diag-btn" id="btn-diag-pcm1000">▶ PCM Tone (1kHz)</button>
                         <button class="diag-btn" id="btn-diag-aac">▶ AAC Chime</button>
                         <button class="diag-btn" id="btn-diag-mic">🎤 Mic Level Test</button>
+                        <button class="diag-btn" id="btn-diag-cli-proc">⚙️ Subprocess Tone (Pull)</button>
+                        <button class="diag-btn" id="btn-diag-in-proc">⚡ In-Process Tone (Pull)</button>
                     </div>
 
                     <div class="diag-vu-container">
@@ -93,6 +95,12 @@ export class DiagnosticWidget {
         });
         document.getElementById('btn-diag-mic')?.addEventListener('click', () => {
             this.runTest('audio_mic', { duration_ms: 3000 });
+        });
+        document.getElementById('btn-diag-cli-proc')?.addEventListener('click', () => {
+            this.runTest('audio_standalone_proc', { freq: 440, duration_sec: 2.0 });
+        });
+        document.getElementById('btn-diag-in-proc')?.addEventListener('click', () => {
+            this.runTest('audio_in_process', { freq: 440, duration_sec: 2.0, push: false });
         });
         document.getElementById('btn-diag-apply-sink')?.addEventListener('click', () => {
             const sink = document.getElementById('diag-sink-select')?.value;

@@ -210,6 +210,56 @@ class DiagnosticModule(BaseBackendModule):
                 )
                 results["media_server_response"] = res
 
+            elif test_type == "audio_standalone_proc":
+                import pathlib
+                script_path = pathlib.Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "test_audio_cli.py"
+                if not script_path.exists():
+                    script_path = pathlib.Path(__file__).resolve().parent.parent.parent / "scripts" / "test_audio_cli.py"
+                if not script_path.exists():
+                    script_path = pathlib.Path("/opt/nemo-headunit/scripts/test_audio_cli.py")
+
+                freq = float(params.get("freq", params.get("tone_hz", 440)))
+                duration_sec = float(params.get("duration_sec", params.get("duration_ms", 2000) / 1000.0))
+
+                cmd = [sys.executable, str(script_path), "--mode", "qaudiosink", "--freq", str(freq), "--duration", str(duration_sec)]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+                results["cmd"] = " ".join(cmd)
+                results["stdout"] = stdout.decode("utf-8", errors="ignore")
+                results["stderr"] = stderr.decode("utf-8", errors="ignore")
+                results["returncode"] = proc.returncode
+                if proc.returncode != 0:
+                    results["status"] = "failed"
+                    results["error"] = f"Process exited with {proc.returncode}"
+
+            elif test_type == "audio_in_process":
+                freq = float(params.get("freq", params.get("tone_hz", 440)))
+                duration_sec = float(params.get("duration_sec", params.get("duration_ms", 2000) / 1000.0))
+                push_mode = bool(params.get("push", False))
+
+                import pathlib
+                scripts_dir = pathlib.Path(__file__).resolve().parent.parent.parent.parent / "scripts"
+                if not scripts_dir.exists():
+                    scripts_dir = pathlib.Path(__file__).resolve().parent.parent.parent / "scripts"
+                if not scripts_dir.exists():
+                    scripts_dir = pathlib.Path("/opt/nemo-headunit/scripts")
+                if str(scripts_dir) not in sys.path:
+                    sys.path.insert(0, str(scripts_dir))
+
+                import test_audio_cli
+                loop = asyncio.get_event_loop()
+                test_ok = await loop.run_in_executor(
+                    None,
+                    lambda: test_audio_cli.test_qaudiosink("", freq, duration_sec, push_mode)
+                )
+                results["in_process_success"] = test_ok
+                if not test_ok:
+                    results["status"] = "failed"
+
             elif test_type == "audio_device_select":
                 sink = params.get("sink")
                 source = params.get("source")
