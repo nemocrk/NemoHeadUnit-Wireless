@@ -62,6 +62,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
     "car_serial": "20250101",
     "driver_position": "LEFT",
     "can_play_native_media_during_vr": True,
+    "session_configuration": 0x07,  # 0x01 (hide clock) | 0x02 (phone signal) | 0x04 (battery level)
     "channels": [
         # ch 1 — Input (touch)
         {
@@ -94,7 +95,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
                         "video_resolution": "VIDEO_1280x720",
                         "video_fps":        "_30",
                         "margin_width":     0,
-                        "margin_height":    0,
+                        "margin_height":    64,
                         "dpi":              140,
                     },
                 ],
@@ -104,7 +105,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
         {
             "channel_id": 4,
             "av_channel": {
-                "codec": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS",
+                "codec": "MEDIA_CODEC_AUDIO_PCM",
                 "audio_type":  "MEDIA",
                 "audio_configs": [
                     {"sample_rate": 48000, "bit_depth": 16, "channel_count": 2},
@@ -146,7 +147,7 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
             "channel_id": 8,
             "navigation_channel": {
                 "minimum_interval_ms": 1000,
-                "type": "INSTRUMENT_CLUSTER",
+                "type": 1,
                 "image_options": {
                     "width": 128,
                     "height": 128,
@@ -158,6 +159,16 @@ SEMANTIC_DEFAULTS: dict[str, Any] = {
         {
             "channel_id": 9,
             "media_info_channel": {},
+        },
+        # ch 10 — Phone Status & In-Call State
+        {
+            "channel_id": 10,
+            "phone_status_channel": {},
+        },
+        # ch 11 — Notifications & Heads-Up Alerts
+        {
+            "channel_id": 11,
+            "notification_channel": {},
         },
     ],
 }
@@ -180,6 +191,10 @@ def classify_channel_descriptor(descriptor_dict: dict) -> ChannelType:
         return ChannelType.NAVIGATION
     elif "media_info_channel" in descriptor_dict:
         return ChannelType.MEDIA_PLAYBACK
+    elif "phone_status_channel" in descriptor_dict:
+        return ChannelType.PHONE_STATUS
+    elif "notification_channel" in descriptor_dict or "generic_notification_channel" in descriptor_dict:
+        return ChannelType.NOTIFICATION
     elif "av_input_channel" in descriptor_dict:
         return ChannelType.AUDIO_MIC
     elif "av_channel" in descriptor_dict:

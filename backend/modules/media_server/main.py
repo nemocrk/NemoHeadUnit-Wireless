@@ -474,7 +474,7 @@ class MediaServerModule(BaseBackendModule):
                     "video_transport": self._active_transport_name,
                     "streams": {
                         "3": {"media_type": "VIDEO", "codec": "avc1.42E01E", "codec_enum": 3, "codec_name": "MEDIA_CODEC_VIDEO_H264_BP", "width": 1280, "height": 720, "fps": 30}, 
-                        "4": {"media_type": "AUDIO", "codec": "mp4a.40.2", "audio_format": "aac_adts", "description": [17, 144], "codec_enum": 4, "codec_name": "MEDIA_CODEC_AUDIO_AAC_LC_ADTS", "sampleRate": 48000, "channels": 2, "bitDepth": 16, "audioType": "MEDIA"}, 
+                        "4": {"media_type": "AUDIO", "codec": "PCM", "audio_format": "pcm", "codec_enum": 1, "codec_name": "MEDIA_CODEC_AUDIO_PCM", "sampleRate": 48000, "channels": 2, "bitDepth": 16, "audioType": "MEDIA"}, 
                         "5": {"media_type": "AUDIO", "codec": "PCM", "audio_format": "pcm", "codec_enum": 1, "codec_name": "MEDIA_CODEC_AUDIO_PCM", "sampleRate": 16000, "channels": 1, "bitDepth": 16, "audioType": "SPEECH"}, 
                         "6": {"media_type": "AUDIO", "codec": "PCM", "audio_format": "pcm", "codec_enum": 1, "codec_name": "MEDIA_CODEC_AUDIO_PCM", "sampleRate": 16000, "channels": 1, "bitDepth": 16, "audioType": "SYSTEM"}
                     }
