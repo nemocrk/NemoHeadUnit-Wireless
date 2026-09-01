@@ -4,6 +4,7 @@
 
 import { SettingsWidgets } from './settings_widgets.js';
 import { BluetoothWidget } from './bluetooth_widget.js';
+import { DiagnosticWidget } from './diagnostic.js';
 
 export class UIControls {
     constructor() {
@@ -33,25 +34,30 @@ export class UIControls {
         this.btnBluetooth = document.getElementById('fab-bluetooth');
         this.btnWifi = document.getElementById('fab-wifi');
         this.btnLogs = document.getElementById('fab-logs');
+        this.btnDiagnostic = document.getElementById('fab-diagnostic');
         this.btnFullscreen = document.getElementById('fab-fullscreen');
 
         // Drawers
         this.drawerSettings = document.getElementById('settings-drawer');
         this.drawerBluetooth = document.getElementById('bluetooth-drawer');
         this.drawerLogs = document.getElementById('logs-drawer');
+        this.drawerDiagnostic = document.getElementById('diagnostics-drawer');
         this.btnCloseSettings = document.getElementById('close-settings');
         this.btnCloseBluetooth = document.getElementById('close-bluetooth');
         this.btnCloseLogs = document.getElementById('close-logs');
+        this.btnCloseDiagnostic = document.getElementById('close-diagnostics');
 
         // Screen & State
         this.disconnectedScreen = document.getElementById('disconnected-screen');
         this.logConsole = document.getElementById('log-console');
         this.bluetoothWidget = null;
+        this.diagnosticWidget = new DiagnosticWidget('diagnostics-drawer-content');
         this.isVideoFocused = true;
         this.isPlaying = false;
 
         this.initEventListeners();
         this.initModuleStreams();
+        this.initMediaBrowser();
     }
 
     showToast(message, type = 'info', durationMs = 3500) {
@@ -129,9 +135,24 @@ export class UIControls {
         let hasNav = false;
         let hasMedia = false;
 
+        // Cache persistent state
+        if (media !== undefined && media !== null && Object.keys(media).length > 0) {
+            this._lastMedia = Object.assign(this._lastMedia || {}, media);
+        } else if (media === null) {
+            this._lastMedia = null;
+        }
+        const effectiveMedia = this._lastMedia;
+
+        if (nav !== undefined && nav !== null && (nav.road || nav.distance_meters >= 0)) {
+            this._lastNav = Object.assign(this._lastNav || {}, nav);
+        } else if (nav === null || (nav && nav.distance_meters === -1 && !nav.road)) {
+            this._lastNav = null;
+        }
+        const effectiveNav = this._lastNav;
+
         // 1. Update Navigation Card
         if (navCard) {
-            const hasActiveNav = nav && (nav.road || (nav.distance_meters !== undefined && nav.distance_meters >= 0));
+            const hasActiveNav = effectiveNav && (effectiveNav.road || (effectiveNav.distance_meters !== undefined && effectiveNav.distance_meters >= 0));
             if (hasActiveNav) {
                 hasNav = true;
                 navCard.classList.remove('hidden');
@@ -142,22 +163,22 @@ export class UIControls {
                 const iconEl = document.getElementById('dash-nav-icon');
 
                 if (distEl) {
-                    if (nav.distance_meters !== undefined && nav.distance_meters >= 0) {
-                        distEl.textContent = nav.distance_meters >= 1000
-                            ? `${(nav.distance_meters / 1000).toFixed(1)} km`
-                            : `${Math.round(nav.distance_meters)} m`;
+                    if (effectiveNav.distance_meters !== undefined && effectiveNav.distance_meters >= 0) {
+                        distEl.textContent = effectiveNav.distance_meters >= 1000
+                            ? `${(effectiveNav.distance_meters / 1000).toFixed(1)} km`
+                            : `${Math.round(effectiveNav.distance_meters)} m`;
                     } else {
                         distEl.textContent = '—';
                     }
                 }
 
                 if (roadEl) {
-                    roadEl.textContent = nav.road || 'Follow Route';
+                    roadEl.textContent = effectiveNav.road || 'Follow Route';
                 }
 
                 if (etaEl) {
-                    if (nav.eta_seconds && nav.eta_seconds > 0) {
-                        const mins = Math.floor(nav.eta_seconds / 60);
+                    if (effectiveNav.eta_seconds && effectiveNav.eta_seconds > 0) {
+                        const mins = Math.floor(effectiveNav.eta_seconds / 60);
                         const hrs = Math.floor(mins / 60);
                         etaEl.textContent = hrs > 0 ? `ETA: ${hrs}h ${mins % 60}m` : `ETA: ${mins} min`;
                     } else {
@@ -167,11 +188,11 @@ export class UIControls {
 
                 // Render Icon / Turn Direction
                 if (iconEl) {
-                    if (nav.turn_icon) {
-                        iconEl.innerHTML = `<img src="${nav.turn_icon}" style="max-width: 64px; max-height: 64px; object-fit: contain;">`;
+                    if (effectiveNav.turn_icon) {
+                        iconEl.innerHTML = `<img src="${effectiveNav.turn_icon}" style="max-width: 64px; max-height: 64px; object-fit: contain;">`;
                     } else {
                         // Vector Arrow default
-                        const side = nav.turn_side || 0;
+                        const side = effectiveNav.turn_side || 0;
                         if (side === 1) { // Left
                             iconEl.innerHTML = '<svg viewBox="0 0 24 24" width="48" height="48" fill="#00e676"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>';
                         } else if (side === 2) { // Right
@@ -188,7 +209,7 @@ export class UIControls {
 
         // 2. Update Media Card
         if (mediaCard) {
-            const hasActiveMedia = media && (media.title || media.artist);
+            const hasActiveMedia = effectiveMedia && (effectiveMedia.title || effectiveMedia.artist);
             if (hasActiveMedia) {
                 hasMedia = true;
                 mediaCard.classList.remove('hidden');
@@ -199,19 +220,19 @@ export class UIControls {
                 const badgeEl = document.getElementById('dash-media-badge');
                 const artEl = document.getElementById('dash-media-art');
 
-                if (titleEl) titleEl.textContent = media.title || 'Unknown Track';
-                if (artistEl) artistEl.textContent = media.artist || '—';
-                if (albumEl) albumEl.textContent = media.album || '';
+                if (titleEl) titleEl.textContent = effectiveMedia.title || 'Unknown Track';
+                if (artistEl) artistEl.textContent = effectiveMedia.artist || '—';
+                if (albumEl) albumEl.textContent = effectiveMedia.album || '';
 
                 if (badgeEl) {
-                    const st = media.playback_state;
+                    const st = effectiveMedia.playback_state;
                     badgeEl.textContent = st === 2 ? 'NOW PLAYING' : (st === 3 ? 'PAUSED' : 'MEDIA');
                     badgeEl.style.color = st === 2 ? '#3fb950' : (st === 3 ? '#d29922' : '#58a6ff');
                 }
 
                 if (artEl) {
-                    if (media.album_art) {
-                        artEl.style.backgroundImage = `url("${media.album_art}")`;
+                    if (effectiveMedia.album_art) {
+                        artEl.style.backgroundImage = `url("${effectiveMedia.album_art}")`;
                         artEl.innerHTML = '';
                     } else {
                         artEl.style.backgroundImage = 'none';
@@ -272,6 +293,85 @@ export class UIControls {
             }
         } catch (e) {
             console.warn('Failed to send media key:', e);
+        }
+    }
+
+    initMediaBrowser() {
+        const btnToggle = document.getElementById('btn-web-toggle-browse');
+        const viewNowPlaying = document.getElementById('media-view-nowplaying');
+        const viewBrowser = document.getElementById('media-view-browser');
+        const btnBack = document.getElementById('btn-browser-back');
+        const pathDisplay = document.getElementById('browser-path-display');
+        const listContainer = document.getElementById('browser-items-list');
+
+        let currentPath = '/';
+        const pathHistory = [];
+
+        const fetchPath = async (path) => {
+            currentPath = path;
+            if (pathDisplay) pathDisplay.textContent = path;
+            try {
+                const res = await fetch(`/api/channels/media/browse?path=${encodeURIComponent(path)}`);
+                const data = await res.json();
+                renderItems(data.items || []);
+            } catch (err) {
+                console.error('Failed to fetch media browse:', err);
+            }
+        };
+
+        const renderItems = (items) => {
+            if (!listContainer) return;
+            listContainer.innerHTML = '';
+            items.forEach(item => {
+                const row = document.createElement('div');
+                row.className = 'browser-item-row';
+                const isFolder = item.type === 'folder';
+                row.innerHTML = `
+                    <span class="item-icon">${isFolder ? '📁' : '▶'}</span>
+                    <div class="item-text">
+                        <div class="item-title">${item.title}</div>
+                        ${item.subtitle ? `<div class="item-sub">${item.subtitle}</div>` : ''}
+                    </div>
+                `;
+                row.addEventListener('click', async () => {
+                    if (isFolder) {
+                        pathHistory.push(currentPath);
+                        await fetchPath(item.id);
+                    } else {
+                        await fetch('/api/channels/media/play_item', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ path: item.id }),
+                        });
+                    }
+                });
+                listContainer.appendChild(row);
+            });
+        };
+
+        if (btnToggle) {
+            btnToggle.addEventListener('click', () => {
+                const isBrowser = viewBrowser && !viewBrowser.classList.contains('hidden');
+                if (isBrowser) {
+                    viewBrowser.classList.add('hidden');
+                    viewNowPlaying.classList.remove('hidden');
+                    btnToggle.textContent = '📁 Browse';
+                } else {
+                    viewBrowser.classList.remove('hidden');
+                    viewNowPlaying.classList.add('hidden');
+                    btnToggle.textContent = '🎵 Now Playing';
+                    fetchPath(currentPath);
+                }
+            });
+        }
+
+        if (btnBack) {
+            btnBack.addEventListener('click', () => {
+                if (pathHistory.length > 0) {
+                    const prev = pathHistory.pop();
+                    fetchPath(prev);
+                }
+            });
         }
     }
 
@@ -345,6 +445,12 @@ export class UIControls {
             this.connectLogStream();
         });
 
+        bindFab(this.btnDiagnostic, () => {
+            this.closeArcMenu();
+            this.openDrawer(this.drawerDiagnostic);
+            this.diagnosticWidget.open();
+        });
+
         bindFab(this.btnWifi, () => {
             this.closeArcMenu();
             this.toggleWifiAp();
@@ -369,6 +475,12 @@ export class UIControls {
         }
         if (this.btnCloseLogs) {
             this.btnCloseLogs.addEventListener('click', () => this.closeDrawer(this.drawerLogs));
+        }
+        if (this.btnCloseDiagnostic) {
+            this.btnCloseDiagnostic.addEventListener('click', () => {
+                this.closeDrawer(this.drawerDiagnostic);
+                this.diagnosticWidget.close();
+            });
         }
     }
 
