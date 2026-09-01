@@ -103,7 +103,7 @@ def test_qaudiosink(device_name: str, freq: float, duration: float, push_mode: b
     print(f"\n[PyQt6 QAudioSink Test] Initializing (mode={'PUSH' if push_mode else 'PULL'})...")
     
     from PyQt6.QtCore import QCoreApplication, QIODevice, QTimer
-    from PyQt6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices, QAudioDevice
+    from PyQt6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices, QAudioDevice, QAudio
 
     app = QCoreApplication(sys.argv)
 
@@ -138,7 +138,7 @@ def test_qaudiosink(device_name: str, freq: float, duration: float, push_mode: b
 
     def on_state_changed(state):
         print(f"  [QAudioSink State Changed] -> {state} (error={sink.error()})")
-        if state == QAudioSink.State.IdleState and not push_mode:
+        if state == QAudio.State.IdleState and not push_mode:
             print("  Sink is Idle (finished or underrun).")
 
     sink.stateChanged.connect(on_state_changed)
@@ -147,14 +147,25 @@ def test_qaudiosink(device_name: str, freq: float, duration: float, push_mode: b
     print(f"Generated PCM payload: {len(pcm_data)} bytes ({len(pcm_data) / (48000 * 4):.2f}s)")
 
     if push_mode:
-        # Push mode: write directly to QIODevice returned by sink.start()
+        # Push mode: write chunks to QIODevice returned by sink.start()
         io_dev = sink.start()
         if not io_dev:
             print("❌ sink.start() returned None in Push Mode!")
             return False
-        
-        written = io_dev.write(pcm_data)
-        print(f"Push mode: Wrote {written} / {len(pcm_data)} bytes to QAudioSink QIODevice.")
+
+        written_total = [0]
+        def push_chunks():
+            if written_total[0] < len(pcm_data):
+                chunk = pcm_data[written_total[0] : written_total[0] + 4096]
+                w = io_dev.write(chunk)
+                if w > 0:
+                    written_total[0] += w
+
+        push_timer = QTimer()
+        push_timer.timeout.connect(push_chunks)
+        push_timer.start(20)  # write 4096 bytes every 20ms (~DAC rate)
+        push_chunks()
+        print("Push mode: Started pushing PCM chunks via QTimer.")
     else:
         # Pull mode: custom QIODevice subclass feeding samples
         class PullStream(QIODevice):
