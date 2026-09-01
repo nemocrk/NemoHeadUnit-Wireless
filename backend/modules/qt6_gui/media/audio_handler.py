@@ -98,7 +98,6 @@ class AudioPcmStream(QIODevice):
                 dropped = len(self._buffer) - max_buffer_bytes
                 del self._buffer[:dropped]
             self._is_active = True
-        self.readyRead.emit()
 
     def readData(self, max_len: int) -> bytes:
         """Called synchronously by QAudioSink to pull PCM samples at DAC clock speed."""
@@ -110,11 +109,7 @@ class AudioPcmStream(QIODevice):
                 chunk = bytes(self._buffer[:take])
                 del self._buffer[:take]
                 return chunk
-            elif self._is_active:
-                # Pad with silence during active stream micro-gaps to prevent PipeWire/ALSA EPIPE
-                return b"\x00" * min(max_len, 512)
-            else:
-                return b""
+            return b""
 
     def writeData(self, data: bytes) -> int:
         """Required pure virtual method implementation for QIODevice."""
@@ -225,12 +220,14 @@ class DynamicChannelAudioSink(QObject):
     @pyqtSlot()
     def _do_start(self):
         """Executed strictly on Main Qt Thread to start QAudioSink timer safely."""
-        if not self.audio_sink:
+        if self.audio_sink is None or not self._is_started:
             self._init_playback(self.sample_rate, self.channel_count)
-        if self.audio_sink and not self._is_started:
-            self.audio_sink.start(self.pcm_stream)
-            self._is_started = True
-            logger.info(f"🔊 [Audio Ch{self.channel_id}] Stream ACTIVE — QAudioSink started in Pull Mode on '{self.target_device}'")
+            if self.audio_sink:
+                if not self.pcm_stream.isOpen():
+                    self.pcm_stream.open(QIODevice.OpenModeFlag.ReadOnly)
+                self.audio_sink.start(self.pcm_stream)
+                self._is_started = True
+                logger.info(f"🔊 [Audio Ch{self.channel_id}] Stream ACTIVE — QAudioSink started in Pull Mode on '{self.target_device}'")
 
     def _ensure_started(self):
         """Lazily activate hardware audio sink in Pull Mode via thread-safe QueuedConnection signal."""
@@ -283,13 +280,19 @@ class DynamicChannelAudioSink(QObject):
     @pyqtSlot()
     def _do_stop(self):
         """Executed strictly on Main Qt Thread to stop QAudioSink timer safely."""
-        if self.audio_sink and self._is_started:
+        if self.audio_sink:
             try:
                 self.audio_sink.stop()
             except Exception:
                 pass
-            self._is_started = False
+            self.audio_sink = None
+        self._is_started = False
         self.pcm_stream.clear()
+        if self.pcm_stream.isOpen():
+            try:
+                self.pcm_stream.close()
+            except Exception:
+                pass
 
     def _close_sink(self):
         """Safely terminate QAudioSink and reset PCM stream via QueuedConnection."""
