@@ -284,6 +284,24 @@ if [ -d "/sys/class/drm/card1" ]; then
     echo "400" > /sys/class/drm/card1/gt_min_freq_mhz 2>/dev/null || true
 fi
 
+# Lock CPU governor to 'performance' so Atom Bay Trail cores do not throttle down to 533 MHz
+UDEV_CPU_RULES="/etc/udev/rules.d/98-cpu-governor.rules"
+TEMP_CPU_UDEV=$(mktemp)
+cat > "$TEMP_CPU_UDEV" <<'EOF'
+ACTION=="add|change", SUBSYSTEM=="cpu", KERNEL=="cpu[0-9]*", ATTR{cpufreq/scaling_governor}="performance"
+EOF
+
+if [ ! -f "$UDEV_CPU_RULES" ] || ! cmp -s "$TEMP_CPU_UDEV" "$UDEV_CPU_RULES"; then
+    mv "$TEMP_CPU_UDEV" "$UDEV_CPU_RULES"
+    chmod 644 "$UDEV_CPU_RULES"
+    udevadm trigger --subsystem-match=cpu >/dev/null 2>&1 || true
+    for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        echo "performance" > "$g" 2>/dev/null || true
+    done
+else
+    rm -f "$TEMP_CPU_UDEV"
+fi
+
 # Set QT_SCALE_FACTOR=1.5 for crisp 1280x800 logical viewport
 if ! grep -q "QT_SCALE_FACTOR=1.5" /etc/environment 2>/dev/null; then
     echo "QT_SCALE_FACTOR=1.5" >> /etc/environment

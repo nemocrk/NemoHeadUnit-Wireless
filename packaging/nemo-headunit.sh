@@ -259,7 +259,26 @@ if [ -z "${JOURNAL_STREAM:-}" ] && [ -z "${NEMO_NO_SYSTEMD_CAT:-}" ] && command 
     exec systemd-cat -t nemo-headunit "$0" "$@"
 fi
 
-# 1. Start Python backend (runs native Qt6 GUI by default as Priority 5)
+# 1. Wait for CPU governor to ramp up to burst frequency after boot
+if [ -r "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq" ]; then
+    echo "[nemo-headunit] Waiting for CPU governor to ramp up to burst frequency..."
+    cpu_wait_count=0
+    while [ $cpu_wait_count -lt 25 ]; do
+        cur_cpu_freq="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo 0)"
+        if [ "$cur_cpu_freq" -ge 1600000 ]; then
+            echo "[nemo-headunit] CPU frequency ramped up: $(( cur_cpu_freq / 1000 )) MHz"
+            break
+        fi
+        sleep 0.2
+        cpu_wait_count=$((cpu_wait_count + 1))
+    done
+fi
+
+# 2. Warm up Linux VFS page cache for Python and shared libraries (eliminates disk I/O lag on boot)
+echo "[nemo-headunit] Pre-loading Python stack and shared libraries into memory cache..."
+"${PYTHON_BIN}" -c "import PyQt6.QtWidgets, zmq, aiohttp, dbus, loguru, gi; gi.require_version('Gst', '1.0'); from gi.repository import Gst; Gst.init(None)" >/dev/null 2>&1 || true
+
+# 3. Start Python backend (runs native Qt6 GUI by default as Priority 5)
 echo "[nemo-headunit] Starting NemoHeadUnit (backend + Qt6 GUI)..."
 "${PYTHON_BIN}" "${APP_MAIN}" "$@" &
 BACKEND_PID=$!

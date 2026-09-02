@@ -40,7 +40,7 @@ from shared.ipc_utils import get_bus_address
 
 MODULES_DIR = BASE_DIR / "modules"
 GRACE_PERIOD = 10.0
-READYTOSTART_WINDOW = 15.0   # max seconds to collect system.module_ready replies (exits early once all modules reply)
+READYTOSTART_WINDOW = 30.0   # max seconds to collect system.module_ready replies (exits early once all modules reply)
 MODULE_READY_TIMEOUT = 10.0  # seconds per level wait
 
 log = get_logger("main")
@@ -94,7 +94,7 @@ def _run_thread_module(script: Path, label: str) -> None:
         log.error(f"Module thread '{label}' exited with error: {exc}", exc_info=True)
 
 
-def _start_module(script: Path, label: str, mode: str) -> ModuleHandle:
+def _start_module(script: Path, label: str, mode: str, ready_event: threading.Event | None = None) -> ModuleHandle:
     if mode == "multithreading":
         t = threading.Thread(target=_run_thread_module, args=(script, label), daemon=True, name=f"mod_{label}")
         t.start()
@@ -104,7 +104,31 @@ def _start_module(script: Path, label: str, mode: str) -> ModuleHandle:
         pythonpath = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = f"{BASE_DIR}{os.pathsep}{repo_root}{os.pathsep}{proto_dir}{os.pathsep}{pythonpath}".rstrip(os.pathsep)
 
-        proc = subprocess.Popen([sys.executable, str(script)], stdout=sys.stdout, stderr=sys.stderr, env=env)
+        if ready_event is not None:
+            # Capture stdout with a pipe to detect deterministic readiness signal,
+            # while continuously streaming lines to sys.stdout in real time
+            proc = subprocess.Popen(
+                [sys.executable, str(script)],
+                stdout=subprocess.PIPE,
+                stderr=sys.stderr,
+                env=env,
+                text=True,
+                bufsize=1,
+            )
+
+            def _pump_stdout():
+                for line in iter(proc.stdout.readline, ""):
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    if "ZMQ Proxy thread active" in line or "Module 'bus_broker' is ready" in line:
+                        ready_event.set()
+                proc.stdout.close()
+
+            t_pump = threading.Thread(target=_pump_stdout, daemon=True, name=f"pump_{label}")
+            t_pump.start()
+        else:
+            proc = subprocess.Popen([sys.executable, str(script)], stdout=sys.stdout, stderr=sys.stderr, env=env)
+
         log.info(f"Started process '{label}' (PID {proc.pid})")
         return ModuleHandle(label=label, mode=mode, proc=proc)
 
@@ -301,13 +325,19 @@ def run(argv: list[str] | None = None):
     def _run_orchestrator():
         nonlocal shutdown_requested, shutdown_reason
         try:
-            # 1. Start Priority 0 bus_broker process/thread first
+            # 1. Start Priority 0 bus_broker process/thread first and wait deterministically for it to bind sockets
+            broker_ready_event = threading.Event()
             broker_path = BASE_DIR / "modules" / "bus_broker" / "main.py"
-            broker_handle = _start_module(broker_path, "bus_broker", mode)
+            broker_handle = _start_module(broker_path, "bus_broker", mode, ready_event=broker_ready_event)
             module_handles.append(broker_handle)
-            time.sleep(0.5)  # Allow bus_broker to bind sockets
 
-            # Setup orchestrator ZMQ sockets
+            log.info("Waiting for bus_broker to initialize and activate ZMQ proxy thread...")
+            if not broker_ready_event.wait(timeout=30.0):
+                log.warning("bus_broker readiness event timed out after 30s — proceeding anyway")
+            else:
+                log.info("bus_broker confirmed ready via stdout handshake!")
+
+            # Setup orchestrator ZMQ sockets (now guaranteed to connect to active broker)
             pub_sock.connect(get_bus_address("main_orchestrator", "sub"))
             sub_sock.connect(get_bus_address("main_orchestrator", "pub"))
             sub_sock.setsockopt_string(zmq.SUBSCRIBE, "system.module_ready")

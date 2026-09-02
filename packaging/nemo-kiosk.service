@@ -18,6 +18,7 @@ WorkingDirectory=/home/nemo
 Environment=LIBSEAT_BACKEND=seatd
 Environment=XDG_SESSION_TYPE=wayland
 EnvironmentFile=-/etc/nemo-headunit/display.conf
+Nice=-10
 ExecStart=/opt/nemo-headunit/bin/nemo-headunit --kiosk-autostart
 Restart=on-failure
 RestartSec=3
