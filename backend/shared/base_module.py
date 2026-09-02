@@ -360,11 +360,6 @@ class BaseBackendModule(ABC):
             self.log.info("Received system.stop — triggering teardown...")
             self._running = False
 
-        def _on_readytostart(topic, payload):
-            self.log.info("Received system.readytostart request — re-announcing readiness")
-            self._announce_readiness("ready_to_start")
-
-        self.subscribe("system.readytostart", _on_readytostart)
         self.subscribe("system.start", _on_start)
         self.subscribe("system.stop", _on_stop)
 
