@@ -181,6 +181,16 @@ run_postinst() {
     fi
 
     # ------------------------------------------------------------------
+    # 2b. Pre-compile Python bytecode to eliminate first-run compilation lag
+    # ------------------------------------------------------------------
+    log "Pre-compiling Python bytecode (.pyc) for fast startup..."
+    local py_compiler="python3"
+    if [ -x "${ENV_PREFIX}/bin/python" ]; then
+        py_compiler="${ENV_PREFIX}/bin/python"
+    fi
+    "${py_compiler}" -m compileall -q -f "${APP_DIR}/backend" "${APP_DIR}/services" "${APP_DIR}/protos" 2>/dev/null || true
+
+    # ------------------------------------------------------------------
     # 3. Fix permissions on the installed app directory
     # ------------------------------------------------------------------
     log "Setting permissions on ${APP_DIR}"
