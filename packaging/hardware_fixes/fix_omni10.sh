@@ -133,6 +133,9 @@ echo -n "  [hw-fix] Systemd services optimization... "
 SERVICES_TO_MASK=(
     systemd-udev-settle.service
     NetworkManager-wait-online.service
+    dev-tpm0.device
+    dev-tpmrm0.device
+    tpm2.target
 )
 
 SERVICES_TO_DISABLE=(
@@ -250,6 +253,51 @@ if [ $DRACUT_CHANGED -eq 1 ]; then
         echo -e "${GREEN}OK.${NC}"
     else
         echo -e "${YELLOW}WARNING: dracut non trovato.${NC}"
+    fi
+fi
+# ---------------------------------------------------------------------------
+# Fix 7B: Mkinitcpio (Early KMS, eMMC Storage & I2C Input Fast-boot)
+# ---------------------------------------------------------------------------
+MKINIT_CONF="/etc/mkinitcpio.conf"
+echo -n "  [hw-fix] Mkinitcpio Early KMS & Input modules... "
+
+MKINIT_CHANGED=0
+if [ -f "$MKINIT_CONF" ]; then
+    # Moduli ideali per la piattaforma Bay Trail (Omni10) per azzerare i colli di bottiglia
+    TARGET_MODULES="i915 sdhci_acpi mmc_block i2c_hid_acpi i2c_hid"
+    
+    # Estrae l'attuale riga MODULES=(...)
+    CURRENT_MODULES_LINE=$(grep -E "^MODULES=\(" "$MKINIT_CONF" || echo "")
+    
+    # Verifica se tutti i moduli target sono già presenti nella stringa
+    NEED_UPDATE=0
+    for mod in $TARGET_MODULES; do
+        if [[ ! "$CURRENT_MODULES_LINE" =~ $mod ]]; then
+            NEED_UPDATE=1
+            break
+        fi
+    fi
+
+    if [ $NEED_UPDATE -eq 1 ]; then
+        # Sostituisce l'intera riga MODULES=(...) iniettando la combinazione ottimale
+        sed -i "s/^MODULES=(.*/MODULES=($TARGET_MODULES)/" "$MKINIT_CONF"
+        MKINIT_CHANGED=1
+        echo -e "${GREEN}configurato in mkinitcpio.conf.${NC}"
+    else
+        echo -e "${GREEN}già ottimizzato.${NC}"
+    fi
+else
+    echo -e "${YELLOW}WARNING: $MKINIT_CONF non trovato — fix saltato.${NC}"
+fi
+
+# Se il file di configurazione è stato modificato, rigenera i ramdisk di Arch
+if [ $MKINIT_CHANGED -eq 1 ]; then
+    echo -n "  [hw-fix] Rigenerazione initramfs (mkinitcpio)... "
+    if command -v mkinitcpio &>/dev/null; then
+        mkinitcpio -P >/dev/null 2>&1
+        echo -e "${GREEN}OK.${NC}"
+    else
+        echo -e "${YELLOW}WARNING: mkinitcpio non trovato.${NC}"
     fi
 fi
 
@@ -428,7 +476,7 @@ echo "    - Display impostato a 1920x1200@40Hz (-33% scanout bandwidth)."
 echo "    - GPU RC6 / Runtime PM disabilitato; clock minimo fissato a 400MHz."
 echo "    - Bluetooth MAC persistente in ${BT_ADDR_FILE} tramite bluetooth-persistent-mac.service."
 
-if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ]; then
+if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ]; then
     echo -e "  ${GREEN}[hw-fix] HP Omni10: fix applicati. Riavvio necessario.${NC}"
 else
     echo -e "  ${GREEN}[hw-fix] HP Omni10: nessuna modifica necessaria.${NC}"
