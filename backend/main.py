@@ -169,8 +169,17 @@ def _collect_module_ready(
     priority_map: dict[int, list[str]] = defaultdict(list)
     replied: set[str] = set()
     deadline = time.monotonic() + window
+    last_pub = time.monotonic()
 
     while time.monotonic() < deadline and len(replied) < len(module_names):
+        # Re-broadcast query every 1.0s to catch processes completing import/boot
+        if time.monotonic() - last_pub >= 1.0:
+            try:
+                pub_sock.send_multipart([b"system.readytostart", json.dumps({"requester": "main"}).encode("utf-8")])
+                last_pub = time.monotonic()
+            except Exception:
+                pass
+
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
             break
@@ -220,8 +229,16 @@ def _wait_for_level_ready(
 
     pending = set(expected)
     deadline = time.monotonic() + (timeout_per_module * len(expected))
+    last_pub = time.monotonic()
 
     while pending and time.monotonic() < deadline:
+        if time.monotonic() - last_pub >= 1.0:
+            try:
+                pub_sock.send_multipart([b"system.start", json.dumps({"priority": priority}).encode("utf-8")])
+                last_pub = time.monotonic()
+            except Exception:
+                pass
+
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
             break
