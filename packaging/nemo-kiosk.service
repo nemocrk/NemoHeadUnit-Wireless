@@ -1,7 +1,8 @@
 [Unit]
 Description=NemoHeadUnit Autostart Kiosk (Compositor + App)
 Documentation=https://github.com/nemocrk/NemoHeadUnit-Wireless
-After=network.target sound.target systemd-user-sessions.service seatd.service dbus.service
+After=network.target sound.target bluetooth.target bluetooth.service systemd-user-sessions.service seatd.service dbus.service
+Wants=bluetooth.target
 
 [Service]
 Type=simple

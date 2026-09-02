@@ -200,15 +200,23 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             self._bus.get_object("org.bluez", "/"),
             "org.freedesktop.DBus.ObjectManager",
         )
-        objects = manager.GetManagedObjects()
         adapter_path = None
-        for path, ifaces in objects.items():
-            if "org.bluez.Adapter1" in ifaces:
-                adapter_path = path
-                break
+        # Wait up to 15 seconds for BlueZ adapter to register on D-Bus during system boot
+        for attempt in range(30):
+            try:
+                objects = manager.GetManagedObjects()
+                for path, ifaces in objects.items():
+                    if "org.bluez.Adapter1" in ifaces:
+                        adapter_path = path
+                        break
+                if adapter_path:
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
 
         if not adapter_path:
-            raise RuntimeError("No BlueZ Bluetooth adapter found")
+            raise RuntimeError("No BlueZ Bluetooth adapter found after waiting")
 
         self._adapter = dbus.Interface(
             self._bus.get_object("org.bluez", adapter_path),
