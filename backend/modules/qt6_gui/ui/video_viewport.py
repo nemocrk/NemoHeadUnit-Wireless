@@ -201,10 +201,6 @@ class VideoViewportWidget(*_bases):
         self.frame_height = height
         self.update()  # Triggers paintEvent / paintGL redraw
 
-    def cleanupGL(self):
-        """Safely release frame resources."""
-        self.current_frame_data = None
-
     def paintEvent(self, event):
         """
         RGBA fallback render path — only used when base class is QWidget (no GL available).

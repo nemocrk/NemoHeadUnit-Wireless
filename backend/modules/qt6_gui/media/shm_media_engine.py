@@ -220,7 +220,7 @@ class GlImageSinkDecoder:
                 "! h264parse config-interval=-1 "
                 "! vah264dec "
                 "! vapostproc "
-                "! video/x-raw(memory:DMABuf),format=RGBA "
+#                "! video/x-raw(memory:DMABuf),format=RGBA "
                 "! glupload "
                 "! glimagesink name=sink sync=false qos=false"
             )

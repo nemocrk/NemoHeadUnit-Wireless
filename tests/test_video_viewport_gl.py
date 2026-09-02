@@ -4,7 +4,12 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 import sys
 import types
-import importlib
+from PyQt6.QtWidgets import QApplication
+
+# Ensure QApplication exists once for test process
+_app = QApplication.instance() or QApplication(sys.argv)
+
+from backend.modules.qt6_gui.ui import video_viewport as mod
 
 
 def _make_mock_decoder(is_available=True, texture_id=42):
@@ -17,28 +22,13 @@ def _make_mock_decoder(is_available=True, texture_id=42):
     )
 
 
-def _get_app():
-    from PyQt6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication(sys.argv)
-
-
-def _mod():
-    name = "backend.modules.qt6_gui.ui.video_viewport"
-    if name in sys.modules:
-        del sys.modules[name]
-    return importlib.import_module(name)
-
-
 def test_attach_gl_decoder_method_exists():
     """VideoViewportWidget must expose attach_gl_decoder()."""
-    mod = _mod()
     assert hasattr(mod.VideoViewportWidget, "attach_gl_decoder")
 
 
 def test_attach_gl_decoder_stores_decoder():
     """attach_gl_decoder stores the decoder on the instance."""
-    _get_app()
-    mod = _mod()
     w = mod.VideoViewportWidget()
     decoder = _make_mock_decoder()
     w.attach_gl_decoder(decoder)
@@ -47,8 +37,6 @@ def test_attach_gl_decoder_stores_decoder():
 
 def test_update_frame_no_op_when_gl_active():
     """update_frame() must not store bytes when GL decoder is active."""
-    _get_app()
-    mod = _mod()
     w = mod.VideoViewportWidget()
     w._gl_decoder = _make_mock_decoder(is_available=True)
     w.current_frame_data = None
@@ -58,8 +46,6 @@ def test_update_frame_no_op_when_gl_active():
 
 def test_update_frame_stores_bytes_when_gl_unavailable():
     """update_frame() stores rgba_bytes when GL decoder is None."""
-    _get_app()
-    mod = _mod()
     w = mod.VideoViewportWidget()
     w._gl_decoder = None
     w.current_frame_data = None
@@ -69,8 +55,6 @@ def test_update_frame_stores_bytes_when_gl_unavailable():
 
 def test_viewport_has_gl_decoder_attr_after_init():
     """VideoViewportWidget instances must have _gl_decoder=None after __init__."""
-    _get_app()
-    mod = _mod()
     w = mod.VideoViewportWidget()
     assert hasattr(w, "_gl_decoder")
     assert w._gl_decoder is None

@@ -53,7 +53,7 @@ Priority 3+: tcp_server, connectivity_manager
 * **Priority 1 (`config_manager`)**: Central configuration engine storing YAML settings in OS AppData, validating strongly-typed module schemas, and exposing `/api/config`.
 * **Priority 2 (`proxy`)**: Gateway Proxy webserver binding to the primary public port (`8000`) and dynamically routing `/api/<module_prefix>` to internal loopback microservices.
 * **Priority 3+ (`tcp_server`, `connectivity_manager`, `channel_manager`, `media_server`)**: Functional domain microservices exposing hardware controls, sockets, channel logic, and media transports.
-* **Priority 5 (`qt6_gui`)**: Native Qt6 Frontend Module using Shared Memory (SHM) zero-copy video/audio rendering and 16kHz microphone capture.
+* **Priority 5 (`qt6_gui`)**: Native Qt6 Frontend Module using Shared Memory (SHM) video/audio rendering and 16kHz microphone capture. On Linux with VAAPI (e.g. Intel Bay Trail), video utilizes zero-CPU GStreamer hardware decode and direct EGL texture rendering (`GlImageSinkDecoder`) via `QOpenGLWidget`, with seamless automatic fallback to RGBA blitting (`GStreamerHwDecoder`) or software decoding (`PyAV`).
 
 ---
 

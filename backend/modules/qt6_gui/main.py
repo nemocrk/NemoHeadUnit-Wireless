@@ -365,6 +365,20 @@ class Qt6GuiModule(BaseBackendModule):
         self.shm_engine.connect_shm()
         self.log.info(f"⏱ [Boot Trace 4f/7] SHM engine connected (is_connected={self.shm_engine.is_connected})!")
 
+        # Wire GL decoder to viewport if active
+        if (
+            self.main_window
+            and hasattr(self.shm_engine, "_hw_decoder")
+            and hasattr(self.main_window, "video_viewport")
+            and hasattr(self.main_window.video_viewport, "attach_gl_decoder")
+        ):
+            self.main_window.video_viewport.attach_gl_decoder(self.shm_engine._hw_decoder)
+            self.log.info(
+                f"[Qt6Gui] GL decoder wired to viewport: "
+                f"{type(self.shm_engine._hw_decoder).__name__} "
+                f"(available={self.shm_engine._hw_decoder.is_available})"
+            )
+
         self.audio_engine = QtAudioEngine()
         self.audio_engine.mic_data_captured.connect(self._on_mic_data_captured)
         self.log.info(f"⏱ [Boot Trace 5/7] SHM & Audio engines initialized in {(time.time()-t4)*1000:.1f}ms")
