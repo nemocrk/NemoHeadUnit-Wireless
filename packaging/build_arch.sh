@@ -225,13 +225,6 @@ if [ -f "${REPO_ROOT}/packaging/nemo-kiosk.service" ]; then
     cp "${REPO_ROOT}/packaging/nemo-kiosk.service" "${SYSTEMD_STAGE}/"
 fi
 
-# —— /etc/nemo-headunit/ ——
-CONFIG_STAGE="${STAGE_DIR}/etc/nemo-headunit"
-mkdir -p "${CONFIG_STAGE}"
-if [ -f "${REPO_ROOT}/packaging/display.conf.default" ]; then
-    cp "${REPO_ROOT}/packaging/display.conf.default" "${CONFIG_STAGE}/display.conf"
-fi
-
 # —— /etc/dbus-1/system.d/ ——
 DBUS_STAGE="${STAGE_DIR}/etc/dbus-1/system.d"
 mkdir -p "${DBUS_STAGE}"

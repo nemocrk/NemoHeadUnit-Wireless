@@ -230,7 +230,7 @@ echo ""
 echo "[4/5] Installing package on remote host (${DISTRO_FAMILY^^})..."
 
 if [ "$DISTRO_FAMILY" = "arch" ]; then
-  SSH_INSTALL_CMD="sudo pacman -U --noconfirm --needed /tmp/${PKG_FILENAME}"
+  SSH_INSTALL_CMD="sudo pacman -U --noconfirm --needed --overwrite '*' /tmp/${PKG_FILENAME}"
 else
   SSH_INSTALL_CMD="if [ -z \"\$(find /var/cache/apt -maxdepth 0 -mmin -1440 2>/dev/null)\" ]; then \
       echo 'Cache vecchia o inesistente. Aggiorno APT...'; sudo apt-get update; \
