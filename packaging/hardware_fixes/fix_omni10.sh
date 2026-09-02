@@ -62,10 +62,17 @@ GRUB_FILE="/etc/default/grub"
 echo -n "  [hw-fix] GRUB configuration... "
 
 if [ -f "$GRUB_FILE" ]; then
-    # Add intel_idle.max_cstate=1 and video=eDP-1:1920x1200@40
+    # Add intel_idle.max_cstate=1, video=eDP-1:1920x1200@40, and mitigations=off (restores CPU speed on Atom Bay Trail)
     if ! grep -q "intel_idle.max_cstate=1" "$GRUB_FILE"; then
         sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 intel_idle.max_cstate=1"/' "$GRUB_FILE"
         sed -i "s/^\(GRUB_CMDLINE_LINUX_DEFAULT='[^']*\)'/\1 intel_idle.max_cstate=1'/" "$GRUB_FILE"
+        GRUB_CHANGED=1
+    fi
+
+    # Disable CPU speculative execution mitigations (PTI/Spectre/Meltdown overhead on in-order Atom CPU)
+    if ! grep -q "mitigations=off" "$GRUB_FILE"; then
+        sed -i 's/^\(GRUB_CMDLINE_LINUX="[^"]*\)"/\1 mitigations=off"/' "$GRUB_FILE"
+        sed -i "s/^\(GRUB_CMDLINE_LINUX='[^']*\)'/\1 mitigations=off'/" "$GRUB_FILE"
         GRUB_CHANGED=1
     fi
 
@@ -284,11 +291,29 @@ if ! grep -q "QT_SCALE_FACTOR=1.5" /etc/environment 2>/dev/null; then
     GPU_CHANGED=1
 fi
 
-if [ -d "/home/nemo/.config/labwc" ]; then
+if [ -d "/home/nemo" ]; then
     mkdir -p /home/nemo/.config/labwc
     if ! grep -q "QT_SCALE_FACTOR=1.5" /home/nemo/.config/labwc/environment 2>/dev/null; then
         echo "QT_SCALE_FACTOR=1.5" >> /home/nemo/.config/labwc/environment
-        chown nemo:nemo /home/nemo/.config/labwc/environment 2>/dev/null || true
+        chown -R nemo:nemo /home/nemo/.config 2>/dev/null || true
+        GPU_CHANGED=1
+    fi
+    # Disable Xwayland in labwc to avoid missing binary warning and save RAM
+    LABWC_RC="/home/nemo/.config/labwc/rc.xml"
+    if [ ! -f "$LABWC_RC" ] || ! grep -q "<xwayland>" "$LABWC_RC"; then
+        cat <<'EOF' > "$LABWC_RC"
+<?xml version="1.0"?>
+<labwc_config>
+  <core>
+    <xwayland>no</xwayland>
+    <allowDirectScanout>yes</allowDirectScanout>
+  </core>
+  <windowRules>
+    <windowRule identifier="nemo-headunit" serverDecoration="no" />
+  </windowRules>
+</labwc_config>
+EOF
+        chown -R nemo:nemo /home/nemo/.config 2>/dev/null || true
         GPU_CHANGED=1
     fi
 fi
@@ -335,12 +360,11 @@ cat > "$TEMP_BT_SVC" <<'EOF'
 [Unit]
 Description=Set Persistent Bluetooth MAC Address (Broadcom/BCM)
 Before=bluetooth.service
-Wants=dev-subsystem-bluetooth-devices-hci0.device
-After=dev-subsystem-bluetooth-devices-hci0.device
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+TimeoutStartSec=10
 ExecStart=/bin/bash -c ' \
     ADDR="$(cat /etc/bluetooth/bdaddr 2>/dev/null | tr -d " \n\r")"; \
     [ -n "$ADDR" ] || exit 0; \
