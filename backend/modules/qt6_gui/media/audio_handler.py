@@ -80,6 +80,8 @@ class AudioPcmStream(QIODevice):
         super().__init__(parent)
         self._sample_rate = sample_rate
         self._channels = channels
+        self._prebuffer_ms = prebuffer_ms
+        self._underrun_count = 0
         if prebuffer_ms <= 0:
             self._prebuffer_bytes = 0
             self._is_buffering = False
@@ -93,6 +95,7 @@ class AudioPcmStream(QIODevice):
         with self._lock:
             self._sample_rate = sample_rate
             self._channels = channels
+            self._prebuffer_ms = prebuffer_ms
             if prebuffer_ms <= 0:
                 self._prebuffer_bytes = 0
                 self._is_buffering = False
@@ -128,16 +131,19 @@ class AudioPcmStream(QIODevice):
             if self._is_buffering:
                 return b""
             if self._buffer:
+                frame_size = max(1, self._channels * 2)
                 take = min(len(self._buffer), max_len)
-                take = (take // 4) * 4
+                take = (take // frame_size) * frame_size
                 if take == 0:
                     return b""
                 chunk = bytes(self._buffer[:take])
                 del self._buffer[:take]
                 if len(self._buffer) == 0:
                     self._is_buffering = True
+                    self._underrun_count += 1
                 return chunk
             self._is_buffering = True
+            self._underrun_count += 1
             return b""
 
     def writeData(self, data: bytes) -> int:
@@ -149,16 +155,32 @@ class AudioPcmStream(QIODevice):
             self._buffer.clear()
             self._is_buffering = True
 
+    def get_buffer_metrics(self) -> dict:
+        with self._lock:
+            buf_len = len(self._buffer)
+            bps = max(1, self._sample_rate * self._channels * 2)
+            return {
+                "buffered_bytes": buf_len,
+                "buffered_ms": int((buf_len / bps) * 1000),
+                "prebuffer_bytes": self._prebuffer_bytes,
+                "prebuffer_ms": self._prebuffer_ms,
+                "is_buffering": self._is_buffering,
+                "underruns": self._underrun_count,
+            }
+
 
 class DynamicChannelAudioSink(QObject):
     """
     Dedicated audio playback pipeline for an individual audio channel.
-    Uses PyQt6 QAudioSink in Pull Mode via AudioPcmStream QIODevice for zero-jitter,
-    underrun-free ALSA/PipeWire playback.
+    Uses PyQt6 QAudioSink in native Push Mode with event-driven buffer pumping
+    (via 10ms QTimer and QIODevice.bytesWritten) and thread-safe jitter pre-buffering.
     """
 
     _start_signal = pyqtSignal()
     _stop_signal = pyqtSignal()
+    _push_signal = pyqtSignal()
+
+    PREBUFFER_MS = 150
 
     def __init__(self, channel_id: int, sample_rate: int = 48000, channel_count: int = 2, target_device: str = "default", parent=None):
         super().__init__(parent)
@@ -168,52 +190,63 @@ class DynamicChannelAudioSink(QObject):
         self.bit_depth = 16
         self.target_device = target_device
 
+        self.audio_sink: Optional[QAudioSink] = None
+        self.audio_io: Optional[QIODevice] = None
+        self._is_started: bool = False
+
+        # Active pump timer on Qt main thread to guarantee continuous buffer draining
+        self._pump_timer = QTimer(self)
+        self._pump_timer.setInterval(10)
+        self._pump_timer.timeout.connect(self._flush_to_sink)
+
+        # Thread-safe jitter buffer state
+        self._app_buffer = bytearray()
+        self._app_lock = threading.Lock()
+        self._is_buffering: bool = True
+        self._underrun_count: int = 0
+
         self._start_signal.connect(self._do_start, Qt.ConnectionType.QueuedConnection)
         self._stop_signal.connect(self._do_stop, Qt.ConnectionType.QueuedConnection)
-
-        self.pcm_stream = AudioPcmStream(sample_rate=self.sample_rate, channels=self.channel_count, prebuffer_ms=150, parent=self)
-        self.pcm_stream.open(QIODevice.OpenModeFlag.ReadOnly)
-
-        self.audio_sink: Optional[QAudioSink] = None
-        self._is_started: bool = False
+        self._push_signal.connect(self._flush_to_sink, Qt.ConnectionType.QueuedConnection)
 
         self.aac_decoder = None
         self.resampler = None
-        self._is_aac: bool = False
+        self._is_aac: Optional[bool] = None
         self.frame_count = 0
         self.total_bytes_in = 0
         self.total_bytes_out = 0
         self.last_frame_time = 0.0
         self._last_log_time = 0.0
 
-    def _init_aac_decoder(self, target_sample_rate: int = 48000, target_channel_count: int = 2):
-        """Initialize per-channel PyAV FFmpeg AAC decoder."""
+        # Timestamp & Lag Tracking
+        self.first_sys_time: Optional[float] = None
+        self.first_ts_us: Optional[int] = None
+        self.last_ts_us: int = 0
+        self.current_lag_ms: float = 0.0
+
+    def _init_aac_decoder(self):
+        """Initialize per-channel PyAV FFmpeg AAC decoder targeting channel sample rate and layout."""
         if self.aac_decoder is not None:
             return
         try:
             import av
             self.aac_decoder = av.CodecContext.create("aac", "r")
-            layout = "stereo" if target_channel_count == 2 else "mono"
-            self.resampler = av.AudioResampler(format="s16", layout=layout, rate=target_sample_rate)
-            logger.info(f"Audio Channel {self.channel_id}: AAC decoder initialized ({target_sample_rate}Hz Int16 {layout})")
+            layout = "stereo" if self.channel_count == 2 else "mono"
+            self.resampler = av.AudioResampler(format="s16", layout=layout, rate=self.sample_rate)
+            logger.info(f"🔊 Audio Channel {self.channel_id}: AAC decoder initialized ({self.sample_rate}Hz Int16 {layout})")
         except Exception as exc:
             logger.warning(f"Audio Channel {self.channel_id}: AAC decoder init failed: {exc}")
 
-    def _init_playback(self, sample_rate: int, channel_count: int):
-        """Configure QAudioSink for specified rate and channels."""
-        if self.audio_sink and self.sample_rate == sample_rate and self.channel_count == channel_count:
-            return
-
+    def _init_playback(self, sample_rate: int = 48000, channel_count: int = 2):
+        """Configure QAudioSink for channel native rate and channels in Push Mode."""
         if self.audio_sink:
             try:
                 self.audio_sink.stop()
             except Exception:
                 pass
             self.audio_sink = None
+            self.audio_io = None
             self._is_started = False
-
-        self.sample_rate = sample_rate
-        self.channel_count = channel_count
 
         try:
             fmt = QAudioFormat()
@@ -224,8 +257,8 @@ class DynamicChannelAudioSink(QObject):
             output_device = find_audio_output_device(self.target_device)
             self.audio_sink = QAudioSink(output_device, fmt, self)
             self.audio_sink.setVolume(1.0)
-            self.audio_sink.setBufferSize(max(48000, int(sample_rate * channel_count * 2 * 0.250)))
-            self.pcm_stream.configure_format(sample_rate, channel_count, prebuffer_ms=150)
+            bps = max(1, sample_rate * channel_count * 2)
+            self.audio_sink.setBufferSize(max(48000, int(bps * 0.25)))
 
             def _on_state_changed(state):
                 err = self.audio_sink.error() if self.audio_sink else "None"
@@ -234,7 +267,7 @@ class DynamicChannelAudioSink(QObject):
             self.audio_sink.stateChanged.connect(_on_state_changed)
 
             dev_desc = output_device.description() if output_device else "Default"
-            logger.info(f"🔊 Audio Channel {self.channel_id}: QAudioSink Pull-Mode configured for '{dev_desc}' ({sample_rate}Hz, {channel_count}ch, Int16, buf={self.audio_sink.bufferSize()}B)")
+            logger.info(f"🔊 Audio Channel {self.channel_id}: QAudioSink Push-Mode configured for '{dev_desc}' ({sample_rate}Hz, {channel_count}ch, Int16, buf={self.audio_sink.bufferSize()}B)")
         except Exception as exc:
             logger.warning(f"Failed to configure QAudioSink for channel {self.channel_id}: {exc}")
 
@@ -245,54 +278,126 @@ class DynamicChannelAudioSink(QObject):
         channel_count: int = 2,
         bit_depth: int = 16,
     ):
-        """Explicitly configure codec, sample rate, and channel count from AVChannelSetupRequest."""
-        if self.sample_rate == sample_rate and self.channel_count == channel_count and self._is_aac is not None:
+        """Explicitly configure incoming stream codec, sample rate, and channel count."""
+        c = str(codec).upper()
+        self._is_aac = "AAC" in c
+        if self._is_aac:
+            self._init_aac_decoder()
+
+        if self.sample_rate == sample_rate and self.channel_count == channel_count and self.audio_sink is not None:
             return
 
         self.sample_rate = sample_rate
         self.channel_count = channel_count
         self.bit_depth = bit_depth
-        c = str(codec).upper()
-        if "AAC" in c:
-            self._is_aac = True
-            self._init_aac_decoder(target_sample_rate=sample_rate, target_channel_count=channel_count)
-            self._init_playback(sample_rate, channel_count)
-        elif "PCM" in c:
-            self._is_aac = False
-            self._init_playback(sample_rate, channel_count)
+        self._close_sink()
+        logger.info(
+            f"🔊 [Audio Ch{self.channel_id}] Configured native sink: {sample_rate}Hz {channel_count}ch ({codec})"
+        )
+
+    @pyqtSlot()
+    def _flush_to_sink(self):
+        """Push available buffered audio directly into QAudioSink io device on Qt main thread."""
+        if self._is_buffering or not self.audio_io or not self.audio_sink:
+            return
+
+        bytes_free = self.audio_sink.bytesFree()
+        if bytes_free <= 0:
+            return
+
+        chunk = None
+        frame_size = max(1, self.channel_count * 2)
+
+        with self._app_lock:
+            avail = len(self._app_buffer)
+            if avail <= 0:
+                self._is_buffering = True
+                self._underrun_count += 1
+                return
+
+            to_write = min(bytes_free, avail)
+            to_write = (to_write // frame_size) * frame_size
+            if to_write <= 0:
+                return
+
+            # Slice without removing yet; unconsumed bytes must stay aligned
+            chunk = bytes(self._app_buffer[:to_write])
+
+        if chunk:
+            try:
+                written = self.audio_io.write(chunk)
+                if written > 0:
+                    # Drop only fully-written sample-aligned frames
+                    consumed = (written // frame_size) * frame_size
+                    if consumed > 0:
+                        with self._app_lock:
+                            del self._app_buffer[:consumed]
+                        self.total_bytes_out += consumed
+            except Exception as exc:
+                logger.debug(f"Audio Channel {self.channel_id} flush error: {exc}")
 
     @pyqtSlot()
     def _do_start(self):
-        """Executed strictly on Main Qt Thread to start QAudioSink timer safely."""
+        """Executed strictly on Main Qt Thread to start QAudioSink in Push Mode."""
         if self.audio_sink is None or not self._is_started:
             self._init_playback(self.sample_rate, self.channel_count)
             if self.audio_sink:
-                if not self.pcm_stream.isOpen():
-                    self.pcm_stream.open(QIODevice.OpenModeFlag.ReadOnly)
-                self.audio_sink.start(self.pcm_stream)
+                self.audio_io = self.audio_sink.start()
+                if self.audio_io:
+                    self.audio_io.bytesWritten.connect(lambda n: self._flush_to_sink())
                 self._is_started = True
-                logger.info(f"🔊 [Audio Ch{self.channel_id}] Stream ACTIVE — QAudioSink started in Pull Mode on '{self.target_device}'")
+                self._pump_timer.start()
+                logger.info(f"🔊 [Audio Ch{self.channel_id}] Stream ACTIVE — QAudioSink started in Push Mode on '{self.target_device}' ({self.sample_rate}Hz, {self.channel_count}ch)")
+                self._flush_to_sink()
 
     def _ensure_started(self):
-        """Lazily activate hardware audio sink in Pull Mode via thread-safe QueuedConnection signal."""
+        """Lazily activate hardware audio sink in Push Mode via thread-safe QueuedConnection signal."""
         if not self._is_started:
             self._start_signal.emit()
 
-    def push_frame(self, audio_bytes: bytes):
-        """Decode and buffer incoming audio frame into the pull-mode PCM stream."""
+    def push_frame(self, audio_bytes: bytes, ts_us: int = 0):
+        """Decode and push audio frame into thread-safe jitter buffer."""
         if not audio_bytes:
             return
 
+        now = time.time()
         self.frame_count += 1
         self.total_bytes_in += len(audio_bytes)
-        self.last_frame_time = time.time()
 
-        # Detect format on first frame if not yet determined
+        # Gap / Pause detection: if gap between audio frames > 0.35s, reset buffering so prebuffer fills before playing
+        time_since_last = now - self.last_frame_time if self.last_frame_time > 0 else 0.0
+        self.last_frame_time = now
+
+        if time_since_last > 0.35:
+            with self._app_lock:
+                self._is_buffering = True
+
+        if ts_us > 0:
+            self.last_ts_us = ts_us
+            if self.first_sys_time is None or self.first_ts_us is None:
+                self.first_sys_time = now
+                self.first_ts_us = ts_us
+                self.current_lag_ms = 0.0
+            else:
+                elapsed_sys = now - self.first_sys_time
+                elapsed_phone = (ts_us - self.first_ts_us) / 1_000_000.0
+                lag = (elapsed_sys - elapsed_phone) * 1000.0
+                # If stream paused, rewound, or phone PTS jumped by more than 1.5 seconds, reset baseline & prebuffer
+                if abs(lag) > 1500.0 or elapsed_phone < 0:
+                    self.first_sys_time = now
+                    self.first_ts_us = ts_us
+                    self.current_lag_ms = 0.0
+                    with self._app_lock:
+                        self._is_buffering = True
+                else:
+                    self.current_lag_ms = max(0.0, lag)
+
+        # Detect format on first frame if not explicitly configured
         if self._is_aac is None:
             is_adts_aac = len(audio_bytes) >= 2 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xF0) == 0xF0
             self._is_aac = is_adts_aac
             if self._is_aac:
-                self._init_aac_decoder(target_sample_rate=self.sample_rate, target_channel_count=self.channel_count)
+                self._init_aac_decoder()
 
         decoded_pcm = bytearray()
         if self._is_aac and self.aac_decoder:
@@ -316,50 +421,106 @@ class DynamicChannelAudioSink(QObject):
         if not decoded_pcm:
             return
 
-        max_bytes = max(self.sample_rate * self.channel_count * 2 * 3, len(decoded_pcm) * 2)
-        self.pcm_stream.write_pcm(bytes(decoded_pcm), max_buffer_bytes=max_bytes)
-        self.total_bytes_out += len(decoded_pcm)
-        self._ensure_started()
+        bps = max(1, self.sample_rate * self.channel_count * 2)
+        prebuffer_bytes = int(bps * (self.PREBUFFER_MS / 1000.0))
+        max_app_bytes = max(bps * 2, len(decoded_pcm) * 4)
+
+        with self._app_lock:
+            self._app_buffer.extend(decoded_pcm)
+            if len(self._app_buffer) > max_app_bytes:
+                dropped = len(self._app_buffer) - max_app_bytes
+                del self._app_buffer[:dropped]
+
+            should_start = False
+            if self._is_buffering:
+                if len(self._app_buffer) >= prebuffer_bytes:
+                    self._is_buffering = False
+                    should_start = True
+                    logger.info(
+                        f"🔊 [Audio Ch{self.channel_id}] Prebuffer FILLED ({len(self._app_buffer)}B / {self.PREBUFFER_MS}ms) "
+                        f"— starting push playback"
+                    )
+            else:
+                should_start = True
+
+        if should_start:
+            self._ensure_started()
+            self._push_signal.emit()
 
     @pyqtSlot()
     def _do_stop(self):
-        """Executed strictly on Main Qt Thread to stop QAudioSink timer safely."""
+        """Executed strictly on Main Qt Thread to stop QAudioSink safely."""
+        self._pump_timer.stop()
         if self.audio_sink:
             try:
                 self.audio_sink.stop()
             except Exception:
                 pass
             self.audio_sink = None
+        self.audio_io = None
         self._is_started = False
-        self.pcm_stream.clear()
-        if self.pcm_stream.isOpen():
+        with self._app_lock:
+            self._app_buffer.clear()
+            self._is_buffering = True
+
+    def _close_sink(self):
+        """Safely terminate QAudioSink via QueuedConnection."""
+        self._stop_signal.emit()
+
+    def get_metrics(self) -> dict:
+        bps = max(1, self.sample_rate * self.channel_count * 2)
+        sink_data = {
+            "buffer_size": 0,
+            "bytes_free": 0,
+            "bytes_queued": 0,
+            "queued_ms": 0,
+            "state": "None",
+            "error": "None",
+        }
+        if self.audio_sink:
             try:
-                self.pcm_stream.close()
+                buf_size = self.audio_sink.bufferSize()
+                bytes_free = self.audio_sink.bytesFree()
+                bytes_queued = max(0, buf_size - bytes_free)
+                state_val = self.audio_sink.state()
+                error_val = self.audio_sink.error()
+                sink_data = {
+                    "buffer_size": buf_size,
+                    "bytes_free": bytes_free,
+                    "bytes_queued": bytes_queued,
+                    "queued_ms": int((bytes_queued / bps) * 1000),
+                    "state": getattr(state_val, "name", str(state_val)),
+                    "error": getattr(error_val, "name", str(error_val)),
+                }
             except Exception:
                 pass
 
-    def _close_sink(self):
-        """Safely terminate QAudioSink and reset PCM stream via QueuedConnection."""
-        self._stop_signal.emit()
+        with self._app_lock:
+            app_len = len(self._app_buffer)
+            is_buf = self._is_buffering
+            underruns = self._underrun_count
 
-    def feed(self):
-        """Periodic maintenance and telemetry check."""
-        now = time.time()
-        # Suspend idle sink after 3.0s of silence to avoid ALSA starvation
-        if self._is_started and (now - self.last_frame_time > 3.0):
-            self._close_sink()
-            logger.info(f"🔊 [Audio Ch{self.channel_id}] Stream IDLE (>3s) — suspended QAudioSink to release ALSA")
-            return
+        app_data = {
+            "buffered_bytes": app_len,
+            "buffered_ms": int((app_len / bps) * 1000),
+            "prebuffer_bytes": int(bps * (self.PREBUFFER_MS / 1000.0)),
+            "prebuffer_ms": self.PREBUFFER_MS,
+            "is_buffering": is_buf,
+            "underruns": underruns,
+        }
 
-        # Periodic throughput telemetry (every 5 seconds)
-        if now - self._last_log_time >= 5.0:
-            self._last_log_time = now
-            state = self.audio_sink.state() if self.audio_sink else "None"
-            logger.info(
-                f"🔊 [Audio Ch{self.channel_id}] Metrics: backend=QAudioSink(Pull), frames={self.frame_count}, "
-                f"in={self.total_bytes_in // 1024}KB, out={self.total_bytes_out // 1024}KB, "
-                f"buf={self.pcm_stream.bytesAvailable()}B, state={state}"
-            )
+        return {
+            "channel_id": self.channel_id,
+            "sample_rate": self.sample_rate,
+            "channel_count": self.channel_count,
+            "is_started": self._is_started,
+            "frame_count": self.frame_count,
+            "total_bytes_in": self.total_bytes_in,
+            "total_bytes_out": self.total_bytes_out,
+            "lag_ms": int(self.current_lag_ms),
+            "app_buffer": app_data,
+            "sink_buffer": sink_data,
+        }
 
     def close(self):
         """Release audio sink and decoder resources."""
@@ -400,7 +561,7 @@ class QtAudioEngine:
         with self._sinks_lock:
             for sink in self.sinks.values():
                 sink.target_device = self.target_output_sink
-                sink._init_playback(sink.sample_rate, sink.channel_count)
+                sink._close_sink()
         logger.info(f"QtAudioEngine target output sink set to '{self.target_output_sink}'")
 
     def set_input_source(self, source_name: str):
@@ -441,7 +602,7 @@ class QtAudioEngine:
             bit_depth=bit_depth,
         )
 
-    def play_pcm_frame(self, audio_bytes: bytes, channel_id: int = 0):
+    def play_pcm_frame(self, audio_bytes: bytes, channel_id: int = 0, ts_us: int = 0):
         """Dispatch audio frame to its dedicated channel sink."""
         if not audio_bytes or not self._running:
             return
@@ -464,7 +625,7 @@ class QtAudioEngine:
                     f"({default_rate}Hz, {default_ch}ch)"
                 )
 
-        sink.push_frame(audio_bytes)
+        sink.push_frame(audio_bytes, ts_us=ts_us)
 
     def start_microphone(self) -> bool:
         """Start capturing 16kHz 16-bit Mono PCM mic audio from default or target input device."""
@@ -542,6 +703,14 @@ class QtAudioEngine:
             self.source_io = None
             self.mic_accumulator.clear()
             logger.info("🎤 [Microphone] Uplink stream STOPPED")
+
+    def get_metrics(self) -> dict:
+        """Return real-time buffer & streaming telemetry for all active audio sinks."""
+        with self._sinks_lock:
+            return {
+                ch_id: sink.get_metrics()
+                for ch_id, sink in self.sinks.items()
+            }
 
     def close(self):
         """Cleanly stop all audio sinks and microphone capture."""

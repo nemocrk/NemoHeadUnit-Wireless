@@ -45,6 +45,7 @@ class ConnectivityManagerModule(BaseBackendModule):
         self._autoconnect_task = None
         self._autoconnect_event = asyncio.Event()
         self._autoconnect_cursor = 0
+        self._status_changed_evt = asyncio.Event()
 
     def get_default_config(self) -> dict[str, Any]:
         return {
@@ -145,15 +146,42 @@ class ConnectivityManagerModule(BaseBackendModule):
             )
             await self._wifi_adapter.setup()
 
-        # Listen for incoming AA RFCOMM connections, pairing PIN requests, and connection state changes
+        # Listen for incoming AA RFCOMM connections, pairing PIN requests, connection state, and telemetry
         self._bt_adapter.set_on_pin_callback(self._on_pin_requested)
         self._bt_adapter.set_on_connection_callback(self._on_device_connection_changed)
+        self._bt_adapter.set_on_battery_callback(self._on_bluetooth_telemetry_changed)
         self._bt_adapter.register_rfcomm_server(self._on_rfcomm_connection)
         self._rfcomm_listening = True
 
         # Initialize Autoconnect loop
         if self.config.get("autoconnect_enabled", True):
             self._autoconnect_task = asyncio.create_task(self._autoconnect_loop())
+
+    def _on_bluetooth_telemetry_changed(
+        self,
+        address: str,
+        battery_pct: int,
+        signal_bars: int,
+        operator_name: str = "",
+        is_roaming: bool = False,
+    ) -> None:
+        """Callback when Bluetooth Battery, RSSI, operator name, or roaming changes."""
+        state = {
+            "source": "bluetooth_hfp",
+            "device_address": address,
+            "is_in_call": False,
+            "call_state": "IDLE",
+        }
+        if battery_pct >= 0:
+            state["battery_level"] = max(0, min(100, battery_pct))
+        if signal_bars >= 0:
+            state["signal_strength"] = max(0, min(5, signal_bars))
+        if operator_name:
+            state["operator_name"] = operator_name
+        if is_roaming is not None:
+            state["is_roaming"] = bool(is_roaming)
+        self.log.info(f"📱 Publishing Bluetooth phone.status telemetry: {state}")
+        self.publish("phone.status", state)
 
     def _on_pin_requested(self, address: str, pin: str) -> None:
         """Callback when Bluetooth pairing PIN/passkey confirmation is requested."""
@@ -167,9 +195,6 @@ class ConnectivityManagerModule(BaseBackendModule):
         if is_connected:
             self.log.info(f"🔵 Inbound/Outbound Bluetooth Connection detected for device {address}")
             self.publish("bluetooth_manager.paired.connected", {"device_address": address})
-            if not self._rfcomm_connected:
-                self.log.info(f"Waking autoconnect loop for connected device {address} to verify Android Auto RFCOMM...")
-                self._autoconnect_event.set()
         else:
             self.log.info(f"⚪ Bluetooth device {address} disconnected")
             self.publish("bluetooth_manager.paired.disconnected", {"device_address": address})
@@ -240,7 +265,11 @@ class ConnectivityManagerModule(BaseBackendModule):
                     is_already_connected = dev.get("connected", False)
                     is_known = addr in known_aa
 
-                    self.log.info(f"Autoconnect: checking paired device {addr} ({name}) [already_connected={is_already_connected}, known_aa={is_known}]")
+                    if is_already_connected:
+                        self.log.debug(f"Autoconnect: device {addr} ({name}) is already connected — skipping")
+                        continue
+
+                    self.log.info(f"Autoconnect: attempting connection to paired device {addr} ({name}) [known_aa={is_known}]")
 
                     # Connect to profiles / initiate RFCOMM trigger
                     success, err = await self._bt_adapter.connect_device(addr)
@@ -319,18 +348,18 @@ class ConnectivityManagerModule(BaseBackendModule):
             self._notify_status_changed()
             return
 
-        self._wifi_credentials = creds
-        self.current_stage_index = 3
-        self._notify_status_changed()
-        self.log.info(f"📶 [WiFi Stage 2/5] WiFi AP active! Credentials: SSID='{creds['ssid']}', BSSID='{creds['bssid']}', Gateway={creds['gateway_ip']}")
+        mode_str = creds.get("mode", "join" if creds.get("ap_type") == 2 else "ap")
+        self.log.info(f"📶 [WiFi Stage 2/5] WiFi AP active ({mode_str} mode)! Credentials: SSID='{creds['ssid']}', BSSID='{creds['bssid']}', Gateway={creds['gateway_ip']}")
 
         # Handshake credentials dict
         handshake_creds = {
             "ssid": creds["ssid"],
-            "key": creds["key"],
+            "key": creds.get("key", ""),
             "bssid": creds["bssid"],
             "gateway_ip": creds["gateway_ip"],
             "tcp_port": 5288,
+            "security_mode": creds.get("security_mode", 8),
+            "ap_type": creds.get("ap_type", 0 if mode_str == "join" else 1),
         }
 
         # Run blocking socket handshake in thread pool to avoid blocking async loop
@@ -699,7 +728,8 @@ class ConnectivityManagerModule(BaseBackendModule):
         self._running = False
         self._rfcomm_listening = False
         self._autoconnect_event.set()
-        self._status_changed_evt.set()
+        if hasattr(self, "_status_changed_evt") and self._status_changed_evt:
+            self._status_changed_evt.set()
         if self._autoconnect_task:
             self._autoconnect_task.cancel()
             try:

@@ -1,17 +1,25 @@
 #!/bin/bash
-# packaging_micromamba/postinst
+# packaging/postinst
 #
-# dpkg post-installation script for nemo-headunit (micromamba version).
-# Called by dpkg automatically after all files are unpacked.
-#
+# dpkg/pacman post-installation script for nemo-headunit.
+# Supports both:
+#   - venv + uv mode (when packaging/requirements.txt is present)
+#   - micromamba mode (when packaging/environment.yml is present)
+# Called automatically after all package files are unpacked.
 
 set -euo pipefail
 
 APP_DIR="/opt/nemo-headunit"
 ENV_PREFIX="${APP_DIR}/env"
+REQUIREMENTS_TXT="${APP_DIR}/requirements.txt"
 ENV_YML="${APP_DIR}/environment.yml"
+
+BOOTSTRAP_UV="${APP_DIR}/bootstrap_uv.sh"
+UV_BIN_OPT="/opt/uv/bin/uv"
+
 BOOTSTRAP_MICROMAMBA="${APP_DIR}/bootstrap_micromamba.sh"
 MICROMAMBA_BIN="/opt/micromamba/micromamba"
+
 SERVICE_NAME="org.nemo.APManager.service"
 GROUP_NAME="ap_manager"
 BLUETOOTH_GROUP_NAME="bluetooth"
@@ -20,9 +28,28 @@ LAUNCHER_SRC="${APP_DIR}/bin/nemo-headunit"
 LAUNCHER_LINK="/usr/local/bin/nemo-headunit"
 DESKTOP_SRC="/usr/share/applications/nemo-headunit.desktop"
 
-log() { echo "[nemo-headunit postinst (micromamba)] $*"; }
+log() { echo "[nemo-headunit postinst] $*"; }
 
-# Trova micromamba nel PATH o in /opt/micromamba
+find_uv() {
+    if command -v uv &>/dev/null; then
+        command -v uv
+        return 0
+    fi
+    if [ -x "${UV_BIN_OPT}" ]; then
+        echo "${UV_BIN_OPT}"
+        return 0
+    fi
+    if [ -x "/opt/uv/uv" ]; then
+        echo "/opt/uv/uv"
+        return 0
+    fi
+    if [ -x "${HOME:-/root}/.local/bin/uv" ]; then
+        echo "${HOME:-/root}/.local/bin/uv"
+        return 0
+    fi
+    return 1
+}
+
 find_micromamba() {
     if command -v micromamba &>/dev/null; then
         command -v micromamba
@@ -35,9 +62,7 @@ find_micromamba() {
     return 1
 }
 
-case "$1" in
-
-configure|post_install|post_upgrade|[0-9]*|"")
+run_postinst() {
     # ------------------------------------------------------------------
     # 1. Create system groups and add standard human users automatically
     # ------------------------------------------------------------------
@@ -66,55 +91,97 @@ configure|post_install|post_upgrade|[0-9]*|"")
     done < <(getent passwd)
 
     # ------------------------------------------------------------------
-    # 2. Bootstrap micromamba if missing
+    # 2. Build or Update Runtime Environment (Venv+UV vs Micromamba)
     # ------------------------------------------------------------------
-    if ! find_micromamba &>/dev/null; then
-        if [ -f "${BOOTSTRAP_MICROMAMBA}" ]; then
-            log "micromamba non trovato — eseguo bootstrap_micromamba.sh"
-            chmod +x "${BOOTSTRAP_MICROMAMBA}"
-            bash "${BOOTSTRAP_MICROMAMBA}"
+    if [ -f "${REQUIREMENTS_TXT}" ]; then
+        log "Packaging mode detected: Python venv + uv"
+
+        # Bootstrap uv if needed
+        if ! find_uv &>/dev/null; then
+            if [ -f "${BOOTSTRAP_UV}" ]; then
+                log "uv non trovato — eseguo bootstrap_uv.sh"
+                chmod +x "${BOOTSTRAP_UV}"
+                bash "${BOOTSTRAP_UV}"
+            else
+                log "WARNING: uv non trovato e bootstrap_uv.sh assente."
+            fi
         else
-            log "WARNING: micromamba non trovato e bootstrap_micromamba.sh assente."
-            log "         Installa micromamba manualmente e ri-esegui:"
-            log "           micromamba create -p ${ENV_PREFIX} -f ${ENV_YML}"
+            log "uv trovato: $(find_uv)"
         fi
-    else
-        log "micromamba trovato: $(find_micromamba)"
-    fi
 
-    # ------------------------------------------------------------------
-    # 3. Build Micromamba env on target (idempotent with SHA256 checksum)
-    # ------------------------------------------------------------------
-    MM_BIN="$(find_micromamba || true)"
-
-    if [ -n "${MM_BIN}" ]; then
+        UV_BIN="$(find_uv || true)"
         CHECKSUM_FILE="${ENV_PREFIX}/.env_spec.sha256"
-        CURRENT_HASH="$(sha256sum "${ENV_YML}" 2>/dev/null | awk '{print $1}')"
+        CURRENT_HASH="$(sha256sum "${REQUIREMENTS_TXT}" 2>/dev/null | awk '{print $1}')"
         SAVED_HASH=""
         if [ -f "${CHECKSUM_FILE}" ]; then
             SAVED_HASH="$(cat "${CHECKSUM_FILE}" 2>/dev/null || true)"
         fi
 
-        if [ -d "${ENV_PREFIX}" ] && [ -n "${CURRENT_HASH}" ] && [ "${CURRENT_HASH}" = "${SAVED_HASH}" ]; then
-            log "Micromamba env in ${ENV_PREFIX} is up-to-date with environment.yml — skipping update."
-        elif [ -d "${ENV_PREFIX}" ]; then
-            log "Micromamba env spec changed — updating env in ${ENV_PREFIX}"
-            log "Command: ${MM_BIN} env update -y -p ${ENV_PREFIX} -f ${ENV_YML} --prune"
-            "${MM_BIN}" env update -y -p "${ENV_PREFIX}" -f "${ENV_YML}" --prune
+        # 1. Create venv with system-site-packages enabled if not exists
+        if [ ! -f "${ENV_PREFIX}/bin/python" ]; then
+            log "Creating virtualenv with --system-site-packages in ${ENV_PREFIX}..."
+            python3 -m venv --system-site-packages "${ENV_PREFIX}"
+        fi
+
+        # 2. Install/Sync packages via uv
+        if [ -n "${UV_BIN}" ]; then
+            if [ -d "${ENV_PREFIX}" ] && [ -n "${CURRENT_HASH}" ] && [ "${CURRENT_HASH}" = "${SAVED_HASH}" ]; then
+                log "Venv packages in ${ENV_PREFIX} up-to-date with requirements.txt — skipping install."
+            else
+                log "Installing/updating Python dependencies with uv pip in ${ENV_PREFIX}..."
+                VIRTUAL_ENV="${ENV_PREFIX}" "${UV_BIN}" pip install --python "${ENV_PREFIX}/bin/python" -r "${REQUIREMENTS_TXT}"
+                echo "${CURRENT_HASH}" > "${CHECKSUM_FILE}"
+                log "Venv packages ready."
+            fi
+        elif [ -x "${ENV_PREFIX}/bin/pip" ]; then
+            log "WARNING: uv not found, falling back to standard pip inside venv..."
+            "${ENV_PREFIX}/bin/pip" install -r "${REQUIREMENTS_TXT}"
             echo "${CURRENT_HASH}" > "${CHECKSUM_FILE}"
         else
-            log "Creazione Micromamba env in ${ENV_PREFIX} (potrebbe richiedere qualche minuto)"
-            "${MM_BIN}" create -y -p "${ENV_PREFIX}" -f "${ENV_YML}"
-            echo "${CURRENT_HASH}" > "${CHECKSUM_FILE}"
+            log "WARNING: neither uv nor pip available to populate venv in ${ENV_PREFIX}."
         fi
-        log "Micromamba env pronto."
-    else
-        log "WARNING: impossibile creare l'env Micromamba — micromamba non disponibile."
-        log "         Il servizio non si avvierà finché l'env non è presente."
+
+    elif [ -f "${ENV_YML}" ]; then
+        log "Packaging mode detected: Micromamba"
+
+        if ! find_micromamba &>/dev/null; then
+            if [ -f "${BOOTSTRAP_MICROMAMBA}" ]; then
+                log "micromamba non trovato — eseguo bootstrap_micromamba.sh"
+                chmod +x "${BOOTSTRAP_MICROMAMBA}"
+                bash "${BOOTSTRAP_MICROMAMBA}"
+            else
+                log "WARNING: micromamba non trovato e bootstrap_micromamba.sh assente."
+            fi
+        else
+            log "micromamba trovato: $(find_micromamba)"
+        fi
+
+        MM_BIN="$(find_micromamba || true)"
+        if [ -n "${MM_BIN}" ]; then
+            CHECKSUM_FILE="${ENV_PREFIX}/.env_spec.sha256"
+            CURRENT_HASH="$(sha256sum "${ENV_YML}" 2>/dev/null | awk '{print $1}')"
+            SAVED_HASH=""
+            if [ -f "${CHECKSUM_FILE}" ]; then
+                SAVED_HASH="$(cat "${CHECKSUM_FILE}" 2>/dev/null || true)"
+            fi
+
+            if [ -d "${ENV_PREFIX}" ] && [ -n "${CURRENT_HASH}" ] && [ "${CURRENT_HASH}" = "${SAVED_HASH}" ]; then
+                log "Micromamba env in ${ENV_PREFIX} is up-to-date with environment.yml — skipping update."
+            elif [ -d "${ENV_PREFIX}" ]; then
+                log "Micromamba env spec changed — updating env in ${ENV_PREFIX}"
+                "${MM_BIN}" env update -y -p "${ENV_PREFIX}" -f "${ENV_YML}" --prune
+                echo "${CURRENT_HASH}" > "${CHECKSUM_FILE}"
+            else
+                log "Creazione Micromamba env in ${ENV_PREFIX} (potrebbe richiedere qualche minuto)"
+                "${MM_BIN}" create -y -p "${ENV_PREFIX}" -f "${ENV_YML}"
+                echo "${CURRENT_HASH}" > "${CHECKSUM_FILE}"
+            fi
+            log "Micromamba env pronto."
+        fi
     fi
 
     # ------------------------------------------------------------------
-    # 4. Fix permissions on the installed app directory
+    # 3. Fix permissions on the installed app directory
     # ------------------------------------------------------------------
     log "Setting permissions on ${APP_DIR}"
     chown -R root:root "${APP_DIR}"
@@ -126,21 +193,22 @@ configure|post_install|post_upgrade|[0-9]*|"")
     fi
 
     # ------------------------------------------------------------------
-    # 5. Fix permissions on privileged service script
+    # 4. Fix permissions on privileged service script
     # ------------------------------------------------------------------
     if [ -f "${APP_DIR}/services/linux/ap_manager_service/ap_manager_service.py" ]; then
         chmod 700 "${APP_DIR}/services/linux/ap_manager_service/ap_manager_service.py"
     fi
 
     # ------------------------------------------------------------------
-    # 6. Reload D-Bus so it picks up the new policy
+    # 5. Reload D-Bus so it picks up the new policy
     # ------------------------------------------------------------------
     log "Reloading D-Bus configuration"
     systemctl restart polkit 2>/dev/null || true
     systemctl reload dbus 2>/dev/null || true
+    systemctl try-restart bluetooth 2>/dev/null || true
 
     # ------------------------------------------------------------------
-    # 7. Reload systemd and enable + start the AP manager service
+    # 6. Reload systemd and enable + start the AP manager service
     # ------------------------------------------------------------------
     log "Reloading systemd daemon"
     systemctl daemon-reload
@@ -148,13 +216,13 @@ configure|post_install|post_upgrade|[0-9]*|"")
     log "Enabling ${SERVICE_NAME}"
     systemctl enable "${SERVICE_NAME}"
 
-    log "Starting ${SERVICE_NAME}"
-    systemctl start "${SERVICE_NAME}" || {
-        log "WARNING: service failed to start — check: journalctl -u ${SERVICE_NAME} -n 50"
+    log "Starting/Restarting ${SERVICE_NAME}"
+    systemctl restart "${SERVICE_NAME}" || {
+        log "WARNING: service failed to start/restart — check: journalctl -u ${SERVICE_NAME} -n 50"
     }
 
     # ------------------------------------------------------------------
-    # 8. Platform-specific hardware fixes
+    # 7. Platform-specific hardware fixes
     # ------------------------------------------------------------------
     if [ -f "${HW_FIX_RUNNER}" ]; then
         log "Running platform hardware fixes"
@@ -165,7 +233,7 @@ configure|post_install|post_upgrade|[0-9]*|"")
     fi
 
     # ------------------------------------------------------------------
-    # 9. Create /usr/local/bin symlink for CLI access
+    # 8. Create /usr/local/bin symlink for CLI access
     # ------------------------------------------------------------------
     if [ -f "${LAUNCHER_SRC}" ]; then
         log "Creating symlink: ${LAUNCHER_LINK} -> ${LAUNCHER_SRC}"
@@ -175,15 +243,13 @@ configure|post_install|post_upgrade|[0-9]*|"")
     fi
 
     # ------------------------------------------------------------------
-    # 10. Add desktop shortcut to all existing human users' Desktops
+    # 9. Add desktop shortcut to all existing human users' Desktops
     # ------------------------------------------------------------------
     if [ -f "${DESKTOP_SRC}" ]; then
-        # getent passwd: iterate UIDs 1000-59999 (standard human users)
         while IFS=: read -r username _ uid _ _ homedir _; do
             if [ "${uid}" -ge 1000 ] && [ "${uid}" -lt 60000 ] && [ -d "${homedir}/Desktop" ]; then
                 DEST="${homedir}/Desktop/nemo-headunit.desktop"
                 cp "${DESKTOP_SRC}" "${DEST}"
-                # Mark as trusted so GNOME/KDE show it without the security warning
                 chmod +x "${DEST}"
                 chown "${username}:${username}" "${DEST}" 2>/dev/null || true
                 log "Desktop shortcut created for user '${username}' at ${DEST}"
@@ -204,22 +270,36 @@ configure|post_install|post_upgrade|[0-9]*|"")
     log "    sudo usermod -aG ${GROUP_NAME} <username>"
     log "  To add a user to the '${BLUETOOTH_GROUP_NAME}' group:"
     log "    sudo usermod -aG ${BLUETOOTH_GROUP_NAME} <username>"
-    log "  (user must log out and back in for the group to take effect)"
-    ;;
+}
 
-upgrade)
-    log "Upgrade detected — restarting ${SERVICE_NAME}"
-    systemctl restart "${SERVICE_NAME}" || true
-    ;;
+# Pacman hooks call post_install and post_upgrade as shell functions
+post_install() {
+    run_postinst
+}
 
-abort-upgrade | abort-install | abort-remove)
-    log "Aborting installation / upgrade. No cleanup performed."
-    ;;
+post_upgrade() {
+    run_postinst
+}
 
-*)
-    log "Unknown argument: $1 — ignoring."
-    ;;
-
-esac
+# Dpkg hooks invoke the script directly with arguments (configure, upgrade, etc.)
+if [ $# -gt 0 ]; then
+    case "$1" in
+        configure|post_install|post_upgrade|[0-9]*|"")
+            run_postinst
+            ;;
+        upgrade)
+            log "Upgrade detected — restarting ${SERVICE_NAME}"
+            systemctl restart "${SERVICE_NAME}" || true
+            ;;
+        abort-upgrade|abort-install|abort-remove)
+            log "Aborting installation / upgrade. No cleanup performed."
+            ;;
+        *)
+            log "Unknown argument: $1 — ignoring."
+            ;;
+    esac
+elif [ "${0##*/}" = "postinst" ]; then
+    run_postinst
+fi
 
 exit 0

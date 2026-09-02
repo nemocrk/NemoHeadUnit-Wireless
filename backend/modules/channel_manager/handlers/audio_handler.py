@@ -20,14 +20,15 @@ if TYPE_CHECKING:
 MSG = ControlMessage.Enum
 AV_MSG = AVChannelMessage.Enum
 
-UNACKED_FRAMES_THRESHOLD = 50
+UNACKED_FRAMES_THRESHOLD = 10
 
 
 class AudioChannelHandler:
     def __init__(self, manager: "ChannelManagerModule"):
         self.manager = manager
         self.log = manager.log
-        self.frame_count = 0
+        self.frame_counts: Dict[int, int] = {}
+        self.unacked_counts: Dict[int, int] = {}
         self.sessions: Dict[int, int] = {}
 
         self._handlers: Dict[int, Callable[[int, bytes], None]] = {
@@ -52,15 +53,15 @@ class AudioChannelHandler:
         await self.manager.send_wire_frame(channel_id, MSG.CHANNEL_OPEN_RESPONSE, resp.SerializeToString(), encrypted=True)
 
     async def _handle_setup_request(self, channel_id: int, body: bytes) -> None:
-        self.log.info(f"AudioChannel (ch{channel_id}): Received AVChannelSetupRequest — responding OK (max_unacked=10)...")
+        self.log.info(f"🔊 AudioChannel (ch{channel_id}): Received AVChannelSetupRequest — responding OK (max_unacked={UNACKED_FRAMES_THRESHOLD})...")
         if body:
             try:
                 from protos.oaa.av.AVChannelSetupRequestMessage_pb2 import AVChannelSetupRequest
                 from protos.oaa.av.MediaCodecTypeEnum_pb2 import MediaCodecType
                 setup_req = AVChannelSetupRequest()
                 setup_req.ParseFromString(body)
-                codec_name = MediaCodecType.Enum.Name(setup_req.media_codec_type) if hasattr(MediaCodecType.Enum, "Name") else setup_req.media_codec_type
-                self.log.info(f"🔊 AudioChannel (ch{channel_id}): AVChannelSetupRequest codec={codec_name}")
+                codec_name = MediaCodecType.Enum.Name(setup_req.media_codec_type) if hasattr(MediaCodecType.Enum, "Name") else str(setup_req.media_codec_type)
+
                 if channel_id in self.manager.active_channels:
                     av_conf = self.manager.active_channels[channel_id].setdefault("av_channel", {})
                     av_conf["codec"] = codec_name
@@ -75,6 +76,12 @@ class AudioChannelHandler:
                     channel_count = cfg0.get("channel_count", 2)
                     bit_depth = cfg0.get("bit_depth", 16)
                 audio_type = av_desc.get("audio_type", "MEDIA")
+
+                self.log.info(
+                    f"🔊 [Audio Setup Ch{channel_id}] Stream Config: "
+                    f"type={audio_type} | codec={codec_name} ({setup_req.media_codec_type}) | "
+                    f"{sample_rate}Hz {channel_count}ch {bit_depth}-bit Int16"
+                )
 
                 self.manager.publish("media.audio.channel_configured", {
                     "channel_id": channel_id,
@@ -110,6 +117,16 @@ class AudioChannelHandler:
 
     async def _handle_stop_indication(self, channel_id: int, body: bytes) -> None:
         self.log.info(f"AudioChannel (ch{channel_id}): Received AVChannelStopIndication — audio stream STOPPED")
+        # Flush any pending unacked frames so phone doesn't freeze on restart
+        unacked = self.unacked_counts.get(channel_id, 0)
+        if unacked > 0:
+            session_id = self.sessions.get(channel_id, 0)
+            ack = AVMediaAckIndication()
+            ack.session_id = session_id
+            ack.ack_count = unacked
+            self.unacked_counts[channel_id] = 0
+            self.log.debug(f"🔊 AudioChannel (ch{channel_id}): Flushed pending AVMediaAckIndication (ack_count={unacked})")
+            await self.manager.send_wire_frame(channel_id, AV_MSG.AV_MEDIA_ACK_INDICATION, ack.SerializeToString(), encrypted=True, log_level='debug')
 
     async def _handle_focus_request(self, channel_id: int, body: bytes) -> None:
         focus_type = AudioFocusType.Enum.GAIN
@@ -149,26 +166,36 @@ class AudioChannelHandler:
         if not audio_payload:
             return
 
-        binary_frame = pack_media_frame(channel_id, ts_us, audio_payload)
+        # Write directly to dedicated per-channel SHM downstream ring buffer zero-copy
+        shm_buf = self.manager.shm.get_downstream_channel(channel_id, size=8 * 1024 * 1024)
+        shm_offset = shm_buf.write_frame(channel_id, ts_us, audio_payload)
+        if shm_offset >= 0:
+            self.manager.publish("media.audio.frame_shm", {
+                "shm_offset": shm_offset,
+                "len": len(audio_payload),
+                "timestamp_us": ts_us,
+                "channel_id": channel_id,
+            })
 
-        self.manager.publish("media.audio.frame", {
-            "payload_b64": base64.b64encode(binary_frame).decode(),
-        })
+        # Broadcast binary frame to web browser clients only if clients connected
+        if self.manager.ws_clients:
+            binary_frame = pack_media_frame(channel_id, ts_us, audio_payload)
+            await self.manager.broadcast_ws_media(binary_frame)
 
-        await self.manager.broadcast_ws_media(binary_frame)
+        # Per-channel frame counting and batch MediaAck
+        ch_frames = self.frame_counts.get(channel_id, 0) + 1
+        self.frame_counts[channel_id] = ch_frames
 
-        if self.frame_count % UNACKED_FRAMES_THRESHOLD == 0:
-            self.log.debug(f"🔊 [Audio Stream Flow] Processed audio frame {self.frame_count}/{UNACKED_FRAMES_THRESHOLD} (ch{channel_id}): msgId=0x{message_id:04x}, payload_len={len(audio_payload)}, ts={ts_us} µs -> Broadcasting to {len(self.manager.ws_clients)} WS client(s)")
+        unacked = self.unacked_counts.get(channel_id, 0) + 1
+        self.unacked_counts[channel_id] = unacked
 
-
-        # Batch MediaAck every 10 frames using AVMediaAckIndication(session_id, ack_count=10)
-        session_id = self.sessions.get(channel_id, 0)
-        self.frame_count += 1
-        if self.frame_count % UNACKED_FRAMES_THRESHOLD == 0:
+        if unacked >= UNACKED_FRAMES_THRESHOLD:
+            session_id = self.sessions.get(channel_id, 0)
             ack = AVMediaAckIndication()
             ack.session_id = session_id
-            ack.ack_count = UNACKED_FRAMES_THRESHOLD
-            self.log.debug(f"🔊 AudioChannel (ch{channel_id}): Sending batch AVMediaAckIndication (session_id={session_id}, ack_count={UNACKED_FRAMES_THRESHOLD}, total_frames={self.frame_count})")
+            ack.ack_count = unacked
+            self.unacked_counts[channel_id] = 0
+            self.log.debug(f"🔊 AudioChannel (ch{channel_id}): Sending batch AVMediaAckIndication (session_id={session_id}, ack_count={unacked}, total_frames={ch_frames})")
             await self.manager.send_wire_frame(channel_id, AV_MSG.AV_MEDIA_ACK_INDICATION, ack.SerializeToString(), encrypted=True, log_level='debug')
 
 

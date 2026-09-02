@@ -55,6 +55,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(800, 480)
         self.fullscreen_change_requested.connect(self.set_fullscreen)
 
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+
         self.isVideoFocused = True
         self._is_connected = False
 
@@ -68,6 +70,7 @@ class MainWindow(QMainWindow):
 
         # Central Master Container
         self.central_widget = QWidget(self)
+        self.central_widget.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self.setCentralWidget(self.central_widget)
 
         # 1. Base Layer: Video Viewport OpenGL Canvas

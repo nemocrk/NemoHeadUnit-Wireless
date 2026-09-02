@@ -122,7 +122,8 @@ class BluetoothDrawerWidget(QWidget):
         self.layout.addLayout(header_layout)
 
         # Controls & Scan Button
-        self.scan_btn = QPushButton("🔍 Scan Bluetooth Devices", self)
+        btn_top_layout = QHBoxLayout()
+        self.scan_btn = QPushButton("🔍 Scan Devices", self)
         self.scan_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1f6feb;
@@ -137,12 +138,69 @@ class BluetoothDrawerWidget(QWidget):
             }
         """)
         self.scan_btn.clicked.connect(self._on_scan_clicked)
-        self.layout.addWidget(self.scan_btn)
+        btn_top_layout.addWidget(self.scan_btn)
+
+        self.connect_pair_btn = QPushButton("🔗 Pair / Connect", self)
+        self.connect_pair_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #238636;
+                color: #ffffff;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 6px;
+                padding: 8px;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background-color: #2ea043;
+            }
+        """)
+        self.connect_pair_btn.clicked.connect(self._on_connect_pair_clicked)
+        btn_top_layout.addWidget(self.connect_pair_btn)
+        self.layout.addLayout(btn_top_layout)
 
         # Status Label
         self.lbl_status = QLabel("Connecting to status stream...", self)
         self.lbl_status.setStyleSheet("color: #58a6ff; font-weight: 500;")
         self.layout.addWidget(self.lbl_status)
+
+        # Pairing PIN Box
+        self.active_pairing_device = None
+        self.pairing_card = QWidget(self)
+        self.pairing_card.setObjectName("bt-pairing-card")
+        self.pairing_card.setStyleSheet("""
+            QWidget#bt-pairing-card {
+                background-color: rgba(30, 41, 59, 0.95);
+                border: 2px solid #38bdf8;
+                border-radius: 10px;
+                padding: 10px;
+            }
+        """)
+        p_layout = QVBoxLayout(self.pairing_card)
+        p_layout.setContentsMargins(10, 10, 10, 10)
+        p_layout.setSpacing(6)
+        self.lbl_pairing_title = QLabel("🔑 Pairing Request", self.pairing_card)
+        self.lbl_pairing_title.setStyleSheet("font-weight: bold; color: #38bdf8; font-size: 13px;")
+        p_layout.addWidget(self.lbl_pairing_title)
+
+        self.lbl_pairing_pin = QLabel("PIN: ------", self.pairing_card)
+        self.lbl_pairing_pin.setStyleSheet("font-size: 18px; font-weight: 800; color: #ffffff; letter-spacing: 3px;")
+        self.lbl_pairing_pin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        p_layout.addWidget(self.lbl_pairing_pin)
+
+        btn_box = QHBoxLayout()
+        self.btn_confirm_pin = QPushButton("✅ Confirm & Pair", self.pairing_card)
+        self.btn_confirm_pin.setStyleSheet("background-color: #238636; color: white; border-radius: 6px; padding: 6px 12px; font-weight: bold;")
+        self.btn_confirm_pin.clicked.connect(self._on_confirm_pin_clicked)
+        btn_box.addWidget(self.btn_confirm_pin)
+
+        self.btn_reject_pin = QPushButton("❌ Reject", self.pairing_card)
+        self.btn_reject_pin.setStyleSheet("background-color: #da3633; color: white; border-radius: 6px; padding: 6px 12px; font-weight: bold;")
+        self.btn_reject_pin.clicked.connect(self._on_reject_pin_clicked)
+        btn_box.addWidget(self.btn_reject_pin)
+        p_layout.addLayout(btn_box)
+
+        self.layout.addWidget(self.pairing_card)
+        self.pairing_card.hide()
 
         # Device List
         self.device_list = QListWidget(self)
@@ -166,6 +224,7 @@ class BluetoothDrawerWidget(QWidget):
                 background-color: #161b22;
             }
         """)
+        self.device_list.itemDoubleClicked.connect(lambda item: self._on_connect_pair_clicked())
         self.layout.addWidget(self.device_list)
 
         # Action Buttons Layout
@@ -235,6 +294,39 @@ class BluetoothDrawerWidget(QWidget):
         self.scan_thread = BluetoothScanThread()
         self.scan_thread.start()
 
+    def _on_connect_pair_clicked(self):
+        selected_item = self.device_list.currentItem()
+        if not selected_item:
+            self.lbl_status.setText("⚠️ Select a device to pair/connect")
+            return
+        addr = selected_item.data(Qt.ItemDataRole.UserRole)
+        if not addr:
+            return
+        is_paired = selected_item.data(Qt.ItemDataRole.UserRole + 1)
+        if is_paired:
+            self.lbl_status.setText(f"Connecting to {addr}...")
+            self.action_thread = BluetoothActionThread("connect", {"device_address": addr})
+        else:
+            self.lbl_status.setText(f"Initiating pairing with {addr}...")
+            self.action_thread = BluetoothActionThread("pair", {"device_address": addr})
+        self.action_thread.start()
+
+    def _on_confirm_pin_clicked(self):
+        if not self.active_pairing_device:
+            return
+        self.lbl_status.setText(f"Confirming pairing with {self.active_pairing_device}...")
+        self.action_thread = BluetoothActionThread("pair/confirm", {"device_address": self.active_pairing_device})
+        self.action_thread.start()
+        self.pairing_card.hide()
+
+    def _on_reject_pin_clicked(self):
+        if not self.active_pairing_device:
+            return
+        self.lbl_status.setText(f"Rejecting pairing with {self.active_pairing_device}...")
+        self.action_thread = BluetoothActionThread("pair/reject", {"device_address": self.active_pairing_device})
+        self.action_thread.start()
+        self.pairing_card.hide()
+
     def _on_toggle_ignore_clicked(self):
         selected_item = self.device_list.currentItem()
         if not selected_item:
@@ -281,7 +373,13 @@ class BluetoothDrawerWidget(QWidget):
         pairing_pin = data.get("pairing_pin")
         if pairing_pin:
             dev_addr = data.get("pairing_device", "Phone")
+            self.active_pairing_device = dev_addr
+            self.lbl_pairing_title.setText(f"🔑 Pairing Request: {dev_addr}")
+            self.lbl_pairing_pin.setText(f"PIN: {pairing_pin}")
+            self.pairing_card.show()
             toast_msg = f"🔑 Pairing Request from {dev_addr}: PIN {pairing_pin}"
+        else:
+            self.pairing_card.hide()
 
         if toast_msg and hasattr(self.window(), "toast_widget") and self.window().toast_widget:
             self.window().toast_widget.show_toast(toast_msg, icon="📶")
@@ -293,11 +391,13 @@ class BluetoothDrawerWidget(QWidget):
         all_devices = []
         for dev in paired:
             dev["connected"] = True
+            dev["is_paired"] = True
             all_devices.append(dev)
 
         for dev in discovered:
             if not any(d.get("address") == dev.get("address") for d in all_devices):
                 dev["connected"] = False
+                dev["is_paired"] = False
                 all_devices.append(dev)
 
         current_selected_addr = None
@@ -313,13 +413,15 @@ class BluetoothDrawerWidget(QWidget):
             name = dev.get("name", "Unknown Device")
             addr = dev.get("address", "")
             connected = dev.get("connected", False)
+            is_paired = dev.get("is_paired", False)
             is_known = addr in self.known_devices
             is_ignored = addr in self.ignored_devices
 
             tag = " [⭐ AA Ready]" if is_known else (" [🚫 Ignored]" if is_ignored else "")
-            status_text = " 🟢 Connected" if connected else " ⚪ Paired / Discovered"
+            status_text = " 🟢 Connected" if connected else (" 🔵 Paired" if is_paired else " ⚪ Discovered (Tap to Pair)")
             item = QListWidgetItem(f"📱 {name}{tag}\n   [{addr}]{status_text}")
             item.setData(Qt.ItemDataRole.UserRole, addr)
+            item.setData(Qt.ItemDataRole.UserRole + 1, is_paired)
             self.device_list.addItem(item)
             if current_selected_addr and addr == current_selected_addr:
                 self.device_list.setCurrentItem(item)

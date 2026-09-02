@@ -274,6 +274,15 @@ class Qt6GuiModule(BaseBackendModule):
         self._sse_tasks: list[asyncio.Task] = []
         self._last_toast_message = ""
 
+        # Video Lag & Sync Tracking
+        self._video_first_sys_time: Optional[float] = None
+        self._video_first_ts_us: Optional[int] = None
+        self._video_lag_ms: float = 0.0
+        self._video_fps: float = 0.0
+        self._video_frame_count: int = 0
+        self._video_fps_timer = time.time()
+        self._last_stats_log_time = 0.0
+
 
 
     def get_default_config(self) -> dict[str, Any]:
@@ -308,12 +317,16 @@ class Qt6GuiModule(BaseBackendModule):
         # Create QApplication if not created
         t1 = time.time()
         if not QApplication.instance():
-            os.environ.setdefault("QT_WIDGETS_RHI", "0")
+            if os.environ.get("QT_WIDGETS_RHI") == "0":
+                del os.environ["QT_WIDGETS_RHI"]
             try:
                 from PyQt6.QtGui import QSurfaceFormat
                 fmt = QSurfaceFormat()
                 fmt.setDepthBufferSize(24)
                 fmt.setStencilBufferSize(8)
+                fmt.setSamples(0)
+                fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
+                fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
                 QSurfaceFormat.setDefaultFormat(fmt)
             except Exception as exc:
                 self.log.debug(f"QSurfaceFormat setup notice: {exc}")
@@ -426,6 +439,12 @@ class Qt6GuiModule(BaseBackendModule):
             self.app.processEvents()
             self.log.info("⏱ [Boot Trace 6f/7] app.processEvents() completed!")
 
+        # Setup periodic audio buffer telemetry timer (200ms)
+        self._audio_telemetry_timer = QTimer(self.main_window)
+        self._audio_telemetry_timer.setInterval(200)
+        self._audio_telemetry_timer.timeout.connect(self._update_audio_buffer_status)
+        self._audio_telemetry_timer.start()
+
         self.log.info(f"⏱ [Boot Trace 7/7] Total setup() completed cleanly in {(time.time()-t0)*1000:.1f}ms")
 
     async def run(self) -> None:
@@ -502,8 +521,9 @@ class Qt6GuiModule(BaseBackendModule):
         """Synchronous callback invoked directly on ZMQ sub thread to avoid asyncio loop drag stalls."""
         data = payload if payload is not None else topic_or_payload
         offset = data.get("shm_offset", -1) if isinstance(data, dict) else -1
+        channel_id = data.get("channel_id") if isinstance(data, dict) else None
         if offset >= 0 and self.shm_engine:
-            self.shm_engine.process_downstream_video(offset)
+            self.shm_engine.process_downstream_video(offset, channel_id=channel_id)
 
     def _on_shm_audio_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         """Synchronous callback invoked directly on ZMQ sub thread to avoid asyncio loop drag stalls."""
@@ -766,6 +786,31 @@ class Qt6GuiModule(BaseBackendModule):
         self.log.info("Video stream temporarily stopped/paused by phone")
 
     def _on_video_frame_from_shm(self, rgba_bytes: bytes, w: int, h: int, ts_us: int):
+        now = time.time()
+        self._video_frame_count += 1
+        elapsed_fps = now - self._video_fps_timer
+        if elapsed_fps >= 1.0:
+            self._video_fps = round(self._video_frame_count / elapsed_fps, 1)
+            self._video_frame_count = 0
+            self._video_fps_timer = now
+
+        if ts_us > 0:
+            if self._video_first_sys_time is None or self._video_first_ts_us is None:
+                self._video_first_sys_time = now
+                self._video_first_ts_us = ts_us
+                self._video_lag_ms = 0.0
+            else:
+                elapsed_sys = now - self._video_first_sys_time
+                elapsed_phone = (ts_us - self._video_first_ts_us) / 1_000_000.0
+                lag = (elapsed_sys - elapsed_phone) * 1000.0
+                # If stream paused, rewound, or phone PTS jumped by more than 3 seconds, reset baseline
+                if abs(lag) > 3000.0 or elapsed_phone < 0:
+                    self._video_first_sys_time = now
+                    self._video_first_ts_us = ts_us
+                    self._video_lag_ms = 0.0
+                else:
+                    self._video_lag_ms = max(0.0, lag)
+
         if self.main_window:
             if self.main_window.isVideoFocused and self.main_window.disconnected_screen.isVisible():
                 self.main_window.disconnected_screen.hide()
@@ -775,7 +820,36 @@ class Qt6GuiModule(BaseBackendModule):
 
     def _on_audio_frame_from_shm(self, pcm_bytes: bytes, channel_id: int, ts_us: int):
         if self.audio_engine:
-            self.audio_engine.play_pcm_frame(pcm_bytes, channel_id=channel_id)
+            self.audio_engine.play_pcm_frame(pcm_bytes, channel_id=channel_id, ts_us=ts_us)
+
+    def _update_audio_buffer_status(self):
+        if self.audio_engine and self.main_window and hasattr(self.main_window, "command_bar") and self.main_window.command_bar:
+            metrics = self.audio_engine.get_metrics()
+            v_lag = int(self._video_lag_ms)
+            video_metrics = {
+                "lag_ms": v_lag,
+                "fps": self._video_fps,
+            }
+            self.main_window.command_bar.update_audio_status(metrics, video_metrics=video_metrics)
+
+            # Periodically log statistics to stdout/systemd log (every 5 seconds when streaming)
+            now = time.time()
+            if now - self._last_stats_log_time >= 5.0:
+                self._last_stats_log_time = now
+                # Check active audio channel metrics
+                active_ch = next((c for c in metrics.values() if c.get("is_started") or c.get("total_bytes_in", 0) > 0), None)
+                if active_ch or self._video_fps > 0 or v_lag > 0:
+                    a_lag = active_ch.get("lag_ms", 0) if active_ch else 0
+                    ch_id = active_ch.get("channel_id", 0) if active_ch else 0
+                    app_ms = active_ch.get("app_buffer", {}).get("buffered_ms", 0) if active_ch else 0
+                    sink_ms = active_ch.get("sink_buffer", {}).get("queued_ms", 0) if active_ch else 0
+                    underruns = active_ch.get("app_buffer", {}).get("underruns", 0) if active_ch else 0
+                    drift = v_lag - a_lag
+                    self.log.info(
+                        f"📊 [A/V Stats] Video: {self._video_fps:.1f} fps (lag +{v_lag}ms) | "
+                        f"Audio Ch{ch_id}: lag +{a_lag}ms (App: {app_ms}ms, Sink: {sink_ms}ms, Underruns: {underruns}) | "
+                        f"A/V Drift: {drift:+d}ms"
+                    )
 
     def _on_mic_data_captured(self, pcm_chunk: bytes):
         if self.shm_engine:
@@ -784,6 +858,11 @@ class Qt6GuiModule(BaseBackendModule):
                 self.publish("media.audio.mic_shm", {"shm_offset": offset, "len": len(pcm_chunk)})
 
     def _on_touch_input_event(self, touch_data: dict):
+        action = touch_data.get("action", 0)
+        if action != 2:
+            self.log.info(
+                f"👆 [Touch Input] action={action} action_index={touch_data.get('action_index')} pointers={touch_data.get('pointers')}"
+            )
         self.publish("input.event", touch_data)
 
     def _on_user_input_event(self, ev_type: str, x: int, y: int, button: int):

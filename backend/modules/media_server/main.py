@@ -83,6 +83,7 @@ class MediaServerModule(BaseBackendModule):
         self.audio_adapter = get_audio_adapter()
         self.shm = BidirectionalMediaSHM(create=False)
         self.ws_clients: set = set()
+        self._video_channel_id: Optional[int] = None
         self._status_changed_evt = asyncio.Event()
 
     async def _handle_volume(self, request):
@@ -550,8 +551,9 @@ class MediaServerModule(BaseBackendModule):
             if len(binary_data) >= 9:
                 from shared.nal_utils import unpack_media_frame
                 channel_id, timestamp_us, pcm_payload = unpack_media_frame(binary_data)
-                # Write to SHM with preserved channel_id
-                shm_offset = self.shm.downstream.write_frame(channel_id, timestamp_us, pcm_payload)
+                # Write to dedicated per-channel SHM with preserved channel_id
+                shm_buf = self.shm.get_downstream_channel(channel_id, size=8 * 1024 * 1024)
+                shm_offset = shm_buf.write_frame(channel_id, timestamp_us, pcm_payload)
                 if shm_offset >= 0:
                     self.publish("media.audio.frame_shm", {
                         "shm_offset": shm_offset,
@@ -573,6 +575,9 @@ class MediaServerModule(BaseBackendModule):
         try:
             offset = payload.get("shm_offset", -1)
             timestamp_us = payload.get("timestamp_us", 0)
+            ch_id = payload.get("channel_id")
+            if ch_id is not None:
+                self._video_channel_id = ch_id
             if offset < 0:
                 return
 
@@ -661,18 +666,21 @@ class MediaServerModule(BaseBackendModule):
         if not frame_bytes:
             return
 
-        # Write video frame to SHM downstream ring buffer (stream_type 4 = VIDEO)
-        shm_offset = self.shm.downstream.write_frame(4, timestamp_us, frame_bytes)
+        # Write video frame to dynamic per-channel SHM downstream ring buffer (stream_type 4 = VIDEO)
+        ch_id = self._video_channel_id if self._video_channel_id is not None else 3
+        shm_buf = self.shm.get_downstream_channel(ch_id, size=32 * 1024 * 1024)
+        shm_offset = shm_buf.write_frame(4, timestamp_us, frame_bytes)
         if shm_offset >= 0:
             self.publish("media.video.transport_frame_shm", {
                 "shm_offset": shm_offset,
                 "len": len(frame_bytes),
                 "timestamp_us": timestamp_us,
                 "wire_format": wire_format,
+                "channel_id": ch_id,
             })
 
-        # Pack binary frame with video channel_id=3 (ChannelType.VIDEO) for WebSocket clients
-        binary_frame = pack_media_frame(3, timestamp_us, frame_bytes)
+        # Pack binary frame with video channel_id for WebSocket clients
+        binary_frame = pack_media_frame(ch_id, timestamp_us, frame_bytes)
         await self.broadcast_ws_media(binary_frame)
 
 

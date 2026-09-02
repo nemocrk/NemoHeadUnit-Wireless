@@ -390,8 +390,12 @@ def dict_to_proto(msg: Any, data: dict) -> None:
             continue
 
         if field_desc.message_type is not None:
-            if isinstance(value, dict) and value:
-                dict_to_proto(getattr(msg, key), value)
+            if isinstance(value, dict):
+                submsg = getattr(msg, key)
+                if value:
+                    dict_to_proto(submsg, value)
+                elif hasattr(submsg, "SetInParent"):
+                    submsg.SetInParent()
             continue
 
         try:
@@ -516,6 +520,9 @@ _ONEOF_CHANNEL_FIELDS = (
     "media_info_channel",
     "av_input_channel",
     "phone_status_channel",
+    "notification_channel",
+    "media_browser_channel",
+    "generic_notification_channel",
 )
 
 
@@ -712,8 +719,14 @@ def _coerce_scalar(field_desc: Any, value: Any) -> Any:
                     if val.name.upper() == value.upper():
                         return val.number
                 # 3. Se è una stringa numerica, convertila in int
-                return int(value)
-        return int(value)
+                try:
+                    return int(value)
+                except ValueError:
+                    return field_desc.default_value
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return field_desc.default_value
 
     if field_desc.type == _descriptor.FieldDescriptor.TYPE_BOOL:
         if isinstance(value, str):

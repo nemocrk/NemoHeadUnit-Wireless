@@ -7,22 +7,19 @@ Intercepts mouse/touch events and emits normalized input coordinates for channel
 
 import logging
 import time
-from typing import Callable, Optional
-from PyQt6.QtCore import QPointF, Qt, pyqtSignal
+from typing import Optional
+from PyQt6.QtWidgets import QWidget
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
-from PyQt6.QtGui import QEventPoint, QMouseEvent, QTouchEvent
-try:
-    from OpenGL import GL
-    HAS_OPENGL = True
-except ImportError:
-    HAS_OPENGL = False
+from PyQt6.QtGui import QEventPoint, QMouseEvent, QTouchEvent, QPainter, QImage, QColor
+from PyQt6.QtCore import QEvent, QPointF, Qt, pyqtSignal
 
 logger = logging.getLogger("qt6_gui.video_viewport")
 
 
 class VideoViewportWidget(QOpenGLWidget):
     """
-    OpenGL Texture Render Canvas for Android Auto Video Stream with Multi-Touch Support.
+    High-Performance Video Render Canvas for Android Auto Projected Stream.
+    Renders decoded RGBA frames directly from shared memory with multi-touch support.
     """
 
     # Emits full touch event dict for AA input channel (action, action_index, pointers)
@@ -34,15 +31,18 @@ class VideoViewportWidget(QOpenGLWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
         self.sample_interval_ms = sample_interval_ms  # Throttling interval for DRAG events (default 30ms / ~33Hz)
         self._last_drag_time = 0.0
 
-        self.texture_id = 0
         self.frame_width = 1280
         self.frame_height = 720
         self.current_frame_data: Optional[bytes] = None
-        self.has_new_frame = False
+
+        self.margin_width: int = 0
+        self.margin_height: int = 0
+        self.stretch_to_fill: bool = True
 
     def update_frame(self, frame_bytes: bytes, width: int, height: int):
         """Update active RGBA frame pixel data from SHM reader."""
@@ -51,120 +51,85 @@ class VideoViewportWidget(QOpenGLWidget):
         self.current_frame_data = frame_bytes
         self.frame_width = width
         self.frame_height = height
-        self.has_new_frame = True
-        self.update()  # Triggers paintGL redraw
-
-    def initializeGL(self):
-        logger.info("🔍 [Video Viewport Trace] Entering initializeGL()...")
-        if not HAS_OPENGL:
-            logger.warning("OpenGL Python bindings not found — falling back to QPainter software render")
-            return
-
-        GL.glClearColor(0.05, 0.07, 0.09, 1.0)
-        GL.glEnable(GL.GL_TEXTURE_2D)
-        self.texture_id = GL.glGenTextures(1)
-        GL.glBindTexture(GL.GL_TEXTURE_2D, self.texture_id)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
-        logger.info("🔍 [Video Viewport Trace] initializeGL() completed cleanly!")
+        self.update()  # Triggers paintEvent redraw
 
     def cleanupGL(self):
-        """Safely delete OpenGL texture while context is valid on the main GUI thread."""
-        if HAS_OPENGL and self.texture_id:
-            try:
-                if self.isValid():
-                    self.makeCurrent()
-                    GL.glDeleteTextures([self.texture_id])
-                    self.doneCurrent()
-            except Exception as exc:
-                logger.debug("cleanupGL notice: %s", exc)
-            self.texture_id = 0
-            self.current_frame_data = None
+        """Safely release frame resources."""
+        self.current_frame_data = None
 
-    def resizeGL(self, w: int, h: int):
-        if HAS_OPENGL:
-            GL.glViewport(0, 0, w, h)
-
-    def paintGL(self):
-        if not HAS_OPENGL or not self.texture_id:
-            return
-
-        GL.glClear(GL.GL_COLOR_BUFFER_BIT)
-
+    def paintEvent(self, event):
+        """High-Performance Painter Rendering for projected video frames."""
+        painter = QPainter(self)
         if (
             self.current_frame_data
-            and self.has_new_frame
             and 0 < self.frame_width <= 4096
             and 0 < self.frame_height <= 4096
             and len(self.current_frame_data) == self.frame_width * self.frame_height * 4
         ):
-            try:
-                GL.glBindTexture(GL.GL_TEXTURE_2D, self.texture_id)
-                GL.glTexImage2D(
-                    GL.GL_TEXTURE_2D,
-                    0,
-                    GL.GL_RGBA,
-                    self.frame_width,
-                    self.frame_height,
-                    0,
-                    GL.GL_RGBA,
-                    GL.GL_UNSIGNED_BYTE,
-                    self.current_frame_data,
-                )
-                self.has_new_frame = False
-            except Exception as exc:
-                logger.debug("OpenGL glTexImage2D exception: %s", exc)
-                self.has_new_frame = False
+            img = QImage(
+                self.current_frame_data,
+                self.frame_width,
+                self.frame_height,
+                self.frame_width * 4,
+                QImage.Format.Format_RGBA8888,
+            )
+            painter.drawImage(self.rect(), img)
+        else:
+            painter.fillRect(self.rect(), QColor(13, 17, 23))
+        painter.end()
 
-        if self.texture_id and self.current_frame_data:
-            GL.glBindTexture(GL.GL_TEXTURE_2D, self.texture_id)
-            GL.glBegin(GL.GL_QUADS)
-            GL.glTexCoord2f(0.0, 0.0); GL.glVertex2f(-1.0, 1.0)
-            GL.glTexCoord2f(1.0, 0.0); GL.glVertex2f(1.0, 1.0)
-            GL.glTexCoord2f(1.0, 1.0); GL.glVertex2f(1.0, -1.0)
-            GL.glTexCoord2f(0.0, 1.0); GL.glVertex2f(-1.0, -1.0)
-            GL.glEnd()
+    def set_margins(self, margin_width: int = 0, margin_height: int = 0, stretch_to_fill: bool = True) -> None:
+        """Configure aspect margins and scaling policy."""
+        self.margin_width = margin_width
+        self.margin_height = margin_height
+        self.stretch_to_fill = stretch_to_fill
 
     # ------------------------------------------------------------------
     # Input Event Interception (Multi-Touch & Mouse)
     # ------------------------------------------------------------------
 
     def _map_coords(self, pos) -> tuple[int, int]:
-        """Map screen pixel coordinates to video projection coordinates compensating for letterboxing/pillarboxing."""
-        widget_w = max(1.0, float(self.width()))
-        widget_h = max(1.0, float(self.height()))
-        target_w = max(1.0, float(self.frame_width))
-        target_h = max(1.0, float(self.frame_height))
+        """Map screen pixel coordinates to video projection coordinates compensating for aspect margins."""
+        from shared.touch_mapper import TouchCoordinateMapper
+        pt = TouchCoordinateMapper.map_coordinate(
+            raw_x=float(pos.x()),
+            raw_y=float(pos.y()),
+            surface_width=float(self.width()),
+            surface_height=float(self.height()),
+            negotiated_width=self.frame_width,
+            negotiated_height=self.frame_height,
+            margin_width=self.margin_width,
+            margin_height=self.margin_height,
+            stretch_to_fill=self.stretch_to_fill,
+        )
+        return pt.x, pt.y
 
-        target_ratio = target_w / target_h
-        view_ratio = widget_w / widget_h
-
-        # Compute letterbox bounds
-        if view_ratio > target_ratio:
-            displayed_w = widget_h * target_ratio
-            displayed_h = widget_h
-        else:
-            displayed_w = widget_w
-            displayed_h = widget_w / target_ratio
-
-        ui_left = (widget_w - displayed_w) / 2.0
-        ui_top = (widget_h - displayed_h) / 2.0
-
-        local_x = float(pos.x()) - ui_left
-        local_y = float(pos.y()) - ui_top
-
-        norm_x = int((local_x / displayed_w) * target_w)
-        norm_y = int((local_y / displayed_h) * target_h)
-
-        norm_x = max(0, min(self.frame_width, norm_x))
-        norm_y = max(0, min(self.frame_height, norm_y))
-        return norm_x, norm_y
+    def event(self, event: QEvent) -> bool:
+        if event.type() in (
+            QEvent.Type.TouchBegin,
+            QEvent.Type.TouchUpdate,
+            QEvent.Type.TouchEnd,
+            QEvent.Type.TouchCancel,
+        ):
+            self.touchEvent(event)
+            return True
+        return super().event(event)
 
     def touchEvent(self, event: QTouchEvent):
         """Native Qt Multi-Touch Event Interception."""
+        if event.type() == QEvent.Type.TouchCancel:
+            self.touch_input_event.emit({
+                "action": 1,
+                "action_index": 0,
+                "pointers": [{"x": 0, "y": 0, "pointer_id": 0}],
+            })
+            event.accept()
+            return
+
         points = event.points()
         if not points:
-            return super().touchEvent(event)
+            event.accept()
+            return
 
         active_pointers = []
         pressed_indices = []
@@ -200,9 +165,11 @@ class VideoViewportWidget(QOpenGLWidget):
             pointers_payload = active_pointers
         elif released_points:
             # Non-last pointer released -> POINTER_UP (6)
+            # Android MotionEvent expects the releasing pointer included at action_index
             action = 6
-            action_index = 0
-            pointers_payload = active_pointers
+            releasing_pointer = released_points[0]
+            action_index = len(active_pointers)
+            pointers_payload = list(active_pointers) + [releasing_pointer]
         else:
             # Moving / Dragging -> DRAG (2)
             now = time.monotonic()

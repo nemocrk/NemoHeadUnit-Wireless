@@ -64,6 +64,10 @@ class BaseBluetoothAdapter(abc.ABC):
         """Register a persistent global callback for device connection state changes."""
         pass
 
+    def set_on_battery_callback(self, on_bat_cb: Callable) -> None:
+        """Register a callback for battery level (%), signal strength (bars 0-5), operator name, and roaming updates."""
+        pass
+
     def get_adapter_address(self) -> str:
         """Get the local Bluetooth adapter MAC address."""
         return ""

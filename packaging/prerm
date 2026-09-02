@@ -18,9 +18,7 @@ ENV_PREFIX="${APP_DIR}/env"
 
 log() { echo "[nemo-headunit prerm] $*"; }
 
-case "$1" in
-
-remove|pre_remove|[0-9]*|"")
+run_prerm() {
     log "Stopping and disabling ${SERVICE_NAME}"
     systemctl stop    "${SERVICE_NAME}" 2>/dev/null || true
     systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
@@ -36,7 +34,7 @@ remove|pre_remove|[0-9]*|"")
     fi
 
     if [ -d "${ENV_PREFIX}" ]; then
-        log "Removing Micromamba env: ${ENV_PREFIX}"
+        log "Removing application runtime env: ${ENV_PREFIX}"
         rm -rf "${ENV_PREFIX}"
     fi
 
@@ -52,18 +50,30 @@ remove|pre_remove|[0-9]*|"")
     done < <(getent passwd)
 
     log "Cleanup complete."
-    ;;
+}
 
-upgrade)
-    # During upgrade dpkg installs the new version first, then calls
-    # old-version's prerm upgrade. Just stop — postinst will restart.
+pre_remove() {
+    run_prerm
+}
+
+pre_upgrade() {
     log "Upgrade: stopping ${SERVICE_NAME} before replacement"
     systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
-    ;;
+}
 
-*)
-    ;;
-
-esac
+if [ $# -gt 0 ]; then
+    case "$1" in
+        remove|pre_remove|[0-9]*|"")
+            run_prerm
+            ;;
+        upgrade)
+            pre_upgrade
+            ;;
+        *)
+            ;;
+    esac
+elif [ "${0##*/}" = "prerm" ]; then
+    run_prerm
+fi
 
 exit 0

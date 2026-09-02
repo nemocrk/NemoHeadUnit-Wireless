@@ -29,26 +29,31 @@ try:
         ControlChannelHandler,
         VideoChannelHandler,
         AudioChannelHandler,
+        AudioChannelHandler,
+        AVInputChannelHandler,
         InputChannelHandler,
         SensorChannelHandler,
         BluetoothChannelHandler,
         WifiChannelHandler,
-        AVInputChannelHandler,
         NavigationChannelHandler,
         MediaPlaybackChannelHandler,
+        PhoneStatusHandler,
+        NotificationHandler,
     )
 except ImportError:
     from handlers import (
         ControlChannelHandler,
         VideoChannelHandler,
         AudioChannelHandler,
+        AVInputChannelHandler,
         InputChannelHandler,
         SensorChannelHandler,
         BluetoothChannelHandler,
         WifiChannelHandler,
-        AVInputChannelHandler,
         NavigationChannelHandler,
         MediaPlaybackChannelHandler,
+        PhoneStatusHandler,
+        NotificationHandler,
     )
 
 from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
@@ -81,9 +86,12 @@ class ChannelManagerModule(BaseBackendModule):
         self.wifi_handler = WifiChannelHandler(self)
         self.navigation_handler = NavigationChannelHandler(self)
         self.media_playback_handler = MediaPlaybackChannelHandler(self)
+        self.phone_status_handler = PhoneStatusHandler(self)
+        self.notification_handler = NotificationHandler(self)
 
         # Active video transport name — set by video_decoder module via video.transport_active
         self.active_video_transport: str = "h264"
+        self._status_changed_evt = asyncio.Event()
 
     def set_channel_type_map(self, type_map: dict) -> None:
         """Store dynamic channel_id -> ChannelType mapping from SDR."""
@@ -120,6 +128,14 @@ class ChannelManagerModule(BaseBackendModule):
                 type_map[cid] = ChannelType.BLUETOOTH
             elif "wifi_channel" in ch:
                 type_map[cid] = ChannelType.WIFI
+            elif "navigation_channel" in ch:
+                type_map[cid] = ChannelType.NAVIGATION
+            elif "media_info_channel" in ch:
+                type_map[cid] = ChannelType.MEDIA_PLAYBACK
+            elif "phone_status_channel" in ch:
+                type_map[cid] = ChannelType.PHONE_STATUS
+            elif "notification_channel" in ch or "generic_notification_channel" in ch:
+                type_map[cid] = ChannelType.NOTIFICATION
         for k, v in type_map.items():
             if k not in self.channel_type_map:
                 self.channel_type_map[k] = v
@@ -177,7 +193,10 @@ class ChannelManagerModule(BaseBackendModule):
         self.add_http_route("GET", "/api/channels/stream_status", self.handle_stream_status)
         self.add_http_route("POST", "/api/channels/input/touch", self.handle_post_touch)
         self.add_http_route("POST", "/api/channels/input/media", self.handle_post_media_key)
+        self.add_http_route("POST", "/api/channels/media/key", self.handle_post_media_key)
         self.add_http_route("POST", "/api/channels/focus", self.handle_post_focus)
+        self.add_http_route("POST", "/api/channels/phone/action", self.handle_phone_action)
+        self.add_http_route("POST", "/api/channels/notification/action", self.handle_notification_action)
         self.add_ws_route("/stream", self.handle_ws_stream)
 
         # Bus subscriptions
@@ -322,7 +341,8 @@ class ChannelManagerModule(BaseBackendModule):
         if offset < 0:
             return
 
-        stream_type, ts_low, payload = self.shm.downstream.read_frame(offset)
+        shm_buf = self.shm.get_downstream_channel(ch_id)
+        stream_type, ts_low, payload = shm_buf.read_frame(offset)
         if not payload:
             return
 
@@ -378,6 +398,10 @@ class ChannelManagerModule(BaseBackendModule):
                 await self.navigation_handler.handle_frame(ch_id, msg_id, body)
             elif ch_type == ChannelType.MEDIA_PLAYBACK:
                 await self.media_playback_handler.handle_frame(ch_id, msg_id, body)
+            elif ch_type == ChannelType.PHONE_STATUS:
+                await self.phone_status_handler.handle_message(ch_id, msg_id, body)
+            elif ch_type == ChannelType.NOTIFICATION:
+                await self.notification_handler.handle_message(ch_id, msg_id, body)
             else:
                 self.log.warning(f"⚠️ [Unhandled Channel Frame] Received frame on unhandled channel ch={ch_id} (type={ch_type.name}) msgId=0x{msg_id:04x} len={len(body)}")
         except Exception as exc:
@@ -390,7 +414,12 @@ class ChannelManagerModule(BaseBackendModule):
         if sdr_hex:
             parsed = channels_from_sdr_bytes(sdr_hex)
             self.active_channels = {ch["channel_id"]: ch for ch in parsed if "channel_id" in ch}
-            self.log.info("SDR registered %d channels", len(self.active_channels))
+            for ch in parsed:
+                ch_id = ch.get("channel_id")
+                if ch_id is not None:
+                    c_type = classify_channel_descriptor(ch)
+                    self.channel_type_map[ch_id] = c_type.name
+            self.log.info("SDR registered %d channels: %s", len(self.active_channels), self.channel_type_map)
             await self.broadcast_ws_json(self.get_stream_config_dict())
 
     async def on_mic_audio_shm(self, data: dict) -> None:
@@ -425,10 +454,10 @@ class ChannelManagerModule(BaseBackendModule):
             else:
                 action = 0
 
-        self.log.debug(
-            "👇 [Touch Input] Dispatching touch event action=%d action_index=%d x=%d y=%d pointers=%s to phone",
-            action, action_index, x, y, pointers
-        )
+        if action != 2:
+            self.log.info(
+                f"👇 [Touch Input] Dispatching action={action} action_index={action_index} x={x} y={y} pointers={pointers} to phone"
+            )
         await self.input_handler.handle_touch_event(
             action=action,
             pointers=pointers,
@@ -653,6 +682,26 @@ class ChannelManagerModule(BaseBackendModule):
             return web.json_response({"status": "ok", "key_code": key_code})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_phone_action(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            action = body.get("action", "")
+            success = await self.phone_status_handler.send_phone_action(action)
+            return web.json_response({"status": "ok" if success else "error", "action": action})
+        except Exception as exc:
+            return web.json_response({"status": "error", "error": str(exc)}, status=500)
+
+    async def handle_notification_action(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+            notif_id = body.get("id", "")
+            action_id = body.get("action_id", "dismiss")
+            success = await self.notification_handler.send_action(notif_id, action_id)
+            return web.json_response({"status": "ok" if success else "error", "id": notif_id})
+        except Exception as exc:
+            return web.json_response({"status": "error", "error": str(exc)}, status=500)
+
 
 if __name__ == "__main__":
     run_module(ChannelManagerModule)

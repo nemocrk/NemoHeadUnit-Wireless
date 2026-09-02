@@ -47,7 +47,7 @@ ensure_display_server() {
 
     if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ]; then
         echo "[nemo-headunit] Active Wayland display detected: ${WAYLAND_DISPLAY}"
-        export QT_QPA_PLATFORM="wayland;xcb"
+        export QT_QPA_PLATFORM="wayland-egl;wayland;xcb"
         return 0
     fi
 
@@ -159,12 +159,15 @@ ensure_display_server() {
 ensure_display_server
 
 export DISPLAY="${DISPLAY:-:0}"
-export QT_WIDGETS_RHI="0"
+export QT_OPENGL="desktop"
+export QSG_RHI_BACKEND="opengl"
 export QT_WAYLAND_CLIENT_BUFFER_INTEGRATION="${QT_WAYLAND_CLIENT_BUFFER_INTEGRATION:-wayland-egl}"
 # Drivers and VA-API paths (if not already set)
 export LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-/usr/lib/dri}"
 export MESA_LOADER_DRIVER_PATH="${MESA_LOADER_DRIVER_PATH:-/usr/lib/dri}"
 export LIBGL_DRIVERS_PATH="${LIBGL_DRIVERS_PATH:-/usr/lib/dri}"
+export LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH
+
 
 # Resolve Python binary
 if [ -x "${MICROMAMBA_ENV_PREFIX}/bin/python" ]; then

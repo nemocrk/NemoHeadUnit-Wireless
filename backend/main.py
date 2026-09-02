@@ -148,7 +148,7 @@ def _terminate_all(handles: list[ModuleHandle]) -> None:
             if not h.thread.is_alive():
                 continue
             remaining = max(0.1, deadline - time.monotonic())
-            h.thread.join(timeout=min(remaining, 5.0))
+            h.thread.join(timeout=min(remaining, 1.0))
             if h.thread.is_alive():
                 log.warning(f"Module thread '{h.label}' did not finish after join timeout.")
             else:
@@ -278,6 +278,8 @@ def run(argv: list[str] | None = None):
     sub_sock.setsockopt(zmq.LINGER, 0)
 
     def _shutdown(reason: str = "shutdown"):
+        nonlocal shutdown_requested
+        shutdown_requested = True
         log.info(f"Shutdown requested ({reason}) — stopping modules...")
         try:
             pub_sock.send_multipart([b"system.stop", json.dumps({"reason": reason}).encode("utf-8")])
@@ -292,82 +294,101 @@ def run(argv: list[str] | None = None):
         except Exception:
             pass
         log.info("Backend orchestrator stopped.")
-        sys.exit(0)
+        os._exit(0)
 
-    try:
-        # 1. Start Priority 0 bus_broker process/thread first
-        broker_path = BASE_DIR / "modules" / "bus_broker" / "main.py"
-        broker_handle = _start_module(broker_path, "bus_broker", mode)
-        module_handles.append(broker_handle)
-        time.sleep(0.5)  # Allow bus_broker to bind sockets
+    gui_module = next((m for m in modules if m.parent.name == "qt6_gui"), None)
 
-        # Setup orchestrator ZMQ sockets
-        pub_sock.connect(get_bus_address("main_orchestrator", "sub"))
-        sub_sock.connect(get_bus_address("main_orchestrator", "pub"))
-        sub_sock.setsockopt_string(zmq.SUBSCRIBE, "system.module_ready")
-        sub_sock.setsockopt_string(zmq.SUBSCRIBE, "system.ready")
-        sub_sock.setsockopt_string(zmq.SUBSCRIBE, "system.shutdown")
-        time.sleep(0.5)  # allow SUB/PUB sockets to complete ZMQ connection handshake
+    def _run_orchestrator():
+        nonlocal shutdown_requested, shutdown_reason
+        try:
+            # 1. Start Priority 0 bus_broker process/thread first
+            broker_path = BASE_DIR / "modules" / "bus_broker" / "main.py"
+            broker_handle = _start_module(broker_path, "bus_broker", mode)
+            module_handles.append(broker_handle)
+            time.sleep(0.5)  # Allow bus_broker to bind sockets
 
-        # 2. Launch non-broker module processes/threads
-        other_modules = [m for m in modules if m.parent.name != "bus_broker"]
-        module_names = [m.parent.name for m in other_modules]
+            # Setup orchestrator ZMQ sockets
+            pub_sock.connect(get_bus_address("main_orchestrator", "sub"))
+            sub_sock.connect(get_bus_address("main_orchestrator", "pub"))
+            sub_sock.setsockopt_string(zmq.SUBSCRIBE, "system.module_ready")
+            sub_sock.setsockopt_string(zmq.SUBSCRIBE, "system.ready")
+            sub_sock.setsockopt_string(zmq.SUBSCRIBE, "system.shutdown")
+            time.sleep(0.5)  # allow SUB/PUB sockets to complete ZMQ connection handshake
 
-        for m in other_modules:
-            if shutdown_requested:
-                break
-            label = m.parent.name
-            handle = _start_module(m, label, mode)
-            module_handles.append(handle)
+            # 2. Launch non-broker module processes/threads (excluding qt6_gui if it runs on main thread)
+            modules_to_start = [
+                m for m in modules
+                if m.parent.name != "bus_broker"
+                and not (mode == "multithreading" and gui_module and m.parent.name == "qt6_gui")
+            ]
+            module_names = [m.parent.name for m in modules if m.parent.name != "bus_broker"]
 
-        if not shutdown_requested:
-            # 3. Multi-step priority boot sequence
-            time.sleep(0.5)
-            priority_map = _collect_module_ready(pub_sock, sub_sock, module_names, "bus_broker", READYTOSTART_WINDOW)
-            log.info(f"Boot priority map → {priority_map}")
-
-            for level in sorted(priority_map.keys()):
+            for m in modules_to_start:
                 if shutdown_requested:
                     break
-                expected = priority_map[level]
-                _wait_for_level_ready(pub_sock, sub_sock, level, expected, MODULE_READY_TIMEOUT)
-                log.info(f"Boot: priority {level} complete.")
+                label = m.parent.name
+                handle = _start_module(m, label, mode)
+                module_handles.append(handle)
 
             if not shutdown_requested:
-                log.info("Boot sequence complete — all priority levels initialised.")
-                log.info(f"Backend orchestrator active with {mode}-isolated modules.")
+                # 3. Multi-step priority boot sequence
+                time.sleep(0.5)
+                priority_map = _collect_module_ready(pub_sock, sub_sock, module_names, "bus_broker", READYTOSTART_WINDOW)
+                log.info(f"Boot priority map → {priority_map}")
 
-        while not shutdown_requested:
-            try:
-                if not sub_sock.poll(timeout=500):
-                    continue
-            except zmq.ZMQError:
-                break
-
-            try:
-                frames = sub_sock.recv_multipart(flags=zmq.NOBLOCK)
-                if len(frames) >= 2:
-                    topic = frames[0].decode("utf-8", errors="ignore")
-                    if topic == "system.shutdown":
-                        payload = json.loads(frames[1].decode("utf-8"))
-                        shutdown_reason = payload.get("reason", "user_exit")
-                        shutdown_requested = True
+                for level in sorted(priority_map.keys()):
+                    if shutdown_requested:
                         break
-            except Exception:
-                continue
+                    expected = priority_map[level]
+                    _wait_for_level_ready(pub_sock, sub_sock, level, expected, MODULE_READY_TIMEOUT)
+                    log.info(f"Boot: priority {level} complete.")
 
-    except (KeyboardInterrupt, SystemExit):
-        shutdown_reason = "keyboard_interrupt"
-    except Exception as exc:
-        log.error(f"Error in orchestrator run loop: {exc}", exc_info=True)
-        shutdown_reason = f"error_{exc}"
+                if not shutdown_requested:
+                    log.info("Boot sequence complete — all priority levels initialised.")
+                    log.info(f"Backend orchestrator active with {mode}-isolated modules.")
 
-    _shutdown(shutdown_reason)
+            while not shutdown_requested:
+                try:
+                    if not sub_sock.poll(timeout=500):
+                        continue
+                except zmq.ZMQError:
+                    break
 
+                try:
+                    frames = sub_sock.recv_multipart(flags=zmq.NOBLOCK)
+                    if len(frames) >= 2:
+                        topic = frames[0].decode("utf-8", errors="ignore")
+                        if topic == "system.shutdown":
+                            payload = json.loads(frames[1].decode("utf-8"))
+                            shutdown_reason = payload.get("reason", "user_exit")
+                            shutdown_requested = True
+                            break
+                except Exception:
+                    continue
 
+        except (KeyboardInterrupt, SystemExit):
+            shutdown_reason = "keyboard_interrupt"
+        except Exception as exc:
+            log.error(f"Error in orchestrator run loop: {exc}", exc_info=True)
+            shutdown_reason = f"error_{exc}"
+        finally:
+            if not (mode == "multithreading" and gui_module):
+                _shutdown(shutdown_reason)
 
+    if mode == "multithreading" and gui_module:
+        orch_thread = threading.Thread(target=_run_orchestrator, daemon=True, name="orchestrator")
+        orch_thread.start()
+        try:
+            _run_thread_module(gui_module, "qt6_gui")
+        except (KeyboardInterrupt, SystemExit):
+            shutdown_reason = "keyboard_interrupt"
+        except Exception as exc:
+            log.error(f"Error in main GUI thread: {exc}", exc_info=True)
+            shutdown_reason = f"error_{exc}"
+        _shutdown(shutdown_reason)
+    else:
+        _run_orchestrator()
 
 
 if __name__ == "__main__":
     run()
-

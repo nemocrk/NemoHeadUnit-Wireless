@@ -7,7 +7,7 @@ Dynamic system configuration editor interacting with config_manager via REST / Z
 import json
 import urllib.request
 import urllib.parse
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QEvent, QTimer
 from PyQt6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QScroller,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -24,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 MODULE_NAMES = {
     "channel_manager": "⚙ Channel Manager & SDR",
+    "media_server": "🎬 Media Server & Video/Audio",
     "tcp_server": "⚡ TCP Server",
     "connectivity_manager": "📶 Connectivity & AP",
     "proxy": "🌐 Gateway Proxy",
@@ -31,9 +33,58 @@ MODULE_NAMES = {
 }
 
 
+class DragScrollArea(QScrollArea):
+    """
+    Touch and Mouse-drag enabled QScrollArea with wheel support.
+    Captures mouse drag even when initiated on top of clickable child buttons.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._dragging = False
+        self._last_pos = None
+        self._start_pos = None
+        self._drag_threshold = 6
+
+    def register_child(self, child: QWidget):
+        """Install drag filter on interactive child widgets like QPushButton."""
+        child.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._start_pos = event.globalPosition().toPoint()
+            self._last_pos = self._start_pos
+            self._dragging = False
+        elif event.type() == QEvent.Type.MouseMove and self._last_pos is not None:
+            current_pos = event.globalPosition().toPoint()
+            delta = current_pos - self._last_pos
+            if not self._dragging and (current_pos - self._start_pos).manhattanLength() > self._drag_threshold:
+                self._dragging = True
+            if self._dragging:
+                self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+                self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+                self._last_pos = current_pos
+                return True
+        elif event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            was_dragging = self._dragging
+            self._last_pos = None
+            self._start_pos = None
+            self._dragging = False
+            if was_dragging:
+                return True
+        return super().eventFilter(obj, event)
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y() or event.angleDelta().x()
+        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta)
+        event.accept()
+
+
 class ConfigFetchThread(QThread):
-    """Asynchronous thread for fetching /api/config/all without blocking UI loop."""
-    config_loaded = pyqtSignal(dict)
+    """Asynchronous thread for fetching /api/config/all and /api/media/audio_devices without blocking UI loop."""
+    config_loaded = pyqtSignal(dict, dict)
     fetch_failed = pyqtSignal(str)
 
     def __init__(self, host_port="127.0.0.1:8000"):
@@ -41,14 +92,37 @@ class ConfigFetchThread(QThread):
         self.host_port = host_port
 
     def run(self):
+        data = {}
+        audio_devices = {}
         try:
             url = f"http://{self.host_port}/api/config/all"
             req = urllib.request.Request(url, headers={"Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                self.config_loaded.emit(data)
         except Exception as exc:
-            self.fetch_failed.emit(str(exc))
+            data = {}
+
+        try:
+            dev_url = f"http://{self.host_port}/api/media/audio_devices"
+            dev_req = urllib.request.Request(dev_url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(dev_req, timeout=3.0) as dev_resp:
+                audio_devices = json.loads(dev_resp.read().decode("utf-8"))
+        except Exception:
+            pass
+
+        if data:
+            self.config_loaded.emit(data, audio_devices)
+        else:
+            # Fallback to local default skeleton if backend REST is not yet reachable
+            fallback = {
+                "media_server": {"config": {"transport_mode": "auto", "jpeg_quality": 75, "audio_output_sink": "default", "audio_input_source": "default"}},
+                "channel_manager": {"config": {}},
+                "tcp_server": {"config": {"port": 5000}},
+                "connectivity_manager": {"config": {}},
+                "proxy": {"config": {"public_port": 8000}},
+                "qt6_gui": {"config": {"fullscreen": False}},
+            }
+            self.config_loaded.emit(fallback, audio_devices)
 
 
 class ConfigSaveThread(QThread):
@@ -88,13 +162,14 @@ class SettingsDrawerWidget(QWidget):
         self.setProperty("class", "drawer-card")
         self.setMinimumWidth(380)
 
-        self.all_config = {}
-        self.active_module = "channel_manager"
-        self.field_inputs = {}
-
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(16, 16, 16, 16)
         self.layout.setSpacing(12)
+
+        self.all_config = {}
+        self.audio_devices = {}
+        self.active_module = "channel_manager"
+        self.field_inputs = {}  # key -> (widget, type_str)
 
         # Drawer Header
         header_layout = QHBoxLayout()
@@ -108,47 +183,100 @@ class SettingsDrawerWidget(QWidget):
         header_layout.addWidget(close_btn)
         self.layout.addLayout(header_layout)
 
-        # Module Tabs Container
-        self.tabs_layout = QHBoxLayout()
-        self.tabs_layout.setSpacing(6)
-        self.tabs_widget = QWidget(self)
-        self.tabs_widget.setLayout(self.tabs_layout)
-        
-        tabs_scroll = QScrollArea(self)
-        tabs_scroll.setFixedHeight(44)
-        tabs_scroll.setWidgetResizable(True)
-        tabs_scroll.setWidget(self.tabs_widget)
-        tabs_scroll.setStyleSheet("border: none; background-color: transparent;")
-        self.layout.addWidget(tabs_scroll)
+        # Module Category Horizontal Navigation Bar with Left/Right Arrows
+        tabs_nav_wrapper = QHBoxLayout()
+        tabs_nav_wrapper.setSpacing(4)
+        tabs_nav_wrapper.setContentsMargins(0, 0, 0, 0)
 
-        # Form Scroll Area
-        self.scroll_area = QScrollArea(self)
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet("border: none; background-color: transparent;")
+        self.btn_scroll_left = QPushButton("‹", self)
+        self.btn_scroll_left.setFixedSize(24, 28)
+        self.btn_scroll_left.setStyleSheet("""
+            QPushButton {
+                background-color: #161b22;
+                color: #8b949e;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background-color: #21262d;
+                color: #58a6ff;
+            }
+        """)
+        self.btn_scroll_left.clicked.connect(lambda: self.tabs_scroll.horizontalScrollBar().setValue(
+            self.tabs_scroll.horizontalScrollBar().value() - 100
+        ))
+        tabs_nav_wrapper.addWidget(self.btn_scroll_left)
 
-        self.form_widget = QWidget()
-        self.form_layout = QVBoxLayout(self.form_widget)
-        self.form_layout.setContentsMargins(0, 0, 0, 0)
-        self.form_layout.setSpacing(12)
-        self.scroll_area.setWidget(self.form_widget)
-        self.layout.addWidget(self.scroll_area)
+        self.tabs_scroll = DragScrollArea(self)
+        self.tabs_scroll.setWidgetResizable(True)
+        self.tabs_scroll.setFixedHeight(44)
+        self.tabs_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tabs_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tabs_scroll.setStyleSheet("background: transparent; border: none;")
 
-        # Status & Save Button
+        tabs_container = QWidget()
+        tabs_container.setStyleSheet("background: transparent;")
+        self.tabs_layout = QHBoxLayout(tabs_container)
+        self.tabs_layout.setContentsMargins(0, 0, 0, 0)
+        self.tabs_layout.setSpacing(8)
+        self.tabs_scroll.setWidget(tabs_container)
+        tabs_nav_wrapper.addWidget(self.tabs_scroll, 1)
+
+        self.btn_scroll_right = QPushButton("›", self)
+        self.btn_scroll_right.setFixedSize(24, 28)
+        self.btn_scroll_right.setStyleSheet("""
+            QPushButton {
+                background-color: #161b22;
+                color: #8b949e;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                font-size: 16px;
+                font-weight: bold;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background-color: #21262d;
+                color: #58a6ff;
+            }
+        """)
+        self.btn_scroll_right.clicked.connect(lambda: self.tabs_scroll.horizontalScrollBar().setValue(
+            self.tabs_scroll.horizontalScrollBar().value() + 100
+        ))
+        tabs_nav_wrapper.addWidget(self.btn_scroll_right)
+
+        self.layout.addLayout(tabs_nav_wrapper)
+
+        # Dynamic Settings Form (Scrollable)
+        self.form_scroll = QScrollArea(self)
+        self.form_scroll.setWidgetResizable(True)
+        self.form_scroll.setStyleSheet("background: transparent; border: none;")
+        self.form_container = QWidget()
+        self.form_container.setStyleSheet("background: transparent;")
+        self.form_layout = QVBoxLayout(self.form_container)
+        self.form_layout.setContentsMargins(0, 4, 0, 4)
+        self.form_layout.setSpacing(8)
+        self.form_scroll.setWidget(self.form_container)
+        self.layout.addWidget(self.form_scroll, 1)
+
+        # Status Notice
         self.lbl_status = QLabel("", self)
-        self.lbl_status.setStyleSheet("color: #3fb950; font-weight: 500;")
-        self.lbl_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_status.setStyleSheet("color: #8b949e; font-size: 12px;")
         self.layout.addWidget(self.lbl_status)
 
-        self.save_btn = QPushButton("💾 Save & Apply Settings", self)
+        # Action Buttons
+        self.save_btn = QPushButton("💾 Save && Apply Settings", self)
         self.save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #238636;
                 color: #ffffff;
-                border: 1px solid #2ea043;
+                border: 1px solid rgba(240, 246, 252, 0.1);
                 border-radius: 6px;
-                padding: 10px;
+                padding: 10px 16px;
                 font-weight: 600;
-                font-size: 14px;
+                font-size: 13px;
             }
             QPushButton:hover {
                 background-color: #2ea043;
@@ -171,8 +299,9 @@ class SettingsDrawerWidget(QWidget):
         self.fetch_thread.fetch_failed.connect(self._on_config_failed)
         self.fetch_thread.start()
 
-    def _on_config_loaded(self, data: dict):
+    def _on_config_loaded(self, data: dict, audio_devices: dict = None):
         self.all_config = data
+        self.audio_devices = audio_devices or {}
         self.lbl_status.setText("")
         self._build_module_tabs()
         self.render_active_module_form()
@@ -186,7 +315,7 @@ class SettingsDrawerWidget(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
-        modules = list(self.all_config.keys()) if self.all_config else ["channel_manager", "tcp_server", "connectivity_manager", "proxy", "qt6_gui"]
+        modules = list(self.all_config.keys()) if self.all_config else ["channel_manager", "media_server", "tcp_server", "connectivity_manager", "proxy", "qt6_gui"]
         if self.active_module not in modules:
             self.active_module = modules[0]
 
@@ -204,7 +333,10 @@ class SettingsDrawerWidget(QWidget):
                 }}
             """)
             btn.clicked.connect(lambda checked, m=mod: self._select_module(m))
+            self.tabs_scroll.register_child(btn)
             self.tabs_layout.addWidget(btn)
+            if is_active:
+                QTimer.singleShot(20, lambda b=btn: self.tabs_scroll.ensureWidgetVisible(b))
 
     def _select_module(self, mod_name: str):
         self.active_module = mod_name
@@ -250,7 +382,41 @@ class SettingsDrawerWidget(QWidget):
             label = QLabel(key.replace("_", " ").title(), self)
             label.setStyleSheet("color: #8b949e; font-weight: 500;")
 
-            if field_type == "enum" and "choices" in field_def:
+            if key == "audio_output_sink":
+                cb = QComboBox(self)
+                cb.setStyleSheet("background-color: #161b22; color: #e6edf3; border: 1px solid #30363d; padding: 4px; border-radius: 4px;")
+                sinks = self.audio_devices.get("sinks", [])
+                if not sinks:
+                    sinks = [{"id": "default", "name": "System Default Output"}]
+                for s in sinks:
+                    sid = s.get("id", "default")
+                    sname = s.get("name", sid)
+                    cb.addItem(f"🔊 {sname}", sid)
+                if val and cb.findData(val) < 0:
+                    cb.addItem(f"🔊 {val}", val)
+                idx = cb.findData(val)
+                if idx >= 0:
+                    cb.setCurrentIndex(idx)
+                self.field_inputs[key] = (cb, "enum")
+                form.addRow(label, cb)
+            elif key == "audio_input_source":
+                cb = QComboBox(self)
+                cb.setStyleSheet("background-color: #161b22; color: #e6edf3; border: 1px solid #30363d; padding: 4px; border-radius: 4px;")
+                sources = self.audio_devices.get("sources", [])
+                if not sources:
+                    sources = [{"id": "default", "name": "System Default Input"}]
+                for src in sources:
+                    sid = src.get("id", "default")
+                    sname = src.get("name", sid)
+                    cb.addItem(f"🎤 {sname}", sid)
+                if val and cb.findData(val) < 0:
+                    cb.addItem(f"🎤 {val}", val)
+                idx = cb.findData(val)
+                if idx >= 0:
+                    cb.setCurrentIndex(idx)
+                self.field_inputs[key] = (cb, "enum")
+                form.addRow(label, cb)
+            elif field_type == "enum" and "choices" in field_def:
                 cb = QComboBox(self)
                 cb.setStyleSheet("background-color: #161b22; color: #e6edf3; border: 1px solid #30363d; padding: 4px; border-radius: 4px;")
                 for choice in field_def["choices"]:

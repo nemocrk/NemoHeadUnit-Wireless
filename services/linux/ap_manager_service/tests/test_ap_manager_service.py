@@ -410,6 +410,30 @@ class TestAPRunnerIsRunning(unittest.TestCase):
         runner._dnsmasq_proc = proc_dead
         self.assertFalse(runner.is_running())
 
+    def test_force_ap_bypasses_join_network(self):
+        runner = svc._APRunner()
+        cfg = svc.APConfig(force_ap=True)
+        with patch("ap_manager_service._detect_existing_wifi") as mock_detect, \
+             patch.object(runner, "_start_ap") as mock_start_ap, \
+             patch.object(runner, "_start_join_network") as mock_start_join:
+            runner.start(cfg)
+            mock_detect.assert_not_called()
+            mock_start_join.assert_not_called()
+            mock_start_ap.assert_called_once_with(cfg)
+
+    def test_get_params_join_mode_includes_key_and_static_ap_type(self):
+        runner = svc._APRunner()
+        runner._mode = "join"
+        runner._bssid = "11:22:33:44:55:66"
+        runner._cfg = svc.APConfig(ssid="HomeNet", key="secret123", gateway_ip="192.168.1.100")
+        params = runner.get_params()
+        self.assertEqual(params["ssid"], "HomeNet")
+        self.assertEqual(params["key"], "secret123")
+        self.assertEqual(params["gateway_ip"], "192.168.1.100")
+        self.assertEqual(params["ap_type"], svc.AP_TYPE_STATIC)
+        self.assertEqual(params["mode"], "join")
+
 
 if __name__ == "__main__":
     unittest.main()
+

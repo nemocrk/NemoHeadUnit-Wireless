@@ -85,9 +85,23 @@ class NavigationChannelHandler:
                     "event_name": getattr(turn_event, "event_name", ""),
                     "distance_meters": self.distance_meters,
                 }
-                self.log.info(f"🧭 [Navigation Channel] Turn event received: road='{event_data['road']}', dist={event_data['distance_meters']}m, maneuver={self.last_maneuver_type}, side={self.last_turn_side}")
+                # Only log at INFO level if road or maneuver changed to avoid spamming logs
+                state_changed = (
+                    self.active_road != getattr(self, "_last_logged_road", None)
+                    or self.last_maneuver_type != getattr(self, "_last_logged_maneuver", None)
+                    or self.last_turn_side != getattr(self, "_last_logged_turn_side", None)
+                )
+                if state_changed:
+                    self._last_logged_road = self.active_road
+                    self._last_logged_maneuver = self.last_maneuver_type
+                    self._last_logged_turn_side = self.last_turn_side
+                    self.log.info(f"🧭 [Navigation Channel] Turn step: road='{event_data['road']}', dist={event_data['distance_meters']}m, maneuver={self.last_maneuver_type}, side={self.last_turn_side}")
+                else:
+                    self.log.debug(f"🧭 [Navigation Channel] Turn event tick: dist={event_data['distance_meters']}m")
+
                 self.manager.publish("navigation.turn_event", event_data)
-                self.manager._notify_status_changed()
+                if state_changed:
+                    self.manager._notify_status_changed()
                 return
             except Exception:
                 pass
@@ -114,7 +128,6 @@ class NavigationChannelHandler:
                 }
                 self.log.debug(f"🧭 [Navigation Channel] Distance update: {dist_data}")
                 self.manager.publish("navigation.distance_event", dist_data)
-                self.manager._notify_status_changed()
                 return
             except Exception:
                 pass
@@ -125,3 +138,23 @@ class NavigationChannelHandler:
 
         except Exception as exc:
             self.log.warning(f"🧭 [Navigation Channel] Failed to process message 0x{message_id:04x}: {exc}")
+
+    def clear_navigation(self) -> None:
+        """Reset and clean active navigation status on route finish or native focus."""
+        self.active_road = ""
+        self.distance_meters = -1.0
+        self.last_maneuver_type = 0
+        self.last_turn_side = 0
+        self._last_logged_road = None
+        self._last_logged_maneuver = None
+        self._last_logged_turn_side = None
+        self.log.info("🧭 [Navigation Channel] Navigation cleared (route finished / native focus)")
+        self.manager.publish("navigation.turn_event", {
+            "road": "",
+            "distance_meters": -1.0,
+            "maneuver_type": 0,
+            "turn_side": 0,
+            "turn_icon": "",
+            "event_name": "",
+        })
+        self.manager._notify_status_changed()

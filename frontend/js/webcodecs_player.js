@@ -318,6 +318,12 @@ export class WebCodecsPlayer {
             );
             this.stopMicrophoneUplink();
           }
+        } else if (msg.type === "phone_status") {
+          window.dispatchEvent(new CustomEvent("phone_status", { detail: msg.data }));
+        } else if (msg.type === "notification_post") {
+          window.dispatchEvent(new CustomEvent("notification_post", { detail: msg.data }));
+        } else if (msg.type === "notification_dismiss") {
+          window.dispatchEvent(new CustomEvent("notification_dismiss", { detail: msg.data }));
         }
       } catch (e) {
         console.warn("[WebCodecsPlayer] Error parsing JSON text message:", e);
@@ -422,9 +428,8 @@ export class WebCodecsPlayer {
     ) {
       nalOffset = 3;
     }
-
-    const config = this.streamConfigs[channelId];
-    const codecStr = (config && config.codec ? config.codec : "avc1.42E01E").toLowerCase();
+    const streamConfig = config || this.streamConfigs[String(channelId)];
+    const codecStr = (streamConfig && streamConfig.codec ? streamConfig.codec : "avc1.42E01E").toLowerCase();
 
     let isKey = false;
     let isHeader = false;

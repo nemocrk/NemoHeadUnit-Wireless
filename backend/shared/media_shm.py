@@ -42,11 +42,18 @@ def _patch_resource_tracker():
 
 _patch_resource_tracker()
 
-DEFAULT_SHM_SIZE = 32 * 1024 * 1024  # 32MB ring buffer capacity
+import threading
+
+DEFAULT_SHM_SIZE = 32 * 1024 * 1024  # 32MB ring buffer capacity for video
+DEFAULT_AUDIO_SHM_SIZE = 8 * 1024 * 1024  # 8MB ring buffer capacity for audio
 SHM_DOWNSTREAM_NAME = "nemo_media_shm_down"
 SHM_UPSTREAM_NAME = "nemo_media_shm_up"
 SHM_TRANSCODE_IN_NAME = "nemo_video_transcode_in"
 
+
+def get_downstream_channel_shm_name(channel_id: int) -> str:
+    """Return standard per-channel downstream SHM buffer name."""
+    return f"nemo_media_shm_down_ch{channel_id}"
 
 
 class RingSharedMemoryBuffer:
@@ -123,7 +130,6 @@ class RingSharedMemoryBuffer:
             logger.debug("Invalid SHM frame magic at offset %d", offset)
             return 0, 0, b""
 
-
         if offset + 12 + length > self.size:
             return 0, 0, b""
 
@@ -145,18 +151,37 @@ class RingSharedMemoryBuffer:
             self.shm = None
 
 
-
 class BidirectionalMediaSHM:
     """
     Manages Downstream, Upstream, and Video Transcode Input shared memory buffers.
+    Supports dynamic per-channel downstream buffers (nemo_media_shm_down_chX).
     """
 
     def __init__(self, create: bool = False, size: int = DEFAULT_SHM_SIZE):
+        self.create = create
+        self.default_size = size
         self.downstream = RingSharedMemoryBuffer(SHM_DOWNSTREAM_NAME, size=size, create=create)
         self.upstream = RingSharedMemoryBuffer(SHM_UPSTREAM_NAME, size=size, create=create)
         self.transcode_in = RingSharedMemoryBuffer(SHM_TRANSCODE_IN_NAME, size=size, create=create)
+        self._downstream_channels: dict[int, RingSharedMemoryBuffer] = {}
+        self._channels_lock = threading.Lock()
+
+    def get_downstream_channel(self, channel_id: int, size: Optional[int] = None) -> RingSharedMemoryBuffer:
+        """Dynamically retrieve or allocate a dedicated downstream ring buffer for channel_id."""
+        with self._channels_lock:
+            buf = self._downstream_channels.get(channel_id)
+            if buf is None:
+                ch_name = get_downstream_channel_shm_name(channel_id)
+                ch_size = size if size is not None else self.default_size
+                buf = RingSharedMemoryBuffer(ch_name, size=ch_size, create=self.create)
+                self._downstream_channels[channel_id] = buf
+            return buf
 
     def close(self):
         self.downstream.close()
         self.upstream.close()
         self.transcode_in.close()
+        with self._channels_lock:
+            for buf in self._downstream_channels.values():
+                buf.close()
+            self._downstream_channels.clear()

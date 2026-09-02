@@ -144,6 +144,10 @@ class ControlChannelHandler:
         except Exception as exc:
             self.log.warning(f"ControlChannel (ch0): NavigationFocusRequest parse error: {exc}")
 
+        if req_type == NavigationFocusType.NAV_FOCUS_NATIVE:
+            if hasattr(self.manager, "navigation_handler") and self.manager.navigation_handler:
+                self.manager.navigation_handler.clear_navigation()
+
         resp = NavigationFocusResponse()
         resp.type = NavigationFocusType.NAV_FOCUS_PROJECTED
         await self.manager.send_wire_frame(0, MSG.NAVIGATION_FOCUS_RESPONSE, resp.SerializeToString(), encrypted=True)
@@ -160,9 +164,11 @@ class ControlChannelHandler:
         try:
             req = BatteryStatusNotification()
             req.ParseFromString(body)
-            self.log.info(f"ControlChannel (ch0): BatteryStatus level={req.battery_level}% remaining={req.time_remaining_s}s critical={req.critical_battery}")
-        except Exception:
-            self.log.info("ControlChannel (ch0): Received BatteryStatusNotification")
+            self.log.info(f"🔋 ControlChannel (ch0): BatteryStatus level={req.battery_level}% remaining={req.time_remaining_s}s critical={req.critical_battery}")
+            if hasattr(self.manager, "phone_status_handler") and self.manager.phone_status_handler:
+                await self.manager.phone_status_handler.update_battery_status(req.battery_level)
+        except Exception as exc:
+            self.log.warning(f"ControlChannel (ch0): Failed to parse BatteryStatusNotification: {exc}")
 
     async def _handle_shutdown_request(self, body: bytes) -> None:
         self.log.info("ControlChannel (ch0): Received ShutdownRequest — responding ShutdownResponse")

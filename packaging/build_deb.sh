@@ -1,58 +1,13 @@
 #!/usr/bin/env bash
-# packaging_micromamba/build_deb.sh
+# packaging/build_deb.sh
 #
-# Build a self-contained .deb for NemoHeadUnit-Wireless (micromamba version).
+# Build a self-contained .deb for NemoHeadUnit-Wireless.
+# Supports two packaging modes:
+#   1. --method venv (Default): uses system python3 + venv + uv installer.
+#   2. --method micromamba (or --micromamba): uses standalone Micromamba conda environment.
 #
 # Usage:
-#   bash packaging_micromamba/build_deb.sh [--arch amd64|arm64] [--output-dir /path]
-#
-# What this script does:
-#   1.  Reads VERSION from repo root
-#   2.  Validates required tools (fpm, dpkg-deb)
-#   3.  Assembles a staging directory (build/stage/) mirroring the
-#       final filesystem layout:
-#         /opt/nemo-headunit/
-#           main.py           ← application entry point
-#           modules/          ← application modules
-#           shared/           ← shared utilities
-#           protos/           ← protobuf generated files
-#           config/           ← configuration files
-#           services/         ← ap_manager_service
-#           hardware_fixes/   ← platform-specific fix scripts + registry
-#           bus_broker.py     ← ZMQ bus broker entry point
-#           environment.yml   ← Micromamba env spec (built on target by postinst)
-#           bin/
-#             nemo-headunit   ← launcher wrapper script
-#         /usr/lib/systemd/system/
-#           org.nemo.APManager.service
-#         /etc/dbus-1/system.d/
-#           org.nemo.APManager.conf
-#         /usr/share/dbus-1/system-services/
-#           org.nemo.APManager.service  (D-Bus activation file)
-#         /usr/share/polkit-1/actions/
-#           org.nemo.apmanager.policy   (lowercase — polkitd 127 case-sensitive)
-#         /etc/polkit-1/rules.d/
-#           org.nemo.bluetooth.rules
-#         /usr/share/applications/
-#           nemo-headunit.desktop
-#   4.  Builds the .deb with FPM
-#   5.  Runs dpkg-deb --info + dpkg-deb --contents to verify the package
-#
-# NOTE: The Micromamba environment is NOT pre-built into the .deb.
-#       postinst runs 'micromamba env create' on the target machine so that
-#       all native libs (glibc, ALSA, VA-API ...) are compatible with
-#       the actual target OS — avoiding ABI mismatches / segfaults across distro versions.
-#
-# Requirements (build machine only):
-#   fpm     (gem install fpm)
-#   ruby    (for fpm)
-#   dpkg    (to verify)
-#
-# The resulting .deb declares APT deps from packaging/system-deps.txt.
-#
-# Arch note:
-#   --arch arm64 cross-compiles the .deb metadata only.
-#   For true arm64 binaries, run this script ON an arm64 machine.
+#   bash packaging/build_deb.sh [--method venv|micromamba] [--arch amd64|arm64] [--output-dir /path]
 #
 set -euo pipefail
 
@@ -63,8 +18,8 @@ set -euo pipefail
 BOLD=$(tput bold 2>/dev/null || true)
 RESET=$(tput sgr0 2>/dev/null || true)
 
-log()  { echo "${BOLD}[build_deb_micromamba]${RESET} $*"; }
-die()  { echo "${BOLD}[build_deb_micromamba] ERROR:${RESET} $*" >&2; exit 1; }
+log()  { echo "${BOLD}[build_deb]${RESET} $*"; }
+die()  { echo "${BOLD}[build_deb] ERROR:${RESET} $*" >&2; exit 1; }
 step() { echo; echo "${BOLD}>>> $* ${RESET}"; }
 
 # ---------------------------------------------------------------------------
@@ -73,17 +28,43 @@ step() { echo; echo "${BOLD}>>> $* ${RESET}"; }
 
 ARCH="amd64"
 OUTPUT_DIR="dist"
+METHOD="venv"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --arch)       ARCH="$2";       shift 2 ;;
-        --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
-        *) die "Unknown argument: $1" ;;
+        --method)
+            METHOD="$2"
+            shift 2
+            ;;
+        --venv)
+            METHOD="venv"
+            shift 1
+            ;;
+        --micromamba|--conda)
+            METHOD="micromamba"
+            shift 1
+            ;;
+        --arch)
+            ARCH="$2"
+            shift 2
+            ;;
+        --output-dir)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        *)
+            die "Unknown argument: $1"
+            ;;
     esac
 done
 
 [[ "$ARCH" == "amd64" || "$ARCH" == "arm64" ]] \
     || die "--arch must be 'amd64' or 'arm64'"
+
+[[ "$METHOD" == "venv" || "$METHOD" == "micromamba" ]] \
+    || die "--method must be 'venv' or 'micromamba'"
+
+log "Packaging target: ARCH=${ARCH}, METHOD=${METHOD}"
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -98,12 +79,20 @@ OUTPUT_DIR="${REPO_ROOT}/${OUTPUT_DIR}"
 
 VERSION_FILE="${REPO_ROOT}/VERSION"
 ENV_YML="${REPO_ROOT}/environment.yml"
-SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps.txt"
+REQUIREMENTS_TXT="${REPO_ROOT}/packaging/requirements.txt"
+
+if [ "$METHOD" = "venv" ]; then
+    SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps-venv.txt"
+    BOOTSTRAP_TOOL="${REPO_ROOT}/packaging/bootstrap_uv.sh"
+else
+    SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps.txt"
+    BOOTSTRAP_TOOL="${REPO_ROOT}/packaging/bootstrap_micromamba.sh"
+fi
+
 POSTINST="${REPO_ROOT}/packaging/postinst"
 PRERM="${REPO_ROOT}/packaging/prerm"
 BT_RULES="${REPO_ROOT}/packaging/org.nemo.bluetooth.rules"
 HW_FIXES_SRC="${REPO_ROOT}/packaging/hardware_fixes"
-BOOTSTRAP_MICROMAMBA="${REPO_ROOT}/packaging/bootstrap_micromamba.sh"
 LAUNCHER_SRC="${REPO_ROOT}/packaging"
 
 SERVICES_SRC="${REPO_ROOT}/services/linux/ap_manager_service"
@@ -144,8 +133,13 @@ for tool in fpm dpkg-deb; do
     log "  ${tool}: $(command -v "${tool}")"
 done
 
-[[ -f "${ENV_YML}" ]] || die "environment.yml not found at ${REPO_ROOT}/environment.yml"
-log "  environment.yml: found"
+if [ "$METHOD" = "venv" ]; then
+    [[ -f "${REQUIREMENTS_TXT}" ]] || die "requirements.txt not found at ${REQUIREMENTS_TXT}"
+    log "  requirements.txt: found"
+else
+    [[ -f "${ENV_YML}" ]] || die "environment.yml not found at ${ENV_YML}"
+    log "  environment.yml: found"
+fi
 
 # ---------------------------------------------------------------------------
 # Step 2 — Clean previous build
@@ -158,13 +152,28 @@ log "Build dir: ${BUILD_DIR}"
 # ---------------------------------------------------------------------------
 # Step 3 — Assemble staging directory
 # ---------------------------------------------------------------------------
-step "Assembling staging directory"
+step "Assembling staging directory (${METHOD} mode)"
 
 APP_OPT="${STAGE_DIR}/opt/nemo-headunit"
 mkdir -p "${APP_OPT}"
 
-log "  Copying environment.yml (Micromamba env will be built on target)"
-cp "${ENV_YML}" "${APP_OPT}/environment.yml"
+if [ "$METHOD" = "venv" ]; then
+    log "  Copying requirements.txt (Python venv + uv will be built on target)"
+    cp "${REQUIREMENTS_TXT}" "${APP_OPT}/requirements.txt"
+    if [ -f "${BOOTSTRAP_TOOL}" ]; then
+        log "  Copying bootstrap_uv.sh"
+        cp "${BOOTSTRAP_TOOL}" "${APP_OPT}/bootstrap_uv.sh"
+        chmod +x "${APP_OPT}/bootstrap_uv.sh"
+    fi
+else
+    log "  Copying environment.yml (Micromamba env will be built on target)"
+    cp "${ENV_YML}" "${APP_OPT}/environment.yml"
+    if [ -f "${BOOTSTRAP_TOOL}" ]; then
+        log "  Copying bootstrap_micromamba.sh"
+        cp "${BOOTSTRAP_TOOL}" "${APP_OPT}/bootstrap_micromamba.sh"
+        chmod +x "${APP_OPT}/bootstrap_micromamba.sh"
+    fi
+fi
 
 log "  Copying application source"
 cp "${REPO_ROOT}/main.py"      "${APP_OPT}/main.py"
@@ -180,12 +189,6 @@ log "  Copying hardware_fixes/"
 cp -a "${HW_FIXES_SRC}" "${APP_OPT}/hardware_fixes"
 chmod +x "${APP_OPT}/hardware_fixes/run_hardware_fixes.sh"
 find "${APP_OPT}/hardware_fixes" -name 'fix_*.sh' -exec chmod +x {} \;
-
-if [ -f "${BOOTSTRAP_MICROMAMBA}" ]; then
-    log "  Copying bootstrap_micromamba.sh"
-    cp "${BOOTSTRAP_MICROMAMBA}" "${APP_OPT}/bootstrap_micromamba.sh"
-    chmod +x "${APP_OPT}/bootstrap_micromamba.sh"
-fi
 
 # —— /opt/nemo-headunit/bin/ (launcher wrapper) ——
 mkdir -p "${APP_OPT}/bin"
@@ -205,9 +208,6 @@ SYSTEMD_STAGE="${STAGE_DIR}/usr/lib/systemd/system"
 mkdir -p "${SYSTEMD_STAGE}"
 log "  Copying systemd unit"
 cp "${SERVICES_SRC}/org.nemo.APManager.service" "${SYSTEMD_STAGE}/"
-# We use the wrapper/launcher to avoid hardcoding the exact micromamba prefix path in the service file, 
-# or we can use the env python directly if we know it's always in the same place.
-# For simplicity and robustness, we'll point it to the environment's python.
 sed -i \
     "s|ExecStart=.*ap_manager_service.py|ExecStart=/opt/nemo-headunit/env/bin/python /opt/nemo-headunit/services/linux/ap_manager_service/ap_manager_service.py|" \
     "${SYSTEMD_STAGE}/org.nemo.APManager.service"
@@ -215,8 +215,15 @@ sed -i \
 # —— /etc/dbus-1/system.d/ ——
 DBUS_STAGE="${STAGE_DIR}/etc/dbus-1/system.d"
 mkdir -p "${DBUS_STAGE}"
-log "  Copying D-Bus policy"
+log "  Copying D-Bus policies"
 cp "${SERVICES_SRC}/org.nemo.APManager.conf" "${DBUS_STAGE}/"
+cp "${REPO_ROOT}/packaging/org.nemo.bluez.conf" "${DBUS_STAGE}/"
+
+# —— /etc/wireplumber/wireplumber.conf.d/ ——
+WIREPLUMBER_STAGE="${STAGE_DIR}/etc/wireplumber/wireplumber.conf.d"
+mkdir -p "${WIREPLUMBER_STAGE}"
+log "  Copying WirePlumber configuration"
+cp "${REPO_ROOT}/packaging/50-bluez.conf" "${WIREPLUMBER_STAGE}/"
 
 # —— /usr/share/dbus-1/system-services/ ——
 DBUS_SERVICES_STAGE="${STAGE_DIR}/usr/share/dbus-1/system-services"
@@ -273,7 +280,7 @@ fpm \
     --name        "${PACKAGE_NAME}" \
     --version     "${VERSION}" \
     --architecture "${ARCH}" \
-    --description "NemoHeadUnit-Wireless — Android Auto wireless head unit" \
+    --description "NemoHeadUnit-Wireless — Android Auto wireless head unit (${METHOD})" \
     --url         "https://github.com/nemocrk/NemoHeadUnit-Wireless" \
     --maintainer  "nemocrk <nemocrk@users.noreply.github.com>" \
     --license     "GPL-2.0-only" \
@@ -281,37 +288,29 @@ fpm \
     --before-remove  "${PRERM}" \
     --deb-recommends "falkon | chromium-browser | chromium | google-chrome | surf, i965-va-driver | intel-media-va-driver | nvidia-va-driver | mesa-va-drivers" \
     --deb-no-default-config-files \
-    --package     "${OUTPUT_DIR}/${DEB_FILENAME}" \
-    --chdir       "${STAGE_DIR}" \
     "${DEPENDS_ARGS[@]}" \
+    -C "${STAGE_DIR}" \
+    -p "${OUTPUT_DIR}/${DEB_FILENAME}" \
     .
 
-log "Package written to: ${OUTPUT_DIR}/${DEB_FILENAME}"
+log "DEB package created: ${OUTPUT_DIR}/${DEB_FILENAME}"
 
 # ---------------------------------------------------------------------------
-# Step 6 — Verify
+# Step 6 — Verify package
 # ---------------------------------------------------------------------------
-step "Verifying package"
+step "Verifying package with dpkg-deb"
 
-echo
-echo "--- dpkg-deb --info ---"
+log "Package info:"
 dpkg-deb --info "${OUTPUT_DIR}/${DEB_FILENAME}"
 
 echo
-echo "--- dpkg-deb --contents (first 40 lines) ---"
-{ dpkg-deb --contents "${OUTPUT_DIR}/${DEB_FILENAME}" || true; } | head -n 40
+log "Package size:"
+ls -lh "${OUTPUT_DIR}/${DEB_FILENAME}"
 
-# ---------------------------------------------------------------------------
-# Done
-# ---------------------------------------------------------------------------
 echo
-log "✔  Build successful: ${OUTPUT_DIR}/${DEB_FILENAME}"
-echo
+log "Build successful!"
+log "Output: ${OUTPUT_DIR}/${DEB_FILENAME}"
 log "Install on target:"
 log "  sudo apt install --fix-broken ./${DEB_FILENAME}"
-log "  # or:"
+log "  # or: "
 log "  sudo dpkg -i ./${DEB_FILENAME} && sudo apt-get install -f"
-log ""
-log "NOTE: postinst creerà l'env Micromamba su /opt/nemo-headunit/env (~3-5 min)."
-log "      Assicurati che la macchina target abbia accesso a internet."
-echo

@@ -54,7 +54,8 @@ class VolumeActionThread(QThread):
     def run(self):
         try:
             url = f"http://127.0.0.1:8000/api/media/volume?action={self.action}"
-            req = urllib.request.Request(url, method="POST")
+            body_bytes = json.dumps({"action": self.action}).encode("utf-8")
+            req = urllib.request.Request(url, data=body_bytes, headers={"Content-Type": "application/json"}, method="POST")
             with urllib.request.urlopen(req, timeout=1.5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 vol = data.get("volume", 80)

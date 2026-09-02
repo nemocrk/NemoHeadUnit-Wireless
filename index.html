@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NemoHeadUnit — Wireless Android Auto</title>
+    <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+
+    <div id="app-container">
+
+        <!-- Full-Screen H.264 WebCodecs Video Viewport -->
+        <canvas id="video-canvas"></canvas>
+
+        <!-- Default Disconnected / Connected Home Screen (Dynamic 2x2 Dashboard) -->
+        <div id="disconnected-screen">
+            <div id="dashboard-grid" class="mode-clock-only">
+                <!-- Navigation Column / Card -->
+                <div id="dashboard-nav-card" class="dash-card hidden">
+                    <div class="dash-nav-icon-container">
+                        <div id="dash-nav-icon" class="dash-nav-icon">
+                            <svg viewBox="0 0 24 24" width="48" height="48" fill="#00e676"><path d="M12 2L4.5 20.29l.71.71L12 18l6.79 3 .71-.71z"/></svg>
+                        </div>
+                    </div>
+                    <div class="dash-nav-details">
+                        <div id="dash-nav-distance" class="dash-nav-dist">—</div>
+                        <div id="dash-nav-road" class="dash-nav-street">Follow Route</div>
+                        <div id="dash-nav-eta" class="dash-nav-eta"></div>
+                    </div>
+                </div>
+
+                <!-- Phone In-Call Card -->
+                <div id="dashboard-phone-card" class="dash-card hidden">
+                    <div class="dash-phone-header">
+                        <span id="dash-phone-state" class="dash-phone-state">Incoming Call...</span>
+                        <span id="dash-phone-duration" class="dash-phone-duration">00:00</span>
+                    </div>
+                    <div class="dash-phone-body">
+                        <div id="dash-caller-name" class="dash-caller-name">Caller Name</div>
+                        <div id="dash-caller-number" class="dash-caller-number">+1 (555) 019-2834</div>
+                    </div>
+                    <div class="dash-phone-actions">
+                        <button id="btn-web-call-answer" class="btn-call-act btn-answer">Answer</button>
+                        <button id="btn-web-call-hangup" class="btn-call-act btn-hangup">End Call</button>
+                    </div>
+                </div>
+
+                <!-- Clock Column / Card -->
+                <div id="dashboard-clock-card" class="dash-card">
+                    <div class="clock-container">
+                        <canvas id="analog-clock"></canvas>
+                    </div>
+                    <div class="date-display" id="clock-date">WED, JUL 22</div>
+                </div>
+
+                <!-- Media Column / Card with Browser View -->
+                <div id="dashboard-media-card" class="dash-card hidden">
+                    <div class="dash-media-header">
+                        <div id="dash-media-badge" class="dash-badge">NOW PLAYING</div>
+                        <button id="btn-web-toggle-browse" class="btn-browse-toggle">📁 Browse</button>
+                    </div>
+                    <!-- View 0: Now Playing -->
+                    <div id="media-view-nowplaying" class="media-subview">
+                        <div id="dash-media-art" class="dash-media-art">
+                            <span class="default-art-icon">🎵</span>
+                        </div>
+                        <div class="dash-media-details">
+                            <div id="dash-media-title" class="dash-media-title">Not Playing</div>
+                            <div id="dash-media-artist" class="dash-media-artist">—</div>
+                            <div id="dash-media-album" class="dash-media-album"></div>
+                        </div>
+                    </div>
+                    <!-- View 1: Library Browser -->
+                    <div id="media-view-browser" class="media-subview hidden">
+                        <div class="browser-nav-bar">
+                            <button id="btn-browser-back" class="btn-browser-back">◀ Back</button>
+                            <span id="browser-path-display" class="browser-path">/</span>
+                        </div>
+                        <div id="browser-items-list" class="browser-items-list"></div>
+                    </div>
+                </div>
+
+                <!-- Notification Feed Card -->
+                <div id="dashboard-notification-card" class="dash-card hidden">
+                    <div class="dash-notif-header">
+                        <span class="dash-notif-title">🔔 Notifications</span>
+                        <button id="btn-clear-notifications" class="btn-clear-notif">Clear</button>
+                    </div>
+                    <div id="dash-notif-list" class="dash-notif-list"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast Notifications Container -->
+        <div id="toast-container"></div>
+        <div id="notification-banner-container"></div>
+
+        <!-- Volume Popover Menu -->
+        <div id="volume-popover" class="hidden">
+            <button class="vol-btn" id="vol-mute" title="Toggle Mute">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77zM3 9v6h4l5 5V4L7 9H3z"/></svg>
+            </button>
+            <button class="vol-btn" id="vol-down" title="Volume Down">-</button>
+            <span id="vol-level-display">80%</span>
+            <button class="vol-btn" id="vol-up" title="Volume Up">+</button>
+        </div>
+
+        <!-- Arc Radial Floating Action Button (FAB) Menu -->
+        <div id="arc-radial-menu">
+            <button class="arc-fab-item" id="fab-settings" title="Settings">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
+            </button>
+            <button class="arc-fab-item" id="fab-bluetooth" title="Bluetooth Connections">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M17.71 7.71L12 2h-1v7.59L6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 11 14.41V22h1l5.71-5.71-4.3-4.29 4.3-4.29zM13 5.83l1.88 1.88L13 9.59V5.83zm1.88 10.46L13 18.17v-3.76l1.88 1.88z"/></svg>
+            </button>
+            <button class="arc-fab-item" id="fab-wifi" title="WiFi Hotspot">
+                <svg id="icon-wifi" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 11c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm6-4c-3.31 0-6 2.69-6 6s2.69 6 6 6 6-2.69 6-6-2.69-6-6-6zm-6-7C5.37 0 0 5.37 0 12s5.37 12 12 12 12-5.37 12-12S18.63 0 12 0zm0 22C6.48 22 2 17.52 2 12S6.48 2 12 2s10 4.48 10 10-4.48 10-10 10z"/></svg>
+            </button>
+            <button class="arc-fab-item" id="fab-logs" title="Live Logs">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>
+            </button>
+            <button class="arc-fab-item" id="fab-fullscreen" title="Fullscreen">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+            </button>
+        </div>
+
+        <!-- Always-Visible Floating Command Bar (Monochrome Material SVG Icons) -->
+        <div id="command-bar">
+            <!-- Home / Clock Toggle -->
+            <button class="cmd-btn" id="btn-home" title="Home / Clock">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+            </button>
+
+            <!-- Pure Label-less Status Indicator Dot -->
+            <div id="status-indicator" title="System Connection Status">
+                <span id="status-dot" class="status-offline"></span>
+            </div>
+
+            <!-- Phone Signal & Battery Pills -->
+            <div id="cmd-signal" class="status-pill" title="Cellular Signal: 4/5">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="#3fb950"><path d="M2 22h20V2z"/></svg>
+            </div>
+            <div id="cmd-battery" class="status-pill" title="Phone Battery: 85%">
+                <span id="battery-text">85%</span>
+            </div>
+
+            <!-- Play / Pause Toggle -->
+            <button class="cmd-btn" id="btn-playpause" title="Play / Pause">
+                <svg id="icon-playpause" viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+
+            <!-- Volume Control Toggle -->
+            <button class="cmd-btn" id="btn-volume" title="Volume Controls">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+            </button>
+
+            <!-- Close / Exit -->
+            <button class="cmd-btn" id="btn-close" title="Close Window / Exit">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+            </button>
+
+            <!-- Main Menu Drawer Toggle -->
+            <button class="cmd-btn" id="btn-menu" title="Menu">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+            </button>
+        </div>
+
+        <!-- Slide-Over Bluetooth Drawer -->
+        <div class="drawer" id="bluetooth-drawer">
+            <div class="drawer-header">
+                <span class="drawer-title">Bluetooth Connections</span>
+                <button class="close-btn" id="close-bluetooth">&times;</button>
+            </div>
+            <div id="bluetooth-widget-container" style="flex: 1; overflow-y: auto;">
+                Loading Bluetooth manager...
+            </div>
+        </div>
+
+        <!-- Slide-Over Settings Drawer -->
+        <div class="drawer" id="settings-drawer">
+            <div class="drawer-header">
+                <span class="drawer-title">System Settings</span>
+                <button class="close-btn" id="close-settings">&times;</button>
+            </div>
+            <div id="config-editor" style="flex: 1; overflow-y: auto;">
+                Loading configuration...
+            </div>
+        </div>
+
+        <!-- Slide-Over Live Log Viewer Drawer -->
+        <div class="drawer" id="logs-drawer">
+            <div class="drawer-header">
+                <span class="drawer-title">Live System Logs</span>
+                <button class="close-btn" id="close-logs">&times;</button>
+            </div>
+            <div class="log-controls-bar" style="display: flex; gap: 8px; margin-bottom: 12px;">
+                <select id="log-module-select" class="styled-select" style="flex: 1;">
+                    <option value="/api/logs?module=all">📋 All Modules</option>
+                </select>
+                <select id="log-level-select" class="styled-select" style="width: 100px;">
+                    <option value="DEBUG">DEBUG</option>
+                    <option value="INFO" selected>INFO</option>
+                    <option value="WARNING">WARN</option>
+                    <option value="ERROR">ERROR</option>
+                </select>
+            </div>
+            <div class="log-console" id="log-console">Connecting to live log stream...</div>
+        </div>
+
+    </div>
+
+    <script type="module">
+        import './js/console_forwarder.js';
+        import { WebCodecsPlayer } from './js/webcodecs_player.js';
+        import { AnalogClock } from './js/analog_clock.js';
+        import { TouchHandler } from './js/touch_handler.js';
+        import { UIControls } from './js/ui_controls.js';
+        import { BluetoothWidget } from './js/bluetooth_widget.js';
+        import { PhoneWidget } from './js/phone_widget.js';
+        import { NotificationManager } from './js/notification_manager.js';
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('video-canvas');
+            const clockCanvas = document.getElementById('analog-clock');
+            const dateEl = document.getElementById('clock-date');
+            const disconnectedScreen = document.getElementById('disconnected-screen');
+
+            // 1. Initialize Analog Clock
+            const clock = new AnalogClock(clockCanvas, dateEl);
+
+            // 2. Initialize UI Controls & Arc Radial FAB Menu
+            const ui = new UIControls();
+
+            // 3. Initialize Phone & Notification Managers
+            const phone = new PhoneWidget();
+            const notifs = new NotificationManager();
+
+            window.addEventListener('phone_status', (e) => phone.updatePhoneStatus(e.detail));
+            window.addEventListener('notification_post', (e) => notifs.addNotification(e.detail));
+            window.addEventListener('notification_dismiss', (e) => notifs.removeNotification(e.detail.id));
+
+            // 4. Initialize Multi-Touch & Gesture Handler
+            const touch = new TouchHandler(canvas);
+
+            // 5. Initialize WebCodecs Player
+            const workflowTextEl = document.getElementById('workflow-text');
+            const player = new WebCodecsPlayer(canvas, workflowTextEl);
+
+
+            // Hide disconnected clock screen when any active video frame format arrives
+            const hideDisconnectedScreen = () => {
+                if (ui.isVideoFocused && disconnectedScreen.classList.contains('hidden') === false) {
+                    disconnectedScreen.classList.add('hidden');
+                }
+            };
+            player.handleVideoFrame = function(frame) {
+                hideDisconnectedScreen();
+                WebCodecsPlayer.prototype.handleVideoFrame.call(this, frame);
+            };
+            const origRenderImageBitmap = player._renderImageBitmap;
+            player._renderImageBitmap = function(payload, mimeSubtype) {
+                hideDisconnectedScreen();
+                origRenderImageBitmap.call(this, payload, mimeSubtype);
+            };
+
+            // Connect WebSocket via Gateway Proxy route at ws://localhost:8000/api/media/stream
+            const host = window.location.host || '127.0.0.1:8000';
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${host}/api/media/stream`;
+
+            player.connect(wsUrl);
+
+            // Unhide disconnected screen if WebCodecs socket disconnects or closes
+            if (player.ws) {
+                player.ws.addEventListener('close', () => {
+                    disconnectedScreen.classList.remove('hidden');
+                    ui.setStatus('offline');
+                });
+            }
+        });
+    </script>
+</body>
+</html>

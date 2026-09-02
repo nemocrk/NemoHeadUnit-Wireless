@@ -182,6 +182,11 @@ class RfcommHandshake:
         if not passphrase:
             log.warning("WifiInfoResponse: passphrase is EMPTY — phone will fail auth")
 
+        if ap_type not in (0, 1):
+            ap_type = AP_TYPE_STATIC if ap_type == 0 else AP_TYPE_DYNAMIC
+        if security_mode not in (0, 1, 2, 3, 4, 8, 12, 20, 24, 28):
+            security_mode = WPA2_SECURITY_MODE
+
         payload = WifiSecurityResponse(
             ssid               = ssid,
             bssid              = bssid,

@@ -76,3 +76,63 @@ class WindowsCoreAudioAdapter(BaseAudioAdapter):
             except Exception as exc:
                 log.warning(f"WASAPI SetMute failed: {exc}")
         return {"volume": self._volume, "muted": self._muted}
+
+    async def get_available_sinks(self) -> list[Dict[str, Any]]:
+        sinks = [{"id": "default", "name": "System Default Output", "description": "Default System Output"}]
+        if sys.platform == "win32":
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                try:
+                    from pycaw.pycaw import AudioUtilities
+                    devices = AudioUtilities.GetAllDevices()
+                    for dev in devices:
+                        try:
+                            if hasattr(dev, "FriendlyName") and dev.FriendlyName:
+                                flow = getattr(dev, "dataFlow", 0)
+                                state = getattr(dev, "state", 1)
+                                if flow in (0, "eRender") and state in (1, "DEVICE_STATE_ACTIVE", "ACTIVE"):
+                                    sinks.append({"id": dev.FriendlyName, "name": dev.FriendlyName, "description": dev.FriendlyName})
+                        except Exception:
+                            continue
+                except Exception as e:
+                    log.debug(f"Windows sink enumeration notice: {e}")
+        log.info(f"🔊 [Windows Audio] Discovered {len(sinks)} output sink(s): {[s['name'] for s in sinks]}")
+        return sinks
+
+    async def get_available_sources(self) -> list[Dict[str, Any]]:
+        sources = [{"id": "default", "name": "System Default Input", "description": "Default System Microphone"}]
+        if sys.platform == "win32":
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                try:
+                    from pycaw.pycaw import AudioUtilities
+                    devices = AudioUtilities.GetAllDevices()
+                    for dev in devices:
+                        try:
+                            if hasattr(dev, "FriendlyName") and dev.FriendlyName:
+                                flow = getattr(dev, "dataFlow", None)
+                                state = getattr(dev, "state", 1)
+                                if flow in (1, "eCapture") and state in (1, "DEVICE_STATE_ACTIVE", "ACTIVE"):
+                                    sources.append({"id": dev.FriendlyName, "name": dev.FriendlyName, "description": dev.FriendlyName})
+                        except Exception:
+                            continue
+                    if len(sources) == 1:
+                        mic = AudioUtilities.GetMicrophone()
+                        if mic and hasattr(mic, "FriendlyName") and mic.FriendlyName:
+                            sources.append({"id": mic.FriendlyName, "name": mic.FriendlyName, "description": mic.FriendlyName})
+                except Exception as e:
+                    log.debug(f"Windows source enumeration notice: {e}")
+        log.info(f"🎤 [Windows Audio] Discovered {len(sources)} input source(s): {[s['name'] for s in sources]}")
+        return sources
+
+    async def set_active_sink(self, sink_id: str) -> bool:
+        self._active_sink = sink_id
+        log.info(f"WindowsCoreAudioAdapter active sink set to '{sink_id}'")
+        return True
+
+    async def set_active_source(self, source_id: str) -> bool:
+        self._active_source = source_id
+        log.info(f"WindowsCoreAudioAdapter active source set to '{source_id}'")
+        return True

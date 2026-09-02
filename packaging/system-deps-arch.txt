@@ -24,8 +24,13 @@ util-linux
 # Network Manager
 networkmanager
 
-# Audio backend (pacat, pactl tools)
+# Audio backend (PipeWire + PulseAudio emulation & BlueZ SPA codec)
+pipewire
+pipewire-audio
+pipewire-pulse
+wireplumber
 libpulse
+sbc
 
 # FFmpeg
 ffmpeg
@@ -45,6 +50,20 @@ glib2
 
 # OpenGL & EGL runtime
 libglvnd
+mesa
+qt6-wayland
+xcb-util-cursor
+egl-wayland
+
+# System Python deps for GUI EGL isolation
+python-pyqt6
+python-pyzmq
+python-protobuf
+python-pydantic
+python-loguru
 
 # VA-API diagnostic utility
 libva-utils
+
+#decode to check hardware info
+dmidecode

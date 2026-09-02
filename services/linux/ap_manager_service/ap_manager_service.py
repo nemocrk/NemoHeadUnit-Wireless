@@ -77,6 +77,7 @@ POLKIT_ACTION_STATUS = "org.nemo.apmanager.status"
 
 WPA2_SECURITY_MODE = 8
 AP_TYPE_DYNAMIC    = 1
+AP_TYPE_STATIC     = 2
 DHCP_LEASE_TIME    = "12h"
 
 DNSMASQ_LEASES_FILE = "/var/lib/misc/dnsmasq.leases"
@@ -101,6 +102,7 @@ class APConfig:
     dhcp_range_start: str = "10.0.0.10"
     dhcp_range_end:   str = "10.0.0.50"
     country_code:     str = "IT"
+    force_ap:         bool = False
 
 
 def _config_from_dbus_dict(d: dict) -> APConfig:
@@ -109,11 +111,16 @@ def _config_from_dbus_dict(d: dict) -> APConfig:
     str_fields = {"interface", "ssid", "key", "hw_mode", "subnet",
                   "gateway_ip", "dhcp_range_start", "dhcp_range_end", "country_code"}
     int_fields = {"channel"}
+    bool_fields = {"force_ap"}
     for k, v in d.items():
-        if k in str_fields:
+        if k in ("ap_password", "password", "wpa_passphrase"):
+            cfg.key = str(v)
+        elif k in str_fields:
             setattr(cfg, k, str(v))
         elif k in int_fields:
             setattr(cfg, k, int(v))
+        elif k in bool_fields:
+            setattr(cfg, k, bool(v))
         else:
             log.warning(f"Unknown config key '{k}' — ignored")
     if cfg.hw_mode not in ("a", "g"):
@@ -256,14 +263,22 @@ def _detect_existing_wifi() -> Optional[dict]:
     Check whether the HU is already connected to a WiFi network that can be
     used in join-network mode (i.e. PSK-secured, non-enterprise).
 
-    Returns a dict with keys {ssid, bssid, interface, security} if a usable
+    Returns a dict with keys {ssid, bssid, interface, security, uuid} if a usable
     network is found, or None otherwise.
-
-    Uses:
-      nmcli -t -f active,ssid,bssid,device,security,type device wifi
-    Output format (terse, colon-separated):
-      yes:MySSID:AA\\:BB\\:CC\\:DD\\:EE\\:FF:wlan0:WPA2:wifi
     """
+    # 1. Get active WiFi connection UUID if available
+    active_uuid = ""
+    try:
+        res = _run(["nmcli", "-t", "-f", "UUID,TYPE,DEVICE", "connection", "show", "--active"], timeout=5)
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                parts = line.split(":")
+                if len(parts) >= 2 and any(t in parts[1].lower() for t in ("wifi", "wireless", "802-11")):
+                    active_uuid = parts[0]
+                    break
+    except Exception as e:
+        log.debug(f"nmcli active connection query notice: {e}")
+
     try:
         result = _run(
             ["nmcli", "-t", "-f", "active,ssid,bssid,device,security,type",
@@ -271,16 +286,44 @@ def _detect_existing_wifi() -> Optional[dict]:
             timeout=5,
         )
     except Exception as e:
-        log.warning(f"nmcli wifi scan failed: {e}")
-        return None
-
+        log.debug(f"nmcli wifi scan failed: {e}")
+        result = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr=str(e))
     if result.returncode != 0:
-        log.warning(f"nmcli returned {result.returncode}: {result.stderr.strip()}")
+        log.debug(f"nmcli returned {result.returncode} — checking iw/iwd connected station")
+        try:
+            iw_devs = _run(["iw", "dev"], timeout=5)
+            if iw_devs.returncode == 0:
+                for line in iw_devs.stdout.splitlines():
+                    line = line.strip()
+                    if line.startswith("Interface "):
+                        cur_iface = line.split("Interface ")[1].strip()
+                        link_res = _run(["iw", "dev", cur_iface, "link"], timeout=5)
+                        if link_res.returncode == 0 and "Connected to " in link_res.stdout:
+                            bssid = ""
+                            ssid = ""
+                            for l_line in link_res.stdout.splitlines():
+                                l_line = l_line.strip()
+                                if l_line.startswith("Connected to "):
+                                    bssid = l_line.split("Connected to ")[1].split()[0].upper()
+                                elif l_line.startswith("SSID: "):
+                                    ssid = l_line.split("SSID: ", 1)[1].strip()
+                            if ssid and bssid:
+                                psk = _get_wifi_psk(ssid)
+                                if psk:
+                                    log.info(f"Detected usable WiFi network via iw/iwd: ssid='{ssid}' bssid={bssid} iface={cur_iface}")
+                                    return {
+                                        "ssid":      ssid,
+                                        "bssid":     bssid,
+                                        "interface": cur_iface,
+                                        "security":  "WPA2",
+                                        "uuid":      "",
+                                    }
+        except Exception as e:
+            log.debug(f"iw fallback scan notice: {e}")
         return None
 
     for line in result.stdout.splitlines():
         # nmcli terse output escapes colons in values as \:
-        # Split on unescaped colons only.
         parts = re.split(r"(?<!\\):", line)
         if len(parts) < 6:
             continue
@@ -303,12 +346,24 @@ def _detect_existing_wifi() -> Optional[dict]:
             log.info(f"WiFi '{ssid}' uses enterprise security ({security}) — skipping join-network mode")
             continue
 
-        log.info(f"Detected usable WiFi network: ssid='{ssid}' bssid={bssid} iface={device} security={security}")
+        resolved_bssid = bssid.upper()
+        if not resolved_bssid or resolved_bssid == "--":
+            try:
+                iw_res = _run(["iw", "dev", device.strip(), "link"], timeout=5)
+                for iw_line in iw_res.stdout.splitlines():
+                    if "Connected to " in iw_line:
+                        resolved_bssid = iw_line.split("Connected to ")[1].split()[0].upper()
+                        break
+            except Exception:
+                pass
+
+        log.info(f"Detected usable WiFi network: ssid='{ssid}' bssid={resolved_bssid} iface={device} security={security} uuid={active_uuid}")
         return {
             "ssid":      ssid,
-            "bssid":     bssid.upper(),
+            "bssid":     resolved_bssid,
             "interface": device.strip(),
             "security":  security.strip(),
+            "uuid":      active_uuid,
         }
 
     log.info("No active WiFi network suitable for join-network mode found")
@@ -339,33 +394,72 @@ def _get_iface_ip(iface: str) -> Optional[str]:
     return None
 
 
-def _get_wifi_psk(ssid: str) -> Optional[str]:
+def _get_wifi_psk(ssid: str, uuid: str = "") -> Optional[str]:
     """
-    Retrieve the PSK for `ssid` from NetworkManager's keyring.
+    Retrieve the PSK for `ssid` or `uuid` from NetworkManager's keyring or config files.
     Requires root. Returns None if not found or on error.
-    Uses: nmcli -s -t -f 802-11-wireless-security.psk connection show <ssid>
     """
-    try:
-        result = _run(
-            ["nmcli", "-s", "-t", "-f", "802-11-wireless-security.psk",
-             "connection", "show", ssid],
-            timeout=5,
-        )
-    except Exception as e:
-        log.warning(f"nmcli PSK retrieval failed for '{ssid}': {e}")
-        return None
+    # 1. Try nmcli with UUID and SSID
+    targets = [uuid, ssid] if uuid else [ssid]
+    for target in targets:
+        if not target:
+            continue
+        try:
+            result = _run(
+                ["nmcli", "-s", "-t", "-f", "802-11-wireless-security.psk",
+                 "connection", "show", target],
+                timeout=5,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if "802-11-wireless-security.psk:" in line:
+                        psk = line.split(":", 1)[1].strip()
+                        if psk and psk != "--":
+                            log.info(f"Retrieved PSK for '{ssid}' via nmcli ({target})")
+                            return psk
+        except Exception as e:
+            log.debug(f"nmcli PSK lookup notice for '{target}': {e}")
 
-    if result.returncode != 0:
-        log.warning(f"nmcli PSK lookup for '{ssid}' returned {result.returncode}: {result.stderr.strip()}")
-        return None
+    # 2. Check /etc/NetworkManager/system-connections/
+    nm_dir = "/etc/NetworkManager/system-connections"
+    if os.path.isdir(nm_dir):
+        try:
+            for fname in os.listdir(nm_dir):
+                fpath = os.path.join(nm_dir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                    if f"ssid={ssid}" in content or (uuid and f"uuid={uuid}" in content) or f"id={ssid}" in content:
+                        for line in content.splitlines():
+                            line = line.strip()
+                            if line.startswith("psk="):
+                                psk = line.split("=", 1)[1].strip()
+                                if psk:
+                                    log.info(f"Found PSK for '{ssid}' in {fpath}")
+                                    return psk
+                except Exception:
+                    pass
+        except Exception as e:
+            log.debug(f"Scanning NM system-connections failed: {e}")
 
-    for line in result.stdout.splitlines():
-        if "802-11-wireless-security.psk:" in line:
-            psk = line.split(":", 1)[1].strip()
-            if psk and psk != "--":
-                return psk
+    # 3. Check /var/lib/iwd/
+    iwd_file = f"/var/lib/iwd/{ssid}.psk"
+    if os.path.isfile(iwd_file):
+        try:
+            with open(iwd_file, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("Passphrase="):
+                        psk = line.split("=", 1)[1].strip()
+                        if psk:
+                            log.info(f"Found PSK for '{ssid}' in {iwd_file}")
+                            return psk
+        except Exception as e:
+            log.debug(f"Reading iwd PSK failed: {e}")
 
-    log.info(f"No PSK found in NM keyring for '{ssid}'")
+    log.info(f"No PSK found for '{ssid}'")
     return None
 
 # ---------------------------------------------------------------------------
@@ -398,18 +492,21 @@ class _APRunner:
         """
         Start connectivity for Android Auto.
 
-        1. If the HU is already on a WiFi network with PSK → join-network mode:
+        1. If force_ap is not set and HU is on a WiFi network with PSK → join-network mode:
            populate internal state from the existing network, set _mode="join",
            return without touching hostapd/dnsmasq/NM.
-        2. Otherwise → AP mode: full hostapd + dnsmasq startup as before.
+        2. Otherwise → AP mode: full hostapd + dnsmasq startup.
 
         Raises RuntimeError on failure.
         """
-        wifi = _detect_existing_wifi()
-        if wifi is not None:
-            self._start_join_network(cfg, wifi)
-        else:
-            self._start_ap(cfg)
+        if not cfg.force_ap:
+            wifi = _detect_existing_wifi()
+            if wifi is not None:
+                self._start_join_network(cfg, wifi)
+                if self._mode == "join":
+                    return
+
+        self._start_ap(cfg)
 
     def stop(self) -> None:
         """
@@ -431,8 +528,7 @@ class _APRunner:
         _cleanup_file(self._hostapd_conf)
         _cleanup_file(self._dnsmasq_conf)
         self._restore_interface()
-        self._set_nm_managed(True)
-        self._nm_reconnect()
+        self._reconnect_network()
         self._reset_state()
         log.info("AP stopped")
 
@@ -446,7 +542,7 @@ class _APRunner:
         return bool(hp and dp)
 
     def get_params(self) -> dict:
-        """Returns connectivity params WITHOUT key."""
+        """Returns connectivity params."""
         if not self._cfg:
             return {}
         return {
@@ -454,8 +550,10 @@ class _APRunner:
             "bssid":         self._bssid,
             "interface":     self._cfg.interface,
             "gateway_ip":    self._cfg.gateway_ip,
+            "key":           self._cfg.key,
             "security_mode": WPA2_SECURITY_MODE,
-            "ap_type":       AP_TYPE_DYNAMIC,
+            "ap_type":       AP_TYPE_STATIC if self._mode == "join" else AP_TYPE_DYNAMIC,
+            "mode":          self._mode or "ap",
         }
 
     def get_key(self) -> str:
@@ -478,19 +576,17 @@ class _APRunner:
             log.warning(
                 f"Could not determine HU IP on {iface} — falling back to AP mode"
             )
-            self._start_ap(cfg)
             return
 
-        psk = _get_wifi_psk(wifi["ssid"])
+        psk = _get_wifi_psk(wifi["ssid"], wifi.get("uuid", ""))
         if not psk:
             log.warning(
                 f"Could not retrieve PSK for '{wifi['ssid']}' — falling back to AP mode"
             )
-            self._start_ap(cfg)
             return
 
         # Build a synthetic APConfig mirroring the existing network
-        join_cfg          = APConfig()
+        join_cfg           = APConfig()
         join_cfg.interface = iface
         join_cfg.ssid      = wifi["ssid"]
         join_cfg.key       = psk
@@ -498,12 +594,12 @@ class _APRunner:
         join_cfg.gateway_ip = hu_ip
 
         self._cfg   = join_cfg
-        self._bssid = wifi["bssid"]
+        self._bssid = wifi["bssid"] or _get_mac(iface)
         self._mode  = "join"
 
         log.info(
-            f"join-network mode: ssid='{join_cfg.ssid}' iface={iface} "
-            f"hu_ip={hu_ip} bssid={self._bssid}"
+            f"join-network mode active: ssid='{join_cfg.ssid}' iface={iface} "
+            f"hu_ip={hu_ip} bssid={self._bssid} key_len={len(psk)}"
         )
 
     # -- AP startup (existing behaviour) --------------------------------------
@@ -564,8 +660,16 @@ class _APRunner:
     def _restore_interface(self) -> None:
         if not self._cfg:
             return
-        _run(["ip", "addr", "flush", "dev", self._cfg.interface])
-        time.sleep(0.2)
+        iface = self._cfg.interface
+        cmds = [
+            ["ip", "addr", "flush", "dev", iface],
+            ["ip", "link", "set", iface, "down"],
+            ["iw", "dev", iface, "set", "type", "managed"],
+            ["ip", "link", "set", iface, "up"],
+        ]
+        for cmd in cmds:
+            _run(cmd)
+        time.sleep(0.5)
 
     def _release_interface(self) -> None:
         iface = self._cfg.interface
@@ -580,9 +684,16 @@ class _APRunner:
         value = "yes" if managed else "no"
         _run(["nmcli", "device", "set", self._cfg.interface, "managed", value], timeout=5)
 
-    def _nm_reconnect(self) -> None:
+    def _reconnect_network(self) -> None:
         time.sleep(0.5)
-        _run(["systemctl", "restart", "NetworkManager"])
+        if self._cfg:
+            self._set_nm_managed(True)
+        # Trigger reconnect across whatever daemon host uses
+        _run(["systemctl", "try-restart", "NetworkManager"])
+        _run(["systemctl", "try-restart", "iwd"])
+        _run(["systemctl", "try-restart", "wpa_supplicant"])
+        _run(["systemctl", "try-restart", "systemd-networkd"])
+        _run(["systemctl", "try-restart", "dhcpcd"])
 
     # -- daemon helpers -------------------------------------------------------
 

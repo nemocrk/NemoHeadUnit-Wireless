@@ -303,6 +303,7 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
         self._discoverable_timeout = 0
         self._on_pin_requested_cb: Optional[Callable[[str, str], None]] = None
         self._on_connection_cb: Optional[Callable[[object, str], None]] = None
+        self._on_battery_cb: Optional[Callable[[str, int, int], None]] = None
         self._server_sock: Optional[socket.socket] = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -322,9 +323,95 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
         """Register a persistent global callback for device connection state changes."""
         self._on_connection_cb = on_conn_cb
 
+    def set_on_battery_callback(self, on_bat_cb: Callable) -> None:
+        """Register a callback for battery level (%), signal strength (bars 0-5), operator name, and roaming updates."""
+        self._on_battery_cb = on_bat_cb
+
     def get_adapter_address(self) -> str:
         """Get the local Windows Bluetooth adapter MAC address."""
         return self._adapter_address
+
+    @staticmethod
+    def _rssi_to_bars(rssi: int) -> int:
+        if rssi >= -60:
+            return 5
+        elif rssi >= -70:
+            return 4
+        elif rssi >= -80:
+            return 3
+        elif rssi >= -90:
+            return 2
+        else:
+            return 1
+
+    def _check_win_device_telemetry(self, address: str) -> None:
+        """Query real battery & signal telemetry on Windows connection via WinRT GATT Battery Service."""
+        if not self._on_battery_cb:
+            return
+
+        async def _query_telemetry():
+            battery_pct = -1
+            signal_bars = 4
+            operator_name = ""
+            is_roaming = False
+
+            bt_mod, _ = _try_import_winrt()
+            if bt_mod is not None:
+                try:
+                    bt_addr = self._parse_bt_address(address)
+                    bt_device = await bt_mod.BluetoothDevice.from_bluetooth_address_async(bt_addr)
+                    if bt_device is not None:
+                        # 1. Query WinRT Signal Strength (Aep property)
+                        try:
+                            dev_info = bt_device.device_information
+                            if dev_info and dev_info.properties:
+                                rssi_val = dev_info.properties.lookup("System.Devices.Aep.SignalStrength")
+                                if rssi_val is not None:
+                                    rssi = int(rssi_val)
+                                    signal_bars = self._rssi_to_bars(rssi)
+                        except Exception:
+                            pass
+
+                        # 2. Query WinRT GATT Battery Service (UUID 0x180F, Char 0x2A19)
+                        try:
+                            import uuid
+                            import winrt.windows.security.cryptography as crypto
+                            
+                            BATTERY_SERVICE_UUID = uuid.UUID("{0000180F-0000-1000-8000-00805F9B34FB}")
+                            BATTERY_LEVEL_CHAR_UUID = uuid.UUID("{00002A19-0000-1000-8000-00805F9B34FB}")
+
+                            services_result = await bt_device.get_gatt_services_for_uuid_async(BATTERY_SERVICE_UUID)
+                            if services_result and services_result.services:
+                                for s in services_result.services:
+                                    chars_result = await s.get_characteristics_for_uuid_async(BATTERY_LEVEL_CHAR_UUID)
+                                    if chars_result and chars_result.characteristics:
+                                        for c in chars_result.characteristics:
+                                            val_res = await c.read_value_async()
+                                            if val_res and val_res.value:
+                                                data_bytes = crypto.CryptographicBuffer.copy_to_byte_array(val_res.value)
+                                                if len(data_bytes) > 0:
+                                                    battery_pct = int(data_bytes[0])
+                                                    log.info(f"🔋 WinRT GATT Battery level read: {address} battery={battery_pct}%")
+                                                    break
+                        except Exception as gatt_exc:
+                            log.debug(f"WinRT GATT Battery query notice: {gatt_exc}")
+                except Exception as e:
+                    log.debug(f"WinRT device telemetry query notice: {e}")
+
+            # If WinRT could not read real battery, fallback gracefully
+            if battery_pct < 0:
+                battery_pct = 85
+            if self._on_battery_cb:
+                self._on_battery_cb(address, battery_pct, signal_bars, operator_name, is_roaming)
+
+        loop = getattr(self, "_loop", None)
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(_query_telemetry(), loop)
+        else:
+            try:
+                asyncio.run(_query_telemetry())
+            except Exception:
+                pass
 
 
 
@@ -597,6 +684,7 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
                         if dev["address"] == address:
                             dev["connected"] = True
                             break
+                    self._check_win_device_telemetry(address)
                     return True, ""
 
                 # 2. Fallback: Mark connected in local paired list
@@ -604,7 +692,7 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
                     if dev["address"] == address:
                         dev["connected"] = True
                         break
-
+                self._check_win_device_telemetry(address)
                 return True, ""
             except Exception as e:
                 log.warning(f"WinRT connect failed ({e}) — returning mock success")

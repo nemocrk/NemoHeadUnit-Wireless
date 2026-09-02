@@ -56,6 +56,9 @@ class ProxyModule(BaseBackendModule):
 
         # System discovery endpoints
         self.web_app.router.add_get("/api/system/modules", self.handle_get_modules)
+        # Direct proxy log stream aliases
+        self.web_app.router.add_get("/api/logs", self._handle_ws_logs)
+        self.web_app.router.add_get("/api/proxy/logs", self._handle_ws_logs)
 
         # Route matching handler: checks registered proxies or falls back to static assets
         self.web_app.router.add_route("*", "/{tail:.*}", self.handle_proxy_request)

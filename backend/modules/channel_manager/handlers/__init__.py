@@ -8,6 +8,8 @@ from .wifi_handler import WifiChannelHandler
 from .av_input_handler import AVInputChannelHandler
 from .navigation_handler import NavigationChannelHandler
 from .media_playback_handler import MediaPlaybackChannelHandler
+from .phone_status_handler import PhoneStatusHandler
+from .notification_handler import NotificationHandler
 
 __all__ = [
     "ControlChannelHandler",
@@ -20,4 +22,6 @@ __all__ = [
     "AVInputChannelHandler",
     "NavigationChannelHandler",
     "MediaPlaybackChannelHandler",
+    "PhoneStatusHandler",
+    "NotificationHandler",
 ]

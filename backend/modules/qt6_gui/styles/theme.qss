@@ -1,7 +1,7 @@
-/* NemoHeadUnit-Wireless Qt6 Theme Stylesheet (Replicating Automotive Glassmorphism Design System) */
+/* NemoHeadUnit-Wireless Qt6 Theme Stylesheet (Automotive Glassmorphism Design System) */
 
 QMainWindow {
-    background-color: #0b0f19;
+    background-color: #07090e;
     color: #f8fafc;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
@@ -12,37 +12,54 @@ QWidget {
 }
 
 /* ------------------------------------------------------------------
-   Command Bar (Floating Bottom Control Bar)
+   Dashboard Background & Cards (Frosted Glass Automotive Cockpit)
+   ------------------------------------------------------------------ */
+QWidget#disconnected-screen {
+    background: qradialgradient(cx:0.5, cy:0.4, radius:0.85, fx:0.5, fy:0.4, 
+        stop:0 #111827, stop:0.5 #0b0f19, stop:1 #030712);
+}
+
+.dash-card, QFrame#clock-card-widget, QFrame#media-card-widget, QFrame#phone-call-card, QFrame#notification-card, QFrame#nav-card-widget {
+    background-color: rgba(17, 24, 39, 0.82);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 20px;
+}
+
+/* ------------------------------------------------------------------
+   Command Bar (Docked Bottom Control Bar)
    ------------------------------------------------------------------ */
 #command-bar {
-    background-color: rgba(15, 23, 42, 0.85);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 30px;
-    padding: 6px 16px;
+    background-color: #0a0d12;
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    border-radius: 0px;
+    padding: 4px 16px;
 }
 
 QPushButton.cmd-btn {
-    background-color: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 26px;
-    min-width: 52px;
-    max-width: 52px;
-    min-height: 52px;
-    max-height: 52px;
+    background-color: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 24px;
+    min-width: 48px;
+    max-width: 48px;
+    min-height: 48px;
+    max-height: 48px;
 }
 
 QPushButton.cmd-btn:hover {
-    background-color: rgba(255, 255, 255, 0.15);
-    border-color: rgba(255, 255, 255, 0.25);
+    background-color: rgba(56, 189, 248, 0.28);
+    border-color: rgba(56, 189, 248, 0.60);
 }
 
 QPushButton.cmd-btn:pressed {
-    background-color: rgba(0, 230, 118, 0.3);
+    background-color: rgba(56, 189, 248, 0.50);
 }
 
 /* Status Indicator Dot */
 #status-dot-online {
-    background-color: #00e676;
+    background-color: #3fb950;
     border-radius: 6px;
     min-width: 12px;
     max-width: 12px;
@@ -51,7 +68,7 @@ QPushButton.cmd-btn:pressed {
 }
 
 #status-dot-offline {
-    background-color: #ff5252;
+    background-color: #f85149;
     border-radius: 6px;
     min-width: 12px;
     max-width: 12px;
@@ -63,8 +80,8 @@ QPushButton.cmd-btn:pressed {
    Arc Radial Floating Action Button (FAB) Menu
    ------------------------------------------------------------------ */
 QPushButton.arc-fab-item {
-    background-color: rgba(15, 23, 42, 0.9);
-    border: 1px solid rgba(255, 255, 255, 0.15);
+    background-color: rgba(15, 23, 42, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.18);
     border-radius: 26px;
     min-width: 52px;
     max-width: 52px;
@@ -73,16 +90,16 @@ QPushButton.arc-fab-item {
 }
 
 QPushButton.arc-fab-item:hover {
-    background-color: #00b0ff;
-    border-color: #00e676;
+    background-color: #0284c7;
+    border-color: #38bdf8;
 }
 
 /* ------------------------------------------------------------------
    Volume Popover Card
    ------------------------------------------------------------------ */
 #volume-popover {
-    background-color: rgba(15, 23, 42, 0.92);
-    border: 1px solid rgba(255, 255, 255, 0.15);
+    background-color: rgba(15, 23, 42, 0.94);
+    border: 1px solid rgba(255, 255, 255, 0.18);
     border-radius: 20px;
     padding: 8px 16px;
 }
@@ -101,7 +118,7 @@ QPushButton.vol-btn {
 }
 
 QPushButton.vol-btn:hover {
-    background-color: rgba(255, 255, 255, 0.2);
+    background-color: rgba(255, 255, 255, 0.22);
 }
 
 QLabel#vol-level-display {
@@ -115,8 +132,8 @@ QLabel#vol-level-display {
    Slide-Over Drawers (Bluetooth, Settings, Logs)
    ------------------------------------------------------------------ */
 QWidget.drawer-card {
-    background-color: rgba(11, 15, 25, 0.95);
-    border-left: 1px solid rgba(255, 255, 255, 0.12);
+    background-color: rgba(11, 15, 25, 0.97);
+    border-left: 1px solid rgba(255, 255, 255, 0.15);
 }
 
 QLabel.drawer-title {
@@ -134,15 +151,15 @@ QPushButton.close-btn {
 }
 
 QPushButton.close-btn:hover {
-    color: #ff5252;
+    color: #f85149;
 }
 
 /* Console Log View */
 QTextEdit#log-console {
-    background-color: #050811;
+    background-color: #030712;
     border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 8px;
-    color: #00e676;
+    border-radius: 10px;
+    color: #38bdf8;
     font-family: 'Consolas', 'Courier New', monospace;
     font-size: 12px;
 }
@@ -150,22 +167,59 @@ QTextEdit#log-console {
 QComboBox.styled-select {
     background-color: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(255, 255, 255, 0.12);
-    border-radius: 6px;
-    padding: 4px 8px;
+    border-radius: 8px;
+    padding: 4px 10px;
     color: #f8fafc;
 }
 
 QComboBox.styled-select:hover {
-    border-color: #00b0ff;
+    border-color: #38bdf8;
 }
 
 QComboBox::drop-down {
     border: none;
 }
 
-/* ------------------------------------------------------------------
-   Disconnected / Home Clock Screen Overlay
-   ------------------------------------------------------------------ */
-QWidget#disconnected-screen {
-    background: qradialgradient(cx:0.5, cy:0.5, radius:0.8, fx:0.5, fy:0.5, stop:0 #1e293b, stop:1 #090d16);
+/* Custom Scrollbars */
+QScrollBar:vertical {
+    background: transparent;
+    width: 6px;
+    margin: 0px;
 }
+QScrollBar::handle:vertical {
+    background: rgba(255, 255, 255, 0.2);
+    min-height: 20px;
+    border-radius: 3px;
+}
+QScrollBar::handle:vertical:hover {
+    background: rgba(255, 255, 255, 0.35);
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+    background: none;
+}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: none;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 6px;
+    margin: 0px;
+}
+QScrollBar::handle:horizontal {
+    background: rgba(255, 255, 255, 0.2);
+    min-width: 20px;
+    border-radius: 3px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: rgba(255, 255, 255, 0.35);
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+    background: none;
+}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: none;
+}
+

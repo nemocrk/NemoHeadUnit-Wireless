@@ -233,7 +233,9 @@ def list_devices():
     print("=== Qt6 Audio Outputs ===")
     from PyQt6.QtCore import QCoreApplication
     from PyQt6.QtMultimedia import QMediaDevices
-    app = QCoreApplication(sys.argv)
+    app = QCoreApplication.instance()
+    if app is None:
+        app = QCoreApplication(sys.argv)
     default_dev = QMediaDevices.defaultAudioOutput()
     for idx, d in enumerate(QMediaDevices.audioOutputs()):
         is_def = (d.id() == default_dev.id())

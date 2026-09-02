@@ -280,7 +280,9 @@ class TCPServerModule(BaseBackendModule):
 
         if ch_type_name in ("VIDEO", "AUDIO") and is_media_msg:
             stream_type = 0 if ch_type_name == "VIDEO" else 1
-            shm_offset = self._shm.downstream.write_frame(stream_type, 0, body)
+            ch_buf_size = 32 * 1024 * 1024 if ch_type_name == "VIDEO" else 8 * 1024 * 1024
+            shm_buf = self._shm.get_downstream_channel(channel_id, size=ch_buf_size)
+            shm_offset = shm_buf.write_frame(stream_type, 0, body)
             self.publish(
                 "aa.frame.shm",
                 {
@@ -291,18 +293,21 @@ class TCPServerModule(BaseBackendModule):
                     "payload_len": len(body),
                 },
             )
+            # Zero-copy optimization: bypass redundant 100KB hex JSON allocations over ZMQ
+            return
 
+        body_hex = body.hex()
         frame_data = {
             "channel_id": channel_id,
             "message_id": message_id,
             "encrypted": encrypted,
-            "payload_hex": body.hex(),
+            "payload_hex": body_hex,
         }
         received_data = {
             "channel_id": channel_id,
             "message_id": message_id,
             "encrypted": encrypted,
-            "payload_hex": body.hex(),
+            "payload_hex": body_hex,
             "payload_head": body[:16].hex(),
         }
 

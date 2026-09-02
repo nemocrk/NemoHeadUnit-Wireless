@@ -2,24 +2,12 @@
 # packaging/build_arch.sh
 #
 # Build a self-contained Arch Linux package (.pkg.tar.zst) for NemoHeadUnit-Wireless.
+# Supports two packaging modes:
+#   1. --method venv (Default): uses system python + venv + uv installer.
+#   2. --method micromamba (or --micromamba): uses standalone Micromamba conda environment.
 #
 # Usage:
-#   bash packaging/build_arch.sh [--arch x86_64|aarch64|amd64|arm64] [--output-dir /path]
-#
-# What this script does:
-#   1. Reads VERSION from repo root & auto-increments patch revision
-#   2. Validates required build tools (fpm, zstd, tar)
-#   3. Assembles a staging directory (build/stage_arch/) mirroring filesystem layout:
-#         /opt/nemo-headunit/
-#         /usr/lib/systemd/system/
-#         /etc/dbus-1/system.d/
-#         /usr/share/dbus-1/system-services/
-#         /usr/share/polkit-1/actions/
-#         /etc/polkit-1/rules.d/
-#         /usr/share/applications/
-#         /usr/share/pixmaps/
-#   4. Builds .pkg.tar.zst with FPM (pacman target)
-#   5. Verifies package archive contents
+#   bash packaging/build_arch.sh [--method venv|micromamba] [--arch x86_64|aarch64|amd64|arm64] [--output-dir /path]
 #
 set -euo pipefail
 
@@ -30,8 +18,8 @@ set -euo pipefail
 BOLD=$(tput bold 2>/dev/null || true)
 RESET=$(tput sgr0 2>/dev/null || true)
 
-log()  { echo "${BOLD}[build_arch_micromamba]${RESET} $*"; }
-die()  { echo "${BOLD}[build_arch_micromamba] ERROR:${RESET} $*" >&2; exit 1; }
+log()  { echo "${BOLD}[build_arch]${RESET} $*"; }
+die()  { echo "${BOLD}[build_arch] ERROR:${RESET} $*" >&2; exit 1; }
 step() { echo; echo "${BOLD}>>> $* ${RESET}"; }
 
 # ---------------------------------------------------------------------------
@@ -40,9 +28,22 @@ step() { echo; echo "${BOLD}>>> $* ${RESET}"; }
 
 ARCH="x86_64"
 OUTPUT_DIR="dist"
+METHOD="venv"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --method)
+            METHOD="$2"
+            shift 2
+            ;;
+        --venv)
+            METHOD="venv"
+            shift 1
+            ;;
+        --micromamba|--conda)
+            METHOD="micromamba"
+            shift 1
+            ;;
         --arch)
             RAW_ARCH="$2"
             case "${RAW_ARCH}" in
@@ -62,6 +63,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+[[ "$METHOD" == "venv" || "$METHOD" == "micromamba" ]] \
+    || die "--method must be 'venv' or 'micromamba'"
+
+log "Packaging target: ARCH=${ARCH}, METHOD=${METHOD}"
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -75,12 +81,20 @@ OUTPUT_DIR="${REPO_ROOT}/${OUTPUT_DIR}"
 
 VERSION_FILE="${REPO_ROOT}/VERSION"
 ENV_YML="${REPO_ROOT}/environment.yml"
+REQUIREMENTS_TXT="${REPO_ROOT}/packaging/requirements.txt"
 SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps-arch.txt"
+
+if [ "$METHOD" = "venv" ]; then
+    BOOTSTRAP_TOOL="${REPO_ROOT}/packaging/bootstrap_uv.sh"
+else
+    BOOTSTRAP_TOOL="${REPO_ROOT}/packaging/bootstrap_micromamba.sh"
+fi
+
 POSTINST="${REPO_ROOT}/packaging/postinst"
 PRERM="${REPO_ROOT}/packaging/prerm"
+PACMAN_INSTALL_TEMPLATE="${REPO_ROOT}/packaging/arch_install_template.sh"
 BT_RULES="${REPO_ROOT}/packaging/org.nemo.bluetooth.rules"
 HW_FIXES_SRC="${REPO_ROOT}/packaging/hardware_fixes"
-BOOTSTRAP_MICROMAMBA="${REPO_ROOT}/packaging/bootstrap_micromamba.sh"
 LAUNCHER_SRC="${REPO_ROOT}/packaging"
 
 SERVICES_SRC="${REPO_ROOT}/services/linux/ap_manager_service"
@@ -113,16 +127,22 @@ PKG_FILENAME="${PACKAGE_NAME}-${VERSION}-1-${ARCH}.pkg.tar.zst"
 # ---------------------------------------------------------------------------
 step "Checking required tools"
 
-for tool in fpm tar; do
+for tool in fpm zstd tar; do
     if ! command -v "${tool}" &>/dev/null; then
         die "'${tool}' not found. Install it before running this script."
     fi
     log "  ${tool}: $(command -v "${tool}")"
 done
 
-[[ -f "${ENV_YML}" ]] || die "environment.yml not found at ${REPO_ROOT}/environment.yml"
+if [ "$METHOD" = "venv" ]; then
+    [[ -f "${REQUIREMENTS_TXT}" ]] || die "requirements.txt not found at ${REQUIREMENTS_TXT}"
+    log "  requirements.txt: found"
+else
+    [[ -f "${ENV_YML}" ]] || die "environment.yml not found at ${ENV_YML}"
+    log "  environment.yml: found"
+fi
+
 [[ -f "${SYS_DEPS_FILE}" ]] || die "system-deps-arch.txt not found at ${SYS_DEPS_FILE}"
-log "  environment.yml: found"
 log "  system-deps-arch.txt: found"
 
 # ---------------------------------------------------------------------------
@@ -136,13 +156,34 @@ log "Stage dir: ${STAGE_DIR}"
 # ---------------------------------------------------------------------------
 # Step 3 — Assemble staging directory
 # ---------------------------------------------------------------------------
-step "Assembling staging directory"
+step "Assembling staging directory (${METHOD} mode)"
 
 APP_OPT="${STAGE_DIR}/opt/nemo-headunit"
 mkdir -p "${APP_OPT}"
 
-log "  Copying environment.yml"
-cp "${ENV_YML}" "${APP_OPT}/environment.yml"
+# Always place executable postinst & prerm in /opt/nemo-headunit for Pacman .INSTALL delegation
+cp "${POSTINST}" "${APP_OPT}/postinst"
+chmod 755 "${APP_OPT}/postinst"
+cp "${PRERM}" "${APP_OPT}/prerm"
+chmod 755 "${APP_OPT}/prerm"
+
+if [ "$METHOD" = "venv" ]; then
+    log "  Copying requirements.txt"
+    cp "${REQUIREMENTS_TXT}" "${APP_OPT}/requirements.txt"
+    if [ -f "${BOOTSTRAP_TOOL}" ]; then
+        log "  Copying bootstrap_uv.sh"
+        cp "${BOOTSTRAP_TOOL}" "${APP_OPT}/bootstrap_uv.sh"
+        chmod +x "${APP_OPT}/bootstrap_uv.sh"
+    fi
+else
+    log "  Copying environment.yml"
+    cp "${ENV_YML}" "${APP_OPT}/environment.yml"
+    if [ -f "${BOOTSTRAP_TOOL}" ]; then
+        log "  Copying bootstrap_micromamba.sh"
+        cp "${BOOTSTRAP_TOOL}" "${APP_OPT}/bootstrap_micromamba.sh"
+        chmod +x "${APP_OPT}/bootstrap_micromamba.sh"
+    fi
+fi
 
 log "  Copying application source"
 cp "${REPO_ROOT}/main.py"      "${APP_OPT}/main.py"
@@ -158,12 +199,6 @@ log "  Copying hardware_fixes/"
 cp -a "${HW_FIXES_SRC}" "${APP_OPT}/hardware_fixes"
 chmod +x "${APP_OPT}/hardware_fixes/run_hardware_fixes.sh"
 find "${APP_OPT}/hardware_fixes" -name 'fix_*.sh' -exec chmod +x {} \;
-
-if [ -f "${BOOTSTRAP_MICROMAMBA}" ]; then
-    log "  Copying bootstrap_micromamba.sh"
-    cp "${BOOTSTRAP_MICROMAMBA}" "${APP_OPT}/bootstrap_micromamba.sh"
-    chmod +x "${APP_OPT}/bootstrap_micromamba.sh"
-fi
 
 # —— /opt/nemo-headunit/bin/ (launcher wrapper) ——
 mkdir -p "${APP_OPT}/bin"
@@ -190,8 +225,15 @@ sed -i \
 # —— /etc/dbus-1/system.d/ ——
 DBUS_STAGE="${STAGE_DIR}/etc/dbus-1/system.d"
 mkdir -p "${DBUS_STAGE}"
-log "  Copying D-Bus policy"
+log "  Copying D-Bus policies"
 cp "${SERVICES_SRC}/org.nemo.APManager.conf" "${DBUS_STAGE}/"
+cp "${REPO_ROOT}/packaging/org.nemo.bluez.conf" "${DBUS_STAGE}/"
+
+# —— /etc/wireplumber/wireplumber.conf.d/ ——
+WIREPLUMBER_STAGE="${STAGE_DIR}/etc/wireplumber/wireplumber.conf.d"
+mkdir -p "${WIREPLUMBER_STAGE}"
+log "  Copying WirePlumber configuration"
+cp "${REPO_ROOT}/packaging/50-bluez.conf" "${WIREPLUMBER_STAGE}/"
 
 # —— /usr/share/dbus-1/system-services/ ——
 DBUS_SERVICES_STAGE="${STAGE_DIR}/usr/share/dbus-1/system-services"
@@ -240,7 +282,7 @@ log "  ${#DEPENDS_ARGS[@]} --depends flags assembled"
 # ---------------------------------------------------------------------------
 # Step 5 — Run FPM (Pacman format)
 # ---------------------------------------------------------------------------
-step "Running FPM (Pacman)"
+step "Running FPM (Arch Linux pacman output)"
 
 fpm \
     --input-type  dir \
@@ -249,35 +291,35 @@ fpm \
     --version     "${VERSION}" \
     --iteration   "1" \
     --architecture "${ARCH}" \
-    --description "NemoHeadUnit-Wireless — Android Auto wireless head unit" \
+    --description "NemoHeadUnit-Wireless — Android Auto wireless head unit (${METHOD})" \
     --url         "https://github.com/nemocrk/NemoHeadUnit-Wireless" \
     --maintainer  "nemocrk <nemocrk@users.noreply.github.com>" \
     --license     "GPL-2.0-only" \
-    --after-install  "${POSTINST}" \
-    --before-remove  "${PRERM}" \
-    --pacman-compression "zstd" \
-    --package     "${OUTPUT_DIR}/${PKG_FILENAME}" \
-    --chdir       "${STAGE_DIR}" \
+    --after-install   "${REPO_ROOT}/packaging/arch_postinst.sh" \
+    --after-upgrade   "${REPO_ROOT}/packaging/arch_postupgrade.sh" \
+    --before-remove   "${REPO_ROOT}/packaging/arch_prerm.sh" \
+    --before-upgrade  "${REPO_ROOT}/packaging/arch_preupgrade.sh" \
     "${DEPENDS_ARGS[@]}" \
+    -C "${STAGE_DIR}" \
+    -p "${OUTPUT_DIR}/${PKG_FILENAME}" \
     .
 
-log "Package written to: ${OUTPUT_DIR}/${PKG_FILENAME}"
+log "Arch Linux package created: ${OUTPUT_DIR}/${PKG_FILENAME}"
 
 # ---------------------------------------------------------------------------
-# Step 6 — Verify
+# Step 6 — Verify package
 # ---------------------------------------------------------------------------
-step "Verifying package"
+step "Verifying package contents"
+
+log "Package archive contents (first 25 entries):"
+tar -tvf "${OUTPUT_DIR}/${PKG_FILENAME}" | head -n 25 || true
 
 echo
-echo "--- Package contents (first 40 lines) ---"
-tar -tf "${OUTPUT_DIR}/${PKG_FILENAME}" | head -n 40 || true
+log "Package size:"
+ls -lh "${OUTPUT_DIR}/${PKG_FILENAME}"
 
-# ---------------------------------------------------------------------------
-# Done
-# ---------------------------------------------------------------------------
 echo
-log "✔  Build successful: ${OUTPUT_DIR}/${PKG_FILENAME}"
-echo
+log "Build successful!"
+log "Output: ${OUTPUT_DIR}/${PKG_FILENAME}"
 log "Install on Arch Linux target:"
 log "  sudo pacman -U ./${PKG_FILENAME}"
-echo

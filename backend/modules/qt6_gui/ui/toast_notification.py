@@ -23,9 +23,13 @@ class ToastNotificationWidget(QWidget):
     Single-Toast Stack Floating Notification Banner Widget.
     """
 
+    _show_toast_signal = pyqtSignal(str, str, int, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("toast-notification")
+
+        self._show_toast_signal.connect(self._do_show_toast, Qt.ConnectionType.QueuedConnection)
 
         self.dismiss_timer = QTimer(self)
         self.dismiss_timer.setSingleShot(True)
@@ -49,9 +53,11 @@ class ToastNotificationWidget(QWidget):
 
     def show_toast(self, message: str, toast_type: str = "info", duration_ms: int = 3500, icon: str = None):
         """
-        Display floating top-center toast banner.
-        Every new toast immediately clears previous active toasts (matching WebClient showToast).
+        Display floating top-center toast banner safely on GUI main thread via QueuedConnection.
         """
+        self._show_toast_signal.emit(message, toast_type, duration_ms, icon or "")
+
+    def _do_show_toast(self, message: str, toast_type: str = "info", duration_ms: int = 3500, icon: str = None):
         if self.dismiss_timer.isActive():
             self.dismiss_timer.stop()
 
@@ -70,7 +76,6 @@ class ToastNotificationWidget(QWidget):
 
         self.lbl_icon.setText(icon if icon else theme["icon"])
         self.lbl_text.setText(message)
-
 
         self.adjustSize()
         self.show()

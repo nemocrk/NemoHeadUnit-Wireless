@@ -41,6 +41,26 @@ class BaseAudioAdapter(abc.ABC):
         """Toggle mute state and return new state."""
         pass
 
+    @abc.abstractmethod
+    async def get_available_sinks(self) -> list[Dict[str, Any]]:
+        """Return list of available audio output sinks [{'id': ..., 'name': ..., 'description': ...}]."""
+        pass
+
+    @abc.abstractmethod
+    async def get_available_sources(self) -> list[Dict[str, Any]]:
+        """Return list of available audio input sources [{'id': ..., 'name': ..., 'description': ...}]."""
+        pass
+
+    @abc.abstractmethod
+    async def set_active_sink(self, sink_id: str) -> bool:
+        """Set active output sink ID or 'default'."""
+        pass
+
+    @abc.abstractmethod
+    async def set_active_source(self, source_id: str) -> bool:
+        """Set active input source ID or 'default'."""
+        pass
+
 
 def get_audio_adapter() -> BaseAudioAdapter:
     """Factory creating and logging the appropriate audio adapter for the active OS platform."""

@@ -52,9 +52,10 @@ def _detect_video_decoders() -> list[dict[str, Any]]:
             Gst.init(None)
 
         candidates = [
+            ("vah264dec", "Hardware (VA-API vah264dec)", "linux"),
+            ("vaapih264dec", "Hardware (VAAPI legacy)", "linux"),
             ("v4l2slh264dec", "Hardware (V4L2 Stateless)", "linux"),
             ("v4l2h264dec", "Hardware (V4L2 Stateful)", "linux"),
-            ("vaapih264dec", "Hardware (VAAPI)", "linux"),
             ("nvh264dec", "Hardware (NVDEC)", "all"),
             ("d3d11h264dec", "Hardware (Direct3D 11)", "windows"),
             ("vtdec_hw", "Hardware (VideoToolbox)", "darwin"),
@@ -133,9 +134,10 @@ def register_diagnostic_routes(media_module) -> None:
 
             # Write directly to downstream audio SHM if available
             offset = -1
-            if hasattr(media_module, "shm") and media_module.shm and hasattr(media_module.shm, "downstream"):
+            if hasattr(media_module, "shm") and media_module.shm:
                 try:
-                    offset = media_module.shm.downstream.write_frame(channel_id, 0, pcm_bytes)
+                    shm_buf = media_module.shm.get_downstream_channel(channel_id, size=8 * 1024 * 1024)
+                    offset = shm_buf.write_frame(channel_id, 0, pcm_bytes)
                 except Exception as exc:
                     media_module.log.warning(f"Diagnostic SHM audio write notice: {exc}")
 

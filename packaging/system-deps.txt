@@ -106,3 +106,12 @@ libgl1
 libegl1
 
 vainfo
+# ────────────────────────────────────────────────────────────────────────
+# Wayland runtime & compositor libraries
+# ────────────────────────────────────────────────────────────────────────
+libwayland-client0
+libwayland-egl1
+libwayland-cursor0
+libxkbcommon0
+labwc
+seatd
