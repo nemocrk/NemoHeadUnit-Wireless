@@ -78,9 +78,18 @@ class RingSharedMemoryBuffer:
         else:
             try:
                 self.shm = shared_memory.SharedMemory(name=name, create=False)
-            except FileNotFoundError:
-                # Fallback: create if non-existent when attaching
-                self.shm = shared_memory.SharedMemory(name=name, create=True, size=size)
+            except (FileNotFoundError, ValueError):
+                # Fallback: if non-existent or empty 0-byte file, recreate with specified size
+                try:
+                    self.shm = shared_memory.SharedMemory(name=name, create=True, size=size)
+                except FileExistsError:
+                    # If already exists but was 0 bytes, unlink and create
+                    try:
+                        temp = shared_memory.SharedMemory(name=name, create=False)
+                        temp.unlink()
+                    except Exception:
+                        pass
+                    self.shm = shared_memory.SharedMemory(name=name, create=True, size=size)
 
         self.write_offset = 0
 
