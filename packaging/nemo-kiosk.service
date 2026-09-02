@@ -1,0 +1,25 @@
+[Unit]
+Description=NemoHeadUnit Autostart Kiosk (Compositor + App)
+Documentation=https://github.com/nemocrk/NemoHeadUnit-Wireless
+After=network.target sound.target systemd-user-sessions.service seatd.service dbus.service
+
+[Service]
+Type=simple
+User=nemo
+Group=nemo
+PAMName=login
+TTYPath=/dev/tty7
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nemo-kiosk
+WorkingDirectory=/home/nemo
+Environment=LIBSEAT_BACKEND=seatd
+Environment=XDG_SESSION_TYPE=wayland
+EnvironmentFile=-/etc/nemo-headunit/display.conf
+ExecStart=/opt/nemo-headunit/bin/nemo-headunit --kiosk-autostart
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

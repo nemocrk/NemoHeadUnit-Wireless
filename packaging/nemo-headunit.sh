@@ -36,6 +36,17 @@ ensure_display_server() {
         fi
     fi
 
+    # 0. Load optional display configuration
+    if [ -f "/etc/nemo-headunit/display.conf" ]; then
+        # shellcheck disable=SC1091
+        . "/etc/nemo-headunit/display.conf"
+    fi
+
+    # CLI overrides
+    if [[ "$*" == *"--no-compositor"* ]] || [ "${COMPOSITOR_AUTOSTART:-true}" = "false" ]; then
+        echo "[nemo-headunit] Compositor autostart disabled by config or CLI flag."
+    fi
+
     # 1. Check if Wayland is already active on host
     if [ -z "${WAYLAND_DISPLAY:-}" ]; then
         if [ -S "${XDG_RUNTIME_DIR}/wayland-0" ]; then
@@ -60,8 +71,15 @@ ensure_display_server() {
         return 0
     fi
 
-    # 3. Neither running: clean SSH inherited display vars before starting DRM/KMS compositor
-    echo "[nemo-headunit] No active display server detected. Scanning for Wayland / X.Org on DRM..."
+    # 3. If autostart disabled, do not spawn compositor
+    if [ "${COMPOSITOR_AUTOSTART:-true}" = "false" ] || [ "${COMPOSITOR_PREFERENCE:-auto}" = "none" ]; then
+        echo "[nemo-headunit] No active display server and autostart disabled. Defaulting to eglfs."
+        export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-eglfs}"
+        return 0
+    fi
+
+    # 4. Neither running: clean SSH inherited display vars before starting DRM/KMS compositor
+    echo "[nemo-headunit] No active display server detected. Starting compositor on DRM..."
     unset DISPLAY
     unset WAYLAND_DISPLAY
 
@@ -69,48 +87,116 @@ ensure_display_server() {
     export WLR_LIBINPUT_NO_DEVICES="1"
     export XDG_SESSION_TYPE="wayland"
 
+    local tty_num="${COMPOSITOR_TTY:-7}"
+
+    wait_wayland_ready() {
+        local target_sock="${XDG_RUNTIME_DIR}/wayland-0"
+        local count=0
+        while [ ! -S "$target_sock" ] && [ $count -lt 50 ]; do
+            sleep 0.1
+            count=$((count + 1))
+        done
+
+        if [ ! -S "$target_sock" ]; then
+            return 1
+        fi
+
+        # Socket exists — verify compositor event loop / IPC readiness
+        count=0
+        while [ $count -lt 30 ]; do
+            if command -v wayland-info &>/dev/null; then
+                if WAYLAND_DISPLAY="wayland-0" wayland-info &>/dev/null; then
+                    return 0
+                fi
+            elif command -v wlr-randr &>/dev/null; then
+                if WAYLAND_DISPLAY="wayland-0" wlr-randr &>/dev/null; then
+                    return 0
+                fi
+            else
+                # Decisive socket ping: verify connection handshake accepted
+                if python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.connect('${target_sock}'); s.close()" 2>/dev/null; then
+                    return 0
+                fi
+            fi
+            sleep 0.1
+            count=$((count + 1))
+        done
+        return 0
+    }
+
     start_compositor() {
         local comp_cmd="$1"
-        local comp_name="$(basename "$comp_cmd")"
-        echo "[nemo-headunit] Starting ${comp_name} Wayland compositor via logind seat..."
+        local comp_name="$(basename "$comp_cmd" | awk '{print $1}')"
+        echo "[nemo-headunit] Starting ${comp_name} Wayland compositor on tty${tty_num}..."
 
-        if command -v systemd-run &>/dev/null; then
+        if [ -n "${INVOCATION_ID:-}" ] || [ -n "${JOURNAL_STREAM:-}" ] && [ "$EUID" -ne 0 ]; then
+            # Running directly inside a dedicated systemd service (e.g. nemo-kiosk.service)
+            dbus-run-session ${comp_cmd} &
+            DISPLAY_SERVER_PID=$!
+        elif command -v systemd-run &>/dev/null; then
             local run_prefix=""
             if [ "$EUID" -ne 0 ] && command -v sudo &>/dev/null; then
                 run_prefix="sudo"
             fi
             $run_prefix systemd-run --unit="nemo-wayland-${comp_name}" --remain-after-exit=no \
                 -p PAMName=login \
-                -p TTYPath=/dev/tty7 \
+                -p TTYPath="/dev/tty${tty_num}" \
                 -p StandardInput=tty \
                 -p User="${USER:-$(id -un)}" \
                 -p WorkingDirectory="${HOME}" \
                 -E LIBSEAT_BACKEND=seatd \
                 -E XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR}" \
+                -E XDG_SESSION_TYPE=wayland \
                 dbus-run-session ${comp_cmd} &>/dev/null &
         else
-            WLR_BACKENDS=drm WLR_LIBINPUT_NO_DEVICES=1 dbus-run-session ${comp_cmd} &
+            dbus-run-session ${comp_cmd} &
             DISPLAY_SERVER_PID=$!
         fi
 
-        local count=0
-        while [ ! -S "${XDG_RUNTIME_DIR}/wayland-0" ] && [ $count -lt 35 ]; do
-            sleep 0.2
-            count=$((count + 1))
-        done
-        if [ -S "${XDG_RUNTIME_DIR}/wayland-0" ]; then
+        if wait_wayland_ready; then
             export WAYLAND_DISPLAY="wayland-0"
             export QT_QPA_PLATFORM="wayland;xcb"
-            echo "[nemo-headunit] ${comp_name} started successfully (wayland-0 ready)"
+            echo "[nemo-headunit] ${comp_name} ready (wayland-0 IPC verified)"
             return 0
         fi
+
+        echo "[nemo-headunit] Warning: ${comp_name} failed to become ready within timeout."
         return 1
     }
 
-    # Check Wayland compositors in order: labwc -> cage -> weston -> sway
-    if command -v labwc &>/dev/null && start_compositor "labwc"; then
+    # Ordered by lightweight / RAM footprint:
+    # 1. cage (~15MB RAM, dedicated kiosk)
+    # 2. labwc (~25MB RAM, lightweight openbox-style wlroots)
+    # 3. weston (~35MB RAM, reference wlroots)
+    # 4. sway (~50MB RAM)
+    # 5. Xorg / startx
+    local pref="${COMPOSITOR_PREFERENCE:-auto}"
+
+    if [ "$pref" != "auto" ]; then
+        case "$pref" in
+            cage)
+                command -v cage &>/dev/null && start_compositor "cage -d" && return 0 ;;
+            labwc)
+                command -v labwc &>/dev/null && start_compositor "labwc" && return 0 ;;
+            weston)
+                command -v weston &>/dev/null && start_compositor "weston --backend=drm-backend.so" && return 0 ;;
+            sway)
+                command -v sway &>/dev/null && start_compositor "sway" && return 0 ;;
+            xorg|Xorg)
+                if command -v Xorg &>/dev/null || command -v X &>/dev/null; then
+                    local x_bin="$(command -v Xorg || command -v X)"
+                    "${x_bin}" :0 vt1 -keeptty -novtswitch &>/dev/null &
+                    sleep 1 && export DISPLAY=":0" && export QT_QPA_PLATFORM="xcb" && return 0
+                fi
+                ;;
+        esac
+        echo "[nemo-headunit] Preferred compositor '$pref' not available or failed. Falling back to auto-probe..."
+    fi
+
+    # Auto probe ordered by lightweight
+    if command -v cage &>/dev/null && start_compositor "cage -d"; then
         return 0
-    elif command -v cage &>/dev/null && start_compositor "cage -d"; then
+    elif command -v labwc &>/dev/null && start_compositor "labwc"; then
         return 0
     elif command -v weston &>/dev/null && start_compositor "weston --backend=drm-backend.so"; then
         return 0
@@ -118,7 +204,7 @@ ensure_display_server() {
         return 0
     fi
 
-    # Check X.Org
+    # Check X.Org fallback
     if command -v Xorg &>/dev/null || command -v X &>/dev/null; then
         local x_bin="$(command -v Xorg || command -v X)"
         echo "[nemo-headunit] Starting X.Org server (${x_bin}) on :0..."
@@ -142,14 +228,6 @@ ensure_display_server() {
             export QT_QPA_PLATFORM="xcb"
             return 0
         fi
-    elif command -v startx &>/dev/null; then
-        echo "[nemo-headunit] Starting X11 via startx..."
-        startx &
-        DISPLAY_SERVER_PID=$!
-        sleep 2
-        export DISPLAY=":0"
-        export QT_QPA_PLATFORM="xcb"
-        return 0
     fi
 
     echo "[nemo-headunit] Warning: Could not auto-start Wayland or X.Org. Falling back to eglfs/linuxfb platform."

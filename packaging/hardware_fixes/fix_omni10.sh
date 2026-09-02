@@ -62,16 +62,25 @@ GRUB_FILE="/etc/default/grub"
 echo -n "  [hw-fix] GRUB configuration... "
 
 if [ -f "$GRUB_FILE" ]; then
-    # Add intel_idle.max_cstate=1 and i915.enable_rc6=0 if missing
+    # Add intel_idle.max_cstate=1 and video=eDP-1:1920x1200@40
     if ! grep -q "intel_idle.max_cstate=1" "$GRUB_FILE"; then
         sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 intel_idle.max_cstate=1"/' "$GRUB_FILE"
         sed -i "s/^\(GRUB_CMDLINE_LINUX_DEFAULT='[^']*\)'/\1 intel_idle.max_cstate=1'/" "$GRUB_FILE"
         GRUB_CHANGED=1
     fi
 
-    if ! grep -q "i915.enable_rc6=0" "$GRUB_FILE"; then
-        sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 i915.enable_rc6=0"/' "$GRUB_FILE"
-        sed -i "s/^\(GRUB_CMDLINE_LINUX_DEFAULT='[^']*\)'/\1 i915.enable_rc6=0'/" "$GRUB_FILE"
+    # Ensure 40Hz panel refresh mode is configured (reduces memory scanout bandwidth 33%)
+    if ! grep -q "video=eDP-1:1920x1200@40" "$GRUB_FILE"; then
+        sed -i 's/video=eDP-1:[^ "]* \?//g' "$GRUB_FILE"
+        sed -i 's/^\(GRUB_CMDLINE_LINUX="[^"]*\)"/\1 video=eDP-1:1920x1200@40"/' "$GRUB_FILE"
+        sed -i "s/^\(GRUB_CMDLINE_LINUX='[^']*\)'/\1 video=eDP-1:1920x1200@40'/" "$GRUB_FILE"
+        GRUB_CHANGED=1
+    fi
+
+    # Note: Modern Linux kernels (>=6.0) removed the obsolete module parameter 'i915.enable_rc6'.
+    # Clean it up from GRUB cmdline to avoid kernel warning.
+    if grep -q "i915\.enable_rc6" "$GRUB_FILE"; then
+        sed -i 's/i915\.enable_rc6=[0-9]* \?//g' "$GRUB_FILE"
         GRUB_CHANGED=1
     fi
 
@@ -90,7 +99,7 @@ if [ -f "$GRUB_FILE" ]; then
             update-grub >/dev/null 2>&1
             echo -e "${GREEN}OK (update-grub).${NC}"
         elif command -v grub-mkconfig &>/dev/null; then
-            local grub_cfg="/boot/grub/grub.cfg"
+            grub_cfg="/boot/grub/grub.cfg"
             if [ -f "/boot/efi/EFI/arch/grub.cfg" ]; then
                 grub_cfg="/boot/efi/EFI/arch/grub.cfg"
             fi
@@ -238,14 +247,146 @@ if [ $DRACUT_CHANGED -eq 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Fix 8: GPU Performance & Power Stability (RC6 / Runtime PM / Frequency floor)
+# ---------------------------------------------------------------------------
+echo -n "  [hw-fix] GPU unthrottle & RC6 / power stability... "
+GPU_CHANGED=0
+
+# Disable GPU runtime PM (disables RC6 power-collapse sleep on Bay Trail)
+# and raise minimum GPU clock floor to 400 MHz (burst to 667 MHz)
+UDEV_GPU_RULES="/etc/udev/rules.d/99-gpu-performance.rules"
+mkdir -p /etc/udev/rules.d
+TEMP_UDEV=$(mktemp)
+cat > "$TEMP_UDEV" <<'EOF'
+# Disable GPU runtime power collapse (RC6) and lock frequency floor to 400 MHz
+ACTION=="add", SUBSYSTEM=="drm", KERNEL=="card1", DRIVERS=="i915", ATTR{power/control}="on", ATTR{gt_min_freq_mhz}="400", ATTR{gt_boost_freq_mhz}="667"
+EOF
+
+if [ ! -f "$UDEV_GPU_RULES" ] || ! cmp -s "$TEMP_UDEV" "$UDEV_GPU_RULES"; then
+    mv "$TEMP_UDEV" "$UDEV_GPU_RULES"
+    chmod 644 "$UDEV_GPU_RULES"
+    udevadm trigger -s drm >/dev/null 2>&1 || true
+    GPU_CHANGED=1
+else
+    rm -f "$TEMP_UDEV"
+fi
+
+# Apply immediately if card1 exists
+if [ -d "/sys/class/drm/card1" ]; then
+    echo "on" > /sys/class/drm/card1/power/control 2>/dev/null || true
+    echo "400" > /sys/class/drm/card1/gt_min_freq_mhz 2>/dev/null || true
+fi
+
+# Set QT_SCALE_FACTOR=1.5 for crisp 1280x800 logical viewport
+if ! grep -q "QT_SCALE_FACTOR=1.5" /etc/environment 2>/dev/null; then
+    echo "QT_SCALE_FACTOR=1.5" >> /etc/environment
+    echo "QT_ENABLE_HIGHDPI_SCALING=0" >> /etc/environment
+    GPU_CHANGED=1
+fi
+
+if [ -d "/home/nemo/.config/labwc" ]; then
+    mkdir -p /home/nemo/.config/labwc
+    if ! grep -q "QT_SCALE_FACTOR=1.5" /home/nemo/.config/labwc/environment 2>/dev/null; then
+        echo "QT_SCALE_FACTOR=1.5" >> /home/nemo/.config/labwc/environment
+        chown nemo:nemo /home/nemo/.config/labwc/environment 2>/dev/null || true
+        GPU_CHANGED=1
+    fi
+fi
+
+if [ $GPU_CHANGED -eq 1 ]; then
+    echo -e "${GREEN}applicato.${NC}"
+else
+    echo -e "${GREEN}già configurato.${NC}"
+fi
+
+# ---------------------------------------------------------------------------
+# Fix 9: Bluetooth persistent MAC address across reboots
+# ---------------------------------------------------------------------------
+echo -n "  [hw-fix] Bluetooth persistent MAC address service... "
+BT_MAC_CHANGED=0
+BT_ADDR_FILE="/etc/bluetooth/bdaddr"
+BT_SERVICE_FILE="/etc/systemd/system/bluetooth-persistent-mac.service"
+
+mkdir -p /etc/bluetooth
+
+# If no persistent MAC stored yet, derive one deterministically from wlan0 MAC
+# (e.g. WiFi 78:61:7c:93:13:74 -> BT 78:61:7c:93:13:75) or generate one
+if [ ! -s "${BT_ADDR_FILE}" ]; then
+    NEW_MAC=""
+    if [ -f "/sys/class/net/wlan0/address" ]; then
+        WIFI_MAC="$(cat /sys/class/net/wlan0/address 2>/dev/null | tr 'a-z' 'A-Z')"
+        # Invert lowest bit of last octet to stay in same registered OUI
+        PREFIX="${WIFI_MAC%:*}"
+        LAST_HEX="${WIFI_MAC##*:}"
+        LAST_INT=$(( 16#$LAST_HEX ^ 1 ))
+        NEW_MAC=$(printf "%s:%02X" "${PREFIX}" "${LAST_INT}")
+    fi
+    if [ -z "${NEW_MAC}" ]; then
+        # Fallback random locally-administered unicast MAC
+        NEW_MAC=$(hexdump -n3 -e'/3 "02:00:00"' -e'/3 ":%02X:%02X:%02X"' /dev/urandom 2>/dev/null || echo "78:61:7C:93:13:75")
+    fi
+    echo "${NEW_MAC}" > "${BT_ADDR_FILE}"
+    chmod 644 "${BT_ADDR_FILE}"
+    BT_MAC_CHANGED=1
+fi
+
+TEMP_BT_SVC=$(mktemp)
+cat > "$TEMP_BT_SVC" <<'EOF'
+[Unit]
+Description=Set Persistent Bluetooth MAC Address (Broadcom/BCM)
+Before=bluetooth.service
+Wants=dev-subsystem-bluetooth-devices-hci0.device
+After=dev-subsystem-bluetooth-devices-hci0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c ' \
+    ADDR="$(cat /etc/bluetooth/bdaddr 2>/dev/null | tr -d " \n\r")"; \
+    [ -n "$ADDR" ] || exit 0; \
+    command -v btmgmt >/dev/null 2>&1 || exit 0; \
+    for i in {1..30}; do \
+        if btmgmt --index 0 info >/dev/null 2>&1; then \
+            btmgmt --index 0 power off >/dev/null 2>&1 || true; \
+            btmgmt --index 0 public-addr "$ADDR" >/dev/null 2>&1 || true; \
+            btmgmt --index 0 power on >/dev/null 2>&1 || true; \
+            exit 0; \
+        fi; \
+        sleep 0.2; \
+    done'
+
+[Install]
+WantedBy=bluetooth.service
+EOF
+
+if [ ! -f "$BT_SERVICE_FILE" ] || ! cmp -s "$TEMP_BT_SVC" "$BT_SERVICE_FILE"; then
+    mv "$TEMP_BT_SVC" "$BT_SERVICE_FILE"
+    chmod 644 "$BT_SERVICE_FILE"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable bluetooth-persistent-mac.service >/dev/null 2>&1 || true
+    BT_MAC_CHANGED=1
+else
+    rm -f "$TEMP_BT_SVC"
+fi
+
+if [ $BT_MAC_CHANGED -eq 1 ]; then
+    echo -e "${GREEN}applicato ($(cat "${BT_ADDR_FILE}")).${NC}"
+else
+    echo -e "${GREEN}già presente ($(cat "${BT_ADDR_FILE}")).${NC}"
+fi
+
+# ---------------------------------------------------------------------------
 # Riepilogo
 # ---------------------------------------------------------------------------
 echo ""
 echo -e "  [hw-fix] Info:"
 echo "    - bluetooth / wpa_supplicant / org.nemo.APManager : Mantenuti attivi."
 echo "    - cups.service è stato disabilitato per performance."
+echo "    - Display impostato a 1920x1200@40Hz (-33% scanout bandwidth)."
+echo "    - GPU RC6 / Runtime PM disabilitato; clock minimo fissato a 400MHz."
+echo "    - Bluetooth MAC persistente in ${BT_ADDR_FILE} tramite bluetooth-persistent-mac.service."
 
-if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ]; then
+if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ]; then
     echo -e "  ${GREEN}[hw-fix] HP Omni10: fix applicati. Riavvio necessario.${NC}"
 else
     echo -e "  ${GREEN}[hw-fix] HP Omni10: nessuna modifica necessaria.${NC}"

@@ -222,6 +222,91 @@ run_postinst() {
     }
 
     # ------------------------------------------------------------------
+    # 6b. Configure Compositor Autostart (nemo-kiosk.service) & display.conf
+    # ------------------------------------------------------------------
+    CONFIG_DIR="/etc/nemo-headunit"
+    DISPLAY_CONF="${CONFIG_DIR}/display.conf"
+    mkdir -p "${CONFIG_DIR}"
+
+    local autostart_kiosk="true"
+    local compositor_pref="auto"
+
+    # Interactive prompt if connected to terminal
+    if [ -t 0 ] && [ "${DEBIAN_FRONTEND:-}" != "noninteractive" ]; then
+        echo ""
+        echo "======================================================================="
+        echo " NemoHeadUnit: Display & Compositor Configuration"
+        echo "======================================================================="
+        read -r -p " Enable automatic kiosk mode on boot (compositor + app without DM)? [Y/n]: " ans_auto || ans_auto="Y"
+        case "$ans_auto" in
+            [nN][oO]|[nN]) autostart_kiosk="false" ;;
+            *) autostart_kiosk="true" ;;
+        esac
+
+        if [ "$autostart_kiosk" = "true" ]; then
+            echo " Choose compositor preference:"
+            echo "   1) auto   (lightest installed: cage -> labwc -> weston -> sway)"
+            echo "   2) cage   (ultra-lightweight ~15MB RAM kiosk)"
+            echo "   3) labwc  (lightweight ~25MB RAM windowed)"
+            echo "   4) weston (reference DRM compositor)"
+            echo "   5) sway   (tiling DRM compositor)"
+            echo "   6) xorg   (legacy X11)"
+            read -r -p " Selection [default: 1]: " comp_choice || comp_choice="1"
+            case "$comp_choice" in
+                2|cage)   compositor_pref="cage" ;;
+                3|labwc)  compositor_pref="labwc" ;;
+                4|weston) compositor_pref="weston" ;;
+                5|sway)   compositor_pref="sway" ;;
+                6|xorg)   compositor_pref="xorg" ;;
+                *)        compositor_pref="auto" ;;
+            esac
+        fi
+    fi
+
+    # Write /etc/nemo-headunit/display.conf if missing or update values
+    if [ ! -f "${DISPLAY_CONF}" ]; then
+        cat <<EOF > "${DISPLAY_CONF}"
+# /etc/nemo-headunit/display.conf
+# NemoHeadUnit Display & Compositor Configuration
+
+COMPOSITOR_AUTOSTART=${autostart_kiosk}
+COMPOSITOR_PREFERENCE="${compositor_pref}"
+COMPOSITOR_TTY="7"
+QT_SCALE_FACTOR="1.5"
+EOF
+        chmod 644 "${DISPLAY_CONF}"
+        log "Created ${DISPLAY_CONF} (autostart=${autostart_kiosk}, preference=${compositor_pref})"
+    fi
+
+    # Install and configure nemo-kiosk.service
+    KIOSK_SERVICE_SRC="${APP_DIR}/packaging/nemo-kiosk.service"
+    if [ ! -f "${KIOSK_SERVICE_SRC}" ] && [ -f "/usr/lib/systemd/system/nemo-kiosk.service" ]; then
+        KIOSK_SERVICE_SRC="/usr/lib/systemd/system/nemo-kiosk.service"
+    fi
+
+    if [ -f "${KIOSK_SERVICE_SRC}" ]; then
+        cp -f "${KIOSK_SERVICE_SRC}" /etc/systemd/system/nemo-kiosk.service
+        # Resolve target user (prefer first human user UID >= 1000)
+        local target_user="nemo"
+        if [ -n "$(id -un 1000 2>/dev/null)" ]; then
+            target_user="$(id -un 1000)"
+        fi
+        sed -i "s/^User=.*/User=${target_user}/" /etc/systemd/system/nemo-kiosk.service
+        sed -i "s/^Group=.*/Group=${target_user}/" /etc/systemd/system/nemo-kiosk.service
+        sed -i "s|^WorkingDirectory=.*|WorkingDirectory=/home/${target_user}|" /etc/systemd/system/nemo-kiosk.service
+        sed -i "s|XDG_RUNTIME_DIR=/run/user/.*|XDG_RUNTIME_DIR=/run/user/$(id -u "${target_user}")|" /etc/systemd/system/nemo-kiosk.service
+
+        systemctl daemon-reload
+        if [ "${autostart_kiosk}" = "true" ]; then
+            log "Enabling nemo-kiosk.service for autostart on boot (user: ${target_user})"
+            systemctl enable nemo-kiosk.service || true
+        else
+            log "Disabling nemo-kiosk.service"
+            systemctl disable nemo-kiosk.service || true
+        fi
+    fi
+
+    # ------------------------------------------------------------------
     # 7. Platform-specific hardware fixes
     # ------------------------------------------------------------------
     if [ -f "${HW_FIX_RUNNER}" ]; then

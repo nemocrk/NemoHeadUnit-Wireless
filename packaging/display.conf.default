@@ -1,0 +1,16 @@
+# /etc/nemo-headunit/display.conf
+# NemoHeadUnit Display & Compositor Configuration
+
+# Enable automatic compositor launch if no display server is active (true/false)
+COMPOSITOR_AUTOSTART=true
+
+# Preferred compositor order:
+# auto   -> probes lightest installed: cage -> labwc -> weston -> sway -> xorg
+# Or explicitly: cage | labwc | weston | sway | xorg | none
+COMPOSITOR_PREFERENCE="auto"
+
+# Virtual terminal for DRM compositor
+COMPOSITOR_TTY="7"
+
+# UI scale factor for Qt6 GUI
+QT_SCALE_FACTOR="1.5"

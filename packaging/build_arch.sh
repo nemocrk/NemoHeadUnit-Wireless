@@ -221,6 +221,16 @@ cp "${SERVICES_SRC}/org.nemo.APManager.service" "${SYSTEMD_STAGE}/"
 sed -i \
     "s|ExecStart=.*ap_manager_service.py|ExecStart=/opt/nemo-headunit/env/bin/python /opt/nemo-headunit/services/linux/ap_manager_service/ap_manager_service.py|" \
     "${SYSTEMD_STAGE}/org.nemo.APManager.service"
+if [ -f "${REPO_ROOT}/packaging/nemo-kiosk.service" ]; then
+    cp "${REPO_ROOT}/packaging/nemo-kiosk.service" "${SYSTEMD_STAGE}/"
+fi
+
+# —— /etc/nemo-headunit/ ——
+CONFIG_STAGE="${STAGE_DIR}/etc/nemo-headunit"
+mkdir -p "${CONFIG_STAGE}"
+if [ -f "${REPO_ROOT}/packaging/display.conf.default" ]; then
+    cp "${REPO_ROOT}/packaging/display.conf.default" "${CONFIG_STAGE}/display.conf"
+fi
 
 # —— /etc/dbus-1/system.d/ ——
 DBUS_STAGE="${STAGE_DIR}/etc/dbus-1/system.d"
