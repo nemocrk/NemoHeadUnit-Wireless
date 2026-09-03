@@ -73,6 +73,7 @@ class VideoViewportWidget(QQuickWidget):
         self._gl_decoder = None
         self._qml_temp_path = None
         self._attached = False
+        self._sg_initialized = False
         self._video_item: Optional[QObject] = None
         self._sink_bound_callback: Optional[Callable[[], None]] = None
 
@@ -102,7 +103,8 @@ class VideoViewportWidget(QQuickWidget):
             if root:
                 self._video_item = root.findChild(QObject, "videoItem")
                 logger.info(f"🎬 [VideoViewport] videoItem found: {self._video_item}")
-                self._try_bind()
+                if self._sg_initialized:
+                    self._try_bind()
         elif status == QQuickWidget.Status.Error:
             for err in self.errors():
                 logger.error(f"❌ [VideoViewport] QML Error: {err.toString()}")
@@ -122,14 +124,17 @@ class VideoViewportWidget(QQuickWidget):
     def attach_gstreamer_sink(self, sink) -> None:
         """Attach a GStreamer qml6glsink element."""
         self._gst_sink = sink
-        self._try_bind()
+        logger.info(f"🎬 [VideoViewport] attach_gstreamer_sink (sg_initialized={self._sg_initialized})")
+        if self._sg_initialized:
+            self._try_bind()
 
     def _on_scenegraph_initialized(self) -> None:
-        logger.info("🎬 [VideoViewport] Scene Graph initialized signal received")
+        logger.info("🎬 [VideoViewport] Scene Graph initialized signal received on render thread")
+        self._sg_initialized = True
         self._try_bind()
 
     def _try_bind(self) -> None:
-        if self._attached or not self._gst_sink:
+        if self._attached or not self._gst_sink or not self._sg_initialized:
             return
 
         if not self._video_item:
@@ -138,11 +143,6 @@ class VideoViewportWidget(QQuickWidget):
                 self._video_item = root.findChild(QObject, "videoItem")
 
         if not self._video_item:
-            return
-
-        qw = self.quickWindow()
-        if qw and hasattr(qw, "isSceneGraphInitialized") and not qw.isSceneGraphInitialized():
-            # Wait for sceneGraphInitialized
             return
 
         try:

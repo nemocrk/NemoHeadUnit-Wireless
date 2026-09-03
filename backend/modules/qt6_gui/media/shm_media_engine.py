@@ -196,6 +196,8 @@ class Qml6ZeroCopyDecoder:
         self._sink = None
         self._viewport = None
         self._Gst = None
+        self._is_sink_bound = False
+        self._is_playing = False
         self._try_init_pipeline()
 
     def _try_init_pipeline(self) -> None:
@@ -267,22 +269,27 @@ class Qml6ZeroCopyDecoder:
 
     def _on_sink_bound(self) -> None:
         """Invoked when sceneGraphInitialized has successfully bound widget to qml6glsink."""
-        if self._pipeline:
-            self._pipeline.set_state(self._Gst.State.PLAYING)
-            logger.info("🎬 [Qml6ZeroCopyDecoder] Pipeline transitioned to PLAYING after Scene Graph widget attachment")
+        self._is_sink_bound = True
+        logger.info("🎬 [Qml6ZeroCopyDecoder] Sink bound to GstGLQt6VideoItem confirmed — ready for stream")
 
     def decode_nal(self, nal_data: bytes, ts_us: int = 0) -> bool:
-        """Push a NAL unit into appsrc."""
+        """Push a NAL unit into appsrc. Starts playback on first frame."""
         if not self.is_available or not self._appsrc:
             return False
         try:
+            if not self._is_playing and self._is_sink_bound and self._pipeline:
+                self._is_playing = True
+                ret = self._pipeline.set_state(self._Gst.State.PLAYING)
+                logger.info(f"🎬 [Qml6ZeroCopyDecoder] First NAL arrived -> pipeline set to PLAYING ({ret})")
+
             buf = self._Gst.Buffer.new_wrapped(nal_data)
             if ts_us > 0:
                 buf.pts = ts_us * 1000
             self._appsrc.emit("push-buffer", buf)
             self.frames_decoded += 1
             return True
-        except Exception:
+        except Exception as exc:
+            logger.debug(f"[Qml6ZeroCopyDecoder] decode_nal error: {exc}")
             return False
 
     def close(self) -> None:
