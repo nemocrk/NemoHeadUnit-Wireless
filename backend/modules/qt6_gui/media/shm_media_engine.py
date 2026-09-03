@@ -249,9 +249,10 @@ class GlImageSinkDecoder:
         try:
             import gi
             gi.require_version("GstGL", "1.0")
-            from gi.repository import GstGL
+            gi.require_version("GstGLEGL", "1.0")
+            from gi.repository import GstGL, GstGLEGL
 
-            gl_display = GstGL.GLDisplayEGL.new_with_egl_display(egl_display_handle)
+            gl_display = GstGLEGL.GLDisplayEGL.new_with_egl_display(egl_display_handle)
             gl_context = GstGL.GLContext.new_wrapped(
                 gl_display,
                 egl_context_handle,
