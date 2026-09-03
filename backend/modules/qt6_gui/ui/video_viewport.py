@@ -118,6 +118,9 @@ class _GLMixin:
             tex_id = self._gl_decoder.get_latest_texture_id()
         GL.glClear(GL.GL_COLOR_BUFFER_BIT)
         if tex_id:
+            if not hasattr(self, "_logged_gl_render"):
+                self._logged_gl_render = True
+                logger.info(f"🎬 [VideoViewport] Rendering hardware GL frames (texture_id={tex_id})")
             if self._shader_program is None:
                 self._compile_shader()
             GL.glUseProgram(self._shader_program)
@@ -198,9 +201,13 @@ class VideoViewportWidget(*_bases):
         self._gl_decoder = decoder
 
     def update_frame(self, frame_bytes: bytes, width: int, height: int):
-        """Update active frame. No-op when GL decoder is active (GStreamer renders directly)."""
+        """Update active frame. In GL mode, triggers paintGL redraw."""
         if self._gl_decoder and self._gl_decoder.is_available:
-            return  # GL path: glimagesink renders; no bytes needed
+            if width > 0 and height > 0:
+                self.frame_width = width
+                self.frame_height = height
+            self.update()  # Triggers paintGL redraw for the new hardware frame
+            return
         if not frame_bytes or width <= 0 or height <= 0:
             return
         self.current_frame_data = frame_bytes
