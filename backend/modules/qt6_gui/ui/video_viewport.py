@@ -1,8 +1,8 @@
 """
-video_viewport.py — QQuickView Container for Zero-Copy Video Viewport with Full pyside6_gstreamer_player Parity.
+video_viewport.py — QQuickWidget-based Zero-Copy Video Viewport for Android Auto Projected Stream.
 
-Uses QQuickView embedded via QWidget.createWindowContainer() for direct DRM/KMS scanout
-(no offscreen FBO blitting), and attaches qml6glsink on sceneGraphInitialized.
+Uses QQuickWidget (single native window compatible with EGLFS and Wayland) embedding GstGLQt6VideoItem.
+Avoids createWindowContainer() which is forbidden on EGLFS (causes 'OpenGL windows cannot be mixed with others').
 """
 
 import os
@@ -14,10 +14,11 @@ import ctypes
 import ctypes.util
 from typing import Optional, Callable
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout
+from PyQt6.QtWidgets import QWidget
+from PyQt6.QtQuickWidgets import QQuickWidget
 from PyQt6.QtCore import QEvent, QPointF, Qt, QUrl, QObject, pyqtSignal
 from PyQt6.QtGui import QEventPoint, QMouseEvent, QTouchEvent, QPainter, QImage
-from PyQt6.QtQuick import QQuickView, QQuickItem, QQuickWindow, QSGRendererInterface
+from PyQt6.QtQuick import QQuickItem, QQuickWindow, QSGRendererInterface
 
 logger = logging.getLogger("qt6_gui.video_viewport")
 
@@ -41,10 +42,10 @@ Item {
 """
 
 
-class VideoViewportWidget(QWidget):
+class VideoViewportWidget(QQuickWidget):
     """
     High-Performance Zero-Copy Video Render Canvas for Android Auto Projected Stream.
-    Embeds native QQuickView via createWindowContainer for direct KMS hardware scanout.
+    Inherits from QQuickWidget (compatible with EGLFS single-window constraint).
     """
 
     touch_input_event = pyqtSignal(dict)
@@ -52,6 +53,7 @@ class VideoViewportWidget(QWidget):
 
     def __init__(self, parent=None, sample_interval_ms: int = 30):
         super().__init__(parent)
+        self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
@@ -71,37 +73,39 @@ class VideoViewportWidget(QWidget):
         self._gl_decoder = None
         self._qml_temp_path = None
         self._attached = False
+        self._video_item: Optional[QObject] = None
         self._sink_bound_callback: Optional[Callable[[], None]] = None
 
-        # 1. Initialize native QQuickView
-        self._quick_view = QQuickView()
-        self._quick_view.setResizeMode(QQuickView.ResizeMode.SizeRootObjectToView)
-        self._quick_view.setColor(Qt.GlobalColor.black)
-
-        # 2. Write and load QML scene
+        # 1. Write QML and set source
         with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False) as f:
             f.write(QML_VIEWPORT_CODE)
             self._qml_temp_path = f.name
 
-        self._quick_view.setSource(QUrl.fromLocalFile(self._qml_temp_path))
+        self.statusChanged.connect(self._on_qml_status_changed)
+        self.sceneGraphError.connect(self._on_scenegraph_error)
 
-        # 3. Embed QQuickView window into QWidget hierarchy via native container
-        self._container = QWidget.createWindowContainer(self._quick_view, self)
-        self._container.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self._container.setMouseTracking(True)
+        # 2. Hook Scene Graph initialization
+        qw = self.quickWindow()
+        if qw:
+            qw.sceneGraphInitialized.connect(self._on_scenegraph_initialized)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self._container)
+        self.setSource(QUrl.fromLocalFile(self._qml_temp_path))
+        logger.info("🎬 [VideoViewport] QQuickWidget initialized (EGLFS Single-Window Compliant)")
 
-        # Filter events on container and quick view for touch/mouse dispatch
-        self._container.installEventFilter(self)
-        self._quick_view.installEventFilter(self)
+    def _on_scenegraph_error(self, error, message):
+        logger.error(f"❌ [VideoViewport] SceneGraph Error: {error} - {message}")
 
-        # 4. Connect sceneGraphInitialized
-        self._quick_view.sceneGraphInitialized.connect(self._on_scenegraph_initialized)
-        logger.info("🎬 [VideoViewport] Native QQuickView container initialized")
+    def _on_qml_status_changed(self, status):
+        logger.info(f"🎬 [VideoViewport] QML Status: {status}")
+        if status == QQuickWidget.Status.Ready:
+            root = self.rootObject()
+            if root:
+                self._video_item = root.findChild(QObject, "videoItem")
+                logger.info(f"🎬 [VideoViewport] videoItem found: {self._video_item}")
+                self._try_bind()
+        elif status == QQuickWidget.Status.Error:
+            for err in self.errors():
+                logger.error(f"❌ [VideoViewport] QML Error: {err.toString()}")
 
     def set_sink_bound_callback(self, cb: Callable[[], None]) -> None:
         """Set callback invoked once qml6glsink has been successfully bound to GstGLQt6VideoItem."""
@@ -118,36 +122,41 @@ class VideoViewportWidget(QWidget):
     def attach_gstreamer_sink(self, sink) -> None:
         """Attach a GStreamer qml6glsink element."""
         self._gst_sink = sink
-        if hasattr(self._quick_view, "isSceneGraphInitialized") and self._quick_view.isSceneGraphInitialized():
-            self._on_scenegraph_initialized()
+        self._try_bind()
 
     def _on_scenegraph_initialized(self) -> None:
-        """Executed inside Qt's OpenGL render thread when Scene Graph is ready."""
+        logger.info("🎬 [VideoViewport] Scene Graph initialized signal received")
+        self._try_bind()
+
+    def _try_bind(self) -> None:
         if self._attached or not self._gst_sink:
             return
 
-        root = self._quick_view.rootObject()
-        if not root:
-            logger.warning("[VideoViewport] sceneGraphInitialized but rootObject is None")
+        if not self._video_item:
+            root = self.rootObject()
+            if root:
+                self._video_item = root.findChild(QObject, "videoItem")
+
+        if not self._video_item:
             return
 
-        video_item = root.findChild(QObject, "videoItem")
-        if not video_item:
-            logger.warning("[VideoViewport] sceneGraphInitialized but videoItem not found")
+        qw = self.quickWindow()
+        if qw and hasattr(qw, "isSceneGraphInitialized") and not qw.isSceneGraphInitialized():
+            # Wait for sceneGraphInitialized
             return
 
         try:
             cpp_ptr = None
             try:
                 import PyQt6.sip as sip
-                cpp_ptr = sip.unwrapinstance(video_item)
+                cpp_ptr = sip.unwrapinstance(self._video_item)
             except Exception:
                 pass
 
             if not cpp_ptr:
                 try:
                     from shiboken6 import Shiboken
-                    cpp_ptr = Shiboken.getCppPointer(video_item)[0]
+                    cpp_ptr = Shiboken.getCppPointer(self._video_item)[0]
                 except Exception:
                     pass
 
@@ -164,12 +173,12 @@ class VideoViewportWidget(QWidget):
                 libgobject.g_object_set(hash(self._gst_sink), b"widget", ctypes.c_void_p(cpp_ptr), None)
                 self._attached = True
                 logger.info(
-                    f"🎬 [VideoViewport] qml6glsink attached to GstGLQt6VideoItem (ptr={hex(cpp_ptr)}) — Zero-Copy ACTIVE!"
+                    f"🎬 [VideoViewport] qml6glsink successfully attached to GstGLQt6VideoItem (ptr={hex(cpp_ptr)}) — Zero-Copy ACTIVE!"
                 )
                 if self._sink_bound_callback:
                     self._sink_bound_callback()
         except Exception as exc:
-            logger.error(f"[VideoViewport] Error in _on_scenegraph_initialized: {exc}")
+            logger.error(f"❌ [VideoViewport] Error binding widget to sink: {exc}")
 
     def update_frame(self, frame_bytes: bytes, width: int, height: int):
         """Update active frame dimensions."""
@@ -195,29 +204,8 @@ class VideoViewportWidget(QWidget):
         self.stretch_to_fill = stretch_to_fill
 
     # ------------------------------------------------------------------
-    # Input Event Interception (Multi-Touch & Mouse via Event Filter)
+    # Input Event Interception (Multi-Touch & Mouse)
     # ------------------------------------------------------------------
-
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        etype = event.type()
-        if etype in (
-            QEvent.Type.TouchBegin,
-            QEvent.Type.TouchUpdate,
-            QEvent.Type.TouchEnd,
-            QEvent.Type.TouchCancel,
-        ):
-            self.touchEvent(event)
-            return True
-        elif etype == QEvent.Type.MouseButtonPress:
-            self.mousePressEvent(event)
-            return True
-        elif etype == QEvent.Type.MouseMove:
-            self.mouseMoveEvent(event)
-            return True
-        elif etype == QEvent.Type.MouseButtonRelease:
-            self.mouseReleaseEvent(event)
-            return True
-        return super().eventFilter(watched, event)
 
     def _map_coords(self, pos) -> tuple[int, int]:
         """Map screen pixel coordinates to video projection coordinates."""
@@ -234,6 +222,17 @@ class VideoViewportWidget(QWidget):
             stretch_to_fill=self.stretch_to_fill,
         )
         return pt.x, pt.y
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() in (
+            QEvent.Type.TouchBegin,
+            QEvent.Type.TouchUpdate,
+            QEvent.Type.TouchEnd,
+            QEvent.Type.TouchCancel,
+        ):
+            self.touchEvent(event)
+            return True
+        return super().event(event)
 
     def touchEvent(self, event: QTouchEvent):
         """Native Qt Multi-Touch Event Interception."""
