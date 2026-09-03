@@ -63,14 +63,21 @@ class _GLMixin:
         if not (self._gl_decoder and self._gl_decoder.is_available):
             return
         try:
-            from PyQt6.QtGui import QOpenGLContext
-            ctx = QOpenGLContext.currentContext()
-            native = ctx.nativeInterface()
-            if native and hasattr(native, "nativeContext") and hasattr(native, "display"):
-                self._gl_decoder.set_gl_context(int(native.display()), int(native.nativeContext()))
-                logger.debug("[VideoViewport] EGL context shared with GlImageSinkDecoder")
+            import ctypes
+            libegl = ctypes.CDLL("libEGL.so.1")
+            libegl.eglGetCurrentDisplay.restype = ctypes.c_void_p
+            libegl.eglGetCurrentContext.restype = ctypes.c_void_p
+            egl_dpy = libegl.eglGetCurrentDisplay()
+            egl_ctx = libegl.eglGetCurrentContext()
+            if egl_dpy and egl_ctx:
+                self._gl_decoder.set_gl_context(int(egl_dpy), int(egl_ctx))
+                logger.info(
+                    f"🎬 [VideoViewport] EGL context shared with GlImageSinkDecoder (dpy={egl_dpy}, ctx={egl_ctx})"
+                )
             else:
-                logger.warning("[VideoViewport] No EGL native interface — GL decoder disabled")
+                logger.warning(
+                    f"[VideoViewport] eglGetCurrentDisplay/Context returned NULL ({egl_dpy}, {egl_ctx}) — GL decoder disabled"
+                )
                 self._gl_decoder = None
         except Exception as exc:
             logger.warning(f"[VideoViewport] initializeGL failed: {exc} — GL decoder disabled")
