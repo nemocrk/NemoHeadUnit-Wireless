@@ -81,7 +81,7 @@ class TestAudioHandler(unittest.TestCase):
     def test_two_stage_prebuffer_and_priming(self):
         # 48000Hz 2ch Int16 = 192000 B/s.
         # 150ms prebuffer = 28800 bytes.
-        sink = DynamicChannelAudioSink(channel_id=4, sample_rate=48000, channel_count=2)
+        sink = DynamicChannelAudioSink(channel_id=4, sample_rate=48000, channel_count=2, prebuffer_ms=150)
         sink.configure_codec(codec="MEDIA_CODEC_AUDIO_PCM", sample_rate=48000, channel_count=2)
         
         # Initially buffering
@@ -100,6 +100,38 @@ class TestAudioHandler(unittest.TestCase):
         m2 = sink.get_metrics()["app_buffer"]
         self.assertFalse(m2["is_buffering"])
         sink.close()
+
+    def test_audio_dump_wav(self):
+        import os
+        import tempfile
+        os.environ["NEMO_AUDIO_DUMP"] = "1"
+        try:
+            sink = DynamicChannelAudioSink(channel_id=99, sample_rate=48000, channel_count=2)
+            sink.configure_codec(codec="MEDIA_CODEC_AUDIO_PCM", sample_rate=48000, channel_count=2)
+            sink.push_frame(b"\x00\x01" * 480)
+            sink.close()
+            expected_path = os.path.join(tempfile.gettempdir(), "nemo_audio_ch99_48000hz.wav")
+            self.assertTrue(os.path.exists(expected_path))
+            self.assertGreater(os.path.getsize(expected_path), 0)
+            os.remove(expected_path)
+        finally:
+            os.environ.pop("NEMO_AUDIO_DUMP", None)
+
+    def test_parse_media_with_timestamp_raw_pcm(self):
+        import struct
+        from shared.proto_utils import parse_media_with_timestamp
+        fake_ts = 1234567890
+        ts_bytes = struct.pack(">Q", fake_ts)
+        # 960 bytes of PCM audio containing byte 0x12 (would previously trigger false protobuf match)
+        pcm_bytes = bytearray(b"\x00\x00" * 480)
+        pcm_bytes[100] = 0x12
+        pcm_bytes[101] = 50
+        raw_frame = bytes(ts_bytes + pcm_bytes)
+
+        ts, parsed = parse_media_with_timestamp(raw_frame)
+        self.assertEqual(ts, fake_ts)
+        self.assertEqual(parsed, bytes(pcm_bytes))
+        self.assertEqual(len(parsed), 960)
 
 
 if __name__ == "__main__":

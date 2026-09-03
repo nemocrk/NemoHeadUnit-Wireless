@@ -48,7 +48,7 @@ packages = []
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
 testpaths  = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", "backend", "protos", "third_party/open-android-auto"]
 python_files   = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

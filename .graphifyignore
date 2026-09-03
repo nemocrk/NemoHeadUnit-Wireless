@@ -1,0 +1,17 @@
+# Non-code assets that require external LLM API keys for semantic extraction
+*.md
+*.txt
+*.rst
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.webp
+*.gif
+*.ico
+*.pdf
+
+# Third-party archive submodules/doc repositories
+third_party/**/docs/
+third_party/**/research/
+third_party/**/captures/

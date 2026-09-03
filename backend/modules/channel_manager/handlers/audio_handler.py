@@ -152,35 +152,22 @@ class AudioChannelHandler:
         self.log.info(f"AudioChannel (ch{channel_id}): Responding AudioFocusResponse(state={focus_resp.audio_focus_state}, granted=True)")
         await self.manager.send_wire_frame(channel_id, MSG.AUDIO_FOCUS_RESPONSE, focus_resp.SerializeToString(), encrypted=True)
 
-    async def process_shm_frame(self, channel_id: int, message_id: int, payload: bytes) -> None:
-        ts_us = 0
-        audio_payload = b""
-
-        if message_id == AV_MSG.AV_MEDIA_WITH_TIMESTAMP_INDICATION:
-            ts_us, audio_payload = parse_media_with_timestamp(payload)
-        elif message_id == AV_MSG.AV_MEDIA_INDICATION:
-            audio_payload = payload
-        else:
-            return
-
-        if not audio_payload:
-            return
-
-        # Write directly to dedicated per-channel SHM downstream ring buffer zero-copy
-        shm_buf = self.manager.shm.get_downstream_channel(channel_id, size=8 * 1024 * 1024)
-        shm_offset = shm_buf.write_frame(channel_id, ts_us, audio_payload)
-        if shm_offset >= 0:
-            self.manager.publish("media.audio.frame_shm", {
-                "shm_offset": shm_offset,
-                "len": len(audio_payload),
-                "timestamp_us": ts_us,
-                "channel_id": channel_id,
-            })
+    async def process_shm_frame(self, channel_id: int, message_id: int, offset: int, ts_us: int, payload_len: int) -> None:
+        # Re-transmit pointer directly to GUI zero-copy
+        self.manager.publish("media.audio.frame_shm", {
+            "shm_offset": offset,
+            "len": payload_len,
+            "timestamp_us": ts_us,
+            "channel_id": channel_id,
+        })
 
         # Broadcast binary frame to web browser clients only if clients connected
         if self.manager.ws_clients:
-            binary_frame = pack_media_frame(channel_id, ts_us, audio_payload)
-            await self.manager.broadcast_ws_media(binary_frame)
+            shm_buf = self.manager.shm.get_downstream_channel(channel_id)
+            _, _, audio_payload = shm_buf.read_frame(offset)
+            if audio_payload:
+                binary_frame = pack_media_frame(channel_id, ts_us, audio_payload)
+                await self.manager.broadcast_ws_media(binary_frame)
 
         # Per-channel frame counting and batch MediaAck
         ch_frames = self.frame_counts.get(channel_id, 0) + 1

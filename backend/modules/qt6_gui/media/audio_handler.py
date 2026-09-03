@@ -10,8 +10,10 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
+import wave
 from typing import Callable, Dict, Optional
 from PyQt6.QtCore import Qt, QByteArray, QIODevice, QObject, QTimer, pyqtSignal, pyqtSlot, QThread
 from shared.logger import get_logger
@@ -182,13 +184,15 @@ class DynamicChannelAudioSink(QObject):
 
     PREBUFFER_MS = 150
 
-    def __init__(self, channel_id: int, sample_rate: int = 48000, channel_count: int = 2, target_device: str = "default", parent=None):
+    def __init__(self, channel_id: int, sample_rate: int = 48000, channel_count: int = 2, target_device: str = "default", prebuffer_ms: Optional[int] = None, parent=None):
         super().__init__(parent)
         self.channel_id = channel_id
         self.sample_rate = sample_rate
         self.channel_count = channel_count
         self.bit_depth = 16
         self.target_device = target_device
+        if prebuffer_ms is not None:
+            self.PREBUFFER_MS = prebuffer_ms
 
         self.audio_sink: Optional[QAudioSink] = None
         self.audio_io: Optional[QIODevice] = None
@@ -223,6 +227,10 @@ class DynamicChannelAudioSink(QObject):
         self.first_ts_us: Optional[int] = None
         self.last_ts_us: int = 0
         self.current_lag_ms: float = 0.0
+
+        # Audio Dump (/tmp/nemo_audio_ch{id}_{rate}hz.wav when NEMO_AUDIO_DUMP=1)
+        self._dump_wav = None
+        self._dump_enabled = os.environ.get("NEMO_AUDIO_DUMP") == "1"
 
     def _init_aac_decoder(self):
         """Initialize per-channel PyAV FFmpeg AAC decoder targeting channel sample rate and layout."""
@@ -311,8 +319,9 @@ class DynamicChannelAudioSink(QObject):
         with self._app_lock:
             avail = len(self._app_buffer)
             if avail <= 0:
-                self._is_buffering = True
-                self._underrun_count += 1
+                if self.audio_sink and self.audio_sink.bytesFree() >= self.audio_sink.bufferSize():
+                    self._is_buffering = True
+                    self._underrun_count += 1
                 return
 
             to_write = min(bytes_free, avail)
@@ -394,7 +403,12 @@ class DynamicChannelAudioSink(QObject):
 
         # Detect format on first frame if not explicitly configured
         if self._is_aac is None:
-            is_adts_aac = len(audio_bytes) >= 2 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xF0) == 0xF0
+            # Check for ADTS syncword (0xFFF) AND validate frame length to prevent false positives on signed Int16 PCM
+            is_adts_aac = False
+            if len(audio_bytes) >= 7 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xF6) == 0xF0:
+                frame_len = ((audio_bytes[3] & 0x03) << 11) | (audio_bytes[4] << 3) | ((audio_bytes[5] & 0xE0) >> 5)
+                if frame_len == len(audio_bytes):
+                    is_adts_aac = True
             self._is_aac = is_adts_aac
             if self._is_aac:
                 self._init_aac_decoder()
@@ -420,6 +434,24 @@ class DynamicChannelAudioSink(QObject):
 
         if not decoded_pcm:
             return
+
+        if self._dump_enabled:
+            if self._dump_wav is None:
+                dump_path = os.path.join(tempfile.gettempdir(), f"nemo_audio_ch{self.channel_id}_{self.sample_rate}hz.wav")
+                try:
+                    self._dump_wav = wave.open(dump_path, "wb")
+                    self._dump_wav.setnchannels(self.channel_count)
+                    self._dump_wav.setsampwidth(self.bit_depth // 8)
+                    self._dump_wav.setframerate(self.sample_rate)
+                    logger.info(f"🎙️ [Audio Dump] Recording audio ch{self.channel_id} to {dump_path}")
+                except Exception as exc:
+                    logger.warning(f"Audio dump failed to open {dump_path}: {exc}")
+                    self._dump_enabled = False
+            if self._dump_wav:
+                try:
+                    self._dump_wav.writeframes(decoded_pcm)
+                except Exception as exc:
+                    logger.debug(f"Audio dump write error: {exc}")
 
         bps = max(1, self.sample_rate * self.channel_count * 2)
         prebuffer_bytes = int(bps * (self.PREBUFFER_MS / 1000.0))
@@ -525,6 +557,12 @@ class DynamicChannelAudioSink(QObject):
     def close(self):
         """Release audio sink and decoder resources."""
         self._close_sink()
+        if self._dump_wav:
+            try:
+                self._dump_wav.close()
+            except Exception:
+                pass
+            self._dump_wav = None
         if self.audio_sink:
             self.audio_sink = None
         self.aac_decoder = None

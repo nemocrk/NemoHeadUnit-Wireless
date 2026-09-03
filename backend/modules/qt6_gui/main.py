@@ -542,6 +542,9 @@ class Qt6GuiModule(BaseBackendModule):
 
     def _on_video_focus_toggled(self, mode: str):
         self.log.info(f"Video Focus Toggled by user -> Requesting focus mode: {mode}")
+        is_projected = (mode == "PROJECTED")
+        if self.shm_engine:
+            self.shm_engine.set_video_focused(is_projected)
         self.publish("media.video.request_focus", {"mode": mode, "sender": "qt6_gui"})
 
     def _on_channel_status_updated(self, data: dict):
@@ -811,6 +814,8 @@ class Qt6GuiModule(BaseBackendModule):
 
     async def _on_stream_start(self, payload: dict) -> None:
         self.log.info("Video stream started -> Switching Qt GUI to projected state")
+        if self.shm_engine:
+            self.shm_engine.set_video_focused(True)
         if self.main_window:
             self.main_window.isVideoFocused = True
             self.main_window.set_connected_state(True)
@@ -818,6 +823,8 @@ class Qt6GuiModule(BaseBackendModule):
 
     async def _on_stream_stop(self, payload: dict) -> None:
         self.log.info("Video stream temporarily stopped/paused by phone")
+        if self.shm_engine:
+            self.shm_engine.set_video_focused(False)
 
     def _on_video_frame_from_shm(self, rgba_bytes: bytes, w: int, h: int, ts_us: int):
         now = time.time()

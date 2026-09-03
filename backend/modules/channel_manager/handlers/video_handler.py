@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 MSG = ControlMessage.Enum
 AV_MSG = AVChannelMessage.Enum
-UNACKED_FRAMES_THRESHOLD = 30
+UNACKED_FRAMES_THRESHOLD = 10
 
 from shared.constants import ChannelType
 
@@ -30,6 +30,7 @@ class VideoChannelHandler:
         self.log = manager.log
         self.setup_completed = False
         self.frame_count = 0
+        self.unacked_frames = 0
         self.session_id = 0
 
         self._handlers: Dict[int, Callable[[int, bytes], None]] = {
@@ -41,6 +42,21 @@ class VideoChannelHandler:
             AV_MSG.VIDEO_FOCUS_INDICATION: self._handle_focus_indication,
         }
 
+    async def _flush_unacked_frames(self) -> None:
+        """Immediately transmit ACK for any in-flight unacknowledged video frames to prevent phone socket freeze."""
+        if self.unacked_frames > 0:
+            video_ch_id = self.manager.get_channel_id_for_type(ChannelType.VIDEO)
+            ack = AVMediaAckIndication()
+            ack.session_id = self.session_id
+            ack.ack_count = self.unacked_frames
+            self.log.info(
+                f"📹 VideoChannel (ch{video_ch_id}): Flushing {self.unacked_frames} pending unacked frames to phone before focus/stop"
+            )
+            await self.manager.send_wire_frame(
+                video_ch_id, AV_MSG.AV_MEDIA_ACK_INDICATION,
+                ack.SerializeToString(), encrypted=True
+            )
+            self.unacked_frames = 0
 
     async def handle_frame(self, channel_id: int, message_id: int, body: bytes) -> None:
         handler = self._handlers.get(message_id)
@@ -57,6 +73,9 @@ class VideoChannelHandler:
         from protos.oaa.video.VideoFocusModeEnum_pb2 import VideoFocusMode
         mode_name = VideoFocusMode.Enum.Name(focus_mode) if hasattr(VideoFocusMode.Enum, "Name") else focus_mode
         self.log.info(f"📹 VideoChannel: Sending explicit VideoFocusIndication({mode_name}) to phone")
+
+        if focus_mode != VideoFocusMode.Enum.PROJECTED:
+            await self._flush_unacked_frames()
 
         focus_ind = VideoFocusIndication()
         focus_ind.focus_mode = focus_mode
@@ -126,6 +145,7 @@ class VideoChannelHandler:
 
     async def _handle_stop_indication(self, channel_id: int, body: bytes) -> None:
         self.log.info(f"VideoChannel (ch{channel_id}): Received AVChannelStopIndication — video stream STOPPED")
+        await self._flush_unacked_frames()
         self.manager.publish("video.stream_stop", {
             "session_id": self.session_id,
             "codec": getattr(self, "codec_name", "MEDIA_CODEC_VIDEO_H264_BP"),
@@ -149,52 +169,40 @@ class VideoChannelHandler:
 
 
 
-    async def process_shm_frame(self, message_id: int, payload: bytes) -> None:
-        ts_us = 0
-        codec_payload = b""
-
-        if message_id == AV_MSG.AV_MEDIA_WITH_TIMESTAMP_INDICATION:
-            ts_us, codec_payload = parse_media_with_timestamp(payload)
-        elif message_id == AV_MSG.AV_MEDIA_INDICATION:
-            codec_payload = payload
-        else:
-            return
-
-        if not codec_payload:
-            return
-
+    async def process_shm_frame(self, message_id: int, offset: int, ts_us: int, payload_len: int) -> None:
         video_ch_id = self.manager.get_channel_id_for_type(ChannelType.VIDEO)
 
         if self.frame_count % UNACKED_FRAMES_THRESHOLD == 0:
             self.log.debug(
                 f"📹 [Video Stream Flow] Processed video frame {self.frame_count}/{UNACKED_FRAMES_THRESHOLD} "
-                f"(ch{video_ch_id}): msgId=0x{message_id:04x}, payload_len={len(codec_payload)}, ts={ts_us} µs "
+                f"(ch{video_ch_id}): msgId=0x{message_id:04x}, payload_len={payload_len}, ts={ts_us} µs "
                 f"-> Publishing to video.raw_nal (transport: {self.manager.active_video_transport or 'h264'})"
             )
 
-        # Write raw H.264 NAL bytes directly to SHM (nemo_video_transcode_in) zero-copy
-        shm_offset = self.manager.shm.transcode_in.write_frame(4, ts_us, codec_payload)
+        # Re-transmit raw H.264 NAL pointer directly to media_server zero-copy
         self.manager.publish("media.video.raw_nal_shm", {
-            "shm_offset": shm_offset,
-            "len": len(codec_payload),
+            "shm_offset": offset,
+            "len": payload_len,
             "channel_id": video_ch_id,
             "timestamp_us": ts_us,
         })
 
         # Batch MediaAck every UNACKED_FRAMES_THRESHOLD frames
         self.frame_count += 1
-        if self.frame_count % UNACKED_FRAMES_THRESHOLD == 0:
+        self.unacked_frames += 1
+        if self.unacked_frames >= UNACKED_FRAMES_THRESHOLD:
             ack = AVMediaAckIndication()
             ack.session_id = self.session_id
-            ack.ack_count = UNACKED_FRAMES_THRESHOLD
+            ack.ack_count = self.unacked_frames
             self.log.debug(
                 f"📹 VideoChannel (ch{video_ch_id}): Sending batch AVMediaAckIndication "
-                f"(session_id={self.session_id}, ack_count={UNACKED_FRAMES_THRESHOLD}, total_frames={self.frame_count})"
+                f"(session_id={self.session_id}, ack_count={self.unacked_frames}, total_frames={self.frame_count})"
             )
             await self.manager.send_wire_frame(
                 video_ch_id, AV_MSG.AV_MEDIA_ACK_INDICATION,
                 ack.SerializeToString(), encrypted=True, log_level='debug'
             )
+            self.unacked_frames = 0
 
 
 

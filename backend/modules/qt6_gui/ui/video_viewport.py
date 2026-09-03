@@ -26,9 +26,10 @@ QML_VIEWPORT_CODE = """
 import QtQuick 2.15
 import org.freedesktop.gstreamer.Qt6GLVideoItem 1.0
 
-Item {
+Rectangle {
     id: root
     anchors.fill: parent
+    color: "#000000"
 
     GstGLQt6VideoItem {
         id: videoItem
@@ -62,12 +63,12 @@ class VideoViewportWidget(QQuickWidget):
         self._last_drag_time = 0.0
 
         self.frame_width = 1280
-        self.frame_height = 800
+        self.frame_height = 720
         self.current_frame_data: Optional[bytes] = None
 
         self.margin_width: int = 0
         self.margin_height: int = 0
-        self.stretch_to_fill: bool = True
+        self.stretch_to_fill: bool = False
 
         self._gst_sink = None
         self._gl_decoder = None
@@ -185,6 +186,8 @@ class VideoViewportWidget(QQuickWidget):
         if width > 0 and height > 0:
             self.frame_width = width
             self.frame_height = height
+        if not self._gl_decoder:
+            self.current_frame_data = frame_bytes
 
     def cleanupGL(self) -> None:
         """Release temporary QML resources."""
@@ -254,9 +257,12 @@ class VideoViewportWidget(QQuickWidget):
         pressed_indices = []
         released_points = []
 
-        for pt in points:
-            px, py = self._map_coords(pt.position())
-            pid = int(pt.id())
+        for idx, pt in enumerate(points):
+            pos = pt.position()
+            if pos.isNull() and not pt.scenePosition().isNull():
+                pos = pt.scenePosition()
+            px, py = self._map_coords(pos)
+            pid = int(pt.id()) if (pt.id() != 0 or idx == 0) else idx
             state = pt.state()
             if state != QEventPoint.State.Released:
                 active_pointers.append({"x": px, "y": py, "pointer_id": pid})

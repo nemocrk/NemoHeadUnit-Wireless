@@ -41,9 +41,7 @@ class TestTouchHandling(unittest.TestCase):
         self.widget.touch_input_event.connect(lambda data: self.emitted_events.append(data))
 
     def _create_point(self, pid: int, state: QEventPoint.State, x: float, y: float) -> QEventPoint:
-        pt = QEventPoint(pid, state, QPointF(x, y), QPointF(x, y))
-        pt.setPosition(QPointF(x, y))
-        return pt
+        return QEventPoint(pid, state, QPointF(x, y), QPointF(x, y))
 
     def test_single_touch_press_and_release(self):
         device = QPointingDevice.primaryPointingDevice()

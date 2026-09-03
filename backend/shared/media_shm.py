@@ -56,6 +56,11 @@ def get_downstream_channel_shm_name(channel_id: int) -> str:
     return f"nemo_media_shm_down_ch{channel_id}"
 
 
+def get_wire_channel_shm_name(channel_id: int) -> str:
+    """Return standard per-channel inbound wire SHM buffer name."""
+    return f"nemo_media_shm_wire_ch{channel_id}"
+
+
 class RingSharedMemoryBuffer:
     """
     Circular ring buffer wrapping multiprocessing.shared_memory.SharedMemory.
@@ -173,6 +178,7 @@ class BidirectionalMediaSHM:
         self.upstream = RingSharedMemoryBuffer(SHM_UPSTREAM_NAME, size=size, create=create)
         self.transcode_in = RingSharedMemoryBuffer(SHM_TRANSCODE_IN_NAME, size=size, create=create)
         self._downstream_channels: dict[int, RingSharedMemoryBuffer] = {}
+        self._wire_channels: dict[int, RingSharedMemoryBuffer] = {}
         self._channels_lock = threading.Lock()
 
     def get_downstream_channel(self, channel_id: int, size: Optional[int] = None) -> RingSharedMemoryBuffer:
@@ -186,6 +192,17 @@ class BidirectionalMediaSHM:
                 self._downstream_channels[channel_id] = buf
             return buf
 
+    def get_wire_channel(self, channel_id: int, size: Optional[int] = None) -> RingSharedMemoryBuffer:
+        """Dynamically retrieve or allocate a dedicated inbound wire ring buffer for channel_id."""
+        with self._channels_lock:
+            buf = self._wire_channels.get(channel_id)
+            if buf is None:
+                ch_name = get_wire_channel_shm_name(channel_id)
+                ch_size = size if size is not None else self.default_size
+                buf = RingSharedMemoryBuffer(ch_name, size=ch_size, create=self.create)
+                self._wire_channels[channel_id] = buf
+            return buf
+
     def close(self):
         self.downstream.close()
         self.upstream.close()
@@ -194,3 +211,6 @@ class BidirectionalMediaSHM:
             for buf in self._downstream_channels.values():
                 buf.close()
             self._downstream_channels.clear()
+            for buf in self._wire_channels.values():
+                buf.close()
+            self._wire_channels.clear()

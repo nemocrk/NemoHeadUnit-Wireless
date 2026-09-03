@@ -337,21 +337,18 @@ class ChannelManagerModule(BaseBackendModule):
         ch_id = data.get("channel_id")
         msg_id = data.get("message_id")
         offset = data.get("shm_offset", -1)
+        ts_us = data.get("timestamp_us", 0)
+        payload_len = data.get("payload_len", 0)
 
-        if offset < 0:
-            return
-
-        shm_buf = self.shm.get_downstream_channel(ch_id)
-        stream_type, ts_low, payload = shm_buf.read_frame(offset)
-        if not payload:
+        if offset < 0 or ch_id is None:
             return
 
         ch_type = self.get_channel_type(ch_id)
 
         if ch_type == ChannelType.VIDEO:
-            await self.video_handler.process_shm_frame(msg_id, payload)
+            await self.video_handler.process_shm_frame(msg_id, offset, ts_us, payload_len)
         elif ch_type == ChannelType.AUDIO:
-            await self.audio_handler.process_shm_frame(ch_id, msg_id, payload)
+            await self.audio_handler.process_shm_frame(ch_id, msg_id, offset, ts_us, payload_len)
 
 
     async def on_ch0_frame(self, data: dict) -> None:

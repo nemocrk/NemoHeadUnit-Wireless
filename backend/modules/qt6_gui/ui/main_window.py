@@ -219,7 +219,7 @@ class MainWindow(QMainWindow):
 
         # Resize video canvas and disconnected clock screen strictly above the bottom bar
         self.video_viewport.setGeometry(0, 0, w, draw_h)
-        self.video_viewport.set_margins(margin_width=0, margin_height=0, stretch_to_fill=True)
+        self.video_viewport.set_margins(margin_width=0, margin_height=0, stretch_to_fill=False)
         self.disconnected_screen.setGeometry(0, 0, w, draw_h)
         self._relayout_dashboard(w, draw_h)
 

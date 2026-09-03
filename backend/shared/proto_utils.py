@@ -276,16 +276,20 @@ def parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
         codec data to pass to the decoder.
         Returns (0, b"") on malformed input.
     """
-    ts_us: int  = 0
-    data:  bytes = b""
+    if len(body) < 8:
+        return 0, b""
 
-    if len(body) >= 8:
-        raw_ts_us = struct.unpack_from(">Q", body, 0)[0]
-        raw_data = body[8:]
-    else:
-        raw_ts_us = 0
-        raw_data = b""
-    pos:   int  = 0
+    # Standard Android Auto AV streaming frames use compact [uint64 BE timestamp][raw media payload].
+    # Crucial: Only parse as protobuf if the frame explicitly starts with protobuf tag 0x09 (field 1, fixed64).
+    # Treating raw PCM/NAL streams as protobuf causes sample values (such as byte 0x12) to be misparsed
+    # as field tags, corrupting audio into white noise.
+    if body[0] != 0x09:
+        ts_us = struct.unpack_from(">Q", body, 0)[0]
+        return ts_us, body[8:]
+
+    ts_us: int = 0
+    data: bytes = b""
+    pos: int = 0
 
     while pos < len(body):
         if pos >= len(body):
@@ -315,13 +319,8 @@ def parse_media_with_timestamp(body: bytes) -> tuple[int, bytes]:
     if data:
         return ts_us, data
 
-    # Some AA media implementations send the timestamped media body as a
-    # compact [uint64 BE timestamp][raw codec bytes] tuple instead of protobuf
-    # fields.  Large video/audio frames in the wild commonly use this form.
-    if raw_data:
-        return raw_ts_us, raw_data
-
-    return ts_us, data
+    raw_ts_us = struct.unpack_from(">Q", body, 0)[0]
+    return raw_ts_us, body[8:]
 
 
 def build_media_with_timestamp(ts_us: int, data: bytes) -> bytes:

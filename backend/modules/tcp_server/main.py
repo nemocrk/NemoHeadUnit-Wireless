@@ -27,6 +27,7 @@ from aiohttp import web
 from shared.base_module import BaseBackendModule, run_module
 from shared.config_schema import field_bool, field_int, field_string
 from shared.media_shm import BidirectionalMediaSHM
+from shared.proto_utils import parse_media_with_timestamp
 from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
 from modules.tcp_server.aa_cryptor import AACryptor
 from modules.tcp_server.frame_codec import FrameAssembler, encode
@@ -280,9 +281,22 @@ class TCPServerModule(BaseBackendModule):
 
         if ch_type_name in ("VIDEO", "AUDIO") and is_media_msg:
             stream_type = 0 if ch_type_name == "VIDEO" else 1
-            ch_buf_size = 32 * 1024 * 1024 if ch_type_name == "VIDEO" else 8 * 1024 * 1024
-            shm_buf = self._shm.get_downstream_channel(channel_id, size=ch_buf_size)
-            shm_offset = shm_buf.write_frame(stream_type, 0, body)
+            if message_id == AVChannelMessage.Enum.AV_MEDIA_WITH_TIMESTAMP_INDICATION:
+                ts_us, media_payload = parse_media_with_timestamp(body)
+            else:
+                ts_us = 0
+                media_payload = body
+
+            if not media_payload:
+                return
+
+            if ch_type_name == "VIDEO":
+                shm_offset = self._shm.transcode_in.write_frame(stream_type, ts_us, media_payload)
+            else:
+                ch_buf_size = 8 * 1024 * 1024
+                shm_buf = self._shm.get_downstream_channel(channel_id, size=ch_buf_size)
+                shm_offset = shm_buf.write_frame(channel_id, ts_us, media_payload)
+
             self.publish(
                 "aa.frame.shm",
                 {
@@ -290,7 +304,8 @@ class TCPServerModule(BaseBackendModule):
                     "message_id": message_id,
                     "encrypted": encrypted,
                     "shm_offset": shm_offset,
-                    "payload_len": len(body),
+                    "timestamp_us": ts_us,
+                    "payload_len": len(media_payload),
                 },
             )
             # Zero-copy optimization: bypass redundant 100KB hex JSON allocations over ZMQ

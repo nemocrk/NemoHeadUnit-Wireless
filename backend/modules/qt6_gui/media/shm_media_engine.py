@@ -272,9 +272,13 @@ class Qml6ZeroCopyDecoder:
         self._is_sink_bound = True
         logger.info("🎬 [Qml6ZeroCopyDecoder] Sink bound to GstGLQt6VideoItem confirmed — ready for stream")
 
+    def set_focused(self, focused: bool) -> None:
+        """Track whether video is in foreground to drop NALs when suspended."""
+        self._is_focused = focused
+
     def decode_nal(self, nal_data: bytes, ts_us: int = 0) -> bool:
         """Push a NAL unit into appsrc. Starts playback on first frame."""
-        if not self.is_available or not self._appsrc:
+        if not self.is_available or not self._appsrc or not getattr(self, "_is_focused", True):
             return False
         try:
             if not self._is_playing and self._is_sink_bound and self._pipeline:
@@ -316,6 +320,7 @@ class QtSHMMediaEngine:
         self.on_stream_start: Optional[Callable[[], None]] = None
         self.on_stream_stop: Optional[Callable[[], None]] = None
         self.is_connected = False
+        self.is_video_focused = True
         self._codec_ctx = None
         self._nal_counter = 0
 
@@ -337,9 +342,15 @@ class QtSHMMediaEngine:
             except Exception as e:
                 logger.warning("Could not initialize PyAV H.264 CodecContext: %s", e)
 
+    def set_video_focused(self, focused: bool) -> None:
+        """Enable or suspend video decode to conserve CPU/GPU when not in foreground."""
+        self.is_video_focused = focused
+        if hasattr(self._hw_decoder, "set_focused"):
+            self._hw_decoder.set_focused(focused)
+
     def _on_hw_decoded_frame(self, rgba_pixels: bytes, width: int, height: int, ts_us: int):
         """Dispatch hardware-decoded RGBA frame directly to Qt6 video viewport."""
-        if self.on_video_frame:
+        if self.on_video_frame and self.is_video_focused:
             self.on_video_frame(rgba_pixels, width, height, ts_us)
 
     def connect_shm(self) -> bool:
@@ -360,7 +371,7 @@ class QtSHMMediaEngine:
         """
         Reads video frame at offset from dedicated per-channel SHM and dispatches to on_video_frame callback.
         """
-        if not self.shm or offset < 0:
+        if not self.shm or offset < 0 or not self.is_video_focused:
             return
 
         try:

@@ -42,5 +42,36 @@ class TestMediaSHM(unittest.TestCase):
         shm_host.close()
         shm_client.close()
 
+    def test_channel_shm_isolation(self):
+        from shared.media_shm import get_wire_channel_shm_name, get_downstream_channel_shm_name
+        wire_name = get_wire_channel_shm_name(98)
+        down_name = get_downstream_channel_shm_name(98)
+
+        self.assertNotEqual(wire_name, down_name)
+
+        wire_host = RingSharedMemoryBuffer(wire_name, size=1024*1024, create=True)
+        down_host = RingSharedMemoryBuffer(down_name, size=1024*1024, create=True)
+
+        wire_client = RingSharedMemoryBuffer(wire_name, size=1024*1024, create=False)
+        down_client = RingSharedMemoryBuffer(down_name, size=1024*1024, create=False)
+
+        # Write wire frame
+        wire_offset = wire_host.write_frame(1, 111, b"raw_wire_frame")
+
+        # Write downstream frame
+        down_offset = down_host.write_frame(1, 222, b"pcm_downstream_frame")
+
+        # Read back
+        st_wire, ts_wire, data_wire = wire_client.read_frame(wire_offset)
+        self.assertEqual(data_wire, b"raw_wire_frame")
+
+        st_down, ts_down, data_down = down_client.read_frame(down_offset)
+        self.assertEqual(data_down, b"pcm_downstream_frame")
+
+        wire_host.close()
+        down_host.close()
+        wire_client.close()
+        down_client.close()
+
 if __name__ == "__main__":
     unittest.main()
