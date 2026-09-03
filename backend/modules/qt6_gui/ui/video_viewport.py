@@ -218,8 +218,12 @@ class VideoViewportWidget(*_bases):
     def paintEvent(self, event):
         """
         RGBA fallback render path — only used when base class is QWidget (no GL available).
-        When QOpenGLWidget is the base class, paintGL() handles rendering instead.
+        When QOpenGLWidget is the base class, delegate to super().paintEvent(event) which invokes paintGL().
         """
+        if _HAS_QOPENGL:
+            super().paintEvent(event)
+            return
+
         painter = QPainter(self)
         if (
             self.current_frame_data
