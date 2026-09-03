@@ -242,6 +242,16 @@ class Qml6ZeroCopyDecoder:
                 logger.warning("[Qml6ZeroCopyDecoder] Pipeline element lookup failed")
                 return
 
+            # Monitor GStreamer bus messages for errors
+            bus = self._pipeline.get_bus()
+            bus.add_signal_watch()
+
+            def _on_gst_error(b, msg):
+                err, dbg = msg.parse_error()
+                logger.error(f"❌ [Qml6ZeroCopyDecoder Gst Error] {err.message} - {dbg}")
+
+            bus.connect("message::error", _on_gst_error)
+
             self.is_available = True
             logger.info("🎬 [Qml6ZeroCopyDecoder] Pipeline initialized (Hardware DMABuf -> qml6glsink)")
         except Exception as exc:
@@ -250,11 +260,16 @@ class Qml6ZeroCopyDecoder:
     def attach_viewport(self, viewport) -> None:
         """Wire the qml6glsink element to the VideoViewportWidget."""
         self._viewport = viewport
+        if hasattr(viewport, "set_sink_bound_callback"):
+            viewport.set_sink_bound_callback(self._on_sink_bound)
         if self._sink and hasattr(viewport, "attach_gstreamer_sink"):
             viewport.attach_gstreamer_sink(self._sink)
+
+    def _on_sink_bound(self) -> None:
+        """Invoked when sceneGraphInitialized has successfully bound widget to qml6glsink."""
         if self._pipeline:
             self._pipeline.set_state(self._Gst.State.PLAYING)
-            logger.info("🎬 [Qml6ZeroCopyDecoder] Pipeline set to PLAYING on viewport attach")
+            logger.info("🎬 [Qml6ZeroCopyDecoder] Pipeline transitioned to PLAYING after Scene Graph widget attachment")
 
     def decode_nal(self, nal_data: bytes, ts_us: int = 0) -> bool:
         """Push a NAL unit into appsrc."""
