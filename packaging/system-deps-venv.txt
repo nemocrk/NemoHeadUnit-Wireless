@@ -38,10 +38,15 @@ gstreamer1.0-plugins-bad
 gstreamer1.0-plugins-ugly
 gstreamer1.0-vaapi
 gstreamer1.0-gl
+gstreamer1.0-qt6
 gstreamer1.0-libav
 gir1.2-gstreamer-1.0
 gir1.2-gst-plugins-base-1.0
 i965-va-driver
+
+# Qt6 QML / Quick modules
+qml6-module-qtquick
+qml6-module-qtquick-controls
 
 # GLib, GObject & D-Bus python system bindings
 libglib2.0-0
@@ -60,9 +65,10 @@ libwayland-egl1
 libwayland-cursor0
 libxkbcommon0
 
-# Wayland Compositor & DRM seat management for kiosk / direct boot
-labwc
+# KMS / DRM seat management for kiosk / direct boot
 seatd
 
 # Kiosk Browser fallback
 surf
+
+dmidecode

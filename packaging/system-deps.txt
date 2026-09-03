@@ -87,11 +87,15 @@ gstreamer1.0-plugins-bad
 gstreamer1.0-plugins-ugly
 gstreamer1.0-vaapi
 gstreamer1.0-gl
+gstreamer1.0-qt6
 gstreamer1.0-libav
 gir1.2-gstreamer-1.0
 gir1.2-gst-plugins-base-1.0
 i965-va-driver
 
+# Qt6 QML / Quick modules
+qml6-module-qtquick
+qml6-module-qtquick-controls
 
 # ────────────────────────────────────────────────────────────────────────
 # GLib runtime — required by dbus-python + GObject bindings inside Conda
@@ -107,11 +111,12 @@ libegl1
 
 vainfo
 # ────────────────────────────────────────────────────────────────────────
-# Wayland runtime & compositor libraries
+# KMS / Direct DRM & EGLFS libraries (labwc optional fallback)
 # ────────────────────────────────────────────────────────────────────────
 libwayland-client0
 libwayland-egl1
 libwayland-cursor0
 libxkbcommon0
-labwc
 seatd
+
+dmidecode

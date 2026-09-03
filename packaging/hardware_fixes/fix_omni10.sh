@@ -7,7 +7,10 @@
 # Fix 4: SDDM early initialization safety net
 # Fix 5: grubenv corruption fix
 # Fix 6: Cloud-init purge
-# Fix 7: Dracut (Early KMS & hostonly)
+# Fix 7: Dracut / mkinitcpio (Early KMS & hostonly)
+# Fix 8: GPU Performance & Power Stability (RC6 / Runtime PM / Frequency floor)
+# Fix 9: Bluetooth persistent MAC address across reboots
+# Fix 10: Vendor firmware (Broadcom BT/WiFi, Intel SST DSP)
 #
 # Deve essere eseguito come root.
 # Idempotente: controlla prima di modificare.
@@ -264,7 +267,7 @@ echo -n "  [hw-fix] Mkinitcpio Early KMS & Input modules... "
 MKINIT_CHANGED=0
 if [ -f "$MKINIT_CONF" ]; then
     # Moduli ideali per la piattaforma Bay Trail (Omni10) per azzerare i colli di bottiglia
-    TARGET_MODULES="i915 sdhci_acpi mmc_block i2c_hid_acpi i2c_hid"
+    TARGET_MODULES="i915 sdhci_acpi mmc_block"
     
     # Estrae l'attuale riga MODULES=(...)
     CURRENT_MODULES_LINE=$(grep -E "^MODULES=\(" "$MKINIT_CONF" || echo "")
@@ -276,7 +279,7 @@ if [ -f "$MKINIT_CONF" ]; then
             NEED_UPDATE=1
             break
         fi
-    fi
+    done
 
     if [ $NEED_UPDATE -eq 1 ]; then
         # Sostituisce l'intera riga MODULES=(...) iniettando la combinazione ottimale
@@ -425,28 +428,81 @@ TEMP_BT_SVC=$(mktemp)
 cat > "$TEMP_BT_SVC" <<'EOF'
 [Unit]
 Description=Set Persistent Bluetooth MAC Address (Broadcom/BCM)
-Before=bluetooth.service
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Unit]
+Description=Set Persistent Bluetooth MAC Address (Broadcom/BCM con Log Verbose)
+After=bluetooth.service
+Requires=bluetooth.service
+Before=nemo-kiosk.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-TimeoutStartSec=10
-ExecStart=/bin/bash -c ' \
-    ADDR="$(cat /etc/bluetooth/bdaddr 2>/dev/null | tr -d " \n\r")"; \
-    [ -n "$ADDR" ] || exit 0; \
-    command -v btmgmt >/dev/null 2>&1 || exit 0; \
-    for i in {1..30}; do \
-        if btmgmt --index 0 info >/dev/null 2>&1; then \
-            btmgmt --index 0 power off >/dev/null 2>&1 || true; \
-            btmgmt --index 0 public-addr "$ADDR" >/dev/null 2>&1 || true; \
-            btmgmt --index 0 power on >/dev/null 2>&1 || true; \
-            exit 0; \
-        fi; \
-        sleep 0.2; \
-    done'
+ExecStart=/bin/bash -c '\
+  ADDR="$(tr -d "[:space:]" < /etc/bluetooth/bdaddr 2>/dev/null)"; \
+  if [ -z "$ADDR" ]; then echo "BDADDR non trovato" >&2; exit 1; fi; \
+  echo ">>> MAC configurato da file: $ADDR"; \
+  \
+  echo "--- FASE 1: Ricerca controller e attesa indice valido ---"; \
+  FOUND=0; \
+  for i in {1..30}; do \
+    OUT_INFO="$(btmgmt --index 0 info 2>&1)"; \
+    if echo "$OUT_INFO" | grep -qi "Supported options"; then \
+      echo "Tentativo $i: Controller pronto."; \
+      FOUND=1; \
+      break; \
+    fi; \
+    sleep 0.5; \
+  done; \
+  if [ $FOUND -eq 0 ]; then \
+    echo "ERRORE FASE 1: Controller non pronto. Ultimo output:" ; \
+    echo "$OUT_INFO"; \
+    exit 1; \
+  fi; \
+  \
+  echo "--- FASE 2: Spegnimento e Iniezione MAC ($ADDR) ---"; \
+  btmgmt --index 0 power off >/dev/null 2>&1 || true; \
+  \
+  OUT_MAC="$(btmgmt --index 0 public-addr "$ADDR" 2>&1)"; \
+  echo "public-addr -> $OUT_MAC"; \
+  if echo "$OUT_MAC" | grep -qi "failed"; then \
+    echo "ERRORE FASE 2: Rifiuto del MAC da parte del controller." >&2; \
+    exit 1; \
+  fi; \
+  \
+  sleep 1; \
+  echo "--- FASE 2.5: Verifica immediata pre-reset ---"; \
+  OUT_PRE="$(btmgmt --index 0 info 2>&1)"; \
+  echo "Stato pre-reset ->" "$OUT_PRE"; \
+  \
+  echo "--- FASE 3: Forzatura reset hardware UART (unbind/bind) ---"; \
+  echo "serial0-0" > /sys/bus/serial/drivers/hci_uart_bcm/unbind 2>/dev/null || true; \
+  sleep 1; \
+  echo "serial0-0" > /sys/bus/serial/drivers/hci_uart_bcm/bind 2>/dev/null || true; \
+  \
+  echo "--- FASE 4: Test di riscontro post-rebind ---"; \
+  sleep 2; \
+  FOUND_FINAL=0; \
+  for i in {1..20}; do \
+    OUT_FINAL="$(btmgmt --index 0 info 2>&1)"; \
+    if echo "$OUT_FINAL" | grep -qi "Supported options"; then \
+      btmgmt --index 0 power on >/dev/null 2>&1 || true; \
+      echo "SUCCESSO: Controller resuscitato e operativo con MAC $ADDR."; \
+      FOUND_FINAL=1; \
+      break; \
+    fi; \
+    sleep 0.5; \
+  done; \
+  if [ $FOUND_FINAL -eq 0 ]; then \
+    echo "ERRORE CRITICO: Il controller non si è ripreso dal rebind."; \
+    echo "$OUT_FINAL"; \
+    exit 1; \
+  fi'
 
 [Install]
-WantedBy=bluetooth.service
+WantedBy=multi-user.target
 EOF
 
 if [ ! -f "$BT_SERVICE_FILE" ] || ! cmp -s "$TEMP_BT_SVC" "$BT_SERVICE_FILE"; then
@@ -466,6 +522,49 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Fix 10: Vendor Firmware (Broadcom BT/WiFi NVRAM & Intel SST Audio DSP)
+# ---------------------------------------------------------------------------
+echo -n "  [hw-fix] Proprietary / vendor firmware (Broadcom & Intel SST DSP)... "
+FW_CHANGED=0
+
+mkdir -p /lib/firmware/brcm/
+mkdir -p /lib/firmware/intel/
+
+FW_TARGETS=(
+    "/lib/firmware/brcm/BCM4324B3.hcd|https://raw.githubusercontent.com/Asus-T100/firmware/master/brcm/BCM4324B3.hcd"
+    "/lib/firmware/brcm/brcmfmac43241b4-sdio.txt|https://raw.githubusercontent.com/Asus-T100/firmware/master/brcm/brcmfmac43241b4-sdio.txt"
+    "/lib/firmware/intel/fw_sst_0f28.bin|https://raw.githubusercontent.com/Asus-T100/firmware/master/intel/fw_sst_0f28.bin"
+    "/lib/firmware/intel/fw_sst_0f28_ssp0.bin|https://raw.githubusercontent.com/Asus-T100/firmware/master/intel/fw_sst_0f28_ssp0.bin"
+)
+
+FW_DOWNLOADED=0
+for entry in "${FW_TARGETS[@]}"; do
+    IFS="|" read -r dest_file url <<< "$entry"
+    if [ ! -s "$dest_file" ]; then
+        TEMP_DL=$(mktemp)
+        if curl -fsSL -o "$TEMP_DL" "$url"; then
+            if [ -s "$TEMP_DL" ]; then
+                mv "$TEMP_DL" "$dest_file"
+                chmod 644 "$dest_file"
+                FW_CHANGED=1
+                FW_DOWNLOADED=$((FW_DOWNLOADED + 1))
+            else
+                rm -f "$TEMP_DL"
+            fi
+        else
+            rm -f "$TEMP_DL"
+            echo -e "\n    ${YELLOW}WARNING: Impossibile scaricare $(basename "$dest_file") da $url${NC}" >&2
+        fi
+    fi
+done
+
+if [ $FW_CHANGED -eq 1 ]; then
+    echo -e "${GREEN}scaricati e installati ($FW_DOWNLOADED file).${NC}"
+else
+    echo -e "${GREEN}già presenti.${NC}"
+fi
+
+# ---------------------------------------------------------------------------
 # Riepilogo
 # ---------------------------------------------------------------------------
 echo ""
@@ -475,8 +574,9 @@ echo "    - cups.service è stato disabilitato per performance."
 echo "    - Display impostato a 1920x1200@40Hz (-33% scanout bandwidth)."
 echo "    - GPU RC6 / Runtime PM disabilitato; clock minimo fissato a 400MHz."
 echo "    - Bluetooth MAC persistente in ${BT_ADDR_FILE} tramite bluetooth-persistent-mac.service."
+echo "    - Firmware Broadcom (BT/WiFi) e Intel SST DSP verificati in /lib/firmware/."
 
-if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ]; then
+if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ] || [ $FW_CHANGED -eq 1 ]; then
     echo -e "  ${GREEN}[hw-fix] HP Omni10: fix applicati. Riavvio necessario.${NC}"
 else
     echo -e "  ${GREEN}[hw-fix] HP Omni10: nessuna modifica necessaria.${NC}"

@@ -47,6 +47,16 @@ ensure_display_server() {
         echo "[nemo-headunit] Compositor autostart disabled by config or CLI flag."
     fi
 
+    # 0. If autostart disabled or preference is 'none', run direct on DRM/KMS via eglfs
+    if [ "${COMPOSITOR_AUTOSTART:-true}" = "false" ] || [ "${COMPOSITOR_PREFERENCE:-auto}" = "none" ]; then
+        echo "[nemo-headunit] Compositor disabled (COMPOSITOR_PREFERENCE=none). Running direct on DRM/KMS via eglfs."
+        unset WAYLAND_DISPLAY
+        unset DISPLAY
+        export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-eglfs}"
+        export QT_QPA_EGLFS_ALWAYS_SET_MODE=1
+        return 0
+    fi
+
     # 1. Check if Wayland is already active on host
     if [ -z "${WAYLAND_DISPLAY:-}" ]; then
         if [ -S "${XDG_RUNTIME_DIR}/wayland-0" ]; then
@@ -71,14 +81,7 @@ ensure_display_server() {
         return 0
     fi
 
-    # 3. If autostart disabled, do not spawn compositor
-    if [ "${COMPOSITOR_AUTOSTART:-true}" = "false" ] || [ "${COMPOSITOR_PREFERENCE:-auto}" = "none" ]; then
-        echo "[nemo-headunit] No active display server and autostart disabled. Defaulting to eglfs."
-        export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-eglfs}"
-        return 0
-    fi
-
-    # 4. Neither running: clean SSH inherited display vars before starting DRM/KMS compositor
+    # 3. Neither running: clean SSH inherited display vars before starting DRM/KMS compositor
     echo "[nemo-headunit] No active display server detected. Starting compositor on DRM..."
     unset DISPLAY
     unset WAYLAND_DISPLAY

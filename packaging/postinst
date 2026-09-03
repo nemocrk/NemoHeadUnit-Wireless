@@ -239,7 +239,7 @@ run_postinst() {
     mkdir -p "${CONFIG_DIR}"
 
     local autostart_kiosk="true"
-    local compositor_pref="auto"
+    local compositor_pref="none"
 
     # Interactive prompt if connected to terminal
     if [ -t 0 ] && [ "${DEBIAN_FRONTEND:-}" != "noninteractive" ]; then
@@ -254,8 +254,8 @@ run_postinst() {
         esac
 
         if [ "$autostart_kiosk" = "true" ]; then
-            echo " Choose compositor preference:"
-            echo "   1) auto   (lightest installed: cage -> labwc -> weston -> sway)"
+            echo " Choose display / compositor preference:"
+            echo "   1) none   (Direct KMS/DRM via eglfs - Recommended, zero compositor overhead)"
             echo "   2) cage   (ultra-lightweight ~15MB RAM kiosk)"
             echo "   3) labwc  (lightweight ~25MB RAM windowed)"
             echo "   4) weston (reference DRM compositor)"
@@ -263,12 +263,13 @@ run_postinst() {
             echo "   6) xorg   (legacy X11)"
             read -r -p " Selection [default: 1]: " comp_choice || comp_choice="1"
             case "$comp_choice" in
+                1|none)   compositor_pref="none" ;;
                 2|cage)   compositor_pref="cage" ;;
                 3|labwc)  compositor_pref="labwc" ;;
                 4|weston) compositor_pref="weston" ;;
                 5|sway)   compositor_pref="sway" ;;
                 6|xorg)   compositor_pref="xorg" ;;
-                *)        compositor_pref="auto" ;;
+                *)        compositor_pref="none" ;;
             esac
         fi
     fi
@@ -281,6 +282,8 @@ run_postinst() {
 
 COMPOSITOR_AUTOSTART=${autostart_kiosk}
 COMPOSITOR_PREFERENCE="${compositor_pref}"
+QT_QPA_PLATFORM="eglfs"
+QT_QPA_EGLFS_ALWAYS_SET_MODE="1"
 COMPOSITOR_TTY="7"
 QT_SCALE_FACTOR="1.5"
 EOF

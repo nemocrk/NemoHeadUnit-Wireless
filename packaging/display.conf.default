@@ -2,12 +2,18 @@
 # NemoHeadUnit Display & Compositor Configuration
 
 # Enable automatic compositor launch if no display server is active (true/false)
-COMPOSITOR_AUTOSTART=true
+# When false or when COMPOSITOR_PREFERENCE="none", runs Qt directly on KMS/DRM via eglfs
+COMPOSITOR_AUTOSTART=false
 
 # Preferred compositor order:
+# none   -> Direct DRM/KMS scanout via QT_QPA_PLATFORM=eglfs (zero compositor overhead)
 # auto   -> probes lightest installed: cage -> labwc -> weston -> sway -> xorg
-# Or explicitly: cage | labwc | weston | sway | xorg | none
-COMPOSITOR_PREFERENCE="auto"
+# Or explicitly: none | cage | labwc | weston | sway | xorg
+COMPOSITOR_PREFERENCE="none"
+
+# Default Qt QPA platform
+QT_QPA_PLATFORM="eglfs"
+QT_QPA_EGLFS_ALWAYS_SET_MODE="1"
 
 # Virtual terminal for DRM compositor
 COMPOSITOR_TTY="7"

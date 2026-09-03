@@ -173,15 +173,18 @@ class GStreamerHwDecoder:
         self.is_available = False
 
 
-class GlImageSinkDecoder:
+class Qml6ZeroCopyDecoder:
     """
-    Zero-CPU H.264 decoder via GStreamer hardware decode and shared EGL context.
+    Zero-CPU H.264 decoder using GStreamer VA-API, DMABuf, and qml6glsink.
 
-    Pipeline: appsrc ! h264parse ! vah264dec ! vapostproc ! glupload ! appsink(memory:GLMemory)
-
-    Decodes H.264 in hardware (VAAPI) and uploads DMABuf directly to GL textures
-    in the shared QOpenGLWidget context. On new frames, notifies on_frame_callback
-    so Qt schedules paintGL(), which renders the texture via fullscreen shader quad.
+    Pipeline:
+      appsrc name=src is-live=true format=bytes
+      ! h264parse config-interval=-1
+      ! vah264dec
+      ! vapostproc add-borders=true
+      ! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=YV12,width=1280,height=800
+      ! glupload
+      ! qml6glsink name=qml_sink sync=false
     """
 
     def __init__(self, on_frame_callback: Callable[[bytes, int, int, int], None]):
@@ -191,41 +194,34 @@ class GlImageSinkDecoder:
         self._pipeline = None
         self._appsrc = None
         self._sink = None
+        self._viewport = None
         self._Gst = None
-        self._GstGL = None
-        self._latest_texture_id: int = 0
-        self._gl_context_set = False
-        self._current_sample = None
-        self._libgstgl = None
-
         self._try_init_pipeline()
 
     def _try_init_pipeline(self) -> None:
-        """Build GStreamer pipeline. Sets is_available=True on success."""
+        """Build GStreamer zero-copy pipeline."""
         try:
             import gi
             gi.require_version("Gst", "1.0")
             gi.require_version("GstGL", "1.0")
-            from gi.repository import Gst, GstGL
+            from gi.repository import Gst
             Gst.init(None)
             self._Gst = Gst
-            self._GstGL = GstGL
 
-            import ctypes
-            try:
-                self._libgstgl = ctypes.CDLL("libgstgl-1.0.so.0")
-                self._libgstgl.gst_gl_memory_get_texture_id.restype = ctypes.c_uint
-                self._libgstgl.gst_gl_memory_get_texture_id.argtypes = [ctypes.c_void_p]
-            except Exception as e:
-                logger.warning(f"[GlImageSinkDecoder] Could not load libgstgl: {e}")
+            registry = Gst.Registry.get()
+            for path in [
+                "/usr/lib/gstreamer-1.0",
+                "/usr/lib64/gstreamer-1.0",
+                "/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
+            ]:
+                if os.path.isdir(path):
+                    registry.scan_path(path)
 
-            # Verify all required elements exist before building pipeline
-            required = ["vah264dec", "vapostproc", "glupload", "glcolorconvert", "appsink", "h264parse"]
+            required = ["vah264dec", "vapostproc", "glupload", "qml6glsink", "h264parse"]
             missing = [e for e in required if Gst.ElementFactory.find(e) is None]
             if missing:
                 logger.info(
-                    f"ℹ️ [GlImageSinkDecoder] Missing GStreamer elements {missing} "
-                    "— falling back to GStreamerHwDecoder"
+                    f"ℹ️ [Qml6ZeroCopyDecoder] Missing elements {missing} — falling back to GStreamerHwDecoder"
                 )
                 return
 
@@ -233,124 +229,46 @@ class GlImageSinkDecoder:
                 "appsrc name=src is-live=true format=bytes "
                 "! h264parse config-interval=-1 "
                 "! vah264dec "
-                "! vapostproc "
+                "! vapostproc add-borders=true "
+                "! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=YV12,width=1280,height=800 "
                 "! glupload "
-                "! glcolorconvert "
-                "! appsink name=sink emit-signals=true max-buffers=1 drop=true caps=video/x-raw(memory:GLMemory),format=RGBA"
+                "! qml6glsink name=qml_sink sync=false"
             )
             self._pipeline = Gst.parse_launch(pipe_str)
             self._appsrc = self._pipeline.get_by_name("src")
-            self._sink = self._pipeline.get_by_name("sink")
+            self._sink = self._pipeline.get_by_name("qml_sink")
 
             if not self._appsrc or not self._sink:
-                logger.warning("[GlImageSinkDecoder] Pipeline element lookup failed")
+                logger.warning("[Qml6ZeroCopyDecoder] Pipeline element lookup failed")
                 return
 
-            self._sink.connect("new-sample", self._on_new_sample)
             self.is_available = True
-            logger.info(
-                "🎬 [GlImageSinkDecoder] Pipeline built — awaiting GL context from QOpenGLWidget.initializeGL()"
-            )
+            logger.info("🎬 [Qml6ZeroCopyDecoder] Pipeline initialized (Hardware DMABuf -> qml6glsink)")
         except Exception as exc:
-            logger.warning(f"[GlImageSinkDecoder] Init failed: {exc}")
+            logger.warning(f"[Qml6ZeroCopyDecoder] Init failed: {exc}")
 
-    def _on_new_sample(self, sink):
-        try:
-            sample = sink.emit("pull-sample")
-            if sample:
-                buf = sample.get_buffer()
-                if buf:
-                    mem = buf.peek_memory(0)
-                    if mem and self._GstGL and self._GstGL.is_gl_memory(mem):
-                        tex_id = 0
-                        if self._libgstgl:
-                            try:
-                                import ctypes
-                                tex_id = int(
-                                    self._libgstgl.gst_gl_memory_get_texture_id(
-                                        ctypes.c_void_p(hash(mem))
-                                    )
-                                )
-                            except Exception:
-                                pass
-                        if not tex_id:
-                            try:
-                                tex_id = int(self._GstGL.GLMemory.get_texture_id(mem))
-                            except Exception:
-                                pass
-                        if tex_id:
-                            self._latest_texture_id = tex_id
-                self._current_sample = sample
-                self.frames_decoded += 1
-                if self.on_frame_callback:
-                    self.on_frame_callback(b"", 1280, 720, 0)
-        except Exception as e:
-            logger.debug(f"[GlImageSinkDecoder] _on_new_sample error: {e}")
-        return self._Gst.FlowReturn.OK
-
-    def set_gl_context(self, egl_display_handle: int, egl_context_handle: int) -> None:
-        """
-        Share Qt's EGL context with GStreamer GL. Must be called from QOpenGLWidget.initializeGL()
-        before decode_nal() is first invoked.
-        """
-        if not self.is_available or not self._pipeline:
-            return
-        try:
-            import gi
-            gi.require_version("GstGL", "1.0")
-            gi.require_version("GstGLEGL", "1.0")
-            from gi.repository import GstGL, GstGLEGL
-
-            gl_display = GstGLEGL.GLDisplayEGL.new_with_egl_display(egl_display_handle)
-            gl_context = GstGL.GLContext.new_wrapped(
-                gl_display,
-                egl_context_handle,
-                GstGL.GLPlatform.EGL,
-                GstGL.GLAPI.GLES2 | GstGL.GLAPI.OPENGL,
-            )
-            gl_context.activate(True)
-
-            gst_ctx_display = self._Gst.Context.new(GstGL.GL_DISPLAY_CONTEXT_TYPE, True)
-            GstGL.context_set_gl_display(gst_ctx_display, gl_display)
-            self._pipeline.set_context(gst_ctx_display)
-
-            gst_ctx_app = self._Gst.Context.new("gst.gl.app_context", True)
-            gst_ctx_app.get_structure().set_value("context", gl_context)
-            self._pipeline.set_context(gst_ctx_app)
-
-            ret = self._pipeline.set_state(self._Gst.State.PLAYING)
-            if ret == self._Gst.StateChangeReturn.FAILURE:
-                logger.error("[GlImageSinkDecoder] Pipeline failed to reach PLAYING — disabling GL path")
-                self.is_available = False
-                return
-
-            self._gl_context_set = True
-            logger.info(
-                "🎬 [GlImageSinkDecoder] GL context shared — pipeline PLAYING, zero-CPU path active"
-            )
-        except Exception as exc:
-            logger.warning(f"[GlImageSinkDecoder] set_gl_context failed: {exc} — disabling GL path")
-            self.is_available = False
+    def attach_viewport(self, viewport) -> None:
+        """Wire the qml6glsink element to the VideoViewportWidget."""
+        self._viewport = viewport
+        if self._sink and hasattr(viewport, "attach_gstreamer_sink"):
+            viewport.attach_gstreamer_sink(self._sink)
+        if self._pipeline:
+            self._pipeline.set_state(self._Gst.State.PLAYING)
+            logger.info("🎬 [Qml6ZeroCopyDecoder] Pipeline set to PLAYING on viewport attach")
 
     def decode_nal(self, nal_data: bytes, ts_us: int = 0) -> bool:
-        """Push a NAL unit into the pipeline. Returns False if GL context not yet shared."""
-        if not self.is_available or not self._appsrc or not self._gl_context_set:
+        """Push a NAL unit into appsrc."""
+        if not self.is_available or not self._appsrc:
             return False
         try:
             buf = self._Gst.Buffer.new_wrapped(nal_data)
             if ts_us > 0:
-                buf.pts = ts_us * 1000  # microseconds → nanoseconds
+                buf.pts = ts_us * 1000
             self._appsrc.emit("push-buffer", buf)
+            self.frames_decoded += 1
             return True
         except Exception:
             return False
-
-    def get_latest_texture_id(self) -> int:
-        """
-        Pull the latest GL texture ID for use in paintGL().
-        Returns 0 if no frame is ready yet.
-        """
-        return self._latest_texture_id
 
     def close(self) -> None:
         if self._pipeline:
@@ -361,9 +279,7 @@ class GlImageSinkDecoder:
             self._pipeline = None
             self._appsrc = None
             self._sink = None
-        self._current_sample = None
         self.is_available = False
-        self._gl_context_set = False
 
 
 class QtSHMMediaEngine:
@@ -382,14 +298,11 @@ class QtSHMMediaEngine:
         self._nal_counter = 0
 
         # 1. Initialize best available video decoder
-        if _HAS_QOPENGL:
-            self._hw_decoder = GlImageSinkDecoder(on_frame_callback=self._on_hw_decoded_frame)
-            if not self._hw_decoder.is_available:
-                logger.info(
-                    "ℹ️ [SHM Engine] GlImageSinkDecoder not available — falling back to GStreamerHwDecoder"
-                )
-                self._hw_decoder = GStreamerHwDecoder(self._on_hw_decoded_frame)
-        else:
+        self._hw_decoder = Qml6ZeroCopyDecoder(on_frame_callback=self._on_hw_decoded_frame)
+        if not self._hw_decoder.is_available:
+            logger.info(
+                "ℹ️ [SHM Engine] Qml6ZeroCopyDecoder not available — falling back to GStreamerHwDecoder"
+            )
             self._hw_decoder = GStreamerHwDecoder(self._on_hw_decoded_frame)
 
         # 2. PyAV CPU fallback decoder

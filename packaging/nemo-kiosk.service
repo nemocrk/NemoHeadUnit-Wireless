@@ -16,7 +16,8 @@ StandardError=journal
 SyslogIdentifier=nemo-kiosk
 WorkingDirectory=/home/nemo
 Environment=LIBSEAT_BACKEND=seatd
-Environment=XDG_SESSION_TYPE=wayland
+Environment=QT_QPA_PLATFORM=eglfs
+Environment=QT_QPA_EGLFS_ALWAYS_SET_MODE=1
 EnvironmentFile=-/etc/nemo-headunit/display.conf
 Nice=-10
 ExecStart=/opt/nemo-headunit/bin/nemo-headunit --kiosk-autostart

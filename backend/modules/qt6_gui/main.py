@@ -319,17 +319,37 @@ class Qt6GuiModule(BaseBackendModule):
         if not QApplication.instance():
             if os.environ.get("QT_WIDGETS_RHI") == "0":
                 del os.environ["QT_WIDGETS_RHI"]
+            os.environ.setdefault("LIBVA_DRIVER_NAME", "i965")
+            os.environ.setdefault("QT_MULTIMEDIA_FORCE_GL_TEXTURE_EXTERNAL_OES", "1")
             try:
                 from PyQt6.QtGui import QSurfaceFormat
                 fmt = QSurfaceFormat()
                 fmt.setDepthBufferSize(24)
                 fmt.setStencilBufferSize(8)
+                fmt.setAlphaBufferSize(0)
                 fmt.setSamples(0)
                 fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
                 fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
                 QSurfaceFormat.setDefaultFormat(fmt)
             except Exception as exc:
                 self.log.debug(f"QSurfaceFormat setup notice: {exc}")
+
+            try:
+                from PyQt6.QtQuick import QQuickWindow, QSGRendererInterface
+                QQuickWindow.setGraphicsApi(QSGRendererInterface.GraphicsApi.OpenGL)
+            except Exception as exc:
+                self.log.debug(f"QQuickWindow OpenGL graphics API notice: {exc}")
+
+            try:
+                import gi
+                gi.require_version("Gst", "1.0")
+                from gi.repository import Gst
+                Gst.init(None)
+                # Pre-instantiate qml6glsink to register QML types into Qt6 Scene Graph
+                _dummy_sink = Gst.ElementFactory.make("qml6glsink", None)
+            except Exception as exc:
+                self.log.debug(f"Gst qml6glsink pre-registration notice: {exc}")
+
             self.app = QApplication(sys.argv)
         else:
             self.app = QApplication.instance()

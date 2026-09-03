@@ -1,172 +1,61 @@
 """
-video_viewport.py — QOpenGLWidget (or QWidget fallback) for Low-Latency SHM Video Frame Rendering.
+video_viewport.py — QQuickWidget-based Zero-Copy Video Viewport for Android Auto Projected Stream.
 
-Renders decoded RGBA frames using one of two paths:
-  - GL path  : GlImageSinkDecoder shares EGL context -> glimagesink renders via paintGL() shader quad (zero CPU)
-  - RGBA path: GStreamerHwDecoder / PyAV bytes -> QPainter.drawImage (fallback when GL unavailable)
+Uses GStreamer Qt6 QML sink (qml6glsink + GstGLQt6VideoItem) for direct EGL/DMABuf zero-copy
+hardware scanout into the Qt6 Scene Graph.
 
-Intercepts mouse/touch events and emits normalized input coordinates for channel_manager.
+Intercepts mouse and multi-touch events and emits normalized coordinates for channel_manager.
 """
 
-import logging
+import os
+import sys
 import time
+import logging
+import tempfile
+import ctypes
+import ctypes.util
 from typing import Optional
+
 from PyQt6.QtWidgets import QWidget
+from PyQt6.QtCore import QEvent, QPointF, Qt, QUrl, QObject, pyqtSignal
 from PyQt6.QtGui import QEventPoint, QMouseEvent, QTouchEvent, QPainter, QImage, QColor
-from PyQt6.QtCore import QEvent, QPointF, Qt, pyqtSignal
 
 logger = logging.getLogger("qt6_gui.video_viewport")
 
-# ---------------------------------------------------------------------------
-# GL availability probe
-# ---------------------------------------------------------------------------
 try:
-    from PyQt6.QtOpenGLWidgets import QOpenGLWidget as _QOpenGLWidgetBase
-    from PyQt6.QtGui import QOpenGLContext
-    from OpenGL import GL as _GL
-    _HAS_QOPENGL = True
+    from PyQt6.QtQuickWidgets import QQuickWidget as _BaseViewport
+    from PyQt6.QtQuick import QQuickWindow, QSGRendererInterface
+    _HAS_QUICK = True
 except ImportError:
-    _QOpenGLWidgetBase = None
-    _HAS_QOPENGL = False
+    _BaseViewport = QWidget
+    _HAS_QUICK = False
 
 
-# ---------------------------------------------------------------------------
-# _GLMixin — mixed in only when QOpenGLWidget is importable
-# ---------------------------------------------------------------------------
+QML_VIEWPORT_CODE = """
+import QtQuick
+import org.freedesktop.gstreamer.Qt6GLVideoItem 1.0
 
-class _GLMixin:
+Rectangle {
+    id: root
+    anchors.fill: parent
+    color: "#000000"
+
+    GstGLQt6VideoItem {
+        id: videoItem
+        objectName: "videoItem"
+        anchors.fill: parent
+        smooth: true
+        antialiasing: false
+        opacity: 1.0
+    }
+}
+"""
+
+
+class VideoViewportWidget(_BaseViewport):
     """
-    OpenGL render methods mixed into VideoViewportWidget when QOpenGLWidget is available.
-    paintGL renders the GlImageSinkDecoder texture via a minimal fullscreen shader quad.
-    Falls back to QPainter (RGBA bytes) when no GL texture is ready.
-    """
-
-    # Inline GLSL — RGBA passthrough, Y-flipped for GL convention
-    # ponytail: minimal passthrough; upgrade to BT.601 YUV shader if color accuracy needed
-    _VERT_SRC = (
-        "attribute vec2 a_pos; varying vec2 v_uv;\n"
-        "void main(){\n"
-        "  gl_Position=vec4(a_pos,0.,1.);\n"
-        "  v_uv=(a_pos+1.)*.5;\n"
-        "  v_uv.y=1.-v_uv.y;\n"
-        "}"
-    )
-    _FRAG_SRC = (
-        "uniform sampler2D u_tex; varying vec2 v_uv;\n"
-        "void main(){ gl_FragColor=texture2D(u_tex,v_uv); }"
-    )
-
-    def initializeGL(self):
-        """Share Qt EGL context with GlImageSinkDecoder and set GL clear color."""
-        from OpenGL import GL
-        GL.glClearColor(0.05, 0.067, 0.09, 1.0)
-        if not (self._gl_decoder and self._gl_decoder.is_available):
-            return
-        try:
-            import ctypes
-            libegl = ctypes.CDLL("libEGL.so.1")
-            libegl.eglGetCurrentDisplay.restype = ctypes.c_void_p
-            libegl.eglGetCurrentContext.restype = ctypes.c_void_p
-            egl_dpy = libegl.eglGetCurrentDisplay()
-            egl_ctx = libegl.eglGetCurrentContext()
-            if egl_dpy and egl_ctx:
-                self._gl_decoder.set_gl_context(int(egl_dpy), int(egl_ctx))
-                logger.info(
-                    f"🎬 [VideoViewport] EGL context shared with GlImageSinkDecoder (dpy={egl_dpy}, ctx={egl_ctx})"
-                )
-            else:
-                logger.warning(
-                    f"[VideoViewport] eglGetCurrentDisplay/Context returned NULL ({egl_dpy}, {egl_ctx}) — GL decoder disabled"
-                )
-                self._gl_decoder = None
-        except Exception as exc:
-            logger.warning(f"[VideoViewport] initializeGL failed: {exc} — GL decoder disabled")
-            self._gl_decoder = None
-
-    def _compile_shader(self):
-        """Compile fullscreen quad shader. Called lazily on first paintGL with a valid texture."""
-        from OpenGL import GL
-        import numpy as np
-        vert = GL.glCreateShader(GL.GL_VERTEX_SHADER)
-        GL.glShaderSource(vert, self._VERT_SRC)
-        GL.glCompileShader(vert)
-        frag = GL.glCreateShader(GL.GL_FRAGMENT_SHADER)
-        GL.glShaderSource(frag, self._FRAG_SRC)
-        GL.glCompileShader(frag)
-        prog = GL.glCreateProgram()
-        GL.glAttachShader(prog, vert)
-        GL.glAttachShader(prog, frag)
-        GL.glLinkProgram(prog)
-        GL.glDeleteShader(vert)
-        GL.glDeleteShader(frag)
-        verts = np.array([-1, -1, 1, -1, -1, 1, 1, 1], dtype=np.float32)
-        vbo = GL.glGenBuffers(1)
-        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, vbo)
-        GL.glBufferData(GL.GL_ARRAY_BUFFER, verts.nbytes, verts, GL.GL_STATIC_DRAW)
-        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-        self._shader_program = prog
-        self._quad_vbo = vbo
-
-    def paintGL(self):
-        """
-        GL render path: pull texture from GlImageSinkDecoder and draw with shader quad.
-        Falls back to QPainter RGBA path if no texture is available yet.
-        """
-        from OpenGL import GL
-        tex_id = 0
-        if self._gl_decoder and self._gl_decoder.is_available:
-            tex_id = self._gl_decoder.get_latest_texture_id()
-        GL.glClear(GL.GL_COLOR_BUFFER_BIT)
-        if tex_id:
-            if not hasattr(self, "_logged_gl_render"):
-                self._logged_gl_render = True
-                logger.info(f"🎬 [VideoViewport] Rendering hardware GL frames (texture_id={tex_id})")
-            if self._shader_program is None:
-                self._compile_shader()
-            GL.glUseProgram(self._shader_program)
-            GL.glActiveTexture(GL.GL_TEXTURE0)
-            GL.glBindTexture(GL.GL_TEXTURE_2D, tex_id)
-            GL.glUniform1i(GL.glGetUniformLocation(self._shader_program, "u_tex"), 0)
-            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self._quad_vbo)
-            loc = GL.glGetAttribLocation(self._shader_program, "a_pos")
-            GL.glEnableVertexAttribArray(loc)
-            GL.glVertexAttribPointer(loc, 2, GL.GL_FLOAT, False, 0, None)
-            GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
-            GL.glDisableVertexAttribArray(loc)
-            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
-            GL.glUseProgram(0)
-        elif (
-            self.current_frame_data
-            and 0 < self.frame_width <= 4096
-            and 0 < self.frame_height <= 4096
-            and len(self.current_frame_data) == self.frame_width * self.frame_height * 4
-        ):
-            painter = QPainter(self)
-            img = QImage(
-                self.current_frame_data,
-                self.frame_width, self.frame_height,
-                self.frame_width * 4,
-                QImage.Format.Format_RGBA8888,
-            )
-            painter.drawImage(self.rect(), img)
-            painter.end()
-
-    def resizeGL(self, w: int, h: int):
-        from OpenGL import GL
-        GL.glViewport(0, 0, w, h)
-
-
-# ---------------------------------------------------------------------------
-# VideoViewportWidget — QOpenGLWidget + _GLMixin when GL available, QWidget otherwise
-# ---------------------------------------------------------------------------
-
-_bases = (_GLMixin, _QOpenGLWidgetBase) if _HAS_QOPENGL else (QWidget,)
-
-
-class VideoViewportWidget(*_bases):
-    """
-    High-Performance Video Render Canvas for Android Auto Projected Stream.
-    Renders decoded RGBA frames directly from shared memory with multi-touch support.
+    High-Performance Zero-Copy Video Render Canvas for Android Auto Projected Stream.
+    Embeds GstGLQt6VideoItem in Qt6 Scene Graph via QQuickWidget.
     """
 
     # Emits full touch event dict for AA input channel (action, action_index, pointers)
@@ -180,57 +69,144 @@ class VideoViewportWidget(*_bases):
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
-        self.sample_interval_ms = sample_interval_ms  # Throttling interval for DRAG events (default 30ms / ~33Hz)
+        self.sample_interval_ms = sample_interval_ms
         self._last_drag_time = 0.0
 
         self.frame_width = 1280
-        self.frame_height = 720
+        self.frame_height = 800
         self.current_frame_data: Optional[bytes] = None
 
         self.margin_width: int = 0
         self.margin_height: int = 0
         self.stretch_to_fill: bool = True
 
-        # GL decoder — set via attach_gl_decoder() after SHM engine init in main.py
+        self._gst_sink = None
         self._gl_decoder = None
-        self._shader_program = None  # compiled lazily on first paintGL with texture
-        self._quad_vbo = None
+        self._qml_temp_path = None
+        self._attached = False
+
+        if _HAS_QUICK and isinstance(self, _BaseViewport):
+            self._init_qml_scene()
+
+    def _init_qml_scene(self) -> None:
+        """Initialize QQuickWidget Scene with GstGLQt6VideoItem."""
+        try:
+            from PyQt6.QtQuickWidgets import QQuickWidget
+            if isinstance(self, QQuickWidget):
+                self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
+
+            with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False) as f:
+                f.write(QML_VIEWPORT_CODE)
+                self._qml_temp_path = f.name
+
+            self.setSource(QUrl.fromLocalFile(self._qml_temp_path))
+            logger.info("🎬 [VideoViewport] QML Scene loaded successfully with GstGLQt6VideoItem")
+        except Exception as exc:
+            logger.warning(f"[VideoViewport] QML scene init failed: {exc}")
 
     def attach_gl_decoder(self, decoder) -> None:
-        """Wire a GlImageSinkDecoder to this viewport. Called from main.py after SHM engine init."""
+        """Wire a video decoder to this viewport. Called from main.py after SHM engine init."""
         self._gl_decoder = decoder
+        if hasattr(decoder, "attach_viewport"):
+            decoder.attach_viewport(self)
+
+    def attach_gstreamer_sink(self, sink) -> None:
+        """Attach a GStreamer qml6glsink element to the embedded GstGLQt6VideoItem."""
+        self._gst_sink = sink
+        self._try_bind_sink()
+
+    def _try_bind_sink(self) -> None:
+        if self._attached or not self._gst_sink:
+            return
+
+        root = getattr(self, "rootObject", lambda: None)()
+        if not root:
+            return
+
+        video_item = root.findChild(QObject, "videoItem")
+        if not video_item:
+            return
+
+        def _do_bind():
+            if self._attached or not self._gst_sink:
+                return
+            try:
+                cpp_ptr = None
+                try:
+                    import PyQt6.sip as sip
+                    cpp_ptr = sip.unwrapinstance(video_item)
+                except Exception:
+                    pass
+
+                if not cpp_ptr:
+                    try:
+                        from shiboken6 import Shiboken
+                        cpp_ptr = Shiboken.getCppPointer(video_item)[0]
+                    except Exception:
+                        pass
+
+                if cpp_ptr and self._gst_sink:
+                    libgobject_path = ctypes.util.find_library("gobject-2.0") or "libgobject-2.0.so.0"
+                    libgobject = ctypes.CDLL(libgobject_path)
+                    libgobject.g_object_set.argtypes = [
+                        ctypes.c_void_p,
+                        ctypes.c_char_p,
+                        ctypes.c_void_p,
+                        ctypes.c_void_p,
+                    ]
+                    libgobject.g_object_set.restype = None
+                    libgobject.g_object_set(hash(self._gst_sink), b"widget", ctypes.c_void_p(cpp_ptr), None)
+                    self._attached = True
+                    logger.info(
+                        f"🎬 [VideoViewport] qml6glsink attached to GstGLQt6VideoItem (ptr={hex(cpp_ptr)}) — Zero-Copy ACTIVE!"
+                    )
+            except Exception as exc:
+                logger.error(f"[VideoViewport] Error attaching GstGLQt6VideoItem widget: {exc}")
+
+        # Check scene graph readiness
+        qw = getattr(self, "quickWindow", lambda: None)()
+        if qw and hasattr(qw, "isSceneGraphInitialized") and qw.isSceneGraphInitialized():
+            _do_bind()
+        elif qw and hasattr(qw, "sceneGraphInitialized"):
+            qw.sceneGraphInitialized.connect(_do_bind)
+        else:
+            _do_bind()
 
     def update_frame(self, frame_bytes: bytes, width: int, height: int):
-        """Update active frame. In GL mode, triggers paintGL redraw."""
-        if self._gl_decoder and self._gl_decoder.is_available:
-            if width > 0 and height > 0:
-                self.frame_width = width
-                self.frame_height = height
-            self.update()  # Triggers paintGL redraw for the new hardware frame
+        """Update active frame dimensions or fallback software buffer."""
+        if width > 0 and height > 0:
+            self.frame_width = width
+            self.frame_height = height
+
+        if self._attached:
+            # Direct DMABuf -> qml6glsink -> Qt Scene Graph handles redraw automatically
             return
-        if not frame_bytes or width <= 0 or height <= 0:
-            return
-        self.current_frame_data = frame_bytes
-        self.frame_width = width
-        self.frame_height = height
-        self.update()  # Triggers paintEvent / paintGL redraw
+
+        if frame_bytes and len(frame_bytes) > 0:
+            self.current_frame_data = frame_bytes
+            self.update()
+
+    def cleanupGL(self) -> None:
+        """Release temporary QML resources and reset attachment state."""
+        self._attached = False
+        self._gst_sink = None
+        if self._qml_temp_path and os.path.exists(self._qml_temp_path):
+            try:
+                os.unlink(self._qml_temp_path)
+            except Exception:
+                pass
+            self._qml_temp_path = None
+
+    def set_margins(self, margin_width: int = 0, margin_height: int = 0, stretch_to_fill: bool = True) -> None:
+        """Configure aspect margins and scaling policy."""
+        self.margin_width = margin_width
+        self.margin_height = margin_height
+        self.stretch_to_fill = stretch_to_fill
 
     def paintEvent(self, event):
-        """
-        RGBA fallback render path — only used when base class is QWidget (no GL available).
-        When QOpenGLWidget is the base class, delegate to super().paintEvent(event) which invokes paintGL().
-        """
-        if _HAS_QOPENGL:
-            super().paintEvent(event)
-            return
-
-        painter = QPainter(self)
-        if (
-            self.current_frame_data
-            and 0 < self.frame_width <= 4096
-            and 0 < self.frame_height <= 4096
-            and len(self.current_frame_data) == self.frame_width * self.frame_height * 4
-        ):
+        """Fallback paint event when QQuickWidget is unavailable."""
+        if not _HAS_QUICK and self.current_frame_data and self.frame_width > 0 and self.frame_height > 0:
+            painter = QPainter(self)
             img = QImage(
                 self.current_frame_data,
                 self.frame_width,
@@ -239,21 +215,9 @@ class VideoViewportWidget(*_bases):
                 QImage.Format.Format_RGBA8888,
             )
             painter.drawImage(self.rect(), img)
+            painter.end()
         else:
-            painter.fillRect(self.rect(), QColor(13, 17, 23))
-        painter.end()
-
-    def cleanupGL(self):
-        """Safely release frame and GL resources."""
-        self.current_frame_data = None
-        self._shader_program = None
-        self._quad_vbo = None
-
-    def set_margins(self, margin_width: int = 0, margin_height: int = 0, stretch_to_fill: bool = True) -> None:
-        """Configure aspect margins and scaling policy."""
-        self.margin_width = margin_width
-        self.margin_height = margin_height
-        self.stretch_to_fill = stretch_to_fill
+            super().paintEvent(event)
 
     # ------------------------------------------------------------------
     # Input Event Interception (Multi-Touch & Mouse)
@@ -317,32 +281,24 @@ class VideoViewportWidget(*_bases):
             else:
                 released_points.append({"x": px, "y": py, "pointer_id": pid})
 
-        # Determine Android Auto Touch Action:
-        # 0 = PRESS, 1 = RELEASE, 2 = DRAG, 5 = POINTER_DOWN, 6 = POINTER_UP
         if not active_pointers:
-            # Last pointer released -> RELEASE (1)
             action = 1
             action_index = 0
             pointers_payload = released_points if released_points else [{"x": 0, "y": 0, "pointer_id": 0}]
         elif pressed_indices:
             if len(active_pointers) == 1 and pressed_indices[0] == 0:
-                # First pointer pressed -> PRESS (0)
                 action = 0
                 action_index = 0
             else:
-                # Secondary pointer pressed -> POINTER_DOWN (5)
                 action = 5
                 action_index = pressed_indices[0]
             pointers_payload = active_pointers
         elif released_points:
-            # Non-last pointer released -> POINTER_UP (6)
-            # Android MotionEvent expects the releasing pointer included at action_index
             action = 6
             releasing_pointer = released_points[0]
             action_index = len(active_pointers)
             pointers_payload = list(active_pointers) + [releasing_pointer]
         else:
-            # Moving / Dragging -> DRAG (2)
             now = time.monotonic()
             if (now - self._last_drag_time) * 1000.0 < self.sample_interval_ms:
                 event.accept()
@@ -393,5 +349,3 @@ class VideoViewportWidget(*_bases):
             "action_index": 0,
             "pointers": [{"x": x, "y": y, "pointer_id": 0}],
         })
-
-

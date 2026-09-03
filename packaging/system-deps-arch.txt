@@ -42,6 +42,7 @@ gst-plugins-good
 gst-plugins-bad
 gst-plugins-ugly
 gst-plugin-va
+gst-plugin-qml6
 gst-libav
 python-gobject
 
@@ -51,6 +52,7 @@ glib2
 # OpenGL & EGL runtime
 libglvnd
 mesa
+qt6-declarative
 qt6-wayland
 xcb-util-cursor
 egl-wayland
