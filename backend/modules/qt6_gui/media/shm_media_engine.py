@@ -187,6 +187,7 @@ class GlImageSinkDecoder:
     def __init__(self, on_frame_callback: Callable[[bytes, int, int, int], None]):
         self.on_frame_callback = on_frame_callback
         self.is_available = False
+        self.frames_decoded = 0
         self._pipeline = None
         self._appsrc = None
         self._sink = None
@@ -219,7 +220,7 @@ class GlImageSinkDecoder:
                 logger.warning(f"[GlImageSinkDecoder] Could not load libgstgl: {e}")
 
             # Verify all required elements exist before building pipeline
-            required = ["vah264dec", "vapostproc", "glupload", "appsink", "h264parse"]
+            required = ["vah264dec", "vapostproc", "glupload", "glcolorconvert", "appsink", "h264parse"]
             missing = [e for e in required if Gst.ElementFactory.find(e) is None]
             if missing:
                 logger.info(
@@ -234,7 +235,8 @@ class GlImageSinkDecoder:
                 "! vah264dec "
                 "! vapostproc "
                 "! glupload "
-                "! appsink name=sink emit-signals=true max-buffers=1 drop=true"
+                "! glcolorconvert "
+                "! appsink name=sink emit-signals=true max-buffers=1 drop=true caps=video/x-raw(memory:GLMemory),format=RGBA"
             )
             self._pipeline = Gst.parse_launch(pipe_str)
             self._appsrc = self._pipeline.get_by_name("src")
@@ -279,6 +281,7 @@ class GlImageSinkDecoder:
                         if tex_id:
                             self._latest_texture_id = tex_id
                 self._current_sample = sample
+                self.frames_decoded += 1
                 if self.on_frame_callback:
                     self.on_frame_callback(b"", 1280, 720, 0)
         except Exception as e:
