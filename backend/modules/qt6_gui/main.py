@@ -122,6 +122,7 @@ class GuiEventBridge(QObject):
     media_metadata_notify = pyqtSignal(dict)
     media_playback_status_notify = pyqtSignal(dict)
     phone_status_notify = pyqtSignal(dict)
+    audio_focus_notify = pyqtSignal(dict)
     notification_post = pyqtSignal(dict)
     notification_dismiss = pyqtSignal(dict)
     media_tree_updated = pyqtSignal(dict)
@@ -178,6 +179,10 @@ class GuiEventBridge(QObject):
     @pyqtSlot(dict)
     def on_phone_status_notify(self, data: dict):
         self._module._on_phone_status_notify(data)
+
+    @pyqtSlot(dict)
+    def on_audio_focus_notify(self, data: dict):
+        self._module._on_audio_focus_notify(data)
 
     @pyqtSlot(dict)
     def on_notification_post(self, data: dict):
@@ -365,6 +370,7 @@ class Qt6GuiModule(BaseBackendModule):
         self.bridge.media_metadata_notify.connect(self.bridge.on_media_metadata_notify, Qt.ConnectionType.QueuedConnection)
         self.bridge.media_playback_status_notify.connect(self.bridge.on_media_playback_status_notify, Qt.ConnectionType.QueuedConnection)
         self.bridge.phone_status_notify.connect(self.bridge.on_phone_status_notify, Qt.ConnectionType.QueuedConnection)
+        self.bridge.audio_focus_notify.connect(self.bridge.on_audio_focus_notify, Qt.ConnectionType.QueuedConnection)
         self.bridge.notification_post.connect(self.bridge.on_notification_post, Qt.ConnectionType.QueuedConnection)
         self.bridge.notification_dismiss.connect(self.bridge.on_notification_dismiss, Qt.ConnectionType.QueuedConnection)
         self.bridge.media_tree_updated.connect(self.bridge.on_media_tree_updated, Qt.ConnectionType.QueuedConnection)
@@ -380,6 +386,7 @@ class Qt6GuiModule(BaseBackendModule):
         self.subscribe("media.video.transport_frame_shm", lambda top, pay=None: _bridge_emit(self.bridge.shm_video_notify, top, pay))
         self.subscribe("media.audio.frame_shm", lambda top, pay=None: _bridge_emit(self.bridge.shm_audio_notify, top, pay))
         self.subscribe("media.audio.channel_configured", lambda top, pay=None: _bridge_emit(self.bridge.audio_channel_configured, top, pay))
+        self.subscribe("media.audio.focus", lambda top, pay=None: _bridge_emit(self.bridge.audio_focus_notify, top, pay))
         self.subscribe("media.audio.mic_control", lambda top, pay=None: _bridge_emit(self.bridge.mic_control_notify, top, pay))
         self.subscribe("video.stream_start", self._on_stream_start)
         self.subscribe("video.stream_stop", self._on_stream_stop)
@@ -626,6 +633,16 @@ class Qt6GuiModule(BaseBackendModule):
                 media_source=source,
                 position_seconds=pos,
             )
+            if self.audio_engine:
+                is_paused = state in (1, 2)  # 1=STOPPED, 2=PAUSED
+                self.audio_engine.set_paused(is_paused)
+
+    def _on_audio_focus_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.audio_engine:
+            is_paused = bool(data.get("is_paused", False))
+            ch_id = data.get("channel_id")
+            self.audio_engine.set_paused(is_paused, channel_id=ch_id if ch_id and ch_id != 0 else None)
 
     def _on_phone_status_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload

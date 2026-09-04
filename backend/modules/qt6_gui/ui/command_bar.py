@@ -171,8 +171,13 @@ class AudioBufferPill(QFrame):
         # Relative A/V Drift (positive = video trailing audio)
         av_drift = v_lag - a_lag
 
+        is_paused = app_buf.get("is_paused", False)
+
         # Color-coded health
-        if underruns > 0 and is_buffering:
+        if is_paused:
+            status_color = "#8b949e"  # Gray / Neutral (Paused)
+            state_text = "PAUSED"
+        elif underruns > 0 and is_buffering:
             status_color = "#f85149"  # Red (Starved / Underrun)
             state_text = f"UNDERRUN ({underruns})"
         elif is_buffering and app_ms < app_target_ms:

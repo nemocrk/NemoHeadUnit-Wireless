@@ -133,6 +133,13 @@ class ControlChannelHandler:
 
         self.log.info(f"ControlChannel (ch0): Responding AudioFocusResponse (state={resp.audio_focus_state}, granted=True)")
         await self.manager.send_wire_frame(0, MSG.AUDIO_FOCUS_RESPONSE, resp.SerializeToString(), encrypted=True)
+        is_paused = (resp.audio_focus_state == AudioFocusState.LOSS)
+        self.manager.publish("media.audio.focus", {
+            "channel_id": 0,
+            "focus_type": focus_type,
+            "focus_state": resp.audio_focus_state,
+            "is_paused": is_paused,
+        })
 
     async def _handle_navigation_focus_request(self, body: bytes) -> None:
         req_type = NavigationFocusType.NAV_FOCUS_PROJECTED

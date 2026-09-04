@@ -151,6 +151,13 @@ class AudioChannelHandler:
         focus_resp.granted = True
         self.log.info(f"AudioChannel (ch{channel_id}): Responding AudioFocusResponse(state={focus_resp.audio_focus_state}, granted=True)")
         await self.manager.send_wire_frame(channel_id, MSG.AUDIO_FOCUS_RESPONSE, focus_resp.SerializeToString(), encrypted=True)
+        is_paused = (focus_resp.audio_focus_state == AudioFocusState.LOSS)
+        self.manager.publish("media.audio.focus", {
+            "channel_id": channel_id,
+            "focus_type": focus_type,
+            "focus_state": focus_resp.audio_focus_state,
+            "is_paused": is_paused,
+        })
 
     async def process_shm_frame(self, channel_id: int, message_id: int, offset: int, ts_us: int, payload_len: int) -> None:
         # Re-transmit pointer directly to GUI zero-copy

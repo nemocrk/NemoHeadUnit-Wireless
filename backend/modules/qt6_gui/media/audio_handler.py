@@ -84,6 +84,7 @@ class AudioPcmStream(QIODevice):
         self._channels = channels
         self._prebuffer_ms = prebuffer_ms
         self._underrun_count = 0
+        self._is_paused: bool = False
         if prebuffer_ms <= 0:
             self._prebuffer_bytes = 0
             self._is_buffering = False
@@ -125,6 +126,12 @@ class AudioPcmStream(QIODevice):
             if self._is_buffering and len(self._buffer) >= self._prebuffer_bytes:
                 self._is_buffering = False
 
+    def set_paused(self, paused: bool):
+        with self._lock:
+            self._is_paused = bool(paused)
+            if self._is_paused:
+                self._is_buffering = False
+
     def readData(self, max_len: int) -> bytes:
         """Called synchronously by QAudioSink to pull PCM samples at DAC clock speed."""
         if max_len <= 0:
@@ -142,10 +149,12 @@ class AudioPcmStream(QIODevice):
                 del self._buffer[:take]
                 if len(self._buffer) == 0:
                     self._is_buffering = True
-                    self._underrun_count += 1
+                    if not self._is_paused:
+                        self._underrun_count += 1
                 return chunk
             self._is_buffering = True
-            self._underrun_count += 1
+            if not self._is_paused:
+                self._underrun_count += 1
             return b""
 
     def writeData(self, data: bytes) -> int:
@@ -168,6 +177,7 @@ class AudioPcmStream(QIODevice):
                 "prebuffer_ms": self._prebuffer_ms,
                 "is_buffering": self._is_buffering,
                 "underruns": self._underrun_count,
+                "is_paused": self._is_paused,
             }
 
 
@@ -208,6 +218,7 @@ class DynamicChannelAudioSink(QObject):
         self._app_lock = threading.Lock()
         self._is_buffering: bool = True
         self._underrun_count: int = 0
+        self._is_paused: bool = False
 
         self._start_signal.connect(self._do_start, Qt.ConnectionType.QueuedConnection)
         self._stop_signal.connect(self._do_stop, Qt.ConnectionType.QueuedConnection)
@@ -231,6 +242,17 @@ class DynamicChannelAudioSink(QObject):
         # Audio Dump (/tmp/nemo_audio_ch{id}_{rate}hz.wav when NEMO_AUDIO_DUMP=1)
         self._dump_wav = None
         self._dump_enabled = os.environ.get("NEMO_AUDIO_DUMP") == "1"
+
+    @property
+    def is_paused(self) -> bool:
+        with self._app_lock:
+            return self._is_paused
+
+    def set_paused(self, paused: bool):
+        with self._app_lock:
+            self._is_paused = bool(paused)
+            if self._is_paused:
+                self._is_buffering = False
 
     def _init_aac_decoder(self):
         """Initialize per-channel PyAV FFmpeg AAC decoder targeting channel sample rate and layout."""
@@ -321,7 +343,8 @@ class DynamicChannelAudioSink(QObject):
             if avail <= 0:
                 if self.audio_sink and self.audio_sink.bytesFree() >= self.audio_sink.bufferSize():
                     self._is_buffering = True
-                    self._underrun_count += 1
+                    if not self._is_paused:
+                        self._underrun_count += 1
                 return
 
             to_write = min(bytes_free, avail)
@@ -531,6 +554,7 @@ class DynamicChannelAudioSink(QObject):
             app_len = len(self._app_buffer)
             is_buf = self._is_buffering
             underruns = self._underrun_count
+            is_paused = self._is_paused
 
         app_data = {
             "buffered_bytes": app_len,
@@ -539,6 +563,7 @@ class DynamicChannelAudioSink(QObject):
             "prebuffer_ms": self.PREBUFFER_MS,
             "is_buffering": is_buf,
             "underruns": underruns,
+            "is_paused": is_paused,
         }
 
         return {
@@ -553,6 +578,8 @@ class DynamicChannelAudioSink(QObject):
             "app_buffer": app_data,
             "sink_buffer": sink_data,
         }
+
+    get_diagnostics = get_metrics
 
     def close(self):
         """Release audio sink and decoder resources."""
@@ -601,6 +628,15 @@ class QtAudioEngine:
                 sink.target_device = self.target_output_sink
                 sink._close_sink()
         logger.info(f"QtAudioEngine target output sink set to '{self.target_output_sink}'")
+
+    def set_paused(self, paused: bool, channel_id: Optional[int] = None):
+        """Pause or unpause playback underrun detection across channels."""
+        with self._sinks_lock:
+            if channel_id is not None and channel_id in self.sinks:
+                self.sinks[channel_id].set_paused(paused)
+            else:
+                for sink in self.sinks.values():
+                    sink.set_paused(paused)
 
     def set_input_source(self, source_name: str):
         """Reconfigure target audio input source for microphone capture."""
