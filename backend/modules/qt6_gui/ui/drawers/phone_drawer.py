@@ -26,12 +26,18 @@ class PhoneDrawerWidget(QWidget):
     close_clicked = pyqtSignal()
     call_requested = pyqtSignal(str)  # Phone number or contact name to dial
     call_action_triggered = pyqtSignal(str)
+    dtmf_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setProperty("class", "drawer-card")
         self.setMinimumWidth(380)
+
+        self.is_in_call = False
+        self._all_contacts: list[dict] = []
+        self._all_favorites: list[dict] = []
+        self._all_recents: list[dict] = []
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(16, 16, 16, 16)
@@ -87,20 +93,45 @@ class PhoneDrawerWidget(QWidget):
         # Tab 1: Recents
         self.recents_list = QListWidget()
         self.recents_list.setStyleSheet("background: transparent; border: none; color: #c9d1d9;")
-        self._populate_recents()
+        self.recents_list.itemClicked.connect(self._on_item_clicked)
         self.tabs.addTab(self.recents_list, "Recents")
 
         # Tab 2: Favorites
         self.favorites_list = QListWidget()
         self.favorites_list.setStyleSheet("background: transparent; border: none; color: #c9d1d9;")
-        self._populate_favorites()
+        self.favorites_list.itemClicked.connect(self._on_item_clicked)
         self.tabs.addTab(self.favorites_list, "Favorites")
 
-        # Tab 3: Contacts
+        # Tab 3: Contacts with Search Bar
+        contacts_tab_widget = QWidget()
+        contacts_tab_layout = QVBoxLayout(contacts_tab_widget)
+        contacts_tab_layout.setContentsMargins(4, 8, 4, 4)
+        contacts_tab_layout.setSpacing(8)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 Search contacts...")
+        self.search_input.setStyleSheet("""
+            QLineEdit {
+                background: #161b22;
+                color: #f0f6fc;
+                font-size: 13px;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 6px 10px;
+            }
+            QLineEdit:focus {
+                border-color: #58a6ff;
+            }
+        """)
+        self.search_input.textChanged.connect(self._filter_contacts)
+        contacts_tab_layout.addWidget(self.search_input)
+
         self.contacts_list = QListWidget()
         self.contacts_list.setStyleSheet("background: transparent; border: none; color: #c9d1d9;")
-        self._populate_contacts()
-        self.tabs.addTab(self.contacts_list, "Contacts")
+        self.contacts_list.itemClicked.connect(self._on_item_clicked)
+        contacts_tab_layout.addWidget(self.contacts_list)
+
+        self.tabs.addTab(contacts_tab_widget, "Contacts")
 
         # Tab 4: Keypad / Dialer
         keypad_widget = self._create_keypad()
@@ -108,42 +139,63 @@ class PhoneDrawerWidget(QWidget):
 
         self.layout.addWidget(self.tabs)
 
-    def _populate_recents(self):
-        sample_recents = [
-            ("Loredana Di Lillo", "+39 349 332 2591", "Today, 17:15", "incoming"),
-            ("Home", "+39 02 1234567", "Yesterday", "outgoing"),
-            ("Work Office", "+39 02 7654321", "Sep 2", "missed"),
-        ]
-        for name, num, ts, kind in sample_recents:
-            item = QListWidgetItem(f"{name} ({num})\n  {ts} • {kind.capitalize()}")
+        # Load initial data from PBAP cache or synthetics
+        self._load_initial_pbap_data()
+
+    def _load_initial_pbap_data(self):
+        try:
+            from shared.hardware.bluez_pbap import BlueZPBAPClient
+            client = BlueZPBAPClient()
+            self.set_contacts(client.get_contacts())
+            self.set_favorites(client.get_favorites())
+            self.set_recents(client.get_recents())
+        except Exception:
+            # Fallback
+            self.set_contacts([
+                {"name": "Alice Rossi", "primary_phone": "+39 333 111 2222", "favorite": False},
+                {"name": "Bob Bianchi", "primary_phone": "+39 340 333 4444", "favorite": False},
+                {"name": "Emergency Roadside", "primary_phone": "+39 800 123 456", "favorite": True},
+            ])
+
+    def set_contacts(self, contacts: list[dict]):
+        self._all_contacts = list(contacts)
+        self._filter_contacts(self.search_input.text() if hasattr(self, "search_input") else "")
+
+    def _filter_contacts(self, query: str = ""):
+        self.contacts_list.clear()
+        q = (query or "").lower().strip()
+        for c in self._all_contacts:
+            name = c.get("name", "Unknown")
+            phone = c.get("primary_phone", "")
+            if not q or q in name.lower() or q in phone:
+                item = QListWidgetItem(f"👤 {name}\n   {phone}")
+                item.setData(Qt.ItemDataRole.UserRole, phone)
+                self.contacts_list.addItem(item)
+
+    def set_favorites(self, favorites: list[dict]):
+        self._all_favorites = list(favorites)
+        self.favorites_list.clear()
+        for c in self._all_favorites:
+            name = c.get("name", "Unknown")
+            phone = c.get("primary_phone", "")
+            item = QListWidgetItem(f"★ {name}\n   {phone}")
+            item.setData(Qt.ItemDataRole.UserRole, phone)
+            self.favorites_list.addItem(item)
+
+    def set_recents(self, recents: list[dict]):
+        self._all_recents = list(recents)
+        self.recents_list.clear()
+        for r in self._all_recents:
+            name = r.get("name", "Unknown")
+            num = r.get("number", "")
+            ts = r.get("timestamp", "")
+            kind = r.get("call_type", "CALL").capitalize()
+            item = QListWidgetItem(f"{name} ({num})\n   {ts} • {kind}")
             item.setData(Qt.ItemDataRole.UserRole, num)
             self.recents_list.addItem(item)
-        self.recents_list.itemClicked.connect(self._on_item_clicked)
 
-    def _populate_favorites(self):
-        sample_favs = [
-            ("Loredana Di Lillo", "+39 349 332 2591"),
-            ("Home", "+39 02 1234567"),
-            ("Emergency", "112"),
-        ]
-        for name, num in sample_favs:
-            item = QListWidgetItem(f"★ {name}\n  {num}")
-            item.setData(Qt.ItemDataRole.UserRole, num)
-            self.favorites_list.addItem(item)
-        self.favorites_list.itemClicked.connect(self._on_item_clicked)
-
-    def _populate_contacts(self):
-        sample_contacts = [
-            ("Alice Rossi", "+39 333 111 2222"),
-            ("Bob Bianchi", "+39 340 333 4444"),
-            ("Emergency Roadside", "+39 800 123 456"),
-            ("Loredana Di Lillo", "+39 349 332 2591"),
-        ]
-        for name, num in sample_contacts:
-            item = QListWidgetItem(f"👤 {name}\n  {num}")
-            item.setData(Qt.ItemDataRole.UserRole, num)
-            self.contacts_list.addItem(item)
-        self.contacts_list.itemClicked.connect(self._on_item_clicked)
+    def set_in_call(self, in_call: bool):
+        self.is_in_call = in_call
 
     def _on_item_clicked(self, item: QListWidgetItem):
         number = item.data(Qt.ItemDataRole.UserRole)
@@ -231,6 +283,8 @@ class PhoneDrawerWidget(QWidget):
 
     def _append_digit(self, char: str):
         self.dial_display.setText(self.dial_display.text() + char)
+        if self.is_in_call:
+            self.dtmf_requested.emit(char)
 
     def _backspace_digit(self):
         txt = self.dial_display.text()

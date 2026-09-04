@@ -28,6 +28,7 @@ from .drawers.settings_drawer import SettingsDrawerWidget
 from .media_card_widget import MediaCardWidget
 from .nav_card_widget import NavCardWidget
 from .notification_widget import NotificationToast, NotificationCardWidget
+from .phone_card_widget import PhoneCardWidget
 from .phone_call_widget import PhoneCallWidget
 from .toast_notification import ToastNotificationWidget
 from .video_viewport import VideoViewportWidget
@@ -89,10 +90,11 @@ class MainWindow(QMainWindow):
         self.nav_widget = NavCardWidget(self.disconnected_screen)
         self.media_widget = MediaCardWidget(self.disconnected_screen)
         self.phone_call_widget = PhoneCallWidget(self.disconnected_screen)
-        self.notification_card = NotificationCardWidget(self.disconnected_screen)
+        self.phone_card = PhoneCardWidget(self.disconnected_screen)
+        self.notification_card = self.phone_card
 
         self.phone_call_widget.hide()
-        self.notification_card.hide()
+        self.phone_card.hide()
 
         self.has_active_nav = False
         self.has_active_media = False
@@ -118,6 +120,8 @@ class MainWindow(QMainWindow):
         self.settings_drawer = SettingsDrawerWidget(self.central_widget)
         self.logs_drawer = LogsDrawerWidget(self.central_widget)
         self.diagnostics_drawer = DiagnosticsDrawerWidget(self.central_widget)
+        for d in (self.phone_drawer, self.bluetooth_drawer, self.settings_drawer, self.logs_drawer, self.diagnostics_drawer):
+            d.hide()
 
         self._connect_signals()
 
@@ -152,6 +156,9 @@ class MainWindow(QMainWindow):
         # Phone signals
         self.phone_drawer.call_action_triggered.connect(self.phone_action_requested.emit)
         self.phone_call_widget.action_triggered.connect(self.phone_action_requested.emit)
+        self.phone_card.open_drawer_requested.connect(lambda: self._toggle_drawer(self.phone_drawer))
+        self.phone_card.call_requested.connect(self.phone_action_requested.emit)
+        self.phone_card.call_action_triggered.connect(self.phone_action_requested.emit)
         self.command_bar.call_action_triggered.connect(self.phone_action_requested.emit)
 
         # Clock Home Screen signals
@@ -240,9 +247,11 @@ class MainWindow(QMainWindow):
             self.arc_menu.collapse()
         for drawer in (self.phone_drawer, self.bluetooth_drawer, self.settings_drawer, self.logs_drawer, self.diagnostics_drawer):
             if drawer == target_drawer:
-                drawer.setVisible(not drawer.isVisible())
-                if drawer.isVisible():
+                if drawer.isHidden():
+                    drawer.show()
                     drawer.raise_()
+                else:
+                    drawer.hide()
             else:
                 drawer.hide()
 
@@ -319,25 +328,25 @@ class MainWindow(QMainWindow):
             self.clock_widget.setGeometry((w - clock_w) // 2, margin_y, clock_w, avail_h)
             self.media_widget.hide()
             self.nav_widget.hide()
-            self.notification_card.hide()
+            self.phone_card.hide()
             self.phone_call_widget.hide()
             return
 
         col_w = (avail_w - 24) // 2
         row_h = (avail_h - 24) // 2
 
-        # 1. Right Column: Media Card (Top) & Notification/Nav Card (Bottom)
+        # 1. Right Column: Media Card (Top) & Phone/Nav Card (Bottom)
         self.media_widget.show()
         self.media_widget.setGeometry(margin_x + col_w + 24, margin_y, col_w, row_h)
 
         if has_nav:
             self.nav_widget.show()
-            self.notification_card.hide()
+            self.phone_card.hide()
             self.nav_widget.setGeometry(margin_x + col_w + 24, margin_y + row_h + 24, col_w, row_h)
         else:
             self.nav_widget.hide()
-            self.notification_card.show()
-            self.notification_card.setGeometry(margin_x + col_w + 24, margin_y + row_h + 24, col_w, row_h)
+            self.phone_card.show()
+            self.phone_card.setGeometry(margin_x + col_w + 24, margin_y + row_h + 24, col_w, row_h)
 
         # 2. Left Column: Clock Card (Full or Top) & Phone Call Card
         if has_call:
