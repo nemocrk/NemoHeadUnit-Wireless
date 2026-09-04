@@ -136,3 +136,7 @@ class WindowsCoreAudioAdapter(BaseAudioAdapter):
         self._active_source = source_id
         log.info(f"WindowsCoreAudioAdapter active source set to '{source_id}'")
         return True
+
+    async def ensure_hfp_loopback(self, active: bool, bluez_source: str = "", bluez_sink: str = "") -> Dict[str, Any]:
+        log.info(f"WindowsCoreAudioAdapter ensure_hfp_loopback(active={active})")
+        return {"active": active, "rx_loopback_id": "", "tx_loopback_id": "", "status": "ok"}

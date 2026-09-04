@@ -50,3 +50,12 @@ class MockAudioAdapter(BaseAudioAdapter):
     async def set_active_source(self, source_id: str) -> bool:
         log.info(f"MockAudioAdapter source set to '{source_id}'")
         return True
+
+    async def ensure_hfp_loopback(self, active: bool, bluez_source: str = "", bluez_sink: str = "") -> Dict[str, Any]:
+        log.info(f"MockAudioAdapter ensure_hfp_loopback(active={active}, source={bluez_source}, sink={bluez_sink})")
+        return {
+            "active": active,
+            "rx_loopback_id": "mock_rx_123" if active else "",
+            "tx_loopback_id": "mock_tx_124" if active else "",
+            "status": "ok"
+        }

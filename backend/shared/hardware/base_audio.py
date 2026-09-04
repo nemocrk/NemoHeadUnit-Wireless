@@ -61,6 +61,11 @@ class BaseAudioAdapter(abc.ABC):
         """Set active input source ID or 'default'."""
         pass
 
+    @abc.abstractmethod
+    async def ensure_hfp_loopback(self, active: bool, bluez_source: str = "", bluez_sink: str = "") -> Dict[str, Any]:
+        """Enable or disable bidirectional loopback routing between BlueZ HFP and system mic/speaker."""
+        pass
+
 
 def get_audio_adapter() -> BaseAudioAdapter:
     """Factory creating and logging the appropriate audio adapter for the active OS platform."""

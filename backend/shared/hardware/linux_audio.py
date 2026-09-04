@@ -19,6 +19,8 @@ class LinuxPulseAudioAdapter(BaseAudioAdapter):
         self._volume = 80
         self._active_sink: str = ""
         self._active_source: str = ""
+        self._rx_loopback_id: str = ""
+        self._tx_loopback_id: str = ""
         self._pactl_cmd = shutil.which("pactl")
         self._amixer_cmd = shutil.which("amixer")
         if self._pactl_cmd:
@@ -211,3 +213,91 @@ class LinuxPulseAudioAdapter(BaseAudioAdapter):
                 log.warning(f"pactl set-default-source failed: {e}")
                 return False
         return True
+
+    async def ensure_hfp_loopback(self, active: bool, bluez_source: str = "", bluez_sink: str = "") -> Dict[str, Any]:
+        """
+        Dynamically activate or deactivate PulseAudio / PipeWire loopback modules
+        for bidirectional Bluetooth Hands-Free Profile (HFP) phone call audio.
+        RX loopback: phone audio (bluez source) -> vehicle speakers (default sink).
+        TX loopback: vehicle microphone (default source) -> phone mic (bluez sink).
+        """
+        if not self._pactl_cmd:
+            log.warning("pactl command not available for ensure_hfp_loopback")
+            return {"active": False, "status": "pactl_unavailable"}
+
+        if not active:
+            # Tear down loopbacks
+            if self._rx_loopback_id:
+                try:
+                    await asyncio.create_subprocess_exec(self._pactl_cmd, "unload-module", self._rx_loopback_id)
+                    log.info(f"Unloaded HFP RX loopback module {self._rx_loopback_id}")
+                except Exception as e:
+                    log.warning(f"Failed to unload RX loopback module {self._rx_loopback_id}: {e}")
+                self._rx_loopback_id = ""
+
+            if self._tx_loopback_id:
+                try:
+                    await asyncio.create_subprocess_exec(self._pactl_cmd, "unload-module", self._tx_loopback_id)
+                    log.info(f"Unloaded HFP TX loopback module {self._tx_loopback_id}")
+                except Exception as e:
+                    log.warning(f"Failed to unload TX loopback module {self._tx_loopback_id}: {e}")
+                self._tx_loopback_id = ""
+
+            return {"active": False, "rx_loopback_id": "", "tx_loopback_id": "", "status": "ok"}
+
+        # Activate loopbacks
+        if not bluez_source:
+            sources = await self.get_available_sources()
+            for s in sources:
+                if "bluez" in s.get("id", "").lower():
+                    bluez_source = s["id"]
+                    break
+
+        if not bluez_sink:
+            sinks = await self.get_available_sinks()
+            for s in sinks:
+                if "bluez" in s.get("id", "").lower():
+                    bluez_sink = s["id"]
+                    break
+
+        target_sink = self._target_sink()
+        target_source = self._active_source if self._active_source and self._active_source != "default" else "@DEFAULT_SOURCE@"
+
+        # Load RX loopback (Phone incoming audio -> Car speakers)
+        if not self._rx_loopback_id and bluez_source:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    self._pactl_cmd, "load-module", "module-loopback",
+                    f"source={bluez_source}", f"sink={target_sink}", "latency_msec=30",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await proc.communicate()
+                if proc.returncode == 0 and stdout:
+                    self._rx_loopback_id = stdout.decode().strip()
+                    log.info(f"Loaded HFP RX loopback module {self._rx_loopback_id} ({bluez_source} -> {target_sink})")
+            except Exception as e:
+                log.warning(f"Failed to load HFP RX loopback module: {e}")
+
+        # Load TX loopback (Car microphone -> Phone)
+        if not self._tx_loopback_id and bluez_sink:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    self._pactl_cmd, "load-module", "module-loopback",
+                    f"source={target_source}", f"sink={bluez_sink}", "latency_msec=30",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await proc.communicate()
+                if proc.returncode == 0 and stdout:
+                    self._tx_loopback_id = stdout.decode().strip()
+                    log.info(f"Loaded HFP TX loopback module {self._tx_loopback_id} ({target_source} -> {bluez_sink})")
+            except Exception as e:
+                log.warning(f"Failed to load HFP TX loopback module: {e}")
+
+        return {
+            "active": bool(self._rx_loopback_id or self._tx_loopback_id),
+            "rx_loopback_id": self._rx_loopback_id,
+            "tx_loopback_id": self._tx_loopback_id,
+            "bluez_source": bluez_source,
+            "bluez_sink": bluez_sink,
+            "status": "ok"
+        }

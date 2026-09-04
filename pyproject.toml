@@ -65,6 +65,7 @@ markers = [
     "dbus: richiede sessione D-Bus di test",
     "slow: atteso > 10s",
     "fuzz: property-based con Hypothesis",
+    "asyncio: test asincrono con asyncio",
 ]
 
 filterwarnings = [
