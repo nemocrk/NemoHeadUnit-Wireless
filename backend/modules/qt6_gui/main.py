@@ -99,6 +99,7 @@ if HAS_PYQT6 and qInstallMessageHandler:
 
 from backend.modules.qt6_gui.media.shm_media_engine import QtSHMMediaEngine
 from backend.modules.qt6_gui.media.audio_handler import QtAudioEngine
+from backend.modules.qt6_gui.media.hardware_volume_listener import HardwareVolumeListener
 from backend.modules.qt6_gui.ui.main_window import MainWindow
 
 logger = logging.getLogger("qt6_gui")
@@ -355,7 +356,12 @@ class Qt6GuiModule(BaseBackendModule):
         self.main_window.focus_toggle_requested.connect(self._on_video_focus_toggled)
         self.main_window.phone_action_requested.connect(self._on_phone_action_requested)
         self.main_window.media_playpause_requested.connect(self._on_media_playpause_requested)
-        self.log.info(f"⏱ [Boot Trace 6/7] Window signals connected in {(time.time()-t5)*1000:.1f}ms")
+
+        # Hardware Volume Buttons Listener (physical buttons on Linux/Omni10)
+        self.vol_listener = HardwareVolumeListener(self.main_window)
+        self.vol_listener.volume_action.connect(self.main_window._on_hardware_volume_key)
+        self.vol_listener.start()
+        self.log.info(f"⏱ [Boot Trace 6/7] Window signals & hardware volume listener connected in {(time.time()-t5)*1000:.1f}ms")
 
         # Initialize GuiEventBridge and wire slots onto main GUI thread with QueuedConnection
         self.bridge = GuiEventBridge(self)
@@ -445,6 +451,8 @@ class Qt6GuiModule(BaseBackendModule):
         self.publish("system.shutdown", {"sender": "qt6_gui", "reason": "gui_teardown"})
         self.publish("system.stop", {"sender": "qt6_gui", "reason": "gui_teardown"})
 
+        if hasattr(self, "vol_listener") and self.vol_listener:
+            self.vol_listener.stop()
         if self.audio_engine:
             self.audio_engine.close()
         if self.shm_engine:
