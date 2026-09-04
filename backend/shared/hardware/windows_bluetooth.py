@@ -351,7 +351,7 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
 
         async def _query_telemetry():
             battery_pct = -1
-            signal_bars = 4
+            signal_bars = -1
             operator_name = ""
             is_roaming = False
 
@@ -398,11 +398,9 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
                 except Exception as e:
                     log.debug(f"WinRT device telemetry query notice: {e}")
 
-            # If WinRT could not read real battery, fallback gracefully
-            if battery_pct < 0:
-                battery_pct = 85
-            if self._on_battery_cb:
-                self._on_battery_cb(address, battery_pct, signal_bars, operator_name, is_roaming)
+            if battery_pct >= 0 or signal_bars >= 0 or operator_name:
+                if self._on_battery_cb:
+                    self._on_battery_cb(address, battery_pct, signal_bars, operator_name, is_roaming)
 
         loop = getattr(self, "_loop", None)
         if loop and loop.is_running():
@@ -1026,6 +1024,7 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
                 client_sock, client_info = self._server_sock.accept()
                 client_mac = client_info[0].upper()
                 log.info(f"🔵 [BT Stage 1/5] 🎉 RFCOMM Profile Connection accepted from {client_mac}!")
+                self._check_win_device_telemetry(client_mac)
                 threading.Thread(
                     target=self._on_connection_cb,
                     args=(client_sock, client_mac),

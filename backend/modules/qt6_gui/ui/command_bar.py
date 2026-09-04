@@ -46,7 +46,7 @@ class PhoneStatusPill(QFrame):
         layout.addWidget(self.icon_battery)
 
         # 3. Battery Percentage Text
-        self.lbl_battery = QLabel("85%", self)
+        self.lbl_battery = QLabel("--%", self)
         self.lbl_battery.setStyleSheet("""
             color: #f0f6fc;
             font-size: 12px;
@@ -55,14 +55,19 @@ class PhoneStatusPill(QFrame):
         """)
         layout.addWidget(self.lbl_battery)
 
-    def update_status(self, signal: int = 4, battery: int = 85, is_charging: bool = False, operator_name: str = "", is_roaming: bool = False):
-        sig = max(0, min(5, signal))
-        bat = max(0, min(100, battery))
+    def update_status(self, signal: Optional[int] = None, battery: Optional[int] = None, is_charging: bool = False, operator_name: str = "", is_roaming: bool = False):
         op_prefix = f"📶 {operator_name} {'(Roaming) ' if is_roaming else ''}| " if operator_name else ""
-        self.setToolTip(f"{op_prefix}Signal: {sig}/5 | Battery: {bat}% {'(Charging)' if is_charging else ''}")
-        bat_color = "#3fb950" if bat > 20 else "#f85149"
-        self.icon_battery.setPixmap(make_svg_icon("battery", color=bat_color, size=16).pixmap(16, 16))
-        self.lbl_battery.setText(f"{bat}%")
+        sig_str = f"Signal: {signal}/5" if signal is not None and signal >= 0 else "Signal: --"
+        bat_str = f"Battery: {battery}% {'(Charging)' if is_charging else ''}" if battery is not None and battery >= 0 else "Battery: --"
+        self.setToolTip(f"{op_prefix}{sig_str} | {bat_str}")
+        if battery is not None and battery >= 0:
+            bat = max(0, min(100, battery))
+            bat_color = "#3fb950" if bat > 20 else "#f85149"
+            self.icon_battery.setPixmap(make_svg_icon("battery", color=bat_color, size=16).pixmap(16, 16))
+            self.lbl_battery.setText(f"{bat}%")
+        else:
+            self.icon_battery.setPixmap(make_svg_icon("battery", color="#8b949e", size=16).pixmap(16, 16))
+            self.lbl_battery.setText("--%")
 
 
 class AudioBufferPill(QFrame):
@@ -476,7 +481,7 @@ class CommandBarWidget(QWidget):
         """Update audio buffer & A/V sync pill with current app, hardware sink, and video metrics."""
         self.audio_pill.update_status(metrics, video_metrics=video_metrics)
 
-    def update_phone_status(self, signal: int = 4, battery: int = 85, is_charging: bool = False, operator_name: str = "", is_roaming: bool = False):
+    def update_phone_status(self, signal: Optional[int] = None, battery: Optional[int] = None, is_charging: bool = False, operator_name: str = "", is_roaming: bool = False):
         """Update signal bars, battery indicator, and operator tooltip."""
         self.phone_pill.update_status(signal, battery, is_charging, operator_name, is_roaming)
 

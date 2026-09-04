@@ -17,8 +17,11 @@ Supports global environment overrides for hardware-quirk configurations:
 import os
 import sys
 import shutil
-from typing import List, Dict, Tuple, Optional
-from shared.logger import get_logger
+from typing import List, Dict, Tuple, Optional, Any, Union
+try:
+    from shared.logger import get_logger
+except ImportError:
+    from backend.shared.logger import get_logger
 
 log = get_logger("hardware.video_decoder")
 
@@ -242,39 +245,67 @@ def get_best_hardware_decoder() -> Tuple[str, str]:
     return "avdec_h264", "FFmpeg Software Fallback (avdec_h264)"
 
 
+class GstPipeline(str):
+    """
+    Dual-compatible return type for build_video_pipeline.
+    Behaves as a regular pipeline string, but supports tuple unpacking
+    (pipeline_str, decoder_desc) for callers expecting (pipe_str, dec_name).
+    """
+    def __new__(cls, pipeline_str: str, decoder_desc: str = ""):
+        obj = super().__new__(cls, pipeline_str)
+        obj.decoder_desc = decoder_desc
+        return obj
+
+    def __iter__(self):
+        yield str(self)
+        yield self.decoder_desc
+
+
 def build_video_pipeline(
     mode: str = "rgba",
     width: int = 1280,
     height: int = 720,
     parser: str = "h264parse",
-) -> str:
+    sink_name: Optional[str] = None,
+    src_name: str = "src",
+    Gst: Any = None,
+    **kwargs,
+) -> GstPipeline:
     """
     Construct a GStreamer pipeline string honoring environment overrides
     or dynamically assembling the optimal element chain.
 
     Modes:
-      - 'rgba': Standard appsink pipeline pushing RGBA buffers to callbacks.
+      - 'rgba' / 'appsink': Standard appsink pipeline pushing RGBA buffers to callbacks.
       - 'zero_copy': Direct GPU DMABuf / GL pipeline targeting qml6glsink.
     """
+    is_zero_copy = mode == "zero_copy"
+    resolved_sink = sink_name or ("qml_sink" if is_zero_copy else "sink")
+    resolved_src = src_name or "src"
+
     # 1. Check environment overrides first (allows hardware-quirk scripts to inject tuning)
-    if mode == "zero_copy":
+    if is_zero_copy:
         env_override = os.environ.get("NEMO_GST_ZERO_COPY_PIPELINE")
         if env_override:
             log.info("🎬 [Video Decoder] Using NEMO_GST_ZERO_COPY_PIPELINE env override: %s", env_override)
             if not env_override.strip().startswith("appsrc"):
-                return f"appsrc name=src is-live=true format=bytes ! {parser} config-interval=-1 ! {env_override}"
-            return env_override
+                pipeline_str = f"appsrc name={resolved_src} is-live=true format=bytes ! {parser} config-interval=-1 ! {env_override}"
+            else:
+                pipeline_str = env_override
+            log.info("🎬 [Video Decoder] Computed GStreamer pipeline (%s): %s", mode, pipeline_str)
+            return GstPipeline(pipeline_str, "Environment Override (NEMO_GST_ZERO_COPY_PIPELINE)")
 
     env_pipe = os.environ.get("NEMO_GST_VIDEO_PIPELINE")
     if env_pipe:
         log.info("🎬 [Video Decoder] Using NEMO_GST_VIDEO_PIPELINE env override: %s", env_pipe)
-        return env_pipe
+        log.info("🎬 [Video Decoder] Computed GStreamer pipeline (%s): %s", mode, env_pipe)
+        return GstPipeline(env_pipe, "Environment Override (NEMO_GST_VIDEO_PIPELINE)")
 
     # 2. Dynamic hardware decoder resolution
     best_elem, desc = get_best_hardware_decoder()
     log.info("🎬 [Video Decoder] Selected decoder: '%s' (%s)", best_elem, desc)
 
-    if mode == "zero_copy":
+    if is_zero_copy:
         # Build zero-copy pipeline if supported by element
         if best_elem == "vah264dec":
             postproc = "vapostproc ! glupload"
@@ -285,20 +316,23 @@ def build_video_pipeline(
         else:
             postproc = "videoconvert ! glupload"
 
-        return (
-            f"appsrc name=src is-live=true format=bytes "
+        pipeline_str = (
+            f"appsrc name={resolved_src} is-live=true format=bytes "
             f"! {parser} config-interval=-1 "
             f"! {best_elem} "
             f"! {postproc} "
-            f"! qml6glsink name=qml_sink sync=false"
+            f"! qml6glsink name={resolved_sink} sync=false"
+        )
+    else:
+        # Standard appsink mode (RGBA output for Qt viewport or SHM)
+        pipeline_str = (
+            f"appsrc name={resolved_src} is-live=true format=bytes "
+            f"! {parser} config-interval=-1 "
+            f"! {best_elem} "
+            f"! videoconvert "
+            f"! video/x-raw,format=RGBA "
+            f"! appsink name={resolved_sink} emit-signals=true max-buffers=2 drop=true sync=false"
         )
 
-    # Standard appsink mode (RGBA output for Qt viewport or SHM)
-    return (
-        f"appsrc name=src is-live=true format=bytes "
-        f"! {parser} config-interval=-1 "
-        f"! {best_elem} "
-        f"! videoconvert "
-        f"! video/x-raw,format=RGBA "
-        f"! appsink name=sink emit-signals=true max-buffers=2 drop=true sync=false"
-    )
+    log.info("🎬 [Video Decoder] Computed GStreamer pipeline (%s): %s", mode, pipeline_str)
+    return GstPipeline(pipeline_str, desc)

@@ -635,8 +635,8 @@ class Qt6GuiModule(BaseBackendModule):
             name = data.get("caller_name", "")
             number = data.get("caller_number", "")
             duration = data.get("call_duration_seconds", 0)
-            signal = data.get("signal_strength", 4)
-            battery = data.get("battery_level", 85)
+            signal = data.get("signal_strength", None)
+            battery = data.get("battery_level", None)
             charging = data.get("is_charging", False)
 
             operator = data.get("operator_name", "")

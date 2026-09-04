@@ -146,6 +146,7 @@ class GStreamerBaseTransport(BaseVideoTransport):
 
 
         pipeline_str = self._build_pipeline_string()
+        log.info(f"🎬 [MediaServer GStreamer] Launching pipeline ({self.transport_name}): {pipeline_str}")
         try:
             self._pipeline = Gst.parse_launch(pipeline_str)
         except Exception as exc:

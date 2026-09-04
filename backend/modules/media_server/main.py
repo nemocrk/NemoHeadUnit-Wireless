@@ -289,8 +289,10 @@ class MediaServerModule(BaseBackendModule):
 
         self.subscribe("media.video.raw_nal_shm", self._on_raw_nal_shm)
         self.subscribe("media.audio.frame", self._on_audio_frame)
+        self.subscribe("media.audio.frame_shm", self._on_audio_frame_shm)
         self.subscribe("media.audio.mic_control", self._on_mic_control)
         self.subscribe("video.stream_start", self._on_video_stream_start)
+        self.subscribe("phone.status", self._on_phone_status)
 
         configured_mode = self.config.get("transport_mode", "auto")
         if configured_mode == "auto":
@@ -522,6 +524,20 @@ class MediaServerModule(BaseBackendModule):
             except Exception:
                 pass
 
+    async def broadcast_ws_json(self, data: dict) -> None:
+        """Broadcast JSON message to all connected WebSocket clients."""
+        if not self.ws_clients:
+            return
+        msg_str = json.dumps(data)
+        stale = set()
+        for ws in list(self.ws_clients):
+            try:
+                await ws.send_str(msg_str)
+            except Exception:
+                stale.add(ws)
+        for ws in stale:
+            self.ws_clients.discard(ws)
+
     async def broadcast_ws_media(self, binary_data: bytes) -> None:
         """Broadcast binary frame directly to all connected WebSocket clients."""
         if not self.ws_clients or not binary_data:
@@ -565,6 +581,38 @@ class MediaServerModule(BaseBackendModule):
             await self.broadcast_ws_media(binary_data)
         except Exception as exc:
             self.log.debug(f"MediaServer: Error relaying audio frame: {exc}")
+
+    async def _on_audio_frame_shm(self, payload: dict) -> None:
+        """Receive audio frame SHM pointer from channel_manager and broadcast binary frame to WS clients."""
+        if not self.ws_clients:
+            return
+        try:
+            offset = payload.get("shm_offset", -1)
+            channel_id = payload.get("channel_id")
+            timestamp_us = payload.get("timestamp_us", 0)
+            if offset < 0 or channel_id is None:
+                return
+
+            shm_buf = self.shm.get_downstream_channel(channel_id, size=8 * 1024 * 1024)
+            _, _, pcm_payload = shm_buf.read_frame(offset)
+            if pcm_payload:
+                from shared.nal_utils import pack_media_frame
+                binary_data = pack_media_frame(channel_id, timestamp_us, pcm_payload)
+                await self.broadcast_ws_media(binary_data)
+        except Exception as exc:
+            self.log.debug(f"MediaServer: Error relaying SHM audio to WS: {exc}")
+
+    async def _on_phone_status(self, payload: dict) -> None:
+        """Forward bus phone.status events to connected WebSocket clients."""
+        if not self.ws_clients:
+            return
+        try:
+            await self.broadcast_ws_json({
+                "type": "phone_status",
+                "data": payload,
+            })
+        except Exception as exc:
+            self.log.debug(f"MediaServer: Error forwarding phone.status to WS: {exc}")
 
 
     async def _on_raw_nal_shm(self, payload: dict) -> None:

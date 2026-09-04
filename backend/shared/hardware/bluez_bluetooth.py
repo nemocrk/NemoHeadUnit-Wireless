@@ -105,7 +105,7 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         try:
             props_iface = dbus.Interface(self._bus.get_object("org.bluez", dev_path), "org.freedesktop.DBus.Properties")
             battery_pct = -1
-            signal_bars = 4
+            signal_bars = -1
             operator_name = ""
             is_roaming = False
             try:
@@ -132,10 +132,21 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             except Exception:
                 pass
 
-            if battery_pct >= 0 or signal_bars > 0 or operator_name:
+            if battery_pct >= 0 or signal_bars >= 0 or operator_name:
                 self._on_battery_cb(mac, battery_pct, signal_bars, operator_name, is_roaming)
         except Exception:
             pass
+
+    def _on_dbus_interfaces_added(self, path: str, interfaces_and_props: dict) -> None:
+        mac = path.split("dev_")[-1].replace("_", ":").upper() if "dev_" in path else ""
+        if "org.bluez.Battery1" in interfaces_and_props:
+            battery_props = interfaces_and_props["org.bluez.Battery1"]
+            pct = int(battery_props.get("Percentage", -1))
+            if pct >= 0 and self._on_battery_cb and mac:
+                log.info(f"🔋 BlueZ Battery1 interface added: {mac} battery={pct}%")
+                self._on_battery_cb(mac, pct, -1, "", False)
+        if "org.bluez.Device1" in interfaces_and_props or "org.bluez.Battery1" in interfaces_and_props:
+            self._check_device_telemetry(path, mac)
 
     def _on_dbus_properties_changed(self, interface: str, changed: dict, invalidated: list, path: str) -> None:
         mac = path.split("dev_")[-1].replace("_", ":").upper() if "dev_" in path else ""
@@ -146,6 +157,7 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
                 if is_conn:
                     self._disconnected_override_addrs.discard(mac)
                     self._check_device_telemetry(path, mac)
+                    threading.Timer(1.5, lambda p=path, m=mac: self._check_device_telemetry(p, m)).start()
                 if self._on_connection_cb:
                     self._on_connection_cb(mac, is_conn)
             if "RSSI" in changed and self._on_battery_cb and mac:
@@ -183,7 +195,7 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         if "org.bluez" not in self._bus.list_names():
             raise RuntimeError("org.bluez is not registered on the system D-Bus")
 
-        # Subscribe to Device1 PropertiesChanged signals
+        # Subscribe to Device1 PropertiesChanged and ObjectManager InterfacesAdded signals
         try:
             self._bus.add_signal_receiver(
                 self._on_dbus_properties_changed,
@@ -191,9 +203,14 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
                 dbus_interface="org.freedesktop.DBus.Properties",
                 path_keyword="path",
             )
-            log.info("Subscribed to org.bluez.Device1 PropertiesChanged D-Bus signals")
+            self._bus.add_signal_receiver(
+                self._on_dbus_interfaces_added,
+                signal_name="InterfacesAdded",
+                dbus_interface="org.freedesktop.DBus.ObjectManager",
+            )
+            log.info("Subscribed to org.bluez D-Bus PropertiesChanged and InterfacesAdded signals")
         except Exception as e:
-            log.warning(f"Failed to subscribe to D-Bus PropertiesChanged signals: {e}")
+            log.warning(f"Failed to subscribe to D-Bus signals: {e}")
 
 
         manager = dbus.Interface(

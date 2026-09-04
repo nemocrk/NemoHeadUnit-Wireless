@@ -75,13 +75,13 @@ class MainWindow(QMainWindow):
 
         # 1. Base Layer: Video Viewport OpenGL Canvas
         self.video_viewport = VideoViewportWidget(self.central_widget)
-        self.video_viewport.setGeometry(0, 0, 1280, 720)
+        self.video_viewport.setGeometry(0, 0, 1280, 656)
 
         # 2. Overlay Disconnected Clock Screen with 2x2 Grid Layout
         self.disconnected_screen = QWidget(self.central_widget)
         self.disconnected_screen.setObjectName("disconnected-screen")
         self.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.disconnected_screen.setGeometry(0, 0, 1280, 720)
+        self.disconnected_screen.setGeometry(0, 0, 1280, 656)
 
         # Grid Widgets inside disconnected_screen
         self.clock_widget = AnalogClockWidget(self.disconnected_screen)
@@ -249,6 +249,7 @@ class MainWindow(QMainWindow):
 
     def _relayout_dashboard(self, w: int, h: int):
         """Cockpit 2x2 Grid Layout for Connected/Clock Screen ensuring all widgets are displayed."""
+        self.disconnected_screen.setGeometry(0, 0, w, h)
         margin_x = 36
         margin_y = 24
         avail_w = w - (margin_x * 2)
@@ -301,7 +302,9 @@ class MainWindow(QMainWindow):
         self.has_active_nav = has_nav
         self.has_active_media = has_media
         self.has_active_call = has_call
-        self._relayout_dashboard(self.width(), self.height())
+        cmd_h = self.command_bar.height() if hasattr(self, "command_bar") else 64
+        draw_h = max(100, self.height() - cmd_h)
+        self._relayout_dashboard(self.width(), draw_h)
 
     def set_connected_state(self, is_connected: bool, is_disconnect: bool = False):
         """Update connection state: hide clock on projection, re-show on disconnect."""

@@ -213,6 +213,7 @@ class ChannelManagerModule(BaseBackendModule):
         self.subscribe("media.video.release_focus", self.on_video_release_focus)
         self.subscribe("media.audio.mic_shm", self.on_mic_audio_shm)
         self.subscribe("input.event", self.on_input_event)
+        self.subscribe("phone.status", self.on_phone_status_external)
 
 
     async def run(self) -> None:
@@ -463,6 +464,11 @@ class ChannelManagerModule(BaseBackendModule):
             pointer_id=pointer_id,
             action_index=action_index,
         )
+
+    async def on_phone_status_external(self, data: dict) -> None:
+        """Receive Bluetooth HFP phone telemetry from connectivity_manager and merge into phone_status_handler."""
+        if isinstance(data, dict) and data.get("source") == "bluetooth_hfp":
+            await self.phone_status_handler.update_telemetry(data)
 
 
     async def on_video_transport_active(self, data: dict) -> None:

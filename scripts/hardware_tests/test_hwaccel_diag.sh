@@ -5,7 +5,7 @@ set -e
 echo "============================================================"
 echo " 🎬 NemoHeadUnit Hardware Acceleration & Decoder Diagnostics"
 echo " Date: $(date)"
-echo " Host: $(hostname) ($(uname -m) - $(uname -s))"
+echo " Host: $(hostname 2>/dev/null || uname -n) ($(uname -m) - $(uname -s))"
 echo "============================================================"
 echo ""
 

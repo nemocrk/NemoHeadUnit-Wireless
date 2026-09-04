@@ -170,6 +170,7 @@ if ($Local) {
     }
 
     Write-Host "`n[2/4] Verifying Application Files and Directory..." -ForegroundColor Green
+    $NecessaryItems = @("main.py", "backend", "frontend", "protos", "scripts", "services", "packaging", "environment.windows.yml", "environment.yml", "VERSION")
     if ($RepoRoot -ne $Dest) {
         if (-not (Test-Path $Dest)) {
             New-Item -ItemType Directory -Path $Dest -Force | Out-Null
@@ -177,8 +178,14 @@ if ($Local) {
             Write-Host "  [Clean] Purging previous files in $Dest..." -ForegroundColor Yellow
             Get-ChildItem -Path $Dest -Exclude ".git" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
         }
-        Write-Host "  Synchronizing repository to $Dest..." -ForegroundColor White
-        Copy-Item -Path "$RepoRoot\*" -Destination $Dest -Recurse -Force -Exclude ".git", "__pycache__", "env", "*.pyc", "build", "dist"
+        Write-Host "  Synchronizing essential application files to $Dest..." -ForegroundColor White
+        foreach ($item in $NecessaryItems) {
+            $srcPath = Join-Path $RepoRoot $item
+            if (Test-Path $srcPath) {
+                Copy-Item -Path $srcPath -Destination $Dest -Recurse -Force
+            }
+        }
+        Get-ChildItem -Path $Dest -Include "__pycache__", "*.pyc" -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     } else {
         Write-Host "  Running directly in workspace ($RepoRoot)." -ForegroundColor White
     }
@@ -309,36 +316,102 @@ $RemoteProbe -split "`n" | ForEach-Object {
 }
 
 if ($IsRemoteLinux) {
-    # Normalize path if default Windows path or empty
-    if ([string]::IsNullOrWhiteSpace($Dest) -or $Dest -match "^[a-zA-Z]:") {
-        $Dest = "/opt/nemo-headunit"
-    }
-
     if ($DryRun) {
         Write-Host "`n[Dry-Run] Target inspection completed successfully. No payload transferred." -ForegroundColor Green
         exit 0
     }
 
-    Write-Host "`n[3/4] Streaming Repository to Remote Linux Host ($Target`:$Dest)..." -ForegroundColor Green
-    ssh @SshArgs $Target "sudo mkdir -p $Dest && sudo chown -R `$(id -un):`$(id -gn) $Dest"
-    if ($Clean) {
-        Write-Host "  [Clean] Cleaning target directory on remote host..." -ForegroundColor Yellow
-        ssh @SshArgs $Target "find $Dest -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} + 2>/dev/null || true"
-    }
-    
-    # Use native tar.exe (Windows 10/11) or tar
-    tar.exe -cz -C "$RepoRoot" --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='env' --exclude='build' --exclude='dist' . | ssh @SshArgs $Target "tar -xz -C $Dest"
-    Write-Host "  Payload transferred successfully." -ForegroundColor Green
+    # Query remote architecture and package manager
+    $RemotePkgInfo = ssh @SshArgs $Target '
+        ARCH=$(uname -m)
+        PKG_MGR="unknown"
+        if command -v pacman >/dev/null 2>&1; then PKG_MGR="pacman";
+        elif command -v apt-get >/dev/null 2>&1; then PKG_MGR="apt";
+        fi
+        echo "ARCH=$ARCH"
+        echo "PKG_MGR=$PKG_MGR"
+    ' 2>$null
 
-    Write-Host "`n[4/4] Executing Remote Distribution Pipeline on Linux Host with forwarded flags..." -ForegroundColor Green
-    $RemoteBashArgs = "--local --method $Method --dest `"$Dest`""
-    if ($SkipDeps) { $RemoteBashArgs += " --skip-deps" }
-    if ($SkipHardwareFixes) { $RemoteBashArgs += " --skip-hardware-fixes" }
-    if ($SkipService) { $RemoteBashArgs += " --skip-service" }
-    if ($Restart) { $RemoteBashArgs += " --restart" }
-    ssh @SshArgs -t $Target "cd $Dest && bash scripts/distribute.sh $RemoteBashArgs"
+    $RemoteArch = "x86_64"
+    $RemotePkgMgr = "apt"
+    foreach ($line in ($RemotePkgInfo -split "`n")) {
+        if ($line -match "^ARCH=(.+)") { $RemoteArch = $matches[1].Trim() }
+        if ($line -match "^PKG_MGR=(.+)") { $RemotePkgMgr = $matches[1].Trim() }
+    }
+
+    $DistDir = Join-Path $RepoRoot "dist"
+    $CurrentVersion = ""
+    $VersionFile = Join-Path $RepoRoot "VERSION"
+    if (Test-Path $VersionFile) {
+        $CurrentVersion = (Get-Content $VersionFile -Raw).Trim()
+    }
+
+    if ($RemotePkgMgr -eq "apt") {
+        $DebArch = if ($RemoteArch -match "x86_64|amd64") { "amd64" } else { "arm64" }
+        $DebFiles = @()
+        if (-not [string]::IsNullOrWhiteSpace($CurrentVersion)) {
+            $DebFiles = Get-ChildItem -Path $DistDir -Filter "*$CurrentVersion*_$DebArch.deb" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+        }
+        if (-not $DebFiles -or $DebFiles.Count -eq 0) {
+            $DebFiles = Get-ChildItem -Path $DistDir -Filter "*_$DebArch.deb" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+        }
+        if (-not $DebFiles -or $DebFiles.Count -eq 0) {
+            $DebFiles = Get-ChildItem -Path $DistDir -Filter "*.deb" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+        }
+        if (-not $DebFiles -or $DebFiles.Count -eq 0) {
+            throw "No .deb package found in $DistDir for architecture '$DebArch'. Please build package first (e.g. bash packaging/build_deb.sh --arch $DebArch)."
+        }
+        $DebPath = $DebFiles[0].FullName
+        $DebName = $DebFiles[0].Name
+
+        Write-Host "`n[3/4] Transferring $DebName to Remote Linux Target ($Target`:/tmp/)..." -ForegroundColor Green
+        scp @SshArgs "$DebPath" "$Target`:/tmp/$DebName"
+
+        Write-Host "`n[4/4] Installing $DebName via APT on Remote Target..." -ForegroundColor Green
+        $InstallCmd = "sudo apt-get update -qq; sudo apt install --reinstall -y /tmp/$DebName || (sudo dpkg -i /tmp/$DebName && sudo apt-get install -f -y); rm -f /tmp/$DebName"
+        if (-not $SkipHardwareFixes) {
+            $InstallCmd += "; [ -f /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh ] && sudo bash /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh || true"
+        }
+        if ($Restart) {
+            $InstallCmd += "; sudo systemctl daemon-reload || true; sudo systemctl restart nemo-kiosk.service 2>/dev/null || sudo systemctl start nemo-kiosk.service 2>/dev/null || true"
+        }
+        ssh @SshArgs -t $Target "$InstallCmd"
+
+    } elseif ($RemotePkgMgr -eq "pacman") {
+        $ArchPkgArch = if ($RemoteArch -match "x86_64|amd64") { "x86_64" } else { "aarch64" }
+        $PkgFiles = @()
+        if (-not [string]::IsNullOrWhiteSpace($CurrentVersion)) {
+            $PkgFiles = Get-ChildItem -Path $DistDir -Filter "*$CurrentVersion*-$ArchPkgArch.pkg.tar.zst" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+        }
+        if (-not $PkgFiles -or $PkgFiles.Count -eq 0) {
+            $PkgFiles = Get-ChildItem -Path $DistDir -Filter "*-$ArchPkgArch.pkg.tar.zst" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+        }
+        if (-not $PkgFiles -or $PkgFiles.Count -eq 0) {
+            $PkgFiles = Get-ChildItem -Path $DistDir -Filter "*.pkg.tar.zst" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+        }
+        if (-not $PkgFiles -or $PkgFiles.Count -eq 0) {
+            throw "No .pkg.tar.zst package found in $DistDir for architecture '$ArchPkgArch'. Please build package first (e.g. bash packaging/build_arch.sh --arch $ArchPkgArch)."
+        }
+        $PkgPath = $PkgFiles[0].FullName
+        $PkgName = $PkgFiles[0].Name
+
+        Write-Host "`n[3/4] Transferring $PkgName to Remote Arch Linux Target ($Target`:/tmp/)..." -ForegroundColor Green
+        scp @SshArgs "$PkgPath" "$Target`:/tmp/$PkgName"
+
+        Write-Host "`n[4/4] Installing $PkgName via Pacman on Remote Target..." -ForegroundColor Green
+        $InstallCmd = "sudo pacman -U --noconfirm /tmp/$PkgName; rm -f /tmp/$PkgName"
+        if (-not $SkipHardwareFixes) {
+            $InstallCmd += "; [ -f /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh ] && sudo bash /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh || true"
+        }
+        if ($Restart) {
+            $InstallCmd += "; sudo systemctl daemon-reload || true; sudo systemctl restart nemo-kiosk.service 2>/dev/null || sudo systemctl start nemo-kiosk.service 2>/dev/null || true"
+        }
+        ssh @SshArgs -t $Target "$InstallCmd"
+    } else {
+        throw "Unsupported remote package manager '$RemotePkgMgr'. Expected apt or pacman on Linux target."
+    }
 } else {
-    # Target is Remote Windows
+    # Target is Remote Windows: Distribute only necessary runtime folders & configuration files
     if ([string]::IsNullOrWhiteSpace($Dest) -or $Dest.StartsWith("/")) {
         $Dest = "C:\NemoHeadUnit-Wireless"
     }
@@ -348,13 +421,14 @@ if ($IsRemoteLinux) {
         exit 0
     }
 
-    Write-Host "`n[3/4] Streaming Repository to Remote Windows Host ($Target`:$Dest)..." -ForegroundColor Green
+    $NecessaryItems = @("main.py", "backend", "frontend", "protos", "scripts", "services", "packaging", "environment.windows.yml", "environment.yml", "VERSION")
+    Write-Host "`n[3/4] Streaming Essential Application Files to Remote Windows Host ($Target`:$Dest)..." -ForegroundColor Green
     $WinInitPS = "if (-not (Test-Path '$Dest')) { New-Item -ItemType Directory -Path '$Dest' -Force | Out-Null }"
     if ($Clean) {
         $WinInitPS += "; Remove-Item -Path '$Dest\*' -Recurse -Force -Exclude '.git' -ErrorAction SilentlyContinue"
     }
     ssh @SshArgs $Target "powershell.exe -NoProfile -Command `"$WinInitPS`""
-    tar.exe -cz -C "$RepoRoot" --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='env' --exclude='build' --exclude='dist' . | ssh @SshArgs $Target "tar.exe -xz -C `"$Dest`""
+    tar.exe -cz -C "$RepoRoot" --exclude='__pycache__' --exclude='*.pyc' @NecessaryItems | ssh @SshArgs $Target "tar.exe -xz -C `"$Dest`""
     Write-Host "  Payload transferred successfully." -ForegroundColor Green
 
     Write-Host "`n[4/4] Executing Remote PowerShell Distributor on Windows Host with forwarded flags..." -ForegroundColor Green

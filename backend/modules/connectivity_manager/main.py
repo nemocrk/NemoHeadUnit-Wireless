@@ -144,6 +144,7 @@ class ConnectivityManagerModule(BaseBackendModule):
         # Initialize Autoconnect loop
         if self.config.get("autoconnect_enabled", True):
             self._autoconnect_task = asyncio.create_task(self._autoconnect_loop())
+        self._telemetry_poll_task = asyncio.create_task(self._telemetry_poll_loop())
 
     def _on_bluetooth_telemetry_changed(
         self,
@@ -182,6 +183,8 @@ class ConnectivityManagerModule(BaseBackendModule):
         """Callback when a Bluetooth device connects or disconnects (inbound or outbound)."""
         if is_connected:
             self.log.info(f"🔵 Inbound/Outbound Bluetooth Connection detected for device {address}")
+            self._active_device = address
+            self._trigger_device_telemetry(address)
             self.publish("bluetooth_manager.paired.connected", {"device_address": address})
         else:
             self.log.info(f"⚪ Bluetooth device {address} disconnected")
@@ -300,6 +303,7 @@ class ConnectivityManagerModule(BaseBackendModule):
         self.log.info(f"🔵 [BT Stage 1/5] ConnectivityManager accepted RFCOMM from {device_address} — starting WiFi AP & Handshake thread...")
         self._rfcomm_connected = True
         self._active_device = device_address
+        self._trigger_device_telemetry(device_address)
         self.current_stage_index = 1
         self._notify_status_changed()
 
@@ -711,6 +715,32 @@ class ConnectivityManagerModule(BaseBackendModule):
                 self.log.warning(f"handle_stream_status stream notice: {exc}")
         return response
 
+    def _trigger_device_telemetry(self, address: str) -> None:
+        """Trigger underlying Bluetooth adapter to query real telemetry (battery, RSSI, operator)."""
+        if not address:
+            return
+        if hasattr(self._bt_adapter, "_check_win_device_telemetry"):
+            try:
+                self._bt_adapter._check_win_device_telemetry(address)
+            except Exception as exc:
+                self.log.debug(f"Win telemetry trigger notice for {address}: {exc}")
+        elif hasattr(self._bt_adapter, "_check_device_telemetry") and hasattr(self._bt_adapter, "_bus"):
+            try:
+                dev_path = f"/org/bluez/hci0/dev_{address.replace(':', '_').upper()}"
+                self._bt_adapter._check_device_telemetry(dev_path, address)
+            except Exception as exc:
+                self.log.debug(f"BlueZ telemetry trigger notice for {address}: {exc}")
+
+    async def _telemetry_poll_loop(self) -> None:
+        """Periodic background refresh of Bluetooth battery & RSSI while a device is active."""
+        while self._running:
+            await asyncio.sleep(10.0)
+            if self._active_device and self._running:
+                try:
+                    self._trigger_device_telemetry(self._active_device)
+                except Exception as exc:
+                    self.log.debug(f"Periodic telemetry refresh notice: {exc}")
+
     async def teardown(self) -> None:
         self.log.info("Teardown ConnectivityManagerModule...")
         self._running = False
@@ -725,6 +755,13 @@ class ConnectivityManagerModule(BaseBackendModule):
             except asyncio.CancelledError:
                 pass
             self._autoconnect_task = None
+        if hasattr(self, "_telemetry_poll_task") and self._telemetry_poll_task:
+            self._telemetry_poll_task.cancel()
+            try:
+                await self._telemetry_poll_task
+            except asyncio.CancelledError:
+                pass
+            self._telemetry_poll_task = None
         if self._bt_adapter:
             await self._bt_adapter.teardown()
         if self._wifi_adapter:

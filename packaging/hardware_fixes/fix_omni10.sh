@@ -577,7 +577,7 @@ cat <<'EOF' > "$QUIRKS_DIR/hardware_quirks.env.tmp"
 # HP Omni 10 Hardware-specific Quirks & Tunings for NemoHeadUnit
 LIBVA_DRIVER_NAME="i965"
 QT_SCALE_FACTOR="1.5"
-NEMO_GST_ZERO_COPY_PIPELINE="appsrc name=src is-live=true format=bytes ! h264parse config-interval=-1 ! vah264dec ! vapostproc add-borders=true ! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=YV12,width=1280,height=800 ! glupload ! qml6glsink name=qml_sink sync=false"
+NEMO_GST_ZERO_COPY_PIPELINE="appsrc name=src is-live=true format=bytes ! h264parse config-interval=-1 ! vah264dec ! vapostproc add-borders=true ! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=YV12,width=1280 ! glupload ! qml6glsink name=qml_sink sync=false"
 EOF
 
 if [ ! -f "$QUIRKS_FILE" ] || ! cmp -s "$QUIRKS_DIR/hardware_quirks.env.tmp" "$QUIRKS_FILE"; then
@@ -588,6 +588,59 @@ if [ ! -f "$QUIRKS_FILE" ] || ! cmp -s "$QUIRKS_DIR/hardware_quirks.env.tmp" "$Q
 else
     rm -f "$QUIRKS_DIR/hardware_quirks.env.tmp"
     echo -e "${GREEN}già presente.${NC}"
+fi
+
+# ---------------------------------------------------------------------------
+# Fix 12: PipeWire & WirePlumber Audio Autostart (User lingering & systemd user services)
+# ---------------------------------------------------------------------------
+echo -n "  [hw-fix] PipeWire & WirePlumber audio autostart... "
+AUDIO_AUTOSTART_CHANGED=0
+
+# 1. Enable PipeWire and WirePlumber globally for all user sessions
+if command -v systemctl &>/dev/null; then
+    for unit in pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service; do
+        if systemctl --global is-enabled "$unit" 2>/dev/null | grep -qv "enabled"; then
+            systemctl --global enable "$unit" >/dev/null 2>&1 || true
+            AUDIO_AUTOSTART_CHANGED=1
+        fi
+    done
+fi
+
+# 2. Ensure /etc/systemd/user target symlinks are present
+mkdir -p /etc/systemd/user/default.target.wants /etc/systemd/user/sockets.target.wants
+for svc in pipewire.service pipewire-pulse.service wireplumber.service; do
+    if [ -f "/usr/lib/systemd/user/${svc}" ] && [ ! -L "/etc/systemd/user/default.target.wants/${svc}" ]; then
+        ln -sf "/usr/lib/systemd/user/${svc}" "/etc/systemd/user/default.target.wants/${svc}"
+        AUDIO_AUTOSTART_CHANGED=1
+    fi
+done
+for sct in pipewire.socket pipewire-pulse.socket; do
+    if [ -f "/usr/lib/systemd/user/${sct}" ] && [ ! -L "/etc/systemd/user/sockets.target.wants/${sct}" ]; then
+        ln -sf "/usr/lib/systemd/user/${sct}" "/etc/systemd/user/sockets.target.wants/${sct}"
+        AUDIO_AUTOSTART_CHANGED=1
+    fi
+done
+
+# 3. Enable loginctl user lingering for standard users so audio services start at boot
+while IFS=: read -r username _ uid _ _ homedir _; do
+    if [ "${uid}" -ge 1000 ] && [ "${uid}" -lt 60000 ]; then
+        if command -v loginctl &>/dev/null; then
+            if ! loginctl show-user "$username" 2>/dev/null | grep -q "Linger=yes"; then
+                loginctl enable-linger "$username" >/dev/null 2>&1 || true
+                AUDIO_AUTOSTART_CHANGED=1
+            fi
+        fi
+        # Start immediately if user session manager is running
+        if command -v systemctl &>/dev/null; then
+            systemctl --user -M "${username}@" start pipewire.socket pipewire-pulse.socket pipewire.service wireplumber.service >/dev/null 2>&1 || true
+        fi
+    fi
+done < <(getent passwd)
+
+if [ $AUDIO_AUTOSTART_CHANGED -eq 1 ]; then
+    echo -e "${GREEN}applicato (lingering + pipewire/wireplumber abilitati).${NC}"
+else
+    echo -e "${GREEN}già configurato.${NC}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -602,8 +655,9 @@ echo "    - GPU RC6 / Runtime PM disabilitato; clock minimo fissato a 400MHz."
 echo "    - Bluetooth MAC persistente in ${BT_ADDR_FILE} tramite bluetooth-persistent-mac.service."
 echo "    - Firmware Broadcom (BT/WiFi) e Intel SST DSP verificati in /lib/firmware/."
 echo "    - Hardware Quirks generati in ${QUIRKS_FILE} (i965, scale 1.5, DMABuf caps)."
+echo "    - PipeWire & WirePlumber abilitati all'avvio con user lingering attivo."
 
-if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ] || [ $FW_CHANGED -eq 1 ] || [ $QUIRKS_CHANGED -eq 1 ]; then
+if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ] || [ $FW_CHANGED -eq 1 ] || [ $QUIRKS_CHANGED -eq 1 ] || [ $AUDIO_AUTOSTART_CHANGED -eq 1 ]; then
     echo -e "  ${GREEN}[hw-fix] HP Omni10: fix applicati. Riavvio necessario.${NC}"
 else
     echo -e "  ${GREEN}[hw-fix] HP Omni10: nessuna modifica necessaria.${NC}"

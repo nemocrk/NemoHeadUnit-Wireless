@@ -36,6 +36,8 @@ SKIP_SERVICE=0
 SKIP_HW_FIXES=0
 RESTART_AFTER=0
 CLEAN_TARGET=0
+FORCE_BUILD=0
+REBOOT_AFTER=0
 SSH_PORT=""
 SSH_IDENTITY=""
 
@@ -61,7 +63,9 @@ show_help() {
   echo "  --skip-hardware-fixes    Skip execution of hardware adaptation and quirks scripts"
   echo "  --skip-service           Skip installation of systemd unit or desktop shortcuts"
   echo "  --restart, -r, --start   Automatically restart/start NemoHeadUnit service after deployment"
+  echo "  --reboot                 Reboot target system after deployment"
   echo "  --clean, -c              Clean destination directory / pycache before deployment"
+  echo "  --build, -b              Force rebuild of package (deb/.pkg.tar.zst) before distribution"
   echo "  --port, -p <port>        Custom SSH port for remote target"
   echo "  --identity, -i <key>     Custom SSH private key file"
   echo "  --help, -h               Show this help message"
@@ -113,8 +117,16 @@ while [[ $# -gt 0 ]]; do
       RESTART_AFTER=1
       shift
       ;;
+    --reboot)
+      REBOOT_AFTER=1
+      shift
+      ;;
     --clean|-c)
       CLEAN_TARGET=1
+      shift
+      ;;
+    --build|-b)
+      FORCE_BUILD=1
       shift
       ;;
     --port|-p)
@@ -396,56 +408,118 @@ fi
 # -----------------------------------------------------------------------------
 echo -e "${BOLD}[3/5] Synchronizing application files to target...${NC}"
 
-if [ $IS_LOCAL -eq 1 ]; then
-  if [ "$REPO_ROOT" != "$TARGET_DIR" ]; then
-    echo "  Creating target directory ${TARGET_DIR}..."
-    sudo mkdir -p "${TARGET_DIR}"
-    if [ $CLEAN_TARGET -eq 1 ]; then
-      echo "  [Clean] Cleaning target directory ${TARGET_DIR}..."
-      sudo find "${TARGET_DIR}" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+if [ $IS_TARGET_WINDOWS -eq 1 ]; then
+  # Windows Target: Distribute only necessary runtime folders & configuration files
+  WIN_ITEMS=("main.py" "backend" "frontend" "protos" "scripts" "services" "packaging" "environment.windows.yml" "environment.yml" "VERSION")
+  SYNC_ITEMS=()
+  for item in "${WIN_ITEMS[@]}"; do
+    if [ -e "${REPO_ROOT}/${item}" ]; then
+      SYNC_ITEMS+=("${item}")
     fi
-    sudo rsync -a --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='env' "${REPO_ROOT}/" "${TARGET_DIR}/"
-  else
-    echo "  Running directly within repository workspace (${REPO_ROOT})."
-  fi
-elif [ $IS_TARGET_WINDOWS -eq 1 ]; then
-  echo "  Streaming repository payload over SSH to Windows host (${TARGET}:${TARGET_DIR})..."
+  done
+
+  echo "  Streaming essential Windows runtime files over SSH to ${TARGET}:${TARGET_DIR}..."
   WIN_INIT_PS="if (-not (Test-Path '${TARGET_DIR}')) { New-Item -ItemType Directory -Path '${TARGET_DIR}' -Force | Out-Null }"
   if [ $CLEAN_TARGET -eq 1 ]; then
     WIN_INIT_PS="${WIN_INIT_PS}; Remove-Item -Path '${TARGET_DIR}\\*' -Recurse -Force -Exclude '.git' -ErrorAction SilentlyContinue"
   fi
   ssh "${SSH_OPTS[@]}" "$TARGET" "powershell.exe -NoProfile -Command \"${WIN_INIT_PS}\""
   tar -cz -C "$REPO_ROOT" \
-    --exclude='.git' \
     --exclude='__pycache__' \
     --exclude='*.pyc' \
-    --exclude='env' \
-    --exclude='build' \
-    --exclude='dist' \
-    . | ssh "${SSH_OPTS[@]}" "$TARGET" "tar.exe -xz -C \"${TARGET_DIR}\""
-else
-  # Remote sync to Linux via SSH/tar stream
-  echo "  Streaming repository payload over SSH to ${TARGET}:${TARGET_DIR}..."
-  ssh "${SSH_OPTS[@]}" "$TARGET" "sudo mkdir -p ${TARGET_DIR} && sudo chown -R \$(id -un):\$(id -gn) ${TARGET_DIR}"
-  if [ $CLEAN_TARGET -eq 1 ]; then
-    echo "  [Clean] Cleaning target directory ${TARGET_DIR} on remote host..."
-    ssh "${SSH_OPTS[@]}" "$TARGET" "find ${TARGET_DIR} -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} + 2>/dev/null || true"
+    "${SYNC_ITEMS[@]}" | ssh "${SSH_OPTS[@]}" "$TARGET" "tar.exe -xz -C \"${TARGET_DIR}\""
+  echo -e "  ${GREEN}✓ Windows runtime synchronization complete.${NC}\n"
+
+elif [ "$DEPLOY_STRATEGY" = "deb_package" ]; then
+  # Linux Debian/Ubuntu Target: Distribute .deb package
+  DEB_ARCH="amd64"
+  if [[ "$TARGET_ARCH" =~ (aarch64|arm64) ]]; then
+    DEB_ARCH="arm64"
   fi
-  tar -cz -C "$REPO_ROOT" \
-    --exclude='.git' \
-    --exclude='__pycache__' \
-    --exclude='*.pyc' \
-    --exclude='env' \
-    --exclude='build' \
-    --exclude='dist' \
-    . | ssh "${SSH_OPTS[@]}" "$TARGET" "tar -xz -C ${TARGET_DIR}"
+  CURRENT_VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION" 2>/dev/null || true)"
+  LATEST_PKG=$(ls -t "${REPO_ROOT}/dist/"*"${CURRENT_VERSION}"*"_${DEB_ARCH}".deb 2>/dev/null | head -n 1 || true)
+  PKG_MATCHES_METHOD=1
+  if [ -n "$LATEST_PKG" ] && [ -f "$LATEST_PKG" ]; then
+    if [ "$SELECTED_METHOD" = "venv" ] && ! dpkg-deb -c "$LATEST_PKG" 2>/dev/null | grep -q "requirements.txt"; then
+      PKG_MATCHES_METHOD=0
+    elif [ "$SELECTED_METHOD" = "micromamba" ] && ! dpkg-deb -c "$LATEST_PKG" 2>/dev/null | grep -q "environment.yml"; then
+      PKG_MATCHES_METHOD=0
+    fi
+  fi
+  if [ -z "$LATEST_PKG" ] || [ $FORCE_BUILD -eq 1 ] || [ $PKG_MATCHES_METHOD -eq 0 ]; then
+    echo "  Package matching v${CURRENT_VERSION} (${DEB_ARCH}, method=${SELECTED_METHOD}) not found in dist/ or rebuild needed. Building .deb package..."
+    bash "${REPO_ROOT}/packaging/build_deb.sh" --method "${SELECTED_METHOD}" --arch "${DEB_ARCH}" --output-dir "dist"
+    LATEST_PKG=$(ls -t "${REPO_ROOT}/dist/"*_"${DEB_ARCH}".deb 2>/dev/null | head -n 1 || true)
+  fi
+  [ -n "$LATEST_PKG" ] && [ -f "$LATEST_PKG" ] || { echo -e "${RED}Failed to find or build .deb package!${NC}"; exit 1; }
+  PKG_NAME="$(basename "${LATEST_PKG}")"
+  echo -e "  Using package: ${GREEN}${PKG_NAME}${NC}"
+
+  if [ $IS_LOCAL -eq 1 ]; then
+    echo "  Installing ${PKG_NAME} on local system via APT..."
+    sudo apt-get update -qq || true
+    sudo apt-get install --reinstall -y "${LATEST_PKG}" || (sudo dpkg -i "${LATEST_PKG}" && sudo apt-get install -f -y)
+  else
+    echo "  Transferring ${PKG_NAME} to remote target (${TARGET}:/tmp/)..."
+    ssh "${SSH_OPTS[@]}" "$TARGET" "cat > '/tmp/${PKG_NAME}'" < "${LATEST_PKG}"
+    echo "  Installing ${PKG_NAME} on remote target via APT..."
+    ssh "${SSH_OPTS[@]}" "$TARGET" "sudo apt-get update -qq || true; sudo apt-get install --reinstall -y '/tmp/${PKG_NAME}' || (sudo dpkg -i '/tmp/${PKG_NAME}' && sudo apt-get install -f -y); rm -f '/tmp/${PKG_NAME}'"
+  fi
+  echo -e "  ${GREEN}✓ .deb package distribution complete.${NC}\n"
+
+elif [ "$DEPLOY_STRATEGY" = "arch_pacman" ]; then
+  # Linux Arch Target: Distribute .pkg.tar.zst package
+  ARCH_PKG_ARCH="x86_64"
+  if [[ "$TARGET_ARCH" =~ (aarch64|arm64) ]]; then
+    ARCH_PKG_ARCH="aarch64"
+  fi
+  CURRENT_VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION" 2>/dev/null || true)"
+  LATEST_PKG=$(ls -t "${REPO_ROOT}/dist/"*"${CURRENT_VERSION}"*"-${ARCH_PKG_ARCH}".pkg.tar.zst 2>/dev/null | head -n 1 || true)
+  PKG_MATCHES_METHOD=1
+  if [ -n "$LATEST_PKG" ] && [ -f "$LATEST_PKG" ]; then
+    if [ "$SELECTED_METHOD" = "venv" ] && ! tar -tf "$LATEST_PKG" 2>/dev/null | grep -q "requirements.txt"; then
+      PKG_MATCHES_METHOD=0
+    elif [ "$SELECTED_METHOD" = "micromamba" ] && ! tar -tf "$LATEST_PKG" 2>/dev/null | grep -q "environment.yml"; then
+      PKG_MATCHES_METHOD=0
+    fi
+  fi
+  if [ -z "$LATEST_PKG" ] || [ $FORCE_BUILD -eq 1 ] || [ $PKG_MATCHES_METHOD -eq 0 ]; then
+    echo "  Package matching v${CURRENT_VERSION} (${ARCH_PKG_ARCH}, method=${SELECTED_METHOD}) not found in dist/ or rebuild needed. Building .pkg.tar.zst package..."
+    bash "${REPO_ROOT}/packaging/build_arch.sh" --method "${SELECTED_METHOD}" --arch "${ARCH_PKG_ARCH}" --output-dir "dist"
+    LATEST_PKG=$(ls -t "${REPO_ROOT}/dist/"*-"${ARCH_PKG_ARCH}".pkg.tar.zst 2>/dev/null | head -n 1 || true)
+  fi
+  [ -n "$LATEST_PKG" ] && [ -f "$LATEST_PKG" ] || { echo -e "${RED}Failed to find or build .pkg.tar.zst package!${NC}"; exit 1; }
+  PKG_NAME="$(basename "${LATEST_PKG}")"
+  echo -e "  Using package: ${GREEN}${PKG_NAME}${NC}"
+
+  if [ $IS_LOCAL -eq 1 ]; then
+    echo "  Installing ${PKG_NAME} on local system via Pacman..."
+    sudo pacman -U --noconfirm "${LATEST_PKG}"
+  else
+    echo "  Transferring ${PKG_NAME} to remote target (${TARGET}:/tmp/)..."
+    ssh "${SSH_OPTS[@]}" "$TARGET" "cat > '/tmp/${PKG_NAME}'" < "${LATEST_PKG}"
+    echo "  Installing ${PKG_NAME} on remote target via Pacman..."
+    ssh "${SSH_OPTS[@]}" "$TARGET" "sudo pacman -U --noconfirm '/tmp/${PKG_NAME}' && rm -f '/tmp/${PKG_NAME}'"
+  fi
+  echo -e "  ${GREEN}✓ .pkg.tar.zst package distribution complete.${NC}\n"
+
+else
+  # Generic Linux Directory Fallback
+  echo "  Syncing repository payload to ${TARGET_DIR}..."
+  if [ $IS_LOCAL -eq 1 ]; then
+    sudo mkdir -p "${TARGET_DIR}"
+    sudo rsync -a --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='env' "${REPO_ROOT}/" "${TARGET_DIR}/"
+  else
+    ssh "${SSH_OPTS[@]}" "$TARGET" "sudo mkdir -p ${TARGET_DIR} && sudo chown -R \$(id -un):\$(id -gn) ${TARGET_DIR}"
+    tar -cz -C "$REPO_ROOT" --exclude='.git' --exclude='__pycache__' --exclude='*.pyc' --exclude='env' --exclude='build' --exclude='dist' . | ssh "${SSH_OPTS[@]}" "$TARGET" "tar -xz -C ${TARGET_DIR}"
+  fi
+  echo -e "  ${GREEN}✓ Synchronization complete.${NC}\n"
 fi
-echo -e "  ${GREEN}✓ Synchronization complete.${NC}\n"
 
 # -----------------------------------------------------------------------------
 # Step 4: Environment Bootstrap & System Dependency Installation
 # -----------------------------------------------------------------------------
-echo -e "${BOLD}[4/5] Installing dependencies & bootstrapping Python environment...${NC}"
+echo -e "${BOLD}[4/5] Configuring target environment and post-install hooks...${NC}"
 
 if [ $IS_TARGET_WINDOWS -eq 1 ]; then
   echo "  Invoking Windows PowerShell distributor on target host with forwarded flags..."
@@ -458,84 +532,33 @@ if [ $IS_TARGET_WINDOWS -eq 1 ]; then
   
   ssh "${SSH_OPTS[@]}" "$TARGET" "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${TARGET_DIR}\\scripts\\distribute.ps1\" ${REMOTE_PS_ARGS}"
 else
-  DEPLOY_COMMANDS=$(cat <<EOF
-    set -euo pipefail
-    cd "${TARGET_DIR}"
-
-    # 1. System package dependencies installation
-    if [ ${SKIP_DEPS} -eq 0 ]; then
-      if [ "${PKG_MGR}" = "apt" ]; then
-        echo "  Installing system dependencies via APT..."
-        sudo apt-get update -qq || true
-        if [ -f packaging/system-deps.txt ]; then
-          DEPS=\$(grep -v '^#' packaging/system-deps.txt | grep -v '^\$' | tr '\n' ' ')
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \$DEPS || true
-        fi
-      elif [ "${PKG_MGR}" = "pacman" ]; then
-        echo "  Installing system dependencies via Pacman..."
-        sudo pacman -Syu --noconfirm --needed \
-          python python-pip python-gobject gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly \
-          bluez bluez-utils pulseaudio pulseaudio-alsa seatd || true
-      fi
-
-      # 2. Python environment bootstrap
-      if [ "${SELECTED_METHOD}" = "micromamba" ]; then
-        echo "  Setting up Micromamba Conda environment..."
-        if [ -f packaging/bootstrap_micromamba.sh ]; then
-          bash packaging/bootstrap_micromamba.sh
-        elif [ -f environment.yml ] && command -v micromamba &>/dev/null; then
-          micromamba create -y -n NemoHeadUnit-Wireless -f environment.yml || micromamba install -y -n NemoHeadUnit-Wireless -f environment.yml
-        fi
-      else
-        echo "  Setting up UV / Python virtual environment..."
-        if [ -f packaging/bootstrap_uv.sh ]; then
-          bash packaging/bootstrap_uv.sh
-        else
-          python3 -m venv env || true
-          ./env/bin/pip install --upgrade pip setuptools wheel || true
-          if [ -f packaging/requirements.txt ]; then
-            ./env/bin/pip install -r packaging/requirements.txt || true
-          fi
-        fi
+  # Linux Post-Install / Hooks
+  if [ ${SKIP_HW_FIXES} -eq 0 ]; then
+    echo "  Probing and running hardware adaptation scripts..."
+    if [ $IS_LOCAL -eq 1 ]; then
+      if [ -f /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh ]; then
+        sudo bash /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh || true
+      elif [ -f "${TARGET_DIR}/packaging/hardware_fixes/run_hardware_fixes.sh" ]; then
+        sudo bash "${TARGET_DIR}/packaging/hardware_fixes/run_hardware_fixes.sh" || true
       fi
     else
-      echo "  [SkipDeps] Skipping package installation and Python environment bootstrap."
+      ssh "${SSH_OPTS[@]}" "$TARGET" "[ -f /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh ] && sudo bash /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh || true"
     fi
+  else
+    echo "  [SkipHardwareFixes] Bypassing hardware adaptation scripts."
+  fi
 
-    # 3. Apply hardware fixes (HP Omni 10 detection & GPU optimizations)
-    if [ ${SKIP_HW_FIXES} -eq 0 ] && [ -f packaging/hardware_fixes/run_hardware_fixes.sh ]; then
-      echo "  Probing and running hardware adaptation scripts..."
-      sudo bash packaging/hardware_fixes/run_hardware_fixes.sh || true
-    else
-      echo "  [SkipHardwareFixes] Bypassing hardware adaptation scripts."
-    fi
-
-    # 4. Service installation
-    if [ ${SKIP_SERVICE} -eq 0 ]; then
-      if [ -f packaging/nemo-kiosk.service ]; then
-        echo "  Installing systemd nemo-kiosk service..."
-        sudo cp -f packaging/nemo-kiosk.service /etc/systemd/system/nemo-kiosk.service
-        sudo systemctl daemon-reload || true
-      fi
-
-      if [ -f packaging/nemo-headunit.sh ]; then
-        sudo chmod +x packaging/nemo-headunit.sh
-        sudo ln -sf "${TARGET_DIR}/packaging/nemo-headunit.sh" /usr/local/bin/nemo-headunit || true
-      fi
-    else
-      echo "  [SkipService] Skipping systemd service and launcher installation."
-    fi
-
-    # 5. Service restart / start if requested
-    if [ ${RESTART_AFTER} -eq 1 ]; then
-      echo "  [Restart] Restarting nemo-kiosk service..."
+  if [ ${RESTART_AFTER} -eq 1 ]; then
+    echo "  [Restart] Restarting nemo-kiosk service..."
+    if [ $IS_LOCAL -eq 1 ]; then
+      sudo systemctl daemon-reload || true
       sudo systemctl restart nemo-kiosk.service 2>/dev/null || sudo systemctl start nemo-kiosk.service 2>/dev/null || true
+    else
+      ssh "${SSH_OPTS[@]}" "$TARGET" "sudo systemctl daemon-reload || true; sudo systemctl restart nemo-kiosk.service 2>/dev/null || sudo systemctl start nemo-kiosk.service 2>/dev/null || true"
     fi
-EOF
-  )
-  run_cmd "$DEPLOY_COMMANDS"
+  fi
 fi
-echo -e "  ${GREEN}✓ Dependencies and environment bootstrap complete.${NC}\n"
+echo -e "  ${GREEN}✓ Environment configuration complete.${NC}\n"
 
 # -----------------------------------------------------------------------------
 # Step 5: Verification & Diagnostics
@@ -573,4 +596,13 @@ elif [ $IS_TARGET_WINDOWS -eq 1 ]; then
 else
   echo -e "  • Launch via SSH:             ssh ${TARGET} 'sudo systemctl start nemo-kiosk.service'"
   echo -e "  • Connect to Web UI:          http://${TARGET#*@}:8000\n"
+fi
+
+if [ ${REBOOT_AFTER} -eq 1 ]; then
+  echo -e "${YELLOW}${BOLD}🔄 [Reboot] Rebooting target system as requested...${NC}"
+  if [ $IS_LOCAL -eq 1 ]; then
+    sudo reboot
+  else
+    ssh "${SSH_OPTS[@]}" "$TARGET" "sudo reboot" || true
+  fi
 fi

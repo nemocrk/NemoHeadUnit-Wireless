@@ -70,18 +70,27 @@ export class PhoneWidget {
             caller_name = '',
             caller_number = '',
             call_duration_seconds = 0,
-            signal_strength = 4,
-            battery_level = 85,
+            signal_strength = null,
+            battery_level = null,
             is_charging = false,
         } = data;
 
         // Update Top/Bottom Status Indicators
         if (this.cmdSignal) {
-            this.cmdSignal.title = `Cellular Signal: ${signal_strength}/5`;
+            if (signal_strength !== null && signal_strength !== undefined && signal_strength >= 0) {
+                this.cmdSignal.title = `Cellular Signal: ${signal_strength}/5`;
+            } else {
+                this.cmdSignal.title = 'Cellular Signal: Unknown';
+            }
         }
         if (this.cmdBattery && this.batteryText) {
-            this.batteryText.textContent = `${battery_level}%`;
-            this.cmdBattery.title = `Phone Battery: ${battery_level}% ${is_charging ? '(Charging)' : ''}`;
+            if (battery_level !== null && battery_level !== undefined && battery_level >= 0) {
+                this.batteryText.textContent = `${battery_level}%`;
+                this.cmdBattery.title = `Phone Battery: ${battery_level}% ${is_charging ? '(Charging)' : ''}`;
+            } else {
+                this.batteryText.textContent = '--%';
+                this.cmdBattery.title = 'Phone Battery: Unknown';
+            }
         }
 
         // Update Call Card

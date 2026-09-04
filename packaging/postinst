@@ -165,11 +165,11 @@ run_postinst() {
                 SAVED_HASH="$(cat "${CHECKSUM_FILE}" 2>/dev/null || true)"
             fi
 
-            if [ -d "${ENV_PREFIX}" ] && [ -n "${CURRENT_HASH}" ] && [ "${CURRENT_HASH}" = "${SAVED_HASH}" ]; then
+            if [ -f "${ENV_PREFIX}/conda-meta/history" ] && [ -n "${CURRENT_HASH}" ] && [ "${CURRENT_HASH}" = "${SAVED_HASH}" ]; then
                 log "Micromamba env in ${ENV_PREFIX} is up-to-date with environment.yml — skipping update."
-            elif [ -d "${ENV_PREFIX}" ]; then
+            elif [ -f "${ENV_PREFIX}/conda-meta/history" ]; then
                 log "Micromamba env spec changed — updating env in ${ENV_PREFIX}"
-                "${MM_BIN}" env update -y -p "${ENV_PREFIX}" -f "${ENV_YML}" --prune
+                "${MM_BIN}" env update -y -p "${ENV_PREFIX}" -f "${ENV_YML}" --prune || "${MM_BIN}" create -y -p "${ENV_PREFIX}" -f "${ENV_YML}"
                 echo "${CURRENT_HASH}" > "${CHECKSUM_FILE}"
             else
                 log "Creazione Micromamba env in ${ENV_PREFIX} (potrebbe richiedere qualche minuto)"
@@ -310,6 +310,14 @@ EOF
         sed -i "s|XDG_RUNTIME_DIR=/run/user/.*|XDG_RUNTIME_DIR=/run/user/$(id -u "${target_user}")|" /etc/systemd/system/nemo-kiosk.service
 
         systemctl daemon-reload
+        if command -v loginctl &>/dev/null; then
+            loginctl enable-linger "${target_user}" >/dev/null 2>&1 || true
+        fi
+        if command -v systemctl &>/dev/null; then
+            for unit in pipewire.socket pipewire-pulse.socket pipewire.service pipewire-pulse.service wireplumber.service; do
+                systemctl --global enable "$unit" >/dev/null 2>&1 || true
+            done
+        fi
         if [ "${autostart_kiosk}" = "true" ]; then
             log "Enabling nemo-kiosk.service for autostart on boot (user: ${target_user})"
             systemctl enable nemo-kiosk.service || true

@@ -51,11 +51,13 @@ class PhoneStatusHandler:
             "caller_name": "",
             "caller_number": "",
             "call_duration_seconds": 0,
-            "signal_strength": 4,  # 0 to 5
-            "battery_level": 85,   # 0 to 100
+            "signal_strength": -1,  # 0 to 5, -1 if unknown
+            "battery_level": -1,   # 0 to 100, -1 if unknown
             "is_charging": False,
             "has_photo": False,
             "contact_photo_b64": "",
+            "operator_name": "",
+            "is_roaming": False,
         }
 
     async def handle_message(self, channel_id: int, message_id: int, body: bytes) -> None:
@@ -82,8 +84,8 @@ class PhoneStatusHandler:
             update.ParseFromString(body)
             self.log.info(f"📞 PhoneStatus parsed proto:\n{update}")
 
-            signal = update.signal_strength if update.HasField("signal_strength") else self.current_state.get("signal_strength", 4)
-            self.current_state["signal_strength"] = min(5, max(0, signal))
+            if update.HasField("signal_strength"):
+                self.current_state["signal_strength"] = min(5, max(0, update.signal_strength))
 
             if len(update.calls) > 0:
                 call: PhoneCall = update.calls[0]
@@ -132,6 +134,34 @@ class PhoneStatusHandler:
 
         except Exception as exc:
             self.log.warning(f"PhoneStatusHandler (ch{channel_id}): Failed to parse PhoneStatusUpdate: {exc}")
+
+    async def update_telemetry(self, data: dict) -> None:
+        """Merge incoming Bluetooth telemetry (battery, RSSI, operator, roaming) from connectivity_manager."""
+        if not isinstance(data, dict):
+            return
+        updated = False
+        if "battery_level" in data and data["battery_level"] is not None and data["battery_level"] >= 0:
+            self.current_state["battery_level"] = max(0, min(100, int(data["battery_level"])))
+            updated = True
+        if "signal_strength" in data and data["signal_strength"] is not None and data["signal_strength"] >= 0:
+            self.current_state["signal_strength"] = max(0, min(5, int(data["signal_strength"])))
+            updated = True
+        if "operator_name" in data and data["operator_name"]:
+            self.current_state["operator_name"] = str(data["operator_name"])
+            updated = True
+        if "is_roaming" in data and data["is_roaming"] is not None:
+            self.current_state["is_roaming"] = bool(data["is_roaming"])
+            updated = True
+
+        if updated:
+            self.log.info(
+                f"📱 PhoneStatus merged telemetry: battery={self.current_state['battery_level']}%, "
+                f"signal={self.current_state['signal_strength']}/5, operator='{self.current_state['operator_name']}'"
+            )
+            await self.manager.broadcast_ws_json({
+                "type": "phone_status",
+                "data": self.current_state,
+            })
 
     async def update_battery_status(self, battery_level: int, is_charging: bool = False) -> None:
         """Update battery status and broadcast change."""

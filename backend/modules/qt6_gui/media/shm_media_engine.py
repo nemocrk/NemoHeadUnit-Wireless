@@ -87,6 +87,7 @@ class GStreamerHwDecoder:
                 logger.info("ℹ️ [Qt6 Video HW Decoder] No GStreamer video decoder pipeline available — using PyAV fallback")
                 return
 
+            logger.info(f"🎬 [Qt6 Video HW Decoder] Launching GStreamer pipeline: {pipe_str}")
             self._pipeline = Gst.parse_launch(pipe_str)
             self._appsrc = self._pipeline.get_by_name("src")
             self._appsink = self._pipeline.get_by_name("sink")
@@ -211,6 +212,7 @@ class Qml6ZeroCopyDecoder:
                 )
                 return
 
+            logger.info(f"🎬 [Qml6ZeroCopyDecoder] Launching GStreamer pipeline: {pipe_str}")
             self._pipeline = Gst.parse_launch(pipe_str)
             self._appsrc = self._pipeline.get_by_name("src")
             self._sink = self._pipeline.get_by_name("qml_sink")
