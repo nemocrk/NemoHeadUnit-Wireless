@@ -245,8 +245,26 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         )
         self._initialized = True
 
+        # Unblock rfkill if available on Linux
+        try:
+            import subprocess
+            subprocess.run(["rfkill", "unblock", "bluetooth"], capture_output=True, timeout=2.0)
+        except Exception:
+            pass
+
         # Set adapter properties and retrieve address
         props = dbus.Interface(self._bus.get_object("org.bluez", adapter_path), "org.freedesktop.DBus.Properties")
+        try:
+            props.Set("org.bluez.Adapter1", "Powered", dbus.Boolean(True, variant_level=1))
+        except Exception as e:
+            log.warning(f"Could not power on BlueZ adapter: {e}")
+
+        try:
+            props.Set("org.bluez.Adapter1", "Pairable", dbus.Boolean(True, variant_level=1))
+            props.Set("org.bluez.Adapter1", "PairableTimeout", dbus.UInt32(0, variant_level=1))
+        except Exception as e:
+            log.warning(f"Could not set BlueZ pairable properties: {e}")
+
         props.Set("org.bluez.Adapter1", "Alias", dbus.String(adapter_name, variant_level=1))
         props.Set("org.bluez.Adapter1", "Discoverable", dbus.Boolean(discoverable, variant_level=1))
         props.Set("org.bluez.Adapter1", "DiscoverableTimeout", dbus.UInt32(discoverable_timeout, variant_level=1))
@@ -354,7 +372,24 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
 
     def _run_discovery(self, duration_sec: int, on_device_found_cb: Callable[[dict], None]) -> None:
         try:
-            self._adapter.StartDiscovery()
+            try:
+                self._adapter.StartDiscovery()
+            except Exception as e:
+                err_str = str(e)
+                if "InProgress" in err_str:
+                    log.debug("Discovery was already in progress in BlueZ.")
+                elif "NotReady" in err_str or "Failed" in err_str:
+                    log.warning(f"StartDiscovery failed ({e}), attempting adapter power recovery...")
+                    try:
+                        props = dbus.Interface(self._adapter, "org.freedesktop.DBus.Properties")
+                        props.Set("org.bluez.Adapter1", "Powered", dbus.Boolean(True, variant_level=1))
+                        time.sleep(0.5)
+                        self._adapter.StartDiscovery()
+                    except Exception as p_err:
+                        log.error(f"Failed to power-recover adapter for discovery: {p_err}")
+                        raise
+                else:
+                    raise
             deadline = time.monotonic() + duration_sec
             seen = set()
             found_count = 0
