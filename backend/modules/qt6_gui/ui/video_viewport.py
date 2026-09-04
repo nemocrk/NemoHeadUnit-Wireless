@@ -18,11 +18,11 @@ from PyQt6.QtWidgets import QWidget
 from PyQt6.QtQuickWidgets import QQuickWidget
 from PyQt6.QtCore import QEvent, QPointF, Qt, QUrl, QObject, pyqtSignal
 from PyQt6.QtGui import QEventPoint, QMouseEvent, QTouchEvent, QPainter, QImage
-from PyQt6.QtQuick import QQuickItem, QQuickWindow, QSGRendererInterface
+from PyQt6.QtQuick import QQuickItem, QQuickWindow, QSGRendererInterface, QQuickImageProvider
 
 logger = logging.getLogger("qt6_gui.video_viewport")
 
-QML_VIEWPORT_CODE = """
+QML_ZERO_COPY_CODE = """
 import QtQuick 2.15
 import org.freedesktop.gstreamer.Qt6GLVideoItem 1.0
 
@@ -38,14 +38,61 @@ Rectangle {
         smooth: true
         antialiasing: false
         opacity: 1.0
+        visible: true
+    }
+
+    Image {
+        id: fallbackImage
+        objectName: "fallbackImage"
+        anchors.fill: parent
+        visible: false
+        fillMode: Image.Stretch
+        cache: false
+        source: "image://nemo_video/frame"
+    }
+}
+"""
+
+QML_FALLBACK_CODE = """
+import QtQuick 2.15
+
+Rectangle {
+    id: root
+    anchors.fill: parent
+    color: "#000000"
+
+    Image {
+        id: fallbackImage
+        objectName: "fallbackImage"
+        anchors.fill: parent
+        visible: true
+        fillMode: Image.Stretch
+        cache: false
+        source: "image://nemo_video/frame"
     }
 }
 """
 
 
+class FrameImageProvider(QQuickImageProvider):
+    """Fallback QML Image Provider serving software/appsink RGBA video frames."""
+    def __init__(self):
+        super().__init__(QQuickImageProvider.ImageType.Image)
+        self.image = QImage(1280, 720, QImage.Format.Format_RGBA8888)
+        self.image.fill(0)
+
+    def requestImage(self, *args):
+        # PyQt6 passes (id_str, requestedSize) and expects Tuple[QImage, QSize]
+        # PySide6 passes (id_str, size, requestedSize) and expects QImage
+        size = self.image.size()
+        if len(args) == 2:
+            return self.image, size
+        return self.image
+
+
 class VideoViewportWidget(QQuickWidget):
     """
-    High-Performance Zero-Copy Video Render Canvas for Android Auto Projected Stream.
+    High-Performance Zero-Copy & Fallback Video Render Canvas for Android Auto Projected Stream.
     Inherits from QQuickWidget (compatible with EGLFS single-window constraint).
     """
 
@@ -76,23 +123,45 @@ class VideoViewportWidget(QQuickWidget):
         self._attached = False
         self._sg_initialized = False
         self._video_item: Optional[QObject] = None
+        self._fallback_image: Optional[QObject] = None
         self._sink_bound_callback: Optional[Callable[[], None]] = None
+        self._is_fallback_mode = False
+        self._frame_seq = 0
 
-        # 1. Write QML and set source
-        with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False) as f:
-            f.write(QML_VIEWPORT_CODE)
-            self._qml_temp_path = f.name
+        # Register ImageProvider for non-zero-copy frames
+        self._image_provider = FrameImageProvider()
+        self.engine().addImageProvider("nemo_video", self._image_provider)
 
         self.statusChanged.connect(self._on_qml_status_changed)
         self.sceneGraphError.connect(self._on_scenegraph_error)
 
-        # 2. Hook Scene Graph initialization
+        # Hook Scene Graph initialization
         qw = self.quickWindow()
         if qw:
             qw.sceneGraphInitialized.connect(self._on_scenegraph_initialized)
 
+        # On Windows or non-GL systems, directly load fallback Image QML without GstGL plugin warnings
+        if sys.platform == "win32":
+            self._load_fallback_qml()
+        else:
+            self._load_qml(QML_ZERO_COPY_CODE)
+        logger.info("🎬 [VideoViewport] QQuickWidget initialized (Dual-Mode EGLFS/Wayland/Windows Compliant)")
+
+    def _load_qml(self, qml_content: str):
+        if self._qml_temp_path and os.path.exists(self._qml_temp_path):
+            try:
+                os.unlink(self._qml_temp_path)
+            except Exception:
+                pass
+        with tempfile.NamedTemporaryFile("w", suffix=".qml", delete=False) as f:
+            f.write(qml_content)
+            self._qml_temp_path = f.name
         self.setSource(QUrl.fromLocalFile(self._qml_temp_path))
-        logger.info("🎬 [VideoViewport] QQuickWidget initialized (EGLFS Single-Window Compliant)")
+
+    def _load_fallback_qml(self):
+        self._is_fallback_mode = True
+        logger.info("🎬 [VideoViewport] Switching to fallback Image viewport QML")
+        self._load_qml(QML_FALLBACK_CODE)
 
     def _on_scenegraph_error(self, error, message):
         logger.error(f"❌ [VideoViewport] SceneGraph Error: {error} - {message}")
@@ -103,12 +172,15 @@ class VideoViewportWidget(QQuickWidget):
             root = self.rootObject()
             if root:
                 self._video_item = root.findChild(QObject, "videoItem")
-                logger.info(f"🎬 [VideoViewport] videoItem found: {self._video_item}")
+                self._fallback_image = root.findChild(QObject, "fallbackImage")
+                logger.info(f"🎬 [VideoViewport] Elements ready: videoItem={self._video_item}, fallbackImage={self._fallback_image}")
                 if self._sg_initialized:
                     self._try_bind()
         elif status == QQuickWidget.Status.Error:
             for err in self.errors():
-                logger.error(f"❌ [VideoViewport] QML Error: {err.toString()}")
+                logger.warning(f"⚠️ [VideoViewport] QML Error: {err.toString()}")
+            if not self._is_fallback_mode:
+                self._load_fallback_qml()
 
     def set_sink_bound_callback(self, cb: Callable[[], None]) -> None:
         """Set callback invoked once qml6glsink has been successfully bound to GstGLQt6VideoItem."""
@@ -162,7 +234,10 @@ class VideoViewportWidget(QQuickWidget):
                     pass
 
             if cpp_ptr and self._gst_sink:
-                libgobject_path = ctypes.util.find_library("gobject-2.0") or "libgobject-2.0.so.0"
+                if sys.platform == "win32":
+                    libgobject_path = ctypes.util.find_library("gobject-2.0") or "gobject-2.0-0.dll"
+                else:
+                    libgobject_path = ctypes.util.find_library("gobject-2.0") or "libgobject-2.0.so.0"
                 libgobject = ctypes.CDLL(libgobject_path)
                 libgobject.g_object_set.argtypes = [
                     ctypes.c_void_p,
@@ -173,6 +248,10 @@ class VideoViewportWidget(QQuickWidget):
                 libgobject.g_object_set.restype = None
                 libgobject.g_object_set(hash(self._gst_sink), b"widget", ctypes.c_void_p(cpp_ptr), None)
                 self._attached = True
+                if self._video_item:
+                    self._video_item.setProperty("visible", True)
+                if self._fallback_image:
+                    self._fallback_image.setProperty("visible", False)
                 logger.info(
                     f"🎬 [VideoViewport] qml6glsink successfully attached to GstGLQt6VideoItem (ptr={hex(cpp_ptr)}) — Zero-Copy ACTIVE!"
                 )
@@ -182,12 +261,18 @@ class VideoViewportWidget(QQuickWidget):
             logger.error(f"❌ [VideoViewport] Error binding widget to sink: {exc}")
 
     def update_frame(self, frame_bytes: bytes, width: int, height: int):
-        """Update active frame dimensions."""
+        """Update active frame dimensions and render fallback buffer if zero-copy is inactive."""
         if width > 0 and height > 0:
             self.frame_width = width
             self.frame_height = height
-        if not self._gl_decoder:
+        if not self._attached and frame_bytes:
             self.current_frame_data = frame_bytes
+            img = QImage(frame_bytes, width, height, width * 4, QImage.Format.Format_RGBA8888)
+            self._image_provider.image = img
+            if self._fallback_image:
+                self._fallback_image.setProperty("visible", True)
+                self._frame_seq = (self._frame_seq + 1) % 1000000
+                self._fallback_image.setProperty("source", f"image://nemo_video/frame?seq={self._frame_seq}")
 
     def cleanupGL(self) -> None:
         """Release temporary QML resources."""

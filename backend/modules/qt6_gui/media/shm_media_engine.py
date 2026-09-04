@@ -37,10 +37,24 @@ except ImportError:
     _HAS_QOPENGL = False
 
 
+try:
+    from shared.hardware.video_decoder import (
+        scan_gstreamer_plugin_paths,
+        get_best_hardware_decoder,
+        build_video_pipeline,
+    )
+except ImportError:
+    from backend.shared.hardware.video_decoder import (
+        scan_gstreamer_plugin_paths,
+        get_best_hardware_decoder,
+        build_video_pipeline,
+    )
+
+
 class GStreamerHwDecoder:
     """
-    Hardware-accelerated H.264 video decoder using GStreamer VA-API (vah264dec + vapostproc)
-    for zero-CPU hardware decoding on Intel Bay Trail / Linux with zero-clock-sync appsink.
+    Cross-platform hardware-accelerated H.264 video decoder using GStreamer
+    (NVDEC, VA-API, Direct3D 11, QSV, MediaFoundation, or V4L2) with zero-clock-sync appsink.
     """
 
     def __init__(self, on_frame_callback: Callable[[bytes, int, int, int], None]):
@@ -60,46 +74,18 @@ class GStreamerHwDecoder:
             Gst.init(None)
             self._Gst = Gst
 
-            # Ensure system GStreamer plugin paths are scanned when running inside micromamba
-            registry = Gst.Registry.get()
-            for path in [
-                "/usr/lib/gstreamer-1.0",
-                "/usr/lib64/gstreamer-1.0",
-                "/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
-                "/usr/lib/aarch64-linux-gnu/gstreamer-1.0",
-                "/usr/local/lib/gstreamer-1.0",
-            ]:
-                if os.path.isdir(path):
-                    registry.scan_path(path)
+            scan_gstreamer_plugin_paths(Gst)
 
-            has_va = Gst.ElementFactory.find("vah264dec") is not None
-            has_va_post = Gst.ElementFactory.find("vapostproc") is not None
-            has_vaapi = Gst.ElementFactory.find("vaapih264dec") is not None
-            has_vaapi_post = Gst.ElementFactory.find("vaapipostproc") is not None
-
-            if has_va and has_va_post:
-                dec_chain = "vah264dec ! vapostproc"
-                dec_name = "Intel VA-API Hardware VPU (vah264dec + vapostproc)"
-            elif has_va:
-                dec_chain = "vah264dec ! videoconvert"
-                dec_name = "Intel VA-API Hardware VPU (vah264dec)"
-            elif has_vaapi and has_vaapi_post:
-                dec_chain = "vaapih264dec ! vaapipostproc"
-                dec_name = "Intel VA-API Hardware VPU (vaapih264dec + vaapipostproc)"
-            elif has_vaapi:
-                dec_chain = "vaapih264dec ! videoconvert"
-                dec_name = "Intel VA-API Hardware VPU (vaapih264dec)"
-            else:
-                logger.info("ℹ️ [Qt6 Video HW Decoder] VA-API hardware decoder not available in GStreamer registry — using PyAV fallback")
-                return
-
-            pipe_str = (
-                "appsrc name=src is-live=true format=bytes "
-                "! h264parse config-interval=-1 "
-                f"! {dec_chain} "
-                "! video/x-raw,format=RGBA "
-                "! appsink name=sink emit-signals=true max-buffers=2 drop=true sync=false"
+            pipe_str, dec_name = build_video_pipeline(
+                Gst=Gst,
+                mode="appsink",
+                sink_name="sink",
+                src_name="src",
             )
+
+            if not pipe_str:
+                logger.info("ℹ️ [Qt6 Video HW Decoder] No GStreamer video decoder pipeline available — using PyAV fallback")
+                return
 
             self._pipeline = Gst.parse_launch(pipe_str)
             self._appsrc = self._pipeline.get_by_name("src")
@@ -110,7 +96,7 @@ class GStreamerHwDecoder:
                 ret = self._pipeline.set_state(Gst.State.PLAYING)
                 if ret != Gst.StateChangeReturn.FAILURE:
                     self.is_available = True
-                    logger.info(f"🎬 [Qt6 Video HW Decoder] GStreamer pipeline active using {dec_name} (0% CPU Hardware VPU)")
+                    logger.info(f"🎬 [Qt6 Video HW Decoder] GStreamer pipeline active using {dec_name}")
         except Exception as exc:
             logger.warning(f"Could not initialize GStreamer HW decoder: {exc}")
             self.close()
@@ -201,7 +187,7 @@ class Qml6ZeroCopyDecoder:
         self._try_init_pipeline()
 
     def _try_init_pipeline(self) -> None:
-        """Build GStreamer zero-copy pipeline."""
+        """Build GStreamer zero-copy pipeline using unified video_decoder factory."""
         try:
             import gi
             gi.require_version("Gst", "1.0")
@@ -210,32 +196,21 @@ class Qml6ZeroCopyDecoder:
             Gst.init(None)
             self._Gst = Gst
 
-            registry = Gst.Registry.get()
-            for path in [
-                "/usr/lib/gstreamer-1.0",
-                "/usr/lib64/gstreamer-1.0",
-                "/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
-            ]:
-                if os.path.isdir(path):
-                    registry.scan_path(path)
+            scan_gstreamer_plugin_paths(Gst)
 
-            required = ["vah264dec", "vapostproc", "glupload", "qml6glsink", "h264parse"]
-            missing = [e for e in required if Gst.ElementFactory.find(e) is None]
-            if missing:
+            pipe_str, dec_desc = build_video_pipeline(
+                Gst=Gst,
+                mode="zero_copy",
+                sink_name="qml_sink",
+                src_name="src",
+            )
+
+            if not pipe_str:
                 logger.info(
-                    f"ℹ️ [Qml6ZeroCopyDecoder] Missing elements {missing} — falling back to GStreamerHwDecoder"
+                    "ℹ️ [Qml6ZeroCopyDecoder] Zero-copy pipeline not supported or elements missing — falling back to GStreamerHwDecoder"
                 )
                 return
 
-            pipe_str = (
-                "appsrc name=src is-live=true format=bytes "
-                "! h264parse config-interval=-1 "
-                "! vah264dec "
-                "! vapostproc add-borders=true "
-                "! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=YV12,width=1280,height=800 "
-                "! glupload "
-                "! qml6glsink name=qml_sink sync=false"
-            )
             self._pipeline = Gst.parse_launch(pipe_str)
             self._appsrc = self._pipeline.get_by_name("src")
             self._sink = self._pipeline.get_by_name("qml_sink")
@@ -255,7 +230,7 @@ class Qml6ZeroCopyDecoder:
             bus.connect("message::error", _on_gst_error)
 
             self.is_available = True
-            logger.info("🎬 [Qml6ZeroCopyDecoder] Pipeline initialized (Hardware DMABuf -> qml6glsink)")
+            logger.info(f"🎬 [Qml6ZeroCopyDecoder] Pipeline initialized ({dec_desc} -> qml6glsink)")
         except Exception as exc:
             logger.warning(f"[Qml6ZeroCopyDecoder] Init failed: {exc}")
 

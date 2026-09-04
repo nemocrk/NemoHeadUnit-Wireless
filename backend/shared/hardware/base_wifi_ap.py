@@ -33,3 +33,20 @@ class BaseWifiApAdapter(abc.ABC):
     async def teardown(self) -> None:
         """Clean up Wifi AP resources."""
         pass
+
+
+def get_wifi_adapter() -> BaseWifiApAdapter:
+    """
+    Factory to return the appropriate BaseWifiApAdapter for the current OS.
+    On Linux, attempts APManagerWifiApAdapter, falling back to Windows/Mock adapter if unavailable.
+    On Windows/other, returns WindowsWifiApAdapter.
+    """
+    import sys
+    if sys.platform.startswith("linux"):
+        try:
+            from .apmanager_wifi_ap import APManagerWifiApAdapter
+            return APManagerWifiApAdapter()
+        except Exception:
+            pass
+    from .windows_wifi_ap import WindowsWifiApAdapter
+    return WindowsWifiApAdapter()

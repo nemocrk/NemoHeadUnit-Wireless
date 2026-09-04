@@ -79,3 +79,20 @@ class BaseBluetoothAdapter(abc.ABC):
         """Clean up Bluetooth adapter resources."""
         pass
 
+
+def get_bluetooth_adapter() -> BaseBluetoothAdapter:
+    """
+    Factory to return the appropriate BaseBluetoothAdapter for the current OS.
+    On Linux, attempts BluezBluetoothAdapter, falling back to Windows/Mock adapter if unavailable.
+    On Windows/other, returns WindowsBluetoothAdapter.
+    """
+    import sys
+    if sys.platform.startswith("linux"):
+        try:
+            from .bluez_bluetooth import BluezBluetoothAdapter
+            return BluezBluetoothAdapter()
+        except Exception:
+            pass
+    from .windows_bluetooth import WindowsBluetoothAdapter
+    return WindowsBluetoothAdapter()
+

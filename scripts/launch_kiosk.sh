@@ -8,9 +8,18 @@
 
 set -euo pipefail
 
-# Force legacy i965 Intel VA-API driver for hardware H.264 video decoding
-export LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-i965}"
-export LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-/usr/lib/x86_64-linux-gnu/dri:/usr/lib/dri}"
+# Load optional hardware quirks (e.g. HP Omni 10 driver overrides)
+if [ -f "/etc/nemo-headunit/hardware_quirks.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "/etc/nemo-headunit/hardware_quirks.env"
+    set +a
+fi
+
+if [ -n "${LIBVA_DRIVER_NAME:-}" ]; then
+    export LIBVA_DRIVER_NAME
+fi
+export LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-/usr/lib/x86_64-linux-gnu/dri:/usr/lib64/dri:/usr/lib/dri}"
 
 URL="http://localhost:8000"
 SELECTED_BROWSER="${KIOSK_BROWSER:-}"

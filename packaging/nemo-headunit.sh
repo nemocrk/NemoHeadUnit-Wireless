@@ -36,10 +36,16 @@ ensure_display_server() {
         fi
     fi
 
-    # 0. Load optional display configuration
+    # 0. Load optional display configuration and hardware quirks
     if [ -f "/etc/nemo-headunit/display.conf" ]; then
         # shellcheck disable=SC1091
         . "/etc/nemo-headunit/display.conf"
+    fi
+    if [ -f "/etc/nemo-headunit/hardware_quirks.env" ]; then
+        # shellcheck disable=SC1091
+        set -a
+        . "/etc/nemo-headunit/hardware_quirks.env"
+        set +a
     fi
 
     # CLI overrides

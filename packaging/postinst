@@ -285,7 +285,7 @@ COMPOSITOR_PREFERENCE="${compositor_pref}"
 QT_QPA_PLATFORM="eglfs"
 QT_QPA_EGLFS_ALWAYS_SET_MODE="1"
 COMPOSITOR_TTY="7"
-QT_SCALE_FACTOR="1.5"
+QT_SCALE_FACTOR="1.0"
 EOF
         chmod 644 "${DISPLAY_CONF}"
         log "Created ${DISPLAY_CONF} (autostart=${autostart_kiosk}, preference=${compositor_pref})"

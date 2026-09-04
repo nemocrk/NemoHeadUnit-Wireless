@@ -16,19 +16,10 @@ from .base import BaseVideoTransport, TransportUnavailableError
 import os
 
 
-def _scan_system_plugin_paths(Gst) -> None:
-    """Ensure GStreamer system plugin directories are registered in Conda/Micromamba env."""
-    for path in [
-        "/usr/lib/x86_64-linux-gnu/gstreamer-1.0",
-        "/usr/lib/gstreamer-1.0",
-        "/usr/lib64/gstreamer-1.0",
-        "/usr/lib/i386-linux-gnu/gstreamer-1.0",
-    ]:
-        if os.path.isdir(path):
-            try:
-                Gst.Registry.get().scan_path(path)
-            except Exception:
-                pass
+try:
+    from shared.hardware.video_decoder import scan_gstreamer_plugin_paths as _scan_system_plugin_paths
+except ImportError:
+    from backend.shared.hardware.video_decoder import scan_gstreamer_plugin_paths as _scan_system_plugin_paths
 
 
 def _gst_available() -> bool:

@@ -34,71 +34,12 @@ except ImportError:
 import os
 
 
-def _setup_windows_dll_path():
-    """
-    Prepend PyQt6 and Qt6/bin directories to os.environ['PATH'] and os.add_dll_directory()
-    on Windows to prevent DLL load conflicts (ERROR_PROC_NOT_FOUND code 127).
-    """
-    if sys.platform != "win32":
-        return
-    try:
-        import site
-        prefix = sys.prefix
-        qt6_dirs = []
-        site_dirs = []
-        try:
-            site_dirs.extend(site.getsitepackages())
-        except Exception:
-            pass
-        try:
-            site_dirs.append(site.getusersitepackages())
-        except Exception:
-            pass
-        for path_entry in sys.path:
-            if "site-packages" in str(path_entry):
-                site_dirs.append(str(path_entry))
+try:
+    from shared.platform.windows import setup_windows_dll_directories
+except ImportError:
+    from backend.shared.platform.windows import setup_windows_dll_directories
 
-        for d in site_dirs:
-            qt6_bin = os.path.join(d, "PyQt6", "Qt6", "bin")
-            qt6_root = os.path.join(d, "PyQt6")
-            if os.path.exists(qt6_bin):
-                qt6_dirs.append(qt6_bin)
-            if os.path.exists(qt6_root):
-                qt6_dirs.append(qt6_root)
-
-        priority_dirs = qt6_dirs + [
-            os.path.join(prefix, "DLLs"),
-            os.path.join(prefix, "Library", "bin"),
-        ]
-
-        for d in priority_dirs:
-            if os.path.exists(d):
-                if d not in os.environ.get("PATH", ""):
-                    os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
-                if hasattr(os, "add_dll_directory"):
-                    try:
-                        os.add_dll_directory(d)
-                    except Exception:
-                        pass
-
-        # Force pre-loading Qt6Core.dll using LOAD_WITH_ALTERED_SEARCH_PATH
-        import ctypes
-        LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
-        for d in qt6_dirs:
-            qt6_core = os.path.join(d, "Qt6Core.dll")
-            if os.path.exists(qt6_core):
-                try:
-                    ctypes.windll.kernel32.LoadLibraryExW(qt6_core, None, LOAD_WITH_ALTERED_SEARCH_PATH)
-                except Exception:
-                    pass
-    except Exception as exc:
-        logging.debug("Windows DLL path preloading notice: %s", exc)
-
-
-
-
-
-_setup_windows_dll_path()
+setup_windows_dll_directories()
 
 import json
 import threading

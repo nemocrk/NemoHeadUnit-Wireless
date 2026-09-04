@@ -11,10 +11,8 @@ from aiohttp import web
 from shared.base_module import BaseBackendModule, run_module
 from shared.config_schema import field_bool, field_int, field_string, field_enum, ConfigFieldList
 
-from shared.hardware.bluez_bluetooth import BluezBluetoothAdapter
-from shared.hardware.apmanager_wifi_ap import APManagerWifiApAdapter
-from shared.hardware.windows_bluetooth import WindowsBluetoothAdapter
-from shared.hardware.windows_wifi_ap import WindowsWifiApAdapter
+from shared.hardware.base_bluetooth import get_bluetooth_adapter
+from shared.hardware.base_wifi_ap import get_wifi_adapter
 
 from modules.connectivity_manager.handshake import RfcommHandshake
 
@@ -108,42 +106,32 @@ class ConnectivityManagerModule(BaseBackendModule):
 
         self.subscribe("bluetooth_manager.try_autoconnect", self.on_try_autoconnect)
 
-        # OS-specific Adapter instantiation with robust fallback
-        if sys.platform.startswith("linux"):
-            try:
-                self.log.info("Initializing Linux Bluetooth Adapter (BlueZ D-Bus)...")
-                self._bt_adapter = BluezBluetoothAdapter()
-                await self._bt_adapter.setup(
-                    adapter_name=self.config.get("adapter_name", "NemoHeadUnit"),
-                    discoverable=self.config.get("discoverable", True),
-                    discoverable_timeout=self.config.get("discoverable_timeout", 0),
-                )
-            except Exception as e:
-                self.log.warning(f"Failed to initialize Linux BlueZ Bluetooth ({e}) — falling back to Windows/Mock Bluetooth Adapter")
-                self._bt_adapter = WindowsBluetoothAdapter()
-                await self._bt_adapter.setup(
-                    adapter_name=self.config.get("adapter_name", "NemoHeadUnit"),
-                    discoverable=self.config.get("discoverable", True),
-                    discoverable_timeout=self.config.get("discoverable_timeout", 0),
-                )
-
-            try:
-                self.log.info("Initializing Linux WiFi AP Adapter (APManager D-Bus)...")
-                self._wifi_adapter = APManagerWifiApAdapter()
-                await self._wifi_adapter.setup()
-            except Exception as e:
-                self.log.warning(f"Failed to initialize Linux APManager ({e}) — falling back to Windows/Mock WiFi AP Adapter")
-                self._wifi_adapter = WindowsWifiApAdapter()
-                await self._wifi_adapter.setup()
-        else:
-            self.log.info("Initializing Windows Bluetooth & WiFi AP Adapters (AF_BLUETOOTH + WinRT)...")
-            self._bt_adapter = WindowsBluetoothAdapter()
-            self._wifi_adapter = WindowsWifiApAdapter()
+        # Cross-platform Adapter instantiation via factories with graceful fallback
+        self.log.info("Initializing Hardware Bluetooth & WiFi AP Adapters...")
+        self._bt_adapter = get_bluetooth_adapter()
+        try:
             await self._bt_adapter.setup(
                 adapter_name=self.config.get("adapter_name", "NemoHeadUnit"),
                 discoverable=self.config.get("discoverable", True),
                 discoverable_timeout=self.config.get("discoverable_timeout", 0),
             )
+        except Exception as e:
+            self.log.warning(f"Primary Bluetooth adapter setup failed ({e}) — falling back to Windows/Mock adapter")
+            from shared.hardware.windows_bluetooth import WindowsBluetoothAdapter
+            self._bt_adapter = WindowsBluetoothAdapter()
+            await self._bt_adapter.setup(
+                adapter_name=self.config.get("adapter_name", "NemoHeadUnit"),
+                discoverable=self.config.get("discoverable", True),
+                discoverable_timeout=self.config.get("discoverable_timeout", 0),
+            )
+
+        self._wifi_adapter = get_wifi_adapter()
+        try:
+            await self._wifi_adapter.setup()
+        except Exception as e:
+            self.log.warning(f"Primary WiFi AP adapter setup failed ({e}) — falling back to Windows/Mock adapter")
+            from shared.hardware.windows_wifi_ap import WindowsWifiApAdapter
+            self._wifi_adapter = WindowsWifiApAdapter()
             await self._wifi_adapter.setup()
 
         # Listen for incoming AA RFCOMM connections, pairing PIN requests, connection state, and telemetry

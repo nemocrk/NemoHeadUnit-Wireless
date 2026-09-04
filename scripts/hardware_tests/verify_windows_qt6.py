@@ -13,46 +13,14 @@ def verify():
 
     if sys.platform == "win32":
         try:
-            import site
-            prefix = sys.prefix
-            
-            # Step 1: Locate PyQt6\Qt6\bin FIRST
-            qt6_dirs = []
-            site_dirs = []
-            try:
-                site_dirs.extend(site.getsitepackages())
-            except Exception:
-                pass
-            try:
-                site_dirs.append(site.getusersitepackages())
-            except Exception:
-                pass
-
-            for d in site_dirs:
-                qt6_bin = os.path.join(d, "PyQt6", "Qt6", "bin")
-                qt6_root = os.path.join(d, "PyQt6")
-                if os.path.exists(qt6_bin):
-                    qt6_dirs.append(qt6_bin)
-                if os.path.exists(qt6_root):
-                    qt6_dirs.append(qt6_root)
-
-            # Step 2: Build priority list (PyQt6 bin FIRST)
-            priority_dirs = qt6_dirs + [
-                os.path.join(prefix, "DLLs"),
-                os.path.join(prefix, "Library", "bin"),
-            ]
-
-            # Register priority directories
-            for d in priority_dirs:
-                if os.path.exists(d):
-                    if d not in os.environ.get("PATH", ""):
-                        os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
-                    if hasattr(os, "add_dll_directory"):
-                        try:
-                            os.add_dll_directory(d)
-                            print(f"[verify_windows_qt6] Added DLL directory: {d}")
-                        except Exception as err:
-                            print(f"[verify_windows_qt6] add_dll_directory notice ({d}): {err}")
+            from pathlib import Path
+            repo_root = Path(__file__).resolve().parent.parent.parent
+            sys.path.insert(0, str(repo_root / "backend"))
+            from shared.platform.windows import setup_windows_dll_directories
+            added = setup_windows_dll_directories()
+            print(f"[verify_windows_qt6] Registered DLL directories: {added}")
+        except Exception as e:
+            print(f"[verify_windows_qt6] setup_windows_dll_directories notice: {e}")
 
             # Step 3: Inspect loaded VC++ Runtime DLL paths
             print("\n[verify_windows_qt6] Checking C++ Runtime DLL handles...")

@@ -565,6 +565,32 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Fix 11: NemoHeadUnit Hardware Quirks Environment
+# ---------------------------------------------------------------------------
+echo -n "  [hw-fix] NemoHeadUnit hardware quirks environment... "
+QUIRKS_DIR="/etc/nemo-headunit"
+QUIRKS_FILE="$QUIRKS_DIR/hardware_quirks.env"
+QUIRKS_CHANGED=0
+
+mkdir -p "$QUIRKS_DIR"
+cat <<'EOF' > "$QUIRKS_DIR/hardware_quirks.env.tmp"
+# HP Omni 10 Hardware-specific Quirks & Tunings for NemoHeadUnit
+LIBVA_DRIVER_NAME="i965"
+QT_SCALE_FACTOR="1.5"
+NEMO_GST_ZERO_COPY_PIPELINE="appsrc name=src is-live=true format=bytes ! h264parse config-interval=-1 ! vah264dec ! vapostproc add-borders=true ! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=YV12,width=1280,height=800 ! glupload ! qml6glsink name=qml_sink sync=false"
+EOF
+
+if [ ! -f "$QUIRKS_FILE" ] || ! cmp -s "$QUIRKS_DIR/hardware_quirks.env.tmp" "$QUIRKS_FILE"; then
+    mv "$QUIRKS_DIR/hardware_quirks.env.tmp" "$QUIRKS_FILE"
+    chmod 644 "$QUIRKS_FILE"
+    QUIRKS_CHANGED=1
+    echo -e "${GREEN}generato in $QUIRKS_FILE.${NC}"
+else
+    rm -f "$QUIRKS_DIR/hardware_quirks.env.tmp"
+    echo -e "${GREEN}già presente.${NC}"
+fi
+
+# ---------------------------------------------------------------------------
 # Riepilogo
 # ---------------------------------------------------------------------------
 echo ""
@@ -575,8 +601,9 @@ echo "    - Display impostato a 1920x1200@40Hz (-33% scanout bandwidth)."
 echo "    - GPU RC6 / Runtime PM disabilitato; clock minimo fissato a 400MHz."
 echo "    - Bluetooth MAC persistente in ${BT_ADDR_FILE} tramite bluetooth-persistent-mac.service."
 echo "    - Firmware Broadcom (BT/WiFi) e Intel SST DSP verificati in /lib/firmware/."
+echo "    - Hardware Quirks generati in ${QUIRKS_FILE} (i965, scale 1.5, DMABuf caps)."
 
-if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ] || [ $FW_CHANGED -eq 1 ]; then
+if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ] || [ $FW_CHANGED -eq 1 ] || [ $QUIRKS_CHANGED -eq 1 ]; then
     echo -e "  ${GREEN}[hw-fix] HP Omni10: fix applicati. Riavvio necessario.${NC}"
 else
     echo -e "  ${GREEN}[hw-fix] HP Omni10: nessuna modifica necessaria.${NC}"

@@ -212,11 +212,16 @@ class DiagnosticModule(BaseBackendModule):
 
             elif test_type == "audio_standalone_proc":
                 import pathlib
-                script_path = pathlib.Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "test_audio_cli.py"
-                if not script_path.exists():
-                    script_path = pathlib.Path(__file__).resolve().parent.parent.parent / "scripts" / "test_audio_cli.py"
-                if not script_path.exists():
-                    script_path = pathlib.Path("/opt/nemo-headunit/scripts/test_audio_cli.py")
+                base_repo = pathlib.Path(__file__).resolve().parent.parent.parent
+                candidates = [
+                    base_repo.parent / "scripts" / "hardware_tests" / "test_audio_cli.py",
+                    base_repo / "scripts" / "hardware_tests" / "test_audio_cli.py",
+                    base_repo.parent / "scripts" / "test_audio_cli.py",
+                    base_repo / "scripts" / "test_audio_cli.py",
+                    pathlib.Path("/opt/nemo-headunit/scripts/hardware_tests/test_audio_cli.py"),
+                    pathlib.Path("/opt/nemo-headunit/scripts/test_audio_cli.py"),
+                ]
+                script_path = next((c for c in candidates if c.exists()), candidates[0])
 
                 freq = float(params.get("freq", params.get("tone_hz", 440)))
                 duration_sec = float(params.get("duration_sec", params.get("duration_ms", 2000) / 1000.0))

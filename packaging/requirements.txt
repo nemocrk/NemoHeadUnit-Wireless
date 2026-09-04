@@ -24,3 +24,21 @@ av>=10.0.0
 loguru>=0.7.3
 protobuf>=4.25.0
 grpcio-tools>=1.62.0
+
+# Windows Subsystem Bindings
+comtypes>=1.4.0; sys_platform == 'win32'
+pycaw>=20240210; sys_platform == 'win32'
+winrt-runtime>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Networking>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Networking.Connectivity>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Networking.NetworkOperators>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Networking.Sockets>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Foundation>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Foundation.Collections>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Devices.Enumeration>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Devices.Radios>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Devices.Bluetooth>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Devices.Bluetooth.Rfcomm>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Devices.Bluetooth.Advertisement>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Security.Cryptography>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Storage.Streams>=3.2.1; sys_platform == 'win32'

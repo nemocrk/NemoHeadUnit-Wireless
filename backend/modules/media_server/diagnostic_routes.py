@@ -39,48 +39,10 @@ def _generate_pcm_sine(freq_hz: float = 440.0, duration_ms: int = 1000, sample_r
     return bytes(buffer)
 
 
-def _detect_video_decoders() -> list[dict[str, Any]]:
-    """Probe for hardware and software H.264 decoders on current platform."""
-    decoders = []
-    
-    # Try GStreamer ElementFactory if available
-    try:
-        import gi
-        gi.require_version('Gst', '1.0')
-        from gi.repository import Gst
-        if not Gst.is_initialized():
-            Gst.init(None)
-
-        candidates = [
-            ("vah264dec", "Hardware (VA-API vah264dec)", "linux"),
-            ("vaapih264dec", "Hardware (VAAPI legacy)", "linux"),
-            ("v4l2slh264dec", "Hardware (V4L2 Stateless)", "linux"),
-            ("v4l2h264dec", "Hardware (V4L2 Stateful)", "linux"),
-            ("nvh264dec", "Hardware (NVDEC)", "all"),
-            ("d3d11h264dec", "Hardware (Direct3D 11)", "windows"),
-            ("vtdec_hw", "Hardware (VideoToolbox)", "darwin"),
-            ("avdec_h264", "Software (FFmpeg libavcodec)", "all"),
-        ]
-
-        for elem_name, desc, plat in candidates:
-            factory = Gst.ElementFactory.find(elem_name)
-            if factory:
-                decoders.append({
-                    "element": elem_name,
-                    "description": desc,
-                    "available": True,
-                    "is_hardware": "Hardware" in desc,
-                })
-    except Exception:
-        # Fallback to shutil.which or known platform defaults
-        if sys.platform.startswith("linux"):
-            decoders.append({"element": "v4l2slh264dec", "description": "Hardware (V4L2)", "available": shutil.which("v4l2-ctl") is not None, "is_hardware": True})
-            decoders.append({"element": "vaapih264dec", "description": "Hardware (VAAPI)", "available": shutil.which("vainfo") is not None, "is_hardware": True})
-        elif sys.platform == "win32":
-            decoders.append({"element": "d3d11h264dec", "description": "Hardware (Direct3D 11)", "available": True, "is_hardware": True})
-        decoders.append({"element": "avdec_h264", "description": "Software (FFmpeg)", "available": shutil.which("ffmpeg") is not None, "is_hardware": False})
-
-    return decoders
+try:
+    from shared.hardware.video_decoder import get_available_decoders as _detect_video_decoders
+except ImportError:
+    from backend.shared.hardware.video_decoder import get_available_decoders as _detect_video_decoders
 
 
 def register_diagnostic_routes(media_module) -> None:
