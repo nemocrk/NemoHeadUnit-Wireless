@@ -18,31 +18,31 @@
 ## Tasks
 
 ### Task 1: PipeWire BlueZ Configuration Fix & Audio Loopback
-- [ ] **Step 1.1**: Update `packaging/50-bluez.conf` with `bluez5.hfphsp-backend = "native"` and modern PipeWire 1.0+ settings.
-- [ ] **Step 1.2**: Update `/etc/wireplumber/wireplumber.conf.d/50-bluez.conf` on target device (`192.168.1.105`) and restart wireplumber.
-- [ ] **Step 1.3**: Implement `ensure_hfp_loopback` in `backend/shared/hardware/linux_audio.py` to automatically bridge `bluez_input.*` to `@DEFAULT_SINK@` and `@DEFAULT_SOURCE@` to `bluez_output.*`.
-- [ ] **Step 1.4**: Add automated test in `tests/test_hfp_audio_loopback.py` verifying loopback activation and teardown.
+- [x] **Step 1.1**: Update `packaging/50-bluez.conf` with `bluez5.hfphsp-backend = "native"` and modern PipeWire 1.0+ settings.
+- [x] **Step 1.2**: Update `/etc/wireplumber/wireplumber.conf.d/50-bluez.conf` on target device (`192.168.1.105`) and restart wireplumber.
+- [x] **Step 1.3**: Implement `ensure_hfp_loopback` in `backend/shared/hardware/linux_audio.py` to automatically bridge `bluez_input.*` to `@DEFAULT_SINK@` and `@DEFAULT_SOURCE@` to `bluez_output.*`.
+- [x] **Step 1.4**: Add automated test in `tests/test_hfp_audio_loopback.py` verifying loopback activation and teardown.
 
 ### Task 2: Standalone HFP Telephony Client (`backend/shared/hardware/bluez_hfp.py`)
-- [ ] **Step 2.1**: Write failing unit test `tests/test_bluez_hfp.py` testing AT command generation (`ATD`, `ATA`, `AT+CHUP`, `AT+VTS`, `AT+CMUT`) and call status state machine.
-- [ ] **Step 2.2**: Implement `BlueZHFClient` in `backend/shared/hardware/bluez_hfp.py` with mock driver for non-Linux/test environments.
-- [ ] **Step 2.3**: Expose REST endpoints in `backend/modules/connectivity_manager/main.py` (`/api/connectivity/phone/dial`, `/action`, `/dtmf`).
-- [ ] **Step 2.4**: Run tests and commit.
+- [x] **Step 2.1**: Write failing unit test `tests/test_bluez_hfp.py` testing AT command generation (`ATD`, `ATA`, `AT+CHUP`, `AT+VTS`, `AT+CMUT`) and call status state machine.
+- [x] **Step 2.2**: Implement `BlueZHFClient` in `backend/shared/hardware/bluez_hfp.py` with mock driver for non-Linux/test environments.
+- [x] **Step 2.3**: Expose REST endpoints in `backend/modules/connectivity_manager/main.py` (`/api/connectivity/phone/dial`, `/action`, `/dtmf`).
+- [x] **Step 2.4**: Run tests and commit.
 
 ### Task 3: Bluetooth PBAP Contacts & Recents Sync (`backend/shared/hardware/bluez_pbap.py`)
-- [ ] **Step 3.1**: Write failing unit test `tests/test_pbap_vcard_parser.py` verifying vCard parsing for contacts, telephone types, and timestamps.
-- [ ] **Step 3.2**: Implement `BlueZPBAPClient` with stdlib vCard parser and local JSON caching in AppData.
-- [ ] **Step 3.3**: Expose REST endpoints in `backend/modules/connectivity_manager/main.py` (`/api/connectivity/phone/contacts`, `/recents`, `/favorites`, `/sync`).
-- [ ] **Step 3.4**: Run tests and commit.
+- [x] **Step 3.1**: Write failing unit test `tests/test_pbap_vcard_parser.py` verifying vCard parsing for contacts, telephone types, and timestamps.
+- [x] **Step 3.2**: Implement `BlueZPBAPClient` with stdlib vCard parser and local JSON caching in AppData.
+- [x] **Step 3.3**: Expose REST endpoints in `backend/modules/connectivity_manager/main.py` (`/api/connectivity/phone/contacts`, `/recents`, `/favorites`, `/sync`).
+- [x] **Step 3.4**: Run tests and commit.
 
 ### Task 4: Phone Drawer Real Data Hydration & Keypad Integration
-- [ ] **Step 4.1**: Write failing GUI test in `tests/test_phone_drawer_hydration.py`.
-- [ ] **Step 4.2**: Update `backend/modules/qt6_gui/ui/drawers/phone_drawer.py` to populate real PBAP data, search filter in Contacts tab, and call click handling.
-- [ ] **Step 4.3**: Wire dialer keypad to send `ATD` when idle and DTMF `AT+VTS` when in-call.
-- [ ] **Step 4.4**: Verify full test suite passes (54+ tests) and commit.
+- [x] **Step 4.1**: Write failing GUI test in `tests/test_phone_drawer_hydration.py`.
+- [x] **Step 4.2**: Update `backend/modules/qt6_gui/ui/drawers/phone_drawer.py` to populate real PBAP data, search filter in Contacts tab, and call click handling.
+- [x] **Step 4.3**: Wire dialer keypad to send `ATD` when idle and DTMF `AT+VTS` when in-call.
+- [x] **Step 4.4**: Verify full test suite passes (54+ tests) and commit.
 
 ### Task 5: Dashboard Phone Card Widget (Replacing Notification Card)
-- [ ] **Step 5.1**: Create `backend/modules/qt6_gui/ui/phone_card_widget.py` with phone status (carrier, signal bars, battery level, device name), quick call action, and "Open Phone Drawer" button.
-- [ ] **Step 5.2**: Update `backend/modules/qt6_gui/ui/main_window.py` to replace `notification_card` with `phone_card_widget`, connect "Open Phone Drawer" button to toggle `self.phone_drawer`.
-- [ ] **Step 5.3**: Add automated test `tests/test_phone_card_widget.py` and verify in full test suite.
-- [ ] **Step 5.4**: Commit and perform final smoke test.
+- [x] **Step 5.1**: Create `backend/modules/qt6_gui/ui/phone_card_widget.py` with phone status (carrier, signal bars, battery level, device name), quick call action, and "Open Phone Drawer" button.
+- [x] **Step 5.2**: Update `backend/modules/qt6_gui/ui/main_window.py` to replace `notification_card` with `phone_card_widget`, connect "Open Phone Drawer" button to toggle `self.phone_drawer`.
+- [x] **Step 5.3**: Add automated test `tests/test_phone_card_widget.py` and verify in full test suite.
+- [x] **Step 5.4**: Commit and perform final smoke test.
