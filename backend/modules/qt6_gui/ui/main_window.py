@@ -23,6 +23,7 @@ from .command_bar import CommandBarWidget
 from .drawers.bluetooth_drawer import BluetoothDrawerWidget
 from .drawers.diagnostics_drawer import DiagnosticsDrawerWidget
 from .drawers.logs_drawer import LogsDrawerWidget
+from .drawers.phone_drawer import PhoneDrawerWidget
 from .drawers.settings_drawer import SettingsDrawerWidget
 from .media_card_widget import MediaCardWidget
 from .nav_card_widget import NavCardWidget
@@ -112,6 +113,7 @@ class MainWindow(QMainWindow):
         self.notification_toast = NotificationToast(self.central_widget)
 
         # 7. Slide-Over Drawers
+        self.phone_drawer = PhoneDrawerWidget(self.central_widget)
         self.bluetooth_drawer = BluetoothDrawerWidget(self.central_widget)
         self.settings_drawer = SettingsDrawerWidget(self.central_widget)
         self.logs_drawer = LogsDrawerWidget(self.central_widget)
@@ -132,6 +134,7 @@ class MainWindow(QMainWindow):
         self.command_bar.exit_clicked.connect(self.close_app_requested.emit)
 
         # Arc Menu drawer toggle signals
+        self.arc_menu.phone_clicked.connect(lambda: self._toggle_drawer(self.phone_drawer))
         self.arc_menu.bluetooth_clicked.connect(lambda: self._toggle_drawer(self.bluetooth_drawer))
         self.arc_menu.settings_clicked.connect(lambda: self._toggle_drawer(self.settings_drawer))
         self.arc_menu.wifi_clicked.connect(self._on_wifi_restart)
@@ -140,12 +143,14 @@ class MainWindow(QMainWindow):
         self.arc_menu.fullscreen_clicked.connect(self._toggle_fullscreen)
 
         # Drawer close signals
+        self.phone_drawer.close_clicked.connect(self.phone_drawer.hide)
         self.bluetooth_drawer.close_clicked.connect(self.bluetooth_drawer.hide)
         self.settings_drawer.close_clicked.connect(self.settings_drawer.hide)
         self.logs_drawer.close_clicked.connect(self.logs_drawer.hide)
         self.diagnostics_drawer.close_clicked.connect(self.diagnostics_drawer.hide)
 
         # Phone signals
+        self.phone_drawer.call_action_triggered.connect(self.phone_action_requested.emit)
         self.phone_call_widget.action_triggered.connect(self.phone_action_requested.emit)
         self.command_bar.call_action_triggered.connect(self.phone_action_requested.emit)
 
@@ -233,7 +238,7 @@ class MainWindow(QMainWindow):
     def _toggle_drawer(self, target_drawer: QWidget):
         if self.arc_menu:
             self.arc_menu.collapse()
-        for drawer in (self.bluetooth_drawer, self.settings_drawer, self.logs_drawer, self.diagnostics_drawer):
+        for drawer in (self.phone_drawer, self.bluetooth_drawer, self.settings_drawer, self.logs_drawer, self.diagnostics_drawer):
             if drawer == target_drawer:
                 drawer.setVisible(not drawer.isVisible())
                 if drawer.isVisible():
@@ -292,7 +297,7 @@ class MainWindow(QMainWindow):
         drawer_y = margin
         drawer_w = max(100, w - (margin * 2))
         drawer_h = max(100, draw_h - (margin * 2))
-        for drawer in (self.bluetooth_drawer, self.settings_drawer, self.logs_drawer, self.diagnostics_drawer):
+        for drawer in (self.phone_drawer, self.bluetooth_drawer, self.settings_drawer, self.logs_drawer, self.diagnostics_drawer):
             drawer.setGeometry(drawer_x, drawer_y, drawer_w, drawer_h)
 
     def _relayout_dashboard(self, w: int, h: int):

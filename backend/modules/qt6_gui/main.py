@@ -677,17 +677,24 @@ class Qt6GuiModule(BaseBackendModule):
             )
 
             # Update call widget
+            photo_b64 = data.get("contact_photo_b64", "")
             self.main_window.phone_call_widget.update_call_state(
                 is_in_call=is_in_call,
                 call_state=call_state,
                 caller_name=name,
                 caller_number=number,
                 duration_seconds=duration,
+                contact_photo_b64=photo_b64,
             )
 
             has_nav = self.main_window.has_active_nav
             has_media = self.main_window.has_active_media
             self.main_window.update_dashboard_state(has_nav=has_nav, has_media=has_media, has_call=is_in_call)
+            if is_in_call and call_state in ("RINGING", "INCOMING"):
+                self.main_window.disconnected_screen.show()
+                self.main_window.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+                self.main_window.disconnected_screen.raise_()
+                self.main_window.command_bar.raise_()
 
     def _on_notification_post_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload

@@ -17,6 +17,7 @@ class ArcRadialMenuWidget(QWidget):
     Positions items along a curved radial arc anchored to bottom-right.
     """
 
+    phone_clicked = pyqtSignal()
     settings_clicked = pyqtSignal()
     bluetooth_clicked = pyqtSignal()
     wifi_clicked = pyqtSignal()
@@ -31,6 +32,7 @@ class ArcRadialMenuWidget(QWidget):
 
         # Fab Buttons with Material Vector SVG Icons
         self.fabs = [
+            self._create_fab("phone", "Phone & Contacts", self.phone_clicked),
             self._create_fab("settings", "Settings", self.settings_clicked),
             self._create_fab("bluetooth", "Bluetooth Connections", self.bluetooth_clicked),
             self._create_fab("wifi", "WiFi Hotspot", self.wifi_clicked),

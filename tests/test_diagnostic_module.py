@@ -20,10 +20,11 @@ class TestDiagnosticModule(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(nal.startswith(b"\x00\x00\x00\x01") or nal.startswith(b"\x00\x00\x01"))
 
     async def test_diagnostic_module_lifecycle(self):
-        module = DiagnosticModule()
-        self.assertEqual(module.name, "diagnostic")
-        self.assertEqual(module.priority, 5)
-        self.assertEqual(module.path_prefix, "/api/diagnostic")
+        with patch("shared.base_module.BusClient"):
+            module = DiagnosticModule()
+            self.assertEqual(module.name, "diagnostic")
+            self.assertEqual(module.priority, 5)
+            self.assertEqual(module.path_prefix, "/api/diagnostic")
 
 
 if __name__ == "__main__":

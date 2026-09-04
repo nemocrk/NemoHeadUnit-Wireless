@@ -22,6 +22,6 @@ def test_drawer_geometry_near_fullscreen():
     draw_h = 800 - cmd_h
     expected_geom = QRect(30, 30, 1280 - 60, draw_h - 60)
 
-    for drawer in (win.bluetooth_drawer, win.settings_drawer, win.logs_drawer, win.diagnostics_drawer):
+    for drawer in (win.phone_drawer, win.bluetooth_drawer, win.settings_drawer, win.logs_drawer, win.diagnostics_drawer):
         assert drawer.geometry() == expected_geom
         assert drawer.testAttribute(Qt.WidgetAttribute.WA_StyledBackground) is True

@@ -112,6 +112,50 @@ class PhoneCallWidget(QFrame):
         self.btn_hangup.clicked.connect(lambda: self.action_triggered.emit("hangup"))
         self.btn_layout.addWidget(self.btn_hangup)
 
+        # 3. Mute / Unmute (Gray/Yellow)
+        self.btn_mute = QPushButton(" Mute", self)
+        self.btn_mute.setObjectName("btn-call-mute")
+        self.btn_mute.setIcon(make_svg_icon("mic", color="#ffffff", size=18))
+        self.btn_mute.setIconSize(QSize(18, 18))
+        self.btn_mute.setStyleSheet("""
+            QPushButton {
+                background: #30363d;
+                color: #ffffff;
+                font-weight: bold;
+                border-radius: 8px;
+                padding: 10px 16px;
+            }
+            QPushButton:hover { background: #3c444d; }
+        """)
+        self._is_muted = False
+        def _on_mute_clicked():
+            self._is_muted = not self._is_muted
+            if self._is_muted:
+                self.btn_mute.setText(" Unmute")
+                self.btn_mute.setStyleSheet("""
+                    QPushButton {
+                        background: #d29922;
+                        color: #ffffff;
+                        font-weight: bold;
+                        border-radius: 8px;
+                        padding: 10px 16px;
+                    }
+                """)
+            else:
+                self.btn_mute.setText(" Mute")
+                self.btn_mute.setStyleSheet("""
+                    QPushButton {
+                        background: #30363d;
+                        color: #ffffff;
+                        font-weight: bold;
+                        border-radius: 8px;
+                        padding: 10px 16px;
+                    }
+                """)
+            self.action_triggered.emit("mute")
+        self.btn_mute.clicked.connect(_on_mute_clicked)
+        self.btn_layout.addWidget(self.btn_mute)
+
         self.layout.addLayout(self.btn_layout)
 
     def update_call_state(
@@ -121,6 +165,7 @@ class PhoneCallWidget(QFrame):
         caller_name: str = "",
         caller_number: str = "",
         duration_seconds: int = 0,
+        contact_photo_b64: str = "",
     ):
         """Update the call card contents and state."""
         self.lbl_caller_name.setText(caller_name or caller_number or "Unknown Caller")
@@ -130,23 +175,41 @@ class PhoneCallWidget(QFrame):
         secs = duration_seconds % 60
         self.lbl_duration.setText(f"{mins:02d}:{secs:02d}")
 
-        if call_state == "RINGING":
+        if contact_photo_b64:
+            try:
+                import base64
+                from PyQt6.QtGui import QImage, QPixmap
+                img_data = base64.b64decode(contact_photo_b64)
+                img = QImage.fromData(img_data)
+                if not img.isNull():
+                    pix = QPixmap.fromImage(img).scaled(28, 28, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                    self.icon_phone.setPixmap(pix)
+            except Exception:
+                pass
+        else:
+            self.icon_phone.setPixmap(make_svg_icon("phone", color="#58a6ff", size=20).pixmap(20, 20))
+
+        if call_state in ("RINGING", "INCOMING"):
             self.lbl_state.setText("Incoming Call...")
             self.lbl_state.setStyleSheet("font-size: 13px; font-weight: bold; color: #58a6ff;")
             self.btn_answer.setVisible(True)
             self.btn_hangup.setText(" Decline")
-        elif call_state in ("ACTIVE", "CONNECTING", "DIALING"):
+            self.btn_mute.setVisible(True)
+        elif call_state in ("ACTIVE", "IN_CALL", "CONNECTING", "DIALING"):
             self.lbl_state.setText("In Call")
             self.lbl_state.setStyleSheet("font-size: 13px; font-weight: bold; color: #3fb950;")
             self.btn_answer.setVisible(False)
             self.btn_hangup.setText(" End Call")
-        elif call_state == "HOLD":
+            self.btn_mute.setVisible(True)
+        elif call_state in ("HOLD", "ON_HOLD"):
             self.lbl_state.setText("Call on Hold")
             self.lbl_state.setStyleSheet("font-size: 13px; font-weight: bold; color: #d29922;")
             self.btn_answer.setVisible(False)
             self.btn_hangup.setText(" End Call")
+            self.btn_mute.setVisible(True)
         else:
             self.lbl_state.setText("Call Ended")
             self.lbl_state.setStyleSheet("font-size: 13px; font-weight: bold; color: #8b949e;")
             self.btn_answer.setVisible(False)
             self.btn_hangup.setText(" Close")
+            self.btn_mute.setVisible(False)

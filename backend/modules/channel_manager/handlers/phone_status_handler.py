@@ -29,12 +29,12 @@ MSG_PHONE_STATUS_INPUT = 0x8002
 
 CALL_STATE_MAP = {
     0: "UNKNOWN",
-    1: "ACTIVE",
-    2: "HOLD",
-    3: "DIALING",
-    4: "RINGING",
-    5: "CONNECTING",
-    6: "DISCONNECTED",
+    1: "IN_CALL",
+    2: "ON_HOLD",
+    3: "INACTIVE",
+    4: "INCOMING",
+    5: "CONFERENCED",
+    6: "MUTED",
 }
 
 
@@ -100,7 +100,7 @@ class PhoneStatusHandler:
                     photo_b64 = base64.b64encode(call.contact_photo).decode("ascii")
 
                 self.current_state.update({
-                    "is_in_call": state_str in ("ACTIVE", "HOLD", "DIALING", "RINGING", "CONNECTING"),
+                    "is_in_call": state_str in ("IN_CALL", "ON_HOLD", "INCOMING", "CONFERENCED", "MUTED", "ACTIVE", "HOLD", "RINGING"),
                     "call_state": state_str,
                     "caller_name": name,
                     "caller_number": number,
