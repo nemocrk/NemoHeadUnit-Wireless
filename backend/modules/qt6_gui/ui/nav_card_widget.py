@@ -155,13 +155,40 @@ class NavCardWidget(QFrame):
         painter.setPen(QPen(QColor(0, 230, 118), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
 
         cx, cy = size // 2, size // 2
-        # turn_side: 1 = LEFT, 2 = RIGHT, 0 = STRAIGHT
-        if turn_side == 1:  # LEFT
+
+        # U-Turn
+        if maneuver_type in (11, 12):
+            is_left = maneuver_type == 11 or turn_side == 1
+            start_x = cx + 10 if is_left else cx - 10
+            end_x = cx - 10 if is_left else cx + 10
+            path = QPainterPath()
+            path.moveTo(start_x, cy + 18)
+            path.lineTo(start_x, cy - 4)
+            path.quadTo(cx, cy - 20, end_x, cy - 4)
+            path.lineTo(end_x, cy + 18)
+            painter.drawPath(path)
+            painter.drawLine(end_x, cy + 18, end_x - 6, cy + 10)
+            painter.drawLine(end_x, cy + 18, end_x + 6, cy + 10)
+        # Roundabout
+        elif maneuver_type in (30, 31, 32, 33, 34, 35):
+            path = QPainterPath()
+            path.arcMoveTo(cx - 16, cy - 16, 32, 32, 225)
+            path.arcTo(cx - 16, cy - 16, 32, 32, 225, 270)
+            painter.drawPath(path)
+            painter.drawLine(cx, cy - 16, cx + 8, cy - 16)
+            painter.drawLine(cx + 8, cy - 16, cx + 2, cy - 22)
+            painter.drawLine(cx + 8, cy - 16, cx + 2, cy - 10)
+        # Destination
+        elif maneuver_type in (39, 40, 41, 42):
+            painter.drawEllipse(cx - 8, cy - 16, 16, 16)
+            painter.drawLine(cx, cy, cx, cy + 14)
+        # Standard turns
+        elif turn_side == 1 or maneuver_type in (5, 7, 9, 13, 15, 17, 21, 23, 25, 27):  # LEFT
             painter.drawLine(cx + 12, cy + 20, cx + 12, cy - 6)
             painter.drawLine(cx + 12, cy - 6, cx - 14, cy - 6)
             painter.drawLine(cx - 14, cy - 6, cx - 6, cy - 14)
             painter.drawLine(cx - 14, cy - 6, cx - 6, cy + 2)
-        elif turn_side == 2:  # RIGHT
+        elif turn_side == 2 or maneuver_type in (6, 8, 10, 14, 16, 18, 22, 24, 26, 28):  # RIGHT
             painter.drawLine(cx - 12, cy + 20, cx - 12, cy - 6)
             painter.drawLine(cx - 12, cy - 6, cx + 14, cy - 6)
             painter.drawLine(cx + 14, cy - 6, cx + 6, cy - 14)
