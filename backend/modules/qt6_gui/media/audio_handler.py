@@ -20,10 +20,11 @@ from shared.logger import get_logger
 
 
 try:
-    from PyQt6.QtMultimedia import QAudioFormat, QAudioSink, QAudioSource, QMediaDevices
+    from PyQt6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QAudioSource, QMediaDevices
     HAS_MULTIMEDIA = True
 except ImportError:
     HAS_MULTIMEDIA = False
+    QAudio = None
     QAudioSink = None
     QAudioSource = None
     QMediaDevices = None
@@ -291,8 +292,12 @@ class DynamicChannelAudioSink(QObject):
             self.audio_sink.setBufferSize(max(48000, int(bps * 0.25)))
 
             def _on_state_changed(state):
-                err = self.audio_sink.error() if self.audio_sink else "None"
+                err = self.audio_sink.error() if self.audio_sink else None
                 logger.info(f"🔊 [Audio Ch{self.channel_id}] QAudioSink state: {state} (error={err})")
+                if self.audio_sink and err is not None:
+                    no_err = getattr(QAudio.Error, "NoError", 0) if QAudio else 0
+                    if err != no_err:
+                        self._handle_sink_error(err)
 
             self.audio_sink.stateChanged.connect(_on_state_changed)
 
@@ -521,6 +526,31 @@ class DynamicChannelAudioSink(QObject):
     def _close_sink(self):
         """Safely terminate QAudioSink via QueuedConnection."""
         self._stop_signal.emit()
+
+    def _handle_sink_error(self, err):
+        """Handle QAudioSink runtime errors (such as USB unplug or I/O failure)."""
+        logger.warning(f"🔊 [Audio Ch{self.channel_id}] QAudioSink error encountered: {err}")
+        self._schedule_recovery()
+
+    def _schedule_recovery(self):
+        """Schedule recreation of audio sink with fallback to default device."""
+        if not hasattr(self, "_recovery_timer") or self._recovery_timer is None:
+            self._recovery_timer = QTimer(self)
+            self._recovery_timer.setSingleShot(True)
+            self._recovery_timer.timeout.connect(self._recover_playback)
+        if not self._recovery_timer.isActive():
+            logger.info(f"🔊 [Audio Ch{self.channel_id}] Scheduling audio sink recovery in 1000ms")
+            self._recovery_timer.start(1000)
+
+    @pyqtSlot()
+    def _recover_playback(self):
+        """Attempt to re-initialize audio output after an error, falling back to default device if needed."""
+        logger.info(f"🔊 [Audio Ch{self.channel_id}] Executing audio sink recovery...")
+        was_started = self._is_started
+        self._do_stop()
+        self._init_playback(self.sample_rate, self.channel_count)
+        if was_started:
+            self._do_start()
 
     def get_metrics(self) -> dict:
         bps = max(1, self.sample_rate * self.channel_count * 2)
