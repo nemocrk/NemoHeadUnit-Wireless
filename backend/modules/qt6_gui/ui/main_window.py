@@ -13,9 +13,9 @@ Manages stacked layout:
 
 import logging
 from pathlib import Path
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QVBoxLayout, QWidget
 
 from .analog_clock import AnalogClockWidget
 from .arc_radial_menu import ArcRadialMenuWidget
@@ -119,6 +119,10 @@ class MainWindow(QMainWindow):
 
         self._connect_signals()
 
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self)
+
     def _connect_signals(self):
         # Command Bar button signals
         self.command_bar.home_clicked.connect(self._toggle_clock_overlay)
@@ -183,6 +187,48 @@ class MainWindow(QMainWindow):
         self.volume_popover.setVisible(not self.volume_popover.isVisible())
         if self.volume_popover.isVisible():
             self.volume_popover.raise_()
+
+    def _on_hardware_volume_key(self, action: str):
+        """Handle hardware physical volume buttons (VolumeUp, VolumeDown, VolumeMute) with auto-hiding OSD."""
+        if hasattr(self, "volume_popover") and self.volume_popover:
+            self.volume_popover._on_vol_click(action)
+            self.volume_popover.show()
+            self.volume_popover.raise_()
+            if not hasattr(self, "_volume_hud_timer") or self._volume_hud_timer is None:
+                self._volume_hud_timer = QTimer(self)
+                self._volume_hud_timer.setSingleShot(True)
+                self._volume_hud_timer.timeout.connect(self.volume_popover.hide)
+            self._volume_hud_timer.start(2500)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key == Qt.Key.Key_VolumeUp:
+                self._on_hardware_volume_key("up")
+                return True
+            elif key == Qt.Key.Key_VolumeDown:
+                self._on_hardware_volume_key("down")
+                return True
+            elif key == Qt.Key.Key_VolumeMute:
+                self._on_hardware_volume_key("mute")
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key == Qt.Key.Key_VolumeUp:
+            self._on_hardware_volume_key("up")
+            event.accept()
+            return
+        elif key == Qt.Key.Key_VolumeDown:
+            self._on_hardware_volume_key("down")
+            event.accept()
+            return
+        elif key == Qt.Key.Key_VolumeMute:
+            self._on_hardware_volume_key("mute")
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _toggle_drawer(self, target_drawer: QWidget):
         if self.arc_menu:

@@ -34,6 +34,7 @@ GRUB_CHANGED=0
 SERVICES_CHANGED=0
 PKG_CHANGED=0
 DRACUT_CHANGED=0
+BUTTONS_CHANGED=0
 
 # ---------------------------------------------------------------------------
 # Fix 1: Audio loop
@@ -84,6 +85,14 @@ if [ -f "$GRUB_FILE" ]; then
         sed -i 's/video=eDP-1:[^ "]* \?//g' "$GRUB_FILE"
         sed -i 's/^\(GRUB_CMDLINE_LINUX="[^"]*\)"/\1 video=eDP-1:1920x1200@40"/' "$GRUB_FILE"
         sed -i "s/^\(GRUB_CMDLINE_LINUX='[^']*\)'/\1 video=eDP-1:1920x1200@40'/" "$GRUB_FILE"
+        GRUB_CHANGED=1
+    fi
+
+    # Set Windows 2013 (Windows 8.1) ACPI OSI profile for factory HP Omni 10 DSDT device routing
+    if ! grep -q 'acpi_osi="!Windows 2015"' "$GRUB_FILE" || ! grep -q 'acpi_osi="Windows 2013"' "$GRUB_FILE"; then
+        # Convert double-quoted to single-quoted if needed to allow internal quotes safely
+        sed -i "s/^GRUB_CMDLINE_LINUX=\"\(.*\)\"$/GRUB_CMDLINE_LINUX='\1'/" "$GRUB_FILE"
+        sed -i "s/^\(GRUB_CMDLINE_LINUX='[^']*\)'/\1 acpi_osi=\"!Windows 2015\" acpi_osi=\"Windows 2013\"'/" "$GRUB_FILE"
         GRUB_CHANGED=1
     fi
 
@@ -644,6 +653,157 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Fix 13: Physical Volume Buttons & Crystal Cove PMIC Initialization
+# ---------------------------------------------------------------------------
+echo -n "  [hw-fix] Physical volume buttons (PMIC unmask & boot service)... "
+
+# 1. Ensure i2c-dev and core PMIC/button modules load at boot
+mkdir -p /etc/modules-load.d
+BUTTON_MODULES_CONF="/etc/modules-load.d/omni10-buttons.conf"
+BUTTON_MODULES_CONTENT="i2c-dev
+intel_soc_pmic_crc
+gpio_crystalcove
+soc_button_array"
+
+if [ ! -f "$BUTTON_MODULES_CONF" ] || [ "$(cat "$BUTTON_MODULES_CONF")" != "$BUTTON_MODULES_CONTENT" ]; then
+    echo "$BUTTON_MODULES_CONTENT" > "$BUTTON_MODULES_CONF"
+    BUTTONS_CHANGED=1
+fi
+modprobe i2c-dev >/dev/null 2>&1 || true
+modprobe intel_soc_pmic_crc >/dev/null 2>&1 || true
+modprobe gpio_crystalcove >/dev/null 2>&1 || true
+modprobe soc_button_array >/dev/null 2>&1 || true
+
+# 2. Ensure i2c-tools package is installed
+if ! command -v i2cset &>/dev/null; then
+    if command -v pacman &>/dev/null; then
+        pacman -S --needed --noconfirm i2c-tools >/dev/null 2>&1 || true
+        BUTTONS_CHANGED=1
+    elif command -v apt-get &>/dev/null; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq i2c-tools >/dev/null 2>&1 || true
+        BUTTONS_CHANGED=1
+    fi
+fi
+
+# 3. Enable 5-button array module option if intel_hid is used
+mkdir -p /etc/modprobe.d
+if ! grep -q "options intel_hid enable_5_button_array=1" /etc/modprobe.d/omni10-buttons.conf 2>/dev/null; then
+    echo "options intel_hid enable_5_button_array=1" > /etc/modprobe.d/omni10-buttons.conf
+    BUTTONS_CHANGED=1
+fi
+
+# 4. Generate PMIC initialization script to unmask Crystal Cove side buttons and bind driver
+INIT_SCRIPT="/usr/local/bin/hp-omni10-buttons-init.sh"
+cat <<'EOF' > /tmp/hp-omni10-buttons-init.sh.tmp
+#!/usr/bin/env bash
+# Unmasks Crystal Cove PMIC panel control (reg 0x52 / FCOT) and GPIO 0/1 interrupt lines
+modprobe i2c-dev >/dev/null 2>&1 || true
+
+# Find I2C adapter bus number for INT33FD (Crystal Cove PMIC)
+PMIC_PATH=$(find /sys/bus/i2c/devices/ -name '*INT33FD*' 2>/dev/null | head -n 1)
+BUS=""
+if [ -n "$PMIC_PATH" ]; then
+    PARENT_DEV=$(readlink -f "$PMIC_PATH" 2>/dev/null || true)
+    if [ -n "$PARENT_DEV" ]; then
+        BUS_NAME=$(basename "$(dirname "$PARENT_DEV")")
+        BUS="${BUS_NAME#i2c-}"
+    fi
+fi
+
+if [ -z "$BUS" ] || ! [[ "$BUS" =~ ^[0-9]+$ ]]; then
+    BUS=6
+fi
+
+if command -v i2cset &>/dev/null; then
+    # Register 0x52 (GPIOPANELCTL / FCOT): Set bit 0 to 1 (enables side buttons power/logic)
+    i2cset -y -f "$BUS" 0x6e 0x52 0x01 >/dev/null 2>&1 || true
+    # Register 0x0E (MIRQLVL1): Unmask GPIO level 1 interrupt (bit 5 = 0)
+    i2cset -y -f "$BUS" 0x6e 0x0e 0x5f >/dev/null 2>&1 || true
+    # Register 0x19 (MGPIO0IRQS0): Unmask GPIO 0 & 1 (bits 0,1 = 0)
+    i2cset -y -f "$BUS" 0x6e 0x19 0xfc >/dev/null 2>&1 || true
+fi
+
+# Rebind INTCFD9:00 to soc_button_array so volume buttons hook into unmasked lines cleanly
+if [ -d "/sys/bus/platform/drivers/soc_button_array" ]; then
+    if [ -e "/sys/bus/platform/drivers/soc_button_array/INTCFD9:00" ]; then
+        echo INTCFD9:00 > /sys/bus/platform/drivers/soc_button_array/unbind 2>/dev/null || true
+        sleep 0.1
+    fi
+    echo INTCFD9:00 > /sys/bus/platform/drivers/soc_button_array/bind 2>/dev/null || true
+fi
+
+exit 0
+EOF
+
+if [ ! -f "$INIT_SCRIPT" ] || ! cmp -s /tmp/hp-omni10-buttons-init.sh.tmp "$INIT_SCRIPT"; then
+    mv /tmp/hp-omni10-buttons-init.sh.tmp "$INIT_SCRIPT"
+    chmod 755 "$INIT_SCRIPT"
+    BUTTONS_CHANGED=1
+else
+    rm -f /tmp/hp-omni10-buttons-init.sh.tmp
+fi
+
+# Run it immediately
+bash "$INIT_SCRIPT" >/dev/null 2>&1 || true
+
+# 5. Udev rule for button array input permissions and tags
+UDEV_BUTTONS_RULE="/etc/udev/rules.d/99-omni10-buttons.rules"
+cat <<'EOF' > /tmp/99-omni10-buttons.rules.tmp
+# Ensure INTCFD9:00 button array events have input permissions and power-switch tag
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="gpio-keys", KERNELS=="INTCFD9:00*", MODE="0660", GROUP="input", TAG+="power-switch"
+EOF
+
+if [ ! -f "$UDEV_BUTTONS_RULE" ] || ! cmp -s /tmp/99-omni10-buttons.rules.tmp "$UDEV_BUTTONS_RULE"; then
+    mv /tmp/99-omni10-buttons.rules.tmp "$UDEV_BUTTONS_RULE"
+    chmod 644 "$UDEV_BUTTONS_RULE"
+    udevadm control --reload >/dev/null 2>&1 || true
+    udevadm trigger -s input >/dev/null 2>&1 || true
+    BUTTONS_CHANGED=1
+else
+    rm -f /tmp/99-omni10-buttons.rules.tmp
+fi
+
+# 6. Systemd boot service for early initialization
+SERVICE_FILE="/etc/systemd/system/hp-omni10-buttons.service"
+cat <<'EOF' > /tmp/hp-omni10-buttons.service.tmp
+[Unit]
+Description=HP Omni 10 Physical Buttons & Crystal Cove PMIC Initialization
+After=systemd-modules-load.service
+Before=nemo-headunit.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hp-omni10-buttons-init.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+if [ ! -f "$SERVICE_FILE" ] || ! cmp -s /tmp/hp-omni10-buttons.service.tmp "$SERVICE_FILE"; then
+    mv /tmp/hp-omni10-buttons.service.tmp "$SERVICE_FILE"
+    chmod 644 "$SERVICE_FILE"
+    BUTTONS_CHANGED=1
+else
+    rm -f /tmp/hp-omni10-buttons.service.tmp
+fi
+
+if command -v systemctl &>/dev/null; then
+    if ! systemctl is-enabled hp-omni10-buttons.service &>/dev/null; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable hp-omni10-buttons.service >/dev/null 2>&1 || true
+        systemctl start hp-omni10-buttons.service >/dev/null 2>&1 || true
+        BUTTONS_CHANGED=1
+    fi
+fi
+
+if [ $BUTTONS_CHANGED -eq 1 ]; then
+    echo -e "${GREEN}applicato (service + PMIC unmask configurati).${NC}"
+else
+    echo -e "${GREEN}già configurato.${NC}"
+fi
+
+# ---------------------------------------------------------------------------
 # Riepilogo
 # ---------------------------------------------------------------------------
 echo ""
@@ -656,8 +816,9 @@ echo "    - Bluetooth MAC persistente in ${BT_ADDR_FILE} tramite bluetooth-persi
 echo "    - Firmware Broadcom (BT/WiFi) e Intel SST DSP verificati in /lib/firmware/."
 echo "    - Hardware Quirks generati in ${QUIRKS_FILE} (i965, scale 1.5, DMABuf caps)."
 echo "    - PipeWire & WirePlumber abilitati all'avvio con user lingering attivo."
+echo "    - Pulsanti volume fisico abilitati (PMIC unmask & hp-omni10-buttons.service)."
 
-if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ] || [ $FW_CHANGED -eq 1 ] || [ $QUIRKS_CHANGED -eq 1 ] || [ $AUDIO_AUTOSTART_CHANGED -eq 1 ]; then
+if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ] || [ $FW_CHANGED -eq 1 ] || [ $QUIRKS_CHANGED -eq 1 ] || [ $AUDIO_AUTOSTART_CHANGED -eq 1 ] || [ $BUTTONS_CHANGED -eq 1 ]; then
     echo -e "  ${GREEN}[hw-fix] HP Omni10: fix applicati. Riavvio necessario.${NC}"
 else
     echo -e "  ${GREEN}[hw-fix] HP Omni10: nessuna modifica necessaria.${NC}"
