@@ -13,6 +13,9 @@ from shared.config_schema import field_bool, field_int, field_string, field_enum
 
 from shared.hardware.base_bluetooth import get_bluetooth_adapter
 from shared.hardware.base_wifi_ap import get_wifi_adapter
+from shared.hardware.base_audio import get_audio_adapter
+from shared.hardware.bluez_hfp import BlueZHFClient
+from shared.hardware.bluez_pbap import BlueZPBAPClient
 
 from modules.connectivity_manager.handshake import RfcommHandshake
 
@@ -25,6 +28,9 @@ class ConnectivityManagerModule(BaseBackendModule):
         )
         self._bt_adapter = None
         self._wifi_adapter = None
+        self._audio_adapter = None
+        self._hfp_client = None
+        self._pbap_client = None
 
         # State cache
         self._discoverable = True
@@ -104,10 +110,23 @@ class ConnectivityManagerModule(BaseBackendModule):
         self.add_http_route("POST", "/wifi/start", self.handle_wifi_start)
         self.add_http_route("POST", "/wifi/stop", self.handle_wifi_stop)
 
+        # Standalone Bluetooth Telephony & PBAP Routes
+        self.add_http_route("GET", "/phone/status", self.handle_get_phone_status)
+        self.add_http_route("POST", "/phone/dial", self.handle_post_phone_dial)
+        self.add_http_route("POST", "/phone/action", self.handle_post_phone_action)
+        self.add_http_route("POST", "/phone/dtmf", self.handle_post_phone_dtmf)
+        self.add_http_route("GET", "/phone/contacts", self.handle_get_phone_contacts)
+        self.add_http_route("GET", "/phone/recents", self.handle_get_phone_recents)
+        self.add_http_route("GET", "/phone/favorites", self.handle_get_phone_favorites)
+        self.add_http_route("POST", "/phone/sync", self.handle_post_phone_sync)
+
         self.subscribe("bluetooth_manager.try_autoconnect", self.on_try_autoconnect)
 
         # Cross-platform Adapter instantiation via factories with graceful fallback
         self.log.info("Initializing Hardware Bluetooth & WiFi AP Adapters...")
+        self._audio_adapter = get_audio_adapter()
+        self._hfp_client = BlueZHFClient(on_state_changed=self._on_hfp_state_changed)
+        self._pbap_client = BlueZPBAPClient()
         self._bt_adapter = get_bluetooth_adapter()
         try:
             await self._bt_adapter.setup(
@@ -146,6 +165,13 @@ class ConnectivityManagerModule(BaseBackendModule):
             self._autoconnect_task = asyncio.create_task(self._autoconnect_loop())
         self._telemetry_poll_task = asyncio.create_task(self._telemetry_poll_loop())
 
+    def _on_hfp_state_changed(self, state: dict[str, Any]) -> None:
+        """Callback when BlueZ HFP call state or active call changes."""
+        self.log.info(f"📱 Publishing HFP phone.status: {state}")
+        self.publish("phone.status", state)
+        if self._audio_adapter:
+            asyncio.create_task(self._audio_adapter.ensure_hfp_loopback(state.get("is_in_call", False)))
+
     def _on_bluetooth_telemetry_changed(
         self,
         address: str,
@@ -155,6 +181,13 @@ class ConnectivityManagerModule(BaseBackendModule):
         is_roaming: bool = False,
     ) -> None:
         """Callback when Bluetooth Battery, RSSI, operator name, or roaming changes."""
+        if self._hfp_client:
+            self._hfp_client.update_telemetry(
+                battery_pct=battery_pct,
+                signal_bars=signal_bars,
+                carrier=operator_name,
+                is_roaming=is_roaming,
+            )
         state = {
             "source": "bluetooth_hfp",
             "device_address": address,
@@ -714,6 +747,81 @@ class ConnectivityManagerModule(BaseBackendModule):
             if "is_closing" not in str(exc):
                 self.log.warning(f"handle_stream_status stream notice: {exc}")
         return response
+
+    # -------------------------------------------------------------------------
+    # Standalone Bluetooth Telephony & PBAP Route Handlers
+    # -------------------------------------------------------------------------
+    async def handle_get_phone_status(self, request: web.Request) -> web.Response:
+        if not self._hfp_client:
+            return web.json_response({"status": "error", "message": "HFP client not initialized"}, status=503)
+        return web.json_response({"status": "ok", "phone": self._hfp_client.get_state()})
+
+    async def handle_post_phone_dial(self, request: web.Request) -> web.Response:
+        if not self._hfp_client:
+            return web.json_response({"status": "error", "message": "HFP client not initialized"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        number = str(data.get("number", "")).strip()
+        if not number:
+            return web.json_response({"status": "error", "message": "Missing 'number'"}, status=400)
+        success = self._hfp_client.dial(number)
+        return web.json_response({"status": "ok" if success else "failed", "phone": self._hfp_client.get_state()})
+
+    async def handle_post_phone_action(self, request: web.Request) -> web.Response:
+        if not self._hfp_client:
+            return web.json_response({"status": "error", "message": "HFP client not initialized"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        action = str(data.get("action", "")).strip().lower()
+        if action == "answer":
+            success = self._hfp_client.answer()
+        elif action == "hangup":
+            success = self._hfp_client.hangup()
+        elif action == "mute":
+            success = self._hfp_client.set_mute(True)
+        elif action == "unmute":
+            success = self._hfp_client.set_mute(False)
+        else:
+            return web.json_response({"status": "error", "message": f"Unknown action: {action}"}, status=400)
+        return web.json_response({"status": "ok" if success else "failed", "phone": self._hfp_client.get_state()})
+
+    async def handle_post_phone_dtmf(self, request: web.Request) -> web.Response:
+        if not self._hfp_client:
+            return web.json_response({"status": "error", "message": "HFP client not initialized"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        key = str(data.get("key", "")).strip()
+        if not key:
+            return web.json_response({"status": "error", "message": "Missing 'key'"}, status=400)
+        success = self._hfp_client.send_dtmf(key)
+        return web.json_response({"status": "ok" if success else "failed"})
+
+    async def handle_get_phone_contacts(self, request: web.Request) -> web.Response:
+        if not self._pbap_client:
+            return web.json_response({"status": "error", "message": "PBAP client not initialized"}, status=503)
+        return web.json_response({"status": "ok", "contacts": self._pbap_client.get_contacts()})
+
+    async def handle_get_phone_recents(self, request: web.Request) -> web.Response:
+        if not self._pbap_client:
+            return web.json_response({"status": "error", "message": "PBAP client not initialized"}, status=503)
+        return web.json_response({"status": "ok", "recents": self._pbap_client.get_recents()})
+
+    async def handle_get_phone_favorites(self, request: web.Request) -> web.Response:
+        if not self._pbap_client:
+            return web.json_response({"status": "error", "message": "PBAP client not initialized"}, status=503)
+        return web.json_response({"status": "ok", "favorites": self._pbap_client.get_favorites()})
+
+    async def handle_post_phone_sync(self, request: web.Request) -> web.Response:
+        if not self._pbap_client:
+            return web.json_response({"status": "error", "message": "PBAP client not initialized"}, status=503)
+        res = await self._pbap_client.sync(self._active_device or "")
+        return web.json_response({"status": "ok", "sync": res})
 
     def _trigger_device_telemetry(self, address: str) -> None:
         """Trigger underlying Bluetooth adapter to query real telemetry (battery, RSSI, operator)."""
