@@ -68,18 +68,18 @@ class VideoChannelHandler:
         else:
             await self._handle_unhandled_message(channel_id, message_id, body)
 
-    async def send_focus_indication(self, focus_mode: int) -> None:
+    async def send_focus_indication(self, focus_mode: int, unrequested: bool = False) -> None:
         """Send explicit VideoFocusIndication message to phone."""
         from protos.oaa.video.VideoFocusModeEnum_pb2 import VideoFocusMode
         mode_name = VideoFocusMode.Enum.Name(focus_mode) if hasattr(VideoFocusMode.Enum, "Name") else focus_mode
-        self.log.info(f"📹 VideoChannel: Sending explicit VideoFocusIndication({mode_name}) to phone")
+        self.log.info(f"📹 VideoChannel: Sending explicit VideoFocusIndication({mode_name}, unrequested={unrequested}) to phone")
 
         if focus_mode != VideoFocusMode.Enum.PROJECTED:
             await self._flush_unacked_frames()
 
         focus_ind = VideoFocusIndication()
         focus_ind.focus_mode = focus_mode
-        focus_ind.unrequested = False
+        focus_ind.unrequested = unrequested
 
         video_ch_id = self.manager.get_channel_id_for_type(ChannelType.VIDEO)
         await self.manager.send_wire_frame(video_ch_id, AV_MSG.VIDEO_FOCUS_INDICATION, focus_ind.SerializeToString(), encrypted=True)

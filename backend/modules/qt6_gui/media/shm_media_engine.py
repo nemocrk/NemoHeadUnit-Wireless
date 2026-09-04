@@ -301,6 +301,12 @@ class QtSHMMediaEngine:
         self._codec_ctx = None
         self._nal_counter = 0
 
+        # Video Watchdog state
+        self._last_nal_time = 0.0
+        self._last_rendered_time = 0.0
+        self._last_watchdog_recover_time = 0.0
+        self.request_keyframe: Optional[Callable[[], None]] = None
+
         # 1. Initialize best available video decoder
         self._hw_decoder = Qml6ZeroCopyDecoder(on_frame_callback=self._on_hw_decoded_frame)
         if not self._hw_decoder.is_available:
@@ -327,8 +333,38 @@ class QtSHMMediaEngine:
 
     def _on_hw_decoded_frame(self, rgba_pixels: bytes, width: int, height: int, ts_us: int):
         """Dispatch hardware-decoded RGBA frame directly to Qt6 video viewport."""
+        import time
+        self._last_rendered_time = time.time()
         if self.on_video_frame and self.is_video_focused:
             self.on_video_frame(rgba_pixels, width, height, ts_us)
+
+    def _recover_pipeline(self) -> None:
+        """Auto-recovery invoked by watchdog when video pipeline stalls on corrupt/missing frames."""
+        logger.warning("⚠️ [Video Watchdog] Video stall detected! Resetting decoder and requesting keyframe...")
+        # If hardware decoder stalled, close it and fall back to PyAV
+        if self._hw_decoder and getattr(self._hw_decoder, "is_available", False):
+            try:
+                self._hw_decoder.close()
+            except Exception:
+                pass
+            self._hw_decoder.is_available = False
+
+        # Reset PyAV decoder context to flush corrupted internal buffers
+        if av is not None:
+            try:
+                self._codec_ctx = av.CodecContext.create('h264', 'r')
+                self._codec_ctx.thread_type = 'AUTO'
+                self._codec_ctx.thread_count = 2
+                logger.info("🎬 [Video Watchdog] PyAV H.264 CodecContext recreated cleanly")
+            except Exception as exc:
+                logger.warning("Could not recreate PyAV CodecContext: %s", exc)
+
+        # Trigger phone keyframe / IDR generation
+        if self.request_keyframe:
+            try:
+                self.request_keyframe()
+            except Exception as exc:
+                logger.debug("Error calling request_keyframe callback: %s", exc)
 
     def connect_shm(self) -> bool:
         """Attach to existing shared memory buffers created by media_server/channel_manager."""
@@ -364,6 +400,8 @@ class QtSHMMediaEngine:
                 if 0 < width <= 4096 and 0 < height <= 4096:
                     expected_len = width * height * 4
                     if len(payload) == 12 + expected_len:
+                        import time
+                        self._last_rendered_time = time.time()
                         rgba_pixels = payload[12:]
                         if self.on_video_frame:
                             self.on_video_frame(rgba_pixels, width, height, ts_low)
@@ -371,6 +409,16 @@ class QtSHMMediaEngine:
 
             # 2. Decode raw H.264 NAL units via Hardware VA-API (or PyAV Fallback)
             if payload.startswith(b"\x00\x00\x00\x01") or payload.startswith(b"\x00\x00\x01"):
+                import time
+                now = time.time()
+                self._last_nal_time = now
+
+                # Watchdog check: if frames rendered previously but none in last 2.0s while NALs arrive
+                if self._last_rendered_time > 0 and (now - self._last_rendered_time) >= 2.0:
+                    if (now - self._last_watchdog_recover_time) >= 2.5:
+                        self._last_watchdog_recover_time = now
+                        self._recover_pipeline()
+
                 if self._hw_decoder and self._hw_decoder.is_available:
                     self._hw_decoder.decode_nal(payload, ts_low)
                     if self._hw_decoder.frames_decoded > 0 or self._nal_counter < 30:
@@ -382,6 +430,7 @@ class QtSHMMediaEngine:
                         packet = av.Packet(payload)
                         frames = self._codec_ctx.decode(packet)
                         for frame in frames:
+                            self._last_rendered_time = time.time()
                             rgba_frame = frame.reformat(format="rgba")
                             rgba_pixels = bytes(rgba_frame.planes[0])
                             w, h = frame.width, frame.height

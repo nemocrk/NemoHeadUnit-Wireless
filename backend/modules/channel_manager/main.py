@@ -484,11 +484,12 @@ class ChannelManagerModule(BaseBackendModule):
         """Handle focus request from media_server or qt6_gui."""
         sender = data.get("sender", "unknown")
         mode_str = data.get("mode", "PROJECTED")
+        unrequested = data.get("unrequested", False)
         from protos.oaa.video.VideoFocusModeEnum_pb2 import VideoFocusMode
         focus_mode = VideoFocusMode.Enum.PROJECTED if mode_str == "PROJECTED" else VideoFocusMode.Enum.NATIVE
         mode_name = "PROJECTED" if focus_mode == VideoFocusMode.Enum.PROJECTED else "NATIVE"
-        self.log.info(f"📹 VideoChannel: Focus ({mode_name}) requested by {sender} — sending VideoFocusIndication({mode_name}) to phone")
-        await self.video_handler.send_focus_indication(focus_mode)
+        self.log.info(f"📹 VideoChannel: Focus ({mode_name}) requested by {sender} (unrequested={unrequested}) — sending VideoFocusIndication({mode_name}) to phone")
+        await self.video_handler.send_focus_indication(focus_mode, unrequested=unrequested)
 
     async def on_video_release_focus(self, data: dict) -> None:
         """Handle focus release from media_server when all WebSocket clients disconnect."""

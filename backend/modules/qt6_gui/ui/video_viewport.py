@@ -265,13 +265,18 @@ class VideoViewportWidget(QQuickWidget):
         if width > 0 and height > 0:
             self.frame_width = width
             self.frame_height = height
-        gl_active = self._attached or (self._gl_decoder is not None and getattr(self._gl_decoder, "is_available", False))
+        gl_active = self._gl_decoder is not None and getattr(self._gl_decoder, "is_available", False)
         if not gl_active and frame_bytes:
+            expected_size = width * height * 4
+            if len(frame_bytes) < expected_size:
+                return
             self.current_frame_data = frame_bytes
             img = QImage(frame_bytes, width, height, width * 4, QImage.Format.Format_RGBA8888)
             self._image_provider.image = img
             if self._fallback_image:
                 self._fallback_image.setProperty("visible", True)
+                if self._video_item:
+                    self._video_item.setProperty("visible", False)
                 self._frame_seq = (self._frame_seq + 1) % 1000000
                 self._fallback_image.setProperty("source", f"image://nemo_video/frame?seq={self._frame_seq}")
 

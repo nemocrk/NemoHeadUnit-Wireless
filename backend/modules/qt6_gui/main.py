@@ -327,6 +327,7 @@ class Qt6GuiModule(BaseBackendModule):
         self.shm_engine = QtSHMMediaEngine()
         self.shm_engine.on_video_frame = self._on_video_frame_from_shm
         self.shm_engine.on_audio_frame = self._on_audio_frame_from_shm
+        self.shm_engine.request_keyframe = lambda: self.publish("media.video.request_focus", {"mode": "PROJECTED", "unrequested": True, "sender": "qt6_gui_watchdog"})
         self.log.info("⏱ [Boot Trace 4e/7] Connecting to BidirectionalMediaSHM...")
         self.shm_engine.connect_shm()
         self.log.info(f"⏱ [Boot Trace 4f/7] SHM engine connected (is_connected={self.shm_engine.is_connected})!")
