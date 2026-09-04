@@ -286,12 +286,14 @@ class MainWindow(QMainWindow):
         self.toast_widget.setGeometry((w - 380) // 2, 20, 380, 44)
         self.notification_toast.setGeometry((w - 420) // 2, 20, 420, 72)
 
-        # Position Slide-Over Drawers (pinned to right edge, strictly above bottom command bar)
-        drawer_w = 400
-        self.bluetooth_drawer.setGeometry(w - drawer_w, 0, drawer_w, draw_h)
-        self.settings_drawer.setGeometry(w - drawer_w, 0, drawer_w, draw_h)
-        self.logs_drawer.setGeometry(w - drawer_w, 0, drawer_w, draw_h)
-        self.diagnostics_drawer.setGeometry(w - drawer_w, 0, drawer_w, draw_h)
+        # Position Slide-Over Drawers (almost full-screen cards: 30px margin on all sides, strictly above bottom command bar)
+        margin = 30
+        drawer_x = margin
+        drawer_y = margin
+        drawer_w = max(100, w - (margin * 2))
+        drawer_h = max(100, draw_h - (margin * 2))
+        for drawer in (self.bluetooth_drawer, self.settings_drawer, self.logs_drawer, self.diagnostics_drawer):
+            drawer.setGeometry(drawer_x, drawer_y, drawer_w, drawer_h)
 
     def _relayout_dashboard(self, w: int, h: int):
         """Cockpit 2x2 Grid Layout for Connected/Clock Screen ensuring all widgets are displayed."""

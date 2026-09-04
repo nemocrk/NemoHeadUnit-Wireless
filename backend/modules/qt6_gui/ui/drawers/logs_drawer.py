@@ -30,6 +30,7 @@ class LogsDrawerWidget(QWidget):
 
     def __init__(self, parent=None, host_port="127.0.0.1:8000"):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setProperty("class", "drawer-card")
         self.setMinimumWidth(400)
         self.host_port = host_port
