@@ -11,6 +11,10 @@
 # Fix 8: GPU Performance & Power Stability (RC6 / Runtime PM / Frequency floor)
 # Fix 9: Bluetooth persistent MAC address across reboots
 # Fix 10: Vendor firmware (Broadcom BT/WiFi, Intel SST DSP)
+# Fix 11: Hardware quirks environment
+# Fix 12: PipeWire & WirePlumber autostart + unmuting speakers/headphones
+# Fix 13: Physical volume buttons (Crystal Cove PMIC unmask)
+# Fix 14: Broadcom Bluetooth SCO Audio Routing to HCI UART (HFP voice call fix)
 #
 # Deve essere eseguito come root.
 # Idempotente: controlla prima di modificare.
@@ -35,6 +39,7 @@ SERVICES_CHANGED=0
 PKG_CHANGED=0
 DRACUT_CHANGED=0
 BUTTONS_CHANGED=0
+BCM_SCO_CHANGED=0
 
 # ---------------------------------------------------------------------------
 # Fix 1: Audio loop
@@ -499,6 +504,7 @@ ExecStart=/bin/bash -c '\
     if echo "$OUT_FINAL" | grep -qi "Supported options"; then \
       btmgmt --index 0 power on >/dev/null 2>&1 || true; \
       echo "SUCCESSO: Controller resuscitato e operativo con MAC $ADDR."; \
+      python3 /usr/local/bin/bcm-sco-routing.py >/dev/null 2>&1 || true; \
       FOUND_FINAL=1; \
       break; \
     fi; \
@@ -813,6 +819,108 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Fix 14: Broadcom Bluetooth SCO Audio Routing to HCI UART (HFP Voice Call Fix)
+# ---------------------------------------------------------------------------
+echo -n "  [hw-fix] Broadcom SCO routing to HCI UART (HFP voice call fix)... "
+BCM_SCO_SCRIPT="/usr/local/bin/bcm-sco-routing.py"
+BCM_SCO_SERVICE="/etc/systemd/system/bcm-sco-routing.service"
+BCM_SCO_UDEV="/etc/udev/rules.d/99-bcm-sco-routing.rules"
+
+TEMP_BCM_SCRIPT=$(mktemp)
+cat <<'EOF' > "$TEMP_BCM_SCRIPT"
+#!/usr/bin/env python3
+"""
+Sets Broadcom/Cypress Bluetooth SCO audio routing to HCI UART transport.
+Broadcom controllers default to physical PCM pins, resulting in silent HFP audio.
+Vendor Opcode 0xFC1C (Write_SCO_PCM_Int_Param) sets routing to Transport (0x01).
+"""
+import socket
+import struct
+import sys
+import time
+
+def apply_sco_routing(max_retries=15, delay=0.5):
+    # HCI_COMMAND_PKT (0x01) + Opcode 0xFC1C + plen 5 + [0x01 (HCI Transport), 0x00, 0x00, 0x00, 0x00]
+    cmd = struct.pack('<BHBBBBBB', 0x01, 0xFC1C, 5, 0x01, 0x00, 0x00, 0x00, 0x00)
+    last_err = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            s = socket.socket(31, socket.SOCK_RAW, 1)  # AF_BLUETOOTH, BTPROTO_HCI
+            s.bind((0,))  # hci0
+            s.send(cmd)
+            s.close()
+            print(f"[bcm-sco] Broadcom SCO routing -> HCI UART applied (attempt {attempt}).")
+            return 0
+        except Exception as e:
+            last_err = e
+            time.sleep(delay)
+    print(f"[bcm-sco] Failed to set SCO routing after {max_retries} attempts: {last_err}", file=sys.stderr)
+    return 1
+
+if __name__ == "__main__":
+    sys.exit(apply_sco_routing())
+EOF
+
+if [ ! -f "$BCM_SCO_SCRIPT" ] || ! cmp -s "$TEMP_BCM_SCRIPT" "$BCM_SCO_SCRIPT"; then
+    mv "$TEMP_BCM_SCRIPT" "$BCM_SCO_SCRIPT"
+    chmod 755 "$BCM_SCO_SCRIPT"
+    BCM_SCO_CHANGED=1
+else
+    rm -f "$TEMP_BCM_SCRIPT"
+fi
+
+TEMP_BCM_SVC=$(mktemp)
+cat <<'EOF' > "$TEMP_BCM_SVC"
+[Unit]
+Description=Broadcom Bluetooth SCO Audio Routing to HCI UART
+After=bluetooth.service bluetooth-persistent-mac.service
+Wants=bluetooth.service
+Before=nemo-headunit.service nemo-kiosk.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/bcm-sco-routing.py
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+if [ ! -f "$BCM_SCO_SERVICE" ] || ! cmp -s "$TEMP_BCM_SVC" "$BCM_SCO_SERVICE"; then
+    mv "$TEMP_BCM_SVC" "$BCM_SCO_SERVICE"
+    chmod 644 "$BCM_SCO_SERVICE"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable bcm-sco-routing.service >/dev/null 2>&1 || true
+    BCM_SCO_CHANGED=1
+else
+    rm -f "$TEMP_BCM_SVC"
+fi
+
+TEMP_BCM_UDEV=$(mktemp)
+cat <<'EOF' > "$TEMP_BCM_UDEV"
+# Reapply Broadcom SCO UART routing whenever hci0 is initialized/added
+ACTION=="add", SUBSYSTEM=="bluetooth", KERNEL=="hci0", RUN+="/usr/bin/python3 /usr/local/bin/bcm-sco-routing.py"
+EOF
+
+if [ ! -f "$BCM_SCO_UDEV" ] || ! cmp -s "$TEMP_BCM_UDEV" "$BCM_SCO_UDEV"; then
+    mv "$TEMP_BCM_UDEV" "$BCM_SCO_UDEV"
+    chmod 644 "$BCM_SCO_UDEV"
+    udevadm control --reload >/dev/null 2>&1 || true
+    BCM_SCO_CHANGED=1
+else
+    rm -f "$TEMP_BCM_UDEV"
+fi
+
+# Run immediately to ensure current session has SCO routing active
+/usr/bin/python3 "$BCM_SCO_SCRIPT" >/dev/null 2>&1 || true
+
+if [ $BCM_SCO_CHANGED -eq 1 ]; then
+    echo -e "${GREEN}applicato (service + udev + helper configurati).${NC}"
+else
+    echo -e "${GREEN}già configurato.${NC}"
+fi
+
+# ---------------------------------------------------------------------------
 # Riepilogo
 # ---------------------------------------------------------------------------
 echo ""
@@ -826,8 +934,9 @@ echo "    - Firmware Broadcom (BT/WiFi) e Intel SST DSP verificati in /lib/firmw
 echo "    - Hardware Quirks generati in ${QUIRKS_FILE} (i965, scale 1.5, DMABuf caps)."
 echo "    - PipeWire & WirePlumber abilitati all'avvio con user lingering attivo."
 echo "    - Pulsanti volume fisico abilitati (PMIC unmask & hp-omni10-buttons.service)."
+echo "    - Broadcom SCO audio routing verso HCI UART abilitato (bcm-sco-routing.service & udev)."
 
-if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ] || [ $FW_CHANGED -eq 1 ] || [ $QUIRKS_CHANGED -eq 1 ] || [ $AUDIO_AUTOSTART_CHANGED -eq 1 ] || [ $BUTTONS_CHANGED -eq 1 ]; then
+if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ] || [ $FW_CHANGED -eq 1 ] || [ $QUIRKS_CHANGED -eq 1 ] || [ $AUDIO_AUTOSTART_CHANGED -eq 1 ] || [ $BUTTONS_CHANGED -eq 1 ] || [ $BCM_SCO_CHANGED -eq 1 ]; then
     echo -e "  ${GREEN}[hw-fix] HP Omni10: fix applicati. Riavvio necessario.${NC}"
 else
     echo -e "  ${GREEN}[hw-fix] HP Omni10: nessuna modifica necessaria.${NC}"
