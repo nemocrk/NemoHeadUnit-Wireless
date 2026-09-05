@@ -646,6 +646,15 @@ while IFS=: read -r username _ uid _ _ homedir _; do
     fi
 done < <(getent passwd)
 
+# 4. Ensure ALSA hardware mixer routes (Speakers and Headphone/AUX jack) are unmuted
+if command -v amixer &>/dev/null; then
+    amixer -c bytcrrt5640 sset 'Speaker' unmute 100% >/dev/null 2>&1 || true
+    amixer -c bytcrrt5640 sset 'Headphone' unmute 100% >/dev/null 2>&1 || true
+    if command -v alsactl &>/dev/null; then
+        alsactl store >/dev/null 2>&1 || true
+    fi
+fi
+
 if [ $AUDIO_AUTOSTART_CHANGED -eq 1 ]; then
     echo -e "${GREEN}applicato (lingering + pipewire/wireplumber abilitati).${NC}"
 else

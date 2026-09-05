@@ -92,6 +92,7 @@ class ConnectivityManagerModule(BaseBackendModule):
         }
 
     async def setup(self) -> None:
+        self._loop = asyncio.get_running_loop()
         # Register REST Routes
         self.add_http_route("GET", "/status", self.handle_get_status)
         self.add_http_route("GET", "/paired", self.handle_get_paired)
@@ -170,7 +171,13 @@ class ConnectivityManagerModule(BaseBackendModule):
         self.log.info(f"📱 Publishing HFP phone.status: {state}")
         self.publish("phone.status", state)
         if self._audio_adapter:
-            asyncio.create_task(self._audio_adapter.ensure_hfp_loopback(state.get("is_in_call", False)))
+            coro = self._audio_adapter.ensure_hfp_loopback(state.get("is_in_call", False))
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(coro)
+            except RuntimeError:
+                if hasattr(self, "_loop") and self._loop and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def _on_bluetooth_telemetry_changed(
         self,
