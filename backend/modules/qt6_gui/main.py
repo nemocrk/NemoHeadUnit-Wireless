@@ -123,6 +123,7 @@ class GuiEventBridge(QObject):
     media_metadata_notify = pyqtSignal(dict)
     media_playback_status_notify = pyqtSignal(dict)
     phone_status_notify = pyqtSignal(dict)
+    phone_pbap_synced = pyqtSignal(dict)
     audio_focus_notify = pyqtSignal(dict)
     notification_post = pyqtSignal(dict)
     notification_dismiss = pyqtSignal(dict)
@@ -180,6 +181,10 @@ class GuiEventBridge(QObject):
     @pyqtSlot(dict)
     def on_phone_status_notify(self, data: dict):
         self._module._on_phone_status_notify(data)
+
+    @pyqtSlot(dict)
+    def on_phone_pbap_synced(self, data: dict):
+        self._module._on_phone_pbap_synced(data)
 
     @pyqtSlot(dict)
     def on_audio_focus_notify(self, data: dict):
@@ -377,6 +382,7 @@ class Qt6GuiModule(BaseBackendModule):
         self.bridge.media_metadata_notify.connect(self.bridge.on_media_metadata_notify, Qt.ConnectionType.QueuedConnection)
         self.bridge.media_playback_status_notify.connect(self.bridge.on_media_playback_status_notify, Qt.ConnectionType.QueuedConnection)
         self.bridge.phone_status_notify.connect(self.bridge.on_phone_status_notify, Qt.ConnectionType.QueuedConnection)
+        self.bridge.phone_pbap_synced.connect(self.bridge.on_phone_pbap_synced, Qt.ConnectionType.QueuedConnection)
         self.bridge.audio_focus_notify.connect(self.bridge.on_audio_focus_notify, Qt.ConnectionType.QueuedConnection)
         self.bridge.notification_post.connect(self.bridge.on_notification_post, Qt.ConnectionType.QueuedConnection)
         self.bridge.notification_dismiss.connect(self.bridge.on_notification_dismiss, Qt.ConnectionType.QueuedConnection)
@@ -402,6 +408,7 @@ class Qt6GuiModule(BaseBackendModule):
         self.subscribe("media.metadata", lambda top, pay=None: _bridge_emit(self.bridge.media_metadata_notify, top, pay))
         self.subscribe("media.playback_status", lambda top, pay=None: _bridge_emit(self.bridge.media_playback_status_notify, top, pay))
         self.subscribe("phone.status", lambda top, pay=None: _bridge_emit(self.bridge.phone_status_notify, top, pay))
+        self.subscribe("phone.pbap_synced", lambda top, pay=None: _bridge_emit(self.bridge.phone_pbap_synced, top, pay))
         self.subscribe("connectivity.status", lambda top, pay=None: _bridge_emit(self.bridge.connectivity_updated, top, pay))
         self.subscribe("channel.status", lambda top, pay=None: _bridge_emit(self.bridge.channel_status_updated, top, pay))
         self.subscribe("notification.post", lambda top, pay=None: _bridge_emit(self.bridge.notification_post, top, pay))
@@ -695,6 +702,16 @@ class Qt6GuiModule(BaseBackendModule):
                 contact_photo_b64=photo_b64,
             )
 
+            # Update phone drawer call state
+            if hasattr(self.main_window, "phone_drawer"):
+                self.main_window.phone_drawer.update_call_state(
+                    is_in_call=is_in_call,
+                    call_state=call_state,
+                    caller_name=name,
+                    caller_number=number,
+                    duration_seconds=duration,
+                )
+
             has_nav = self.main_window.has_active_nav
             has_media = self.main_window.has_active_media
             self.main_window.update_dashboard_state(has_nav=has_nav, has_media=has_media, has_call=is_in_call)
@@ -703,6 +720,22 @@ class Qt6GuiModule(BaseBackendModule):
                 self.main_window.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
                 self.main_window.disconnected_screen.raise_()
                 self.main_window.command_bar.raise_()
+
+    def _on_phone_pbap_synced(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.main_window:
+            contacts = data.get("contacts", [])
+            favorites = data.get("favorites", [])
+            recents = data.get("recents", [])
+            if hasattr(self.main_window, "phone_drawer"):
+                self.main_window.phone_drawer.set_contacts(contacts)
+                self.main_window.phone_drawer.set_favorites(favorites)
+                self.main_window.phone_drawer.set_recents(recents)
+            if hasattr(self.main_window, "toast_widget"):
+                self.main_window.toast_widget.show_toast(
+                    f"Phonebook synced ({len(contacts)} contacts, {len(recents)} recents)",
+                    "info"
+                )
 
     def _on_notification_post_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload
@@ -747,16 +780,31 @@ class Qt6GuiModule(BaseBackendModule):
     async def _send_phone_action(self, action: str):
         try:
             import urllib.request, json
+            if action.startswith("dial:"):
+                number = action[5:].strip()
+                url = "http://127.0.0.1:8000/api/connectivity/phone/dial"
+                payload = {"number": number}
+            elif action.startswith("dtmf:"):
+                key = action[5:].strip()
+                url = "http://127.0.0.1:8000/api/connectivity/phone/dtmf"
+                payload = {"key": key}
+            elif action == "sync":
+                url = "http://127.0.0.1:8000/api/connectivity/phone/sync"
+                payload = {}
+            else:
+                url = "http://127.0.0.1:8000/api/connectivity/phone/action"
+                payload = {"action": action}
+
             req = urllib.request.Request(
-                "http://127.0.0.1:8000/api/channels/phone/action",
-                data=json.dumps({"action": action}).encode("utf-8"),
+                url,
+                data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=2.0) as resp:
-                pass
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, lambda: urllib.request.urlopen(req, timeout=3.0).close())
         except Exception as exc:
-            self.log.debug(f"Failed to post phone action: {exc}")
+            self.log.debug(f"Failed to post phone action '{action}': {exc}")
 
     def _on_media_playpause_requested(self):
         self.log.info("Media Play/Pause key pressed")

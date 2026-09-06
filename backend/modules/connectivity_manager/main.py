@@ -226,6 +226,14 @@ class ConnectivityManagerModule(BaseBackendModule):
             self._active_device = address
             self._trigger_device_telemetry(address)
             self.publish("bluetooth_manager.paired.connected", {"device_address": address})
+            if hasattr(self, "_loop") and self._loop and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(self._auto_sync_pbap(address), self._loop)
+            else:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._auto_sync_pbap(address))
+                except RuntimeError:
+                    pass
         else:
             self.log.info(f"⚪ Bluetooth device {address} disconnected")
             self.publish("bluetooth_manager.paired.disconnected", {"device_address": address})
@@ -828,7 +836,30 @@ class ConnectivityManagerModule(BaseBackendModule):
         if not self._pbap_client:
             return web.json_response({"status": "error", "message": "PBAP client not initialized"}, status=503)
         res = await self._pbap_client.sync(self._active_device or "")
-        return web.json_response({"status": "ok", "sync": res})
+        payload = {
+            "status": "ok",
+            "sync": res,
+            "contacts": self._pbap_client.get_contacts(),
+            "favorites": self._pbap_client.get_favorites(),
+            "recents": self._pbap_client.get_recents(),
+        }
+        self.publish("phone.pbap_synced", payload)
+        return web.json_response(payload)
+
+    async def _auto_sync_pbap(self, address: str) -> None:
+        await asyncio.sleep(2.0)
+        if self._pbap_client and self._active_device == address:
+            try:
+                res = await self._pbap_client.sync(address)
+                self.publish("phone.pbap_synced", {
+                    "status": "ok",
+                    "sync": res,
+                    "contacts": self._pbap_client.get_contacts(),
+                    "favorites": self._pbap_client.get_favorites(),
+                    "recents": self._pbap_client.get_recents(),
+                })
+            except Exception as e:
+                self.log.debug(f"Auto PBAP sync notice: {e}")
 
     def _trigger_device_telemetry(self, address: str) -> None:
         """Trigger underlying Bluetooth adapter to query real telemetry (battery, RSSI, operator)."""

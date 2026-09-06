@@ -211,6 +211,9 @@ cp "${SERVICES_SRC}/org.nemo.APManager.service" "${SYSTEMD_STAGE}/"
 sed -i \
     "s|ExecStart=.*ap_manager_service.py|ExecStart=/opt/nemo-headunit/env/bin/python /opt/nemo-headunit/services/linux/ap_manager_service/ap_manager_service.py|" \
     "${SYSTEMD_STAGE}/org.nemo.APManager.service"
+if [ -f "${REPO_ROOT}/packaging/systemd/bluez-obex.service" ]; then
+    cp "${REPO_ROOT}/packaging/systemd/bluez-obex.service" "${SYSTEMD_STAGE}/"
+fi
 
 # —— /etc/dbus-1/system.d/ ——
 DBUS_STAGE="${STAGE_DIR}/etc/dbus-1/system.d"

@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QGridLayout,
+    QFrame,
 )
 from ..svg_utils import make_svg_icon
 
@@ -27,6 +28,7 @@ class PhoneDrawerWidget(QWidget):
     call_requested = pyqtSignal(str)  # Phone number or contact name to dial
     call_action_triggered = pyqtSignal(str)
     dtmf_requested = pyqtSignal(str)
+    sync_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -50,6 +52,28 @@ class PhoneDrawerWidget(QWidget):
         title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #f0f6fc;")
         header_layout.addWidget(title_label)
 
+        header_layout.addStretch()
+
+        sync_btn = QPushButton(" Sync", self)
+        sync_btn.setIcon(make_svg_icon("sync", color="#8b949e", size=14))
+        sync_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 13px;
+                color: #8b949e;
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 4px 10px;
+            }
+            QPushButton:hover {
+                color: #f0f6fc;
+                border-color: #58a6ff;
+            }
+        """)
+        sync_btn.setToolTip("Sync contacts and recents from connected Bluetooth phone")
+        sync_btn.clicked.connect(self._on_sync_clicked)
+        header_layout.addWidget(sync_btn)
+
         close_btn = QPushButton("×", self)
         close_btn.setProperty("class", "close-btn")
         close_btn.setStyleSheet("""
@@ -66,7 +90,12 @@ class PhoneDrawerWidget(QWidget):
         header_layout.addWidget(close_btn)
         self.layout.addLayout(header_layout)
 
-        # 2. Tabs: Recents, Favorites, Contacts, Keypad
+        # 2. Active Call Banner (hidden until call is active/ringing)
+        self.active_call_banner = self._create_active_call_banner()
+        self.layout.addWidget(self.active_call_banner)
+        self.active_call_banner.hide()
+
+        # 3. Tabs: Recents, Favorites, Contacts, Keypad
         self.tabs = QTabWidget(self)
         self.tabs.setStyleSheet("""
             QTabWidget::pane {
@@ -139,8 +168,99 @@ class PhoneDrawerWidget(QWidget):
 
         self.layout.addWidget(self.tabs)
 
-        # Load initial data from PBAP cache or synthetics
+        # Load initial data from PBAP cache
         self._load_initial_pbap_data()
+
+    def _create_active_call_banner(self) -> QWidget:
+        banner = QFrame(self)
+        banner.setStyleSheet("""
+            QFrame {
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 6px;
+            }
+        """)
+        layout = QVBoxLayout(banner)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+
+        # Top row: status + timer
+        top_row = QHBoxLayout()
+        self.call_status_label = QLabel("Call in Progress", banner)
+        self.call_status_label.setStyleSheet("font-weight: bold; color: #3fb950; font-size: 13px;")
+        top_row.addWidget(self.call_status_label)
+
+        self.call_timer_label = QLabel("00:00", banner)
+        self.call_timer_label.setStyleSheet("color: #8b949e; font-size: 12px; font-family: monospace;")
+        top_row.addWidget(self.call_timer_label, alignment=Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(top_row)
+
+        # Contact info
+        self.call_contact_label = QLabel("Unknown Caller", banner)
+        self.call_contact_label.setStyleSheet("color: #f0f6fc; font-size: 15px; font-weight: 600;")
+        layout.addWidget(self.call_contact_label)
+
+        self.call_number_label = QLabel("", banner)
+        self.call_number_label.setStyleSheet("color: #8b949e; font-size: 12px;")
+        layout.addWidget(self.call_number_label)
+
+        # Action buttons: Answer, Mute, Hangup
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        self.btn_answer = QPushButton(" Answer", banner)
+        self.btn_answer.setIcon(make_svg_icon("phone", color="#ffffff", size=14))
+        self.btn_answer.setStyleSheet("""
+            QPushButton {
+                background: #238636;
+                color: white;
+                font-weight: bold;
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover { background: #2ea043; }
+        """)
+        self.btn_answer.clicked.connect(lambda: self.call_action_triggered.emit("answer"))
+        btn_row.addWidget(self.btn_answer)
+        self.btn_answer.hide()
+
+        self.btn_mute = QPushButton(" Mute", banner)
+        self.btn_mute.setIcon(make_svg_icon("mic", color="#8b949e", size=14))
+        self.btn_mute.setStyleSheet("""
+            QPushButton {
+                background: #21262d;
+                color: #c9d1d9;
+                font-weight: 500;
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover { background: #30363d; color: #f0f6fc; }
+        """)
+        self.btn_mute.clicked.connect(lambda: self.call_action_triggered.emit("mute"))
+        btn_row.addWidget(self.btn_mute)
+
+        self.btn_hangup = QPushButton(" End Call", banner)
+        self.btn_hangup.setIcon(make_svg_icon("call_end", color="#ffffff", size=14))
+        self.btn_hangup.setStyleSheet("""
+            QPushButton {
+                background: #da3633;
+                color: white;
+                font-weight: bold;
+                border-radius: 6px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover { background: #f85149; }
+        """)
+        self.btn_hangup.clicked.connect(lambda: self.call_action_triggered.emit("hangup"))
+        btn_row.addWidget(self.btn_hangup)
+
+        layout.addLayout(btn_row)
+        return banner
+
+    def _on_sync_clicked(self):
+        self.sync_requested.emit()
+        self.call_action_triggered.emit("sync")
 
     def _load_initial_pbap_data(self):
         try:
@@ -150,12 +270,9 @@ class PhoneDrawerWidget(QWidget):
             self.set_favorites(client.get_favorites())
             self.set_recents(client.get_recents())
         except Exception:
-            # Fallback
-            self.set_contacts([
-                {"name": "Alice Rossi", "primary_phone": "+39 333 111 2222", "favorite": False},
-                {"name": "Bob Bianchi", "primary_phone": "+39 340 333 4444", "favorite": False},
-                {"name": "Emergency Roadside", "primary_phone": "+39 800 123 456", "favorite": True},
-            ])
+            self.set_contacts([])
+            self.set_favorites([])
+            self.set_recents([])
 
     def set_contacts(self, contacts: list[dict]):
         self._all_contacts = list(contacts)
@@ -164,6 +281,7 @@ class PhoneDrawerWidget(QWidget):
     def _filter_contacts(self, query: str = ""):
         self.contacts_list.clear()
         q = (query or "").lower().strip()
+        matched = 0
         for c in self._all_contacts:
             name = c.get("name", "Unknown")
             phone = c.get("primary_phone", "")
@@ -171,6 +289,15 @@ class PhoneDrawerWidget(QWidget):
                 item = QListWidgetItem(f"👤 {name}\n   {phone}")
                 item.setData(Qt.ItemDataRole.UserRole, phone)
                 self.contacts_list.addItem(item)
+                matched += 1
+
+        if matched == 0:
+            if not self._all_contacts:
+                item = QListWidgetItem("No contacts synced.\nTap Sync to import from phone.")
+            else:
+                item = QListWidgetItem(f"No contacts matching '{query}'.")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.contacts_list.addItem(item)
 
     def set_favorites(self, favorites: list[dict]):
         self._all_favorites = list(favorites)
@@ -180,6 +307,11 @@ class PhoneDrawerWidget(QWidget):
             phone = c.get("primary_phone", "")
             item = QListWidgetItem(f"★ {name}\n   {phone}")
             item.setData(Qt.ItemDataRole.UserRole, phone)
+            self.favorites_list.addItem(item)
+
+        if not self._all_favorites:
+            item = QListWidgetItem("No favorites found.")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.favorites_list.addItem(item)
 
     def set_recents(self, recents: list[dict]):
@@ -194,13 +326,60 @@ class PhoneDrawerWidget(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, num)
             self.recents_list.addItem(item)
 
+        if not self._all_recents:
+            item = QListWidgetItem("No recent calls.")
+            item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.recents_list.addItem(item)
+
     def set_in_call(self, in_call: bool):
         self.is_in_call = in_call
+        if not in_call:
+            self.active_call_banner.hide()
+
+    def update_call_state(
+        self,
+        is_in_call: bool,
+        call_state: str = "IDLE",
+        caller_name: str = "",
+        caller_number: str = "",
+        duration_seconds: int = 0,
+    ):
+        self.is_in_call = is_in_call
+        if not is_in_call or call_state in ("IDLE", "TERMINATED", "DISCONNECTED"):
+            self.active_call_banner.hide()
+            return
+
+        self.active_call_banner.show()
+        mins = duration_seconds // 60
+        secs = duration_seconds % 60
+        time_str = f"{mins:02d}:{secs:02d}"
+
+        if call_state in ("RINGING", "INCOMING"):
+            self.call_status_label.setText("Incoming Call...")
+            self.call_status_label.setStyleSheet("font-weight: bold; color: #d29922; font-size: 13px;")
+            self.btn_answer.show()
+            self.call_timer_label.setText("")
+        elif call_state in ("DIALING", "ALERTING"):
+            self.call_status_label.setText("Calling...")
+            self.call_status_label.setStyleSheet("font-weight: bold; color: #58a6ff; font-size: 13px;")
+            self.btn_answer.hide()
+            self.call_timer_label.setText("")
+        else:
+            self.call_status_label.setText("Active Call")
+            self.call_status_label.setStyleSheet("font-weight: bold; color: #3fb950; font-size: 13px;")
+            self.btn_answer.hide()
+            self.call_timer_label.setText(time_str)
+
+        display_name = caller_name or caller_number or "Unknown"
+        self.call_contact_label.setText(display_name)
+        self.call_number_label.setText(caller_number if caller_name else "")
+        self.call_number_label.setVisible(bool(caller_name and caller_number))
 
     def _on_item_clicked(self, item: QListWidgetItem):
         number = item.data(Qt.ItemDataRole.UserRole)
         if number:
             self.call_requested.emit(number)
+            self.call_action_triggered.emit(f"dial:{number}")
 
     def _create_keypad(self) -> QWidget:
         widget = QWidget()
@@ -285,6 +464,7 @@ class PhoneDrawerWidget(QWidget):
         self.dial_display.setText(self.dial_display.text() + char)
         if self.is_in_call:
             self.dtmf_requested.emit(char)
+            self.call_action_triggered.emit(f"dtmf:{char}")
 
     def _backspace_digit(self):
         txt = self.dial_display.text()

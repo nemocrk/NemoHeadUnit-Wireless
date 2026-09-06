@@ -327,6 +327,14 @@ EOF
         fi
     fi
 
+    # 6c. Enable Bluetooth OBEX system service for PBAP phonebook sync
+    if [ -f "/usr/lib/systemd/system/bluez-obex.service" ] || [ -f "/etc/systemd/system/bluez-obex.service" ]; then
+        log "Enabling and starting bluez-obex.service for Bluetooth PBAP phonebook sync"
+        systemctl daemon-reload || true
+        systemctl enable bluez-obex.service || true
+        systemctl restart bluez-obex.service || true
+    fi
+
     # ------------------------------------------------------------------
     # 7. Platform-specific hardware fixes
     # ------------------------------------------------------------------

@@ -3,9 +3,11 @@ bluez_pbap.py — Standalone Bluetooth Phone Book Access Profile (PBAP) client.
 Syncs and caches contacts, favorites, and call history via BlueZ OBEX vCard parser.
 """
 
+import asyncio
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from shared.logger import get_logger
@@ -254,14 +256,158 @@ class BlueZPBAPClient:
     async def sync(self, device_address: str = "") -> Dict[str, Any]:
         """
         Attempt PBAP phonebook pull via BlueZ OBEX over D-Bus.
-        Falls back cleanly if OBEX daemon is absent.
+        Cross-platform compliant: on Windows or when OBEX is unreachable, returns cached data safely.
         """
         log.info(f"Triggered PBAP Phonebook Sync for device '{device_address}'")
-        # In Linux BlueZ OBEX: connects to org.bluez.obex.Client1 and pulls telecom/pb.vcf, telecom/cch.vcf
-        # If D-Bus OBEX is not currently running or available, returns cached data safely
-        return {
-            "status": "ok",
-            "contacts_count": len(self._contacts),
-            "recents_count": len(self._recents),
-            "cached": True,
-        }
+        if sys.platform == "win32" or not device_address:
+            return {
+                "status": "ok",
+                "contacts_count": len(self._contacts),
+                "recents_count": len(self._recents),
+                "cached": True,
+            }
+
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(None, self._sync_dbus_obex, device_address)
+            return result
+        except Exception as e:
+            log.warning(f"PBAP D-Bus sync failed: {e}, using cached data")
+            return {
+                "status": "ok",
+                "contacts_count": len(self._contacts),
+                "recents_count": len(self._recents),
+                "cached": True,
+                "error": str(e),
+            }
+
+    def _sync_dbus_obex(self, device_address: str) -> Dict[str, Any]:
+        import dbus
+        import tempfile
+        import time
+
+        bus = None
+        for get_bus in (dbus.SystemBus, dbus.SessionBus):
+            try:
+                b = get_bus()
+                b.get_object("org.bluez.obex", "/org/bluez/obex")
+                bus = b
+                break
+            except Exception:
+                continue
+
+        if bus is None:
+            log.warning("No D-Bus connection to org.bluez.obex found")
+            return {
+                "status": "ok",
+                "contacts_count": len(self._contacts),
+                "recents_count": len(self._recents),
+                "cached": True,
+            }
+
+        obex_obj = bus.get_object("org.bluez.obex", "/org/bluez/obex")
+        client = dbus.Interface(obex_obj, "org.bluez.obex.Client1")
+
+        session_path = None
+        new_contacts = None
+        new_recents = None
+
+        try:
+            log.info(f"Creating OBEX PBAP session for {device_address}...")
+            session_opts = dbus.Dictionary({"Target": "PBAP"}, signature="sv")
+            session_path = client.CreateSession(device_address, session_opts)
+            log.info(f"OBEX PBAP session established at {session_path}")
+
+            session_obj = bus.get_object("org.bluez.obex", session_path)
+            pbap = dbus.Interface(session_obj, "org.bluez.obex.PhonebookAccess1")
+
+            obex_dir = Path("/var/lib/obex")
+            if obex_dir.exists() and os.access(str(obex_dir), os.W_OK):
+                work_dir = obex_dir
+            else:
+                work_dir = Path(tempfile.gettempdir())
+
+            clean_addr = device_address.replace(":", "_")
+            ts = int(time.time())
+            pid = os.getpid()
+            contacts_file = work_dir / f"pb_{clean_addr}_{pid}_{ts}_contacts.vcf"
+            recents_file = work_dir / f"pb_{clean_addr}_{pid}_{ts}_recents.vcf"
+            empty_filters = dbus.Dictionary({}, signature="sv")
+
+            def _wait_for_transfer(transfer_path: str, target_file: Path, max_wait: float = 12.0):
+                transfer_obj = bus.get_object("org.bluez.obex", transfer_path)
+                props_iface = dbus.Interface(transfer_obj, "org.freedesktop.DBus.Properties")
+                deadline = time.time() + max_wait
+                while time.time() < deadline:
+                    try:
+                        status = str(props_iface.Get("org.bluez.obex.Transfer1", "Status"))
+                        if status in ("complete", "error"):
+                            break
+                    except Exception:
+                        pass
+                    if target_file.exists() and target_file.stat().st_size > 0:
+                        break
+                    time.sleep(0.2)
+
+            # 1. Pull Contacts (pb)
+            try:
+                pbap.Select("int", "pb")
+                transfer_path, _ = pbap.PullAll(str(contacts_file), empty_filters)
+                _wait_for_transfer(transfer_path, contacts_file)
+                if contacts_file.exists() and contacts_file.stat().st_size > 0:
+                    text = contacts_file.read_text(encoding="utf-8", errors="replace")
+                    parsed = parse_vcard_stream(text)
+                    if parsed:
+                        new_contacts = parsed
+                        log.info(f"Parsed {len(parsed)} contacts from OBEX vCard stream")
+            except Exception as ce:
+                log.warning(f"Failed to pull contacts: {ce}")
+            finally:
+                try:
+                    contacts_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            # 2. Pull Call History (cch)
+            try:
+                pbap.Select("int", "cch")
+                transfer_path, _ = pbap.PullAll(str(recents_file), empty_filters)
+                _wait_for_transfer(transfer_path, recents_file)
+                if recents_file.exists() and recents_file.stat().st_size > 0:
+                    text = recents_file.read_text(encoding="utf-8", errors="replace")
+                    parsed_rec = parse_vcard_history(text)
+                    if parsed_rec:
+                        new_recents = parsed_rec
+                        log.info(f"Parsed {len(parsed_rec)} call history entries from OBEX vCard stream")
+            except Exception as re_err:
+                log.warning(f"Failed to pull call history: {re_err}")
+            finally:
+                try:
+                    recents_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            if new_contacts is not None or new_recents is not None:
+                self.save_cache(contacts=new_contacts, recents=new_recents)
+
+            return {
+                "status": "ok",
+                "contacts_count": len(self._contacts),
+                "recents_count": len(self._recents),
+                "cached": False,
+            }
+        except Exception as se:
+            log.warning(f"Error during OBEX PBAP session: {se}")
+            return {
+                "status": "ok",
+                "contacts_count": len(self._contacts),
+                "recents_count": len(self._recents),
+                "cached": True,
+                "error": str(se),
+            }
+        finally:
+            if session_path and client:
+                try:
+                    client.RemoveSession(session_path)
+                except Exception as clean_err:
+                    log.debug(f"Error removing OBEX session: {clean_err}")

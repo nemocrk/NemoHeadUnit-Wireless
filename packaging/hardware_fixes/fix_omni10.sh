@@ -672,12 +672,10 @@ fi
 # ---------------------------------------------------------------------------
 echo -n "  [hw-fix] Physical volume buttons (PMIC unmask & boot service)... "
 
-# 1. Ensure i2c-dev and core PMIC/button modules load at boot
+# 1. Ensure i2c-dev and button array modules load at boot
 mkdir -p /etc/modules-load.d
 BUTTON_MODULES_CONF="/etc/modules-load.d/omni10-buttons.conf"
 BUTTON_MODULES_CONTENT="i2c-dev
-intel_soc_pmic_crc
-gpio_crystalcove
 soc_button_array"
 
 if [ ! -f "$BUTTON_MODULES_CONF" ] || [ "$(cat "$BUTTON_MODULES_CONF")" != "$BUTTON_MODULES_CONTENT" ]; then
@@ -685,8 +683,6 @@ if [ ! -f "$BUTTON_MODULES_CONF" ] || [ "$(cat "$BUTTON_MODULES_CONF")" != "$BUT
     BUTTONS_CHANGED=1
 fi
 modprobe i2c-dev >/dev/null 2>&1 || true
-modprobe intel_soc_pmic_crc >/dev/null 2>&1 || true
-modprobe gpio_crystalcove >/dev/null 2>&1 || true
 modprobe soc_button_array >/dev/null 2>&1 || true
 
 # 2. Ensure i2c-tools package is installed
@@ -736,15 +732,6 @@ if command -v i2cset &>/dev/null; then
     i2cset -y -f "$BUS" 0x6e 0x0e 0x5f >/dev/null 2>&1 || true
     # Register 0x19 (MGPIO0IRQS0): Unmask GPIO 0 & 1 (bits 0,1 = 0)
     i2cset -y -f "$BUS" 0x6e 0x19 0xfc >/dev/null 2>&1 || true
-fi
-
-# Rebind INTCFD9:00 to soc_button_array so volume buttons hook into unmasked lines cleanly
-if [ -d "/sys/bus/platform/drivers/soc_button_array" ]; then
-    if [ -e "/sys/bus/platform/drivers/soc_button_array/INTCFD9:00" ]; then
-        echo INTCFD9:00 > /sys/bus/platform/drivers/soc_button_array/unbind 2>/dev/null || true
-        sleep 0.1
-    fi
-    echo INTCFD9:00 > /sys/bus/platform/drivers/soc_button_array/bind 2>/dev/null || true
 fi
 
 exit 0
@@ -898,8 +885,8 @@ fi
 
 TEMP_BCM_UDEV=$(mktemp)
 cat <<'EOF' > "$TEMP_BCM_UDEV"
-# Reapply Broadcom SCO UART routing whenever hci0 is initialized/added
-ACTION=="add", SUBSYSTEM=="bluetooth", KERNEL=="hci0", RUN+="/usr/bin/python3 /usr/local/bin/bcm-sco-routing.py"
+# Trigger Broadcom SCO routing service via systemd whenever hci0 is initialized/added
+ACTION=="add", SUBSYSTEM=="bluetooth", KERNEL=="hci0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="bcm-sco-routing.service"
 EOF
 
 if [ ! -f "$BCM_SCO_UDEV" ] || ! cmp -s "$TEMP_BCM_UDEV" "$BCM_SCO_UDEV"; then

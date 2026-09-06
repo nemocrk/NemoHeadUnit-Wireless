@@ -155,6 +155,8 @@ class MainWindow(QMainWindow):
 
         # Phone signals
         self.phone_drawer.call_action_triggered.connect(self.phone_action_requested.emit)
+        self.phone_drawer.sync_requested.connect(lambda: self.phone_action_requested.emit("sync"))
+        self.phone_drawer.call_requested.connect(lambda num: self.phone_action_requested.emit(f"dial:{num}"))
         self.phone_call_widget.action_triggered.connect(self.phone_action_requested.emit)
         self.phone_card.open_drawer_requested.connect(lambda: self._toggle_drawer(self.phone_drawer))
         self.phone_card.call_requested.connect(self.phone_action_requested.emit)

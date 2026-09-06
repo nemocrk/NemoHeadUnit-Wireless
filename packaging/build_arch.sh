@@ -224,6 +224,9 @@ sed -i \
 if [ -f "${REPO_ROOT}/packaging/nemo-kiosk.service" ]; then
     cp "${REPO_ROOT}/packaging/nemo-kiosk.service" "${SYSTEMD_STAGE}/"
 fi
+if [ -f "${REPO_ROOT}/packaging/systemd/bluez-obex.service" ]; then
+    cp "${REPO_ROOT}/packaging/systemd/bluez-obex.service" "${SYSTEMD_STAGE}/"
+fi
 
 # —— /etc/dbus-1/system.d/ ——
 DBUS_STAGE="${STAGE_DIR}/etc/dbus-1/system.d"

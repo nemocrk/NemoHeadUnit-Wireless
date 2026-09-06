@@ -13,6 +13,7 @@ polkit
 # Bluetooth stack
 bluez
 bluez-utils
+bluez-obex
 
 # WiFi AP stack
 hostapd
