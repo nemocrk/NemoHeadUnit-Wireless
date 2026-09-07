@@ -58,6 +58,7 @@ class TCPServer:
             self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._server_sock.bind((self.host, self.port))
+            self.port = self._server_sock.getsockname()[1]
             self._server_sock.listen(1)
             self._running = True
             log.info(f"TCP server listening on {self.host}:{self.port}")
