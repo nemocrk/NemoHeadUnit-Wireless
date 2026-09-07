@@ -523,9 +523,26 @@ class ConnectivityManagerModule(BaseBackendModule):
     # -------------------------------------------------------------------------
 
     async def handle_get_status(self, request: web.Request) -> web.Response:
+        bt_address = None
+        if self._bt_adapter:
+            try:
+                bt_address = self._bt_adapter.get_adapter_address()
+            except Exception:
+                pass
+
+        wifi_active = False
+        if self._wifi_adapter:
+            try:
+                w_status = self._wifi_adapter.get_status()
+                wifi_active = bool(w_status.get("active", False)) if isinstance(w_status, dict) else False
+            except Exception:
+                pass
+
         return web.json_response({
             "status": "ok",
             "adapter_name": self.config.get("adapter_name", "NemoHeadUnit"),
+            "bt_address": bt_address,
+            "wifi_active": wifi_active,
             "discoverable": self._discoverable,
             "discovering": self._discovering,
             "rfcomm_listening": self._rfcomm_listening,
@@ -607,7 +624,7 @@ class ConnectivityManagerModule(BaseBackendModule):
             self.publish("bluetooth_manager.discovery.completed", {})
 
         return web.json_response({
-            "status": "ok",
+            "status": "discovery_started",
             "message": f"Discovery scan completed ({len(self._discovered_devices)} devices found)",
             "devices": self._discovered_devices
         })
@@ -618,7 +635,9 @@ class ConnectivityManagerModule(BaseBackendModule):
 
     async def handle_post_pair(self, request: web.Request) -> web.Response:
         body = await request.json()
-        addr = body["device_address"]
+        addr = body.get("device_address") or body.get("address")
+        if not addr:
+            return web.json_response({"status": "error", "message": "Missing 'device_address' or 'address' parameter"}, status=400)
         self._pairing_device = addr
         self._pairing_pin = None
         this_notify = getattr(self, "_notify_status_changed", lambda: None)
@@ -648,7 +667,8 @@ class ConnectivityManagerModule(BaseBackendModule):
         addr = body.get("device_address") or body.get("address")
         if not addr:
             return web.json_response({"status": "error", "message": "Missing 'device_address'"}, status=400)
-        res = await self._bt_adapter.confirm_pairing(addr, True)
+        confirm = body.get("confirm", True)
+        res = await self._bt_adapter.confirm_pairing(addr, confirm)
         self._pairing_pin = None
         self._pairing_device = None
         this_notify = getattr(self, "_notify_status_changed", lambda: None)
