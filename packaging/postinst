@@ -93,9 +93,45 @@ run_postinst() {
     # ------------------------------------------------------------------
     # 2. Build or Update Runtime Environment (Venv+UV vs Micromamba)
     # ------------------------------------------------------------------
-    if [ -f "${REQUIREMENTS_TXT}" ]; then
-        log "Packaging mode detected: Python venv + uv"
+    # Detect pre-existing runtime environment if target is already installed
+    EXISTING_ENV_TYPE="none"
+    if [ -f "${ENV_PREFIX}/conda-meta/history" ] || [ -d "${ENV_PREFIX}/conda-meta" ]; then
+        EXISTING_ENV_TYPE="micromamba"
+    elif [ -f "${ENV_PREFIX}/pyvenv.cfg" ] || [ -f "${ENV_PREFIX}/bin/python" ]; then
+        EXISTING_ENV_TYPE="venv"
+    fi
 
+    # Read explicit build/package preference if present (.packaging_mode)
+    PACKAGING_PREF=""
+    if [ -f "${APP_DIR}/.packaging_mode" ]; then
+        PACKAGING_PREF="$(cat "${APP_DIR}/.packaging_mode" 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+
+    # Determine runtime mode: preserve existing env first!
+    TARGET_MODE=""
+    if [ "${EXISTING_ENV_TYPE}" = "venv" ] && [ -f "${REQUIREMENTS_TXT}" ]; then
+        log "Existing Python venv detected at ${ENV_PREFIX} — preserving Python venv + uv runtime."
+        TARGET_MODE="venv"
+    elif [ "${EXISTING_ENV_TYPE}" = "micromamba" ] && [ -f "${ENV_YML}" ]; then
+        log "Existing Micromamba env detected at ${ENV_PREFIX} — preserving Micromamba runtime."
+        TARGET_MODE="micromamba"
+    elif [ "${PACKAGING_PREF}" = "micromamba" ] && [ -f "${ENV_YML}" ]; then
+        log "Packaging mode requested: Micromamba"
+        TARGET_MODE="micromamba"
+    elif [ "${PACKAGING_PREF}" = "venv" ] && [ -f "${REQUIREMENTS_TXT}" ]; then
+        log "Packaging mode requested: Python venv + uv"
+        TARGET_MODE="venv"
+    elif [ -f "${REQUIREMENTS_TXT}" ]; then
+        log "Packaging mode detected: Python venv + uv"
+        TARGET_MODE="venv"
+    elif [ -f "${ENV_YML}" ]; then
+        log "Packaging mode detected: Micromamba"
+        TARGET_MODE="micromamba"
+    else
+        log "WARNING: Neither requirements.txt nor environment.yml found in ${APP_DIR}."
+    fi
+
+    if [ "${TARGET_MODE}" = "venv" ]; then
         # Bootstrap uv if needed
         if ! find_uv &>/dev/null; then
             if [ -f "${BOOTSTRAP_UV}" ]; then
@@ -115,6 +151,12 @@ run_postinst() {
         SAVED_HASH=""
         if [ -f "${CHECKSUM_FILE}" ]; then
             SAVED_HASH="$(cat "${CHECKSUM_FILE}" 2>/dev/null || true)"
+        fi
+
+        # If prefix exists but is a Conda environment, back it up before creating virtualenv
+        if [ -d "${ENV_PREFIX}" ] && [ -d "${ENV_PREFIX}/conda-meta" ]; then
+            log "Notice: Conda directory detected at ${ENV_PREFIX}. Backing it up before venv creation..."
+            mv "${ENV_PREFIX}" "${ENV_PREFIX}.conda_bak_$(date +%s)" || true
         fi
 
         # 1. Create venv with system-site-packages enabled if not exists
@@ -141,9 +183,7 @@ run_postinst() {
             log "WARNING: neither uv nor pip available to populate venv in ${ENV_PREFIX}."
         fi
 
-    elif [ -f "${ENV_YML}" ]; then
-        log "Packaging mode detected: Micromamba"
-
+    elif [ "${TARGET_MODE}" = "micromamba" ]; then
         if ! find_micromamba &>/dev/null; then
             if [ -f "${BOOTSTRAP_MICROMAMBA}" ]; then
                 log "micromamba non trovato — eseguo bootstrap_micromamba.sh"
@@ -163,6 +203,12 @@ run_postinst() {
             SAVED_HASH=""
             if [ -f "${CHECKSUM_FILE}" ]; then
                 SAVED_HASH="$(cat "${CHECKSUM_FILE}" 2>/dev/null || true)"
+            fi
+
+            # Prevent "Non-conda folder exists at prefix - aborting." if prefix exists but has no conda-meta
+            if [ -d "${ENV_PREFIX}" ] && [ ! -f "${ENV_PREFIX}/conda-meta/history" ]; then
+                log "Notice: Non-conda directory found at ${ENV_PREFIX}. Backing it up to allow Micromamba creation..."
+                mv "${ENV_PREFIX}" "${ENV_PREFIX}.nonconda_bak_$(date +%s)" || true
             fi
 
             if [ -f "${ENV_PREFIX}/conda-meta/history" ] && [ -n "${CURRENT_HASH}" ] && [ "${CURRENT_HASH}" = "${SAVED_HASH}" ]; then

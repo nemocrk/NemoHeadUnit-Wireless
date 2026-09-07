@@ -276,6 +276,12 @@ if [ $IS_TARGET_WINDOWS -eq 1 ]; then
     Write-Output "PROBE_RESULT:HAS_MICROMAMBA=$has_mm"
     $has_uv = ((Get-Command uv -ErrorAction SilentlyContinue) -ne $null)
     Write-Output "PROBE_RESULT:HAS_UV=$has_uv"
+    $dest_dir = "'"${TARGET_DIR}"'"
+    $existing_env = "none"
+    if (Test-Path "$dest_dir\env\conda-meta") { $existing_env = "micromamba" }
+    elseif (Test-Path "$dest_dir\env\pyvenv.cfg") { $existing_env = "venv" }
+    elseif (Test-Path "$dest_dir\env\Scripts\python.exe") { $existing_env = "venv" }
+    Write-Output "PROBE_RESULT:EXISTING_ENV_TYPE=$existing_env"
   '
   WIN_B64=$(echo -n "$WIN_PS_SCRIPT" | iconv -f UTF-8 -t UTF-16LE | base64 -w 0)
   PROBE_OUTPUT=$(run_cmd "powershell.exe -NoProfile -EncodedCommand $WIN_B64")
@@ -337,6 +343,20 @@ else
     command -v uv &>/dev/null && HAS_UV="yes"
     [ -x /opt/uv/bin/uv ] && HAS_UV="yes"
 
+    # Existing environment probe on target
+    EXISTING_ENV_TYPE="none"
+    if [ -f "'"${TARGET_DIR}"'/env/conda-meta/history" ] || [ -d "'"${TARGET_DIR}"'/env/conda-meta" ]; then
+      EXISTING_ENV_TYPE="micromamba"
+    elif [ -f "'"${TARGET_DIR}"'/env/pyvenv.cfg" ]; then
+      EXISTING_ENV_TYPE="venv"
+    elif [ -f "'"${TARGET_DIR}"'/env/bin/python" ]; then
+      if [ -d "'"${TARGET_DIR}"'/env/conda-meta" ]; then
+        EXISTING_ENV_TYPE="micromamba"
+      else
+        EXISTING_ENV_TYPE="venv"
+      fi
+    fi
+
     echo "PROBE_RESULT:OS_NAME=$OS_NAME"
     echo "PROBE_RESULT:ARCH=$ARCH"
     echo "PROBE_RESULT:DISTRO_ID=$DISTRO_ID"
@@ -349,6 +369,7 @@ else
     echo "PROBE_RESULT:HAS_X11=$HAS_X11"
     echo "PROBE_RESULT:HAS_MICROMAMBA=$HAS_MICROMAMBA"
     echo "PROBE_RESULT:HAS_UV=$HAS_UV"
+    echo "PROBE_RESULT:EXISTING_ENV_TYPE=$EXISTING_ENV_TYPE"
   '
   PROBE_OUTPUT=$(run_cmd "$PROBE_SCRIPT")
 fi
@@ -369,6 +390,7 @@ HAS_WAYLAND=$(parse_val "HAS_WAYLAND")
 HAS_X11=$(parse_val "HAS_X11")
 HAS_MICROMAMBA=$(parse_val "HAS_MICROMAMBA")
 HAS_UV=$(parse_val "HAS_UV")
+EXISTING_ENV_TYPE=$(parse_val "EXISTING_ENV_TYPE")
 
 echo -e "  Target OS         : ${GREEN}${PRETTY_NAME:-$TARGET_OS} (${TARGET_OS})${NC}"
 echo -e "  Architecture      : ${GREEN}${TARGET_ARCH}${NC}"
@@ -376,6 +398,7 @@ echo -e "  Package Manager   : ${GREEN}${PKG_MGR}${NC}"
 echo -e "  Hardware / DMI    : ${GREEN}${DMI_PRODUCT:-Standard PC / Embedded Device}${NC}"
 echo -e "  GPU Vendor        : ${GREEN}${GPU_INFO}${NC}"
 echo -e "  Target Path       : ${GREEN}${TARGET_DIR}${NC}"
+echo -e "  Installed Env     : ${GREEN}${EXISTING_ENV_TYPE}${NC}"
 echo -e "  Available Engines : Micromamba=${HAS_MICROMAMBA}, UV/Venv=${HAS_UV}\n"
 
 # Resolve distribution strategy
@@ -390,7 +413,11 @@ fi
 
 SELECTED_METHOD="$CLI_METHOD"
 if [ "$SELECTED_METHOD" = "auto" ]; then
-  if [[ "$HAS_MICROMAMBA" =~ ^(yes|True|true)$ ]] || [ -f "${TARGET_DIR}/env/bin/python" ] || [ -f "${TARGET_DIR}/env/python.exe" ]; then
+  if [ "$EXISTING_ENV_TYPE" = "venv" ]; then
+    SELECTED_METHOD="venv"
+  elif [ "$EXISTING_ENV_TYPE" = "micromamba" ]; then
+    SELECTED_METHOD="micromamba"
+  elif [[ "$HAS_MICROMAMBA" =~ ^(yes|True|true)$ ]]; then
     SELECTED_METHOD="micromamba"
   else
     SELECTED_METHOD="venv"

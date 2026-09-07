@@ -44,6 +44,10 @@ while [[ $# -gt 0 ]]; do
             METHOD="micromamba"
             shift 1
             ;;
+        --auto)
+            METHOD="auto"
+            shift 1
+            ;;
         --arch)
             ARCH="$2"
             shift 2
@@ -61,8 +65,8 @@ done
 [[ "$ARCH" == "amd64" || "$ARCH" == "arm64" ]] \
     || die "--arch must be 'amd64' or 'arm64'"
 
-[[ "$METHOD" == "venv" || "$METHOD" == "micromamba" ]] \
-    || die "--method must be 'venv' or 'micromamba'"
+[[ "$METHOD" == "venv" || "$METHOD" == "micromamba" || "$METHOD" == "auto" ]] \
+    || die "--method must be 'venv', 'micromamba', or 'auto'"
 
 log "Packaging target: ARCH=${ARCH}, METHOD=${METHOD}"
 
@@ -81,12 +85,10 @@ VERSION_FILE="${REPO_ROOT}/VERSION"
 ENV_YML="${REPO_ROOT}/environment.yml"
 REQUIREMENTS_TXT="${REPO_ROOT}/packaging/requirements.txt"
 
-if [ "$METHOD" = "venv" ]; then
-    SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps-venv.txt"
-    BOOTSTRAP_TOOL="${REPO_ROOT}/packaging/bootstrap_uv.sh"
-else
+if [ "$METHOD" = "micromamba" ]; then
     SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps.txt"
-    BOOTSTRAP_TOOL="${REPO_ROOT}/packaging/bootstrap_micromamba.sh"
+else
+    SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps-venv.txt"
 fi
 
 POSTINST="${REPO_ROOT}/packaging/postinst"
@@ -133,11 +135,10 @@ for tool in fpm dpkg-deb; do
     log "  ${tool}: $(command -v "${tool}")"
 done
 
-if [ "$METHOD" = "venv" ]; then
-    [[ -f "${REQUIREMENTS_TXT}" ]] || die "requirements.txt not found at ${REQUIREMENTS_TXT}"
+if [ -f "${REQUIREMENTS_TXT}" ]; then
     log "  requirements.txt: found"
-else
-    [[ -f "${ENV_YML}" ]] || die "environment.yml not found at ${ENV_YML}"
+fi
+if [ -f "${ENV_YML}" ]; then
     log "  environment.yml: found"
 fi
 
@@ -157,22 +158,27 @@ step "Assembling staging directory (${METHOD} mode)"
 APP_OPT="${STAGE_DIR}/opt/nemo-headunit"
 mkdir -p "${APP_OPT}"
 
-if [ "$METHOD" = "venv" ]; then
-    log "  Copying requirements.txt (Python venv + uv will be built on target)"
+# Stage both venv and micromamba environment descriptors so postinst can preserve existing runtime
+if [ -f "${REQUIREMENTS_TXT}" ]; then
+    log "  Copying requirements.txt"
     cp "${REQUIREMENTS_TXT}" "${APP_OPT}/requirements.txt"
-    if [ -f "${BOOTSTRAP_TOOL}" ]; then
-        log "  Copying bootstrap_uv.sh"
-        cp "${BOOTSTRAP_TOOL}" "${APP_OPT}/bootstrap_uv.sh"
-        chmod +x "${APP_OPT}/bootstrap_uv.sh"
-    fi
-else
-    log "  Copying environment.yml (Micromamba env will be built on target)"
+fi
+if [ -f "${REPO_ROOT}/packaging/bootstrap_uv.sh" ]; then
+    log "  Copying bootstrap_uv.sh"
+    cp "${REPO_ROOT}/packaging/bootstrap_uv.sh" "${APP_OPT}/bootstrap_uv.sh"
+    chmod +x "${APP_OPT}/bootstrap_uv.sh"
+fi
+if [ -f "${ENV_YML}" ]; then
+    log "  Copying environment.yml"
     cp "${ENV_YML}" "${APP_OPT}/environment.yml"
-    if [ -f "${BOOTSTRAP_TOOL}" ]; then
-        log "  Copying bootstrap_micromamba.sh"
-        cp "${BOOTSTRAP_TOOL}" "${APP_OPT}/bootstrap_micromamba.sh"
-        chmod +x "${APP_OPT}/bootstrap_micromamba.sh"
-    fi
+fi
+if [ -f "${REPO_ROOT}/packaging/bootstrap_micromamba.sh" ]; then
+    log "  Copying bootstrap_micromamba.sh"
+    cp "${REPO_ROOT}/packaging/bootstrap_micromamba.sh" "${APP_OPT}/bootstrap_micromamba.sh"
+    chmod +x "${APP_OPT}/bootstrap_micromamba.sh"
+fi
+if [ "$METHOD" != "auto" ]; then
+    echo "${METHOD}" > "${APP_OPT}/.packaging_mode"
 fi
 
 log "  Copying application source"

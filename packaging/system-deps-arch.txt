@@ -10,7 +10,7 @@
 dbus
 polkit
 
-# Bluetooth stack
+# Bluetooth stack (Telephony handled via WirePlumber native backend or AUR ofono)
 bluez
 bluez-utils
 bluez-obex

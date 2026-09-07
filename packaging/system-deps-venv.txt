@@ -13,6 +13,7 @@ polkitd
 bluez
 bluez-tools
 bluez-obexd
+ofono
 
 # WiFi AP stack
 hostapd

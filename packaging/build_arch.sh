@@ -44,6 +44,10 @@ while [[ $# -gt 0 ]]; do
             METHOD="micromamba"
             shift 1
             ;;
+        --auto)
+            METHOD="auto"
+            shift 1
+            ;;
         --arch)
             RAW_ARCH="$2"
             case "${RAW_ARCH}" in
@@ -63,8 +67,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ "$METHOD" == "venv" || "$METHOD" == "micromamba" ]] \
-    || die "--method must be 'venv' or 'micromamba'"
+[[ "$METHOD" == "venv" || "$METHOD" == "micromamba" || "$METHOD" == "auto" ]] \
+    || die "--method must be 'venv', 'micromamba', or 'auto'"
 
 log "Packaging target: ARCH=${ARCH}, METHOD=${METHOD}"
 
@@ -167,22 +171,27 @@ chmod 755 "${APP_OPT}/postinst"
 cp "${PRERM}" "${APP_OPT}/prerm"
 chmod 755 "${APP_OPT}/prerm"
 
-if [ "$METHOD" = "venv" ]; then
+# Stage both venv and micromamba environment descriptors so postinst can preserve existing runtime
+if [ -f "${REQUIREMENTS_TXT}" ]; then
     log "  Copying requirements.txt"
     cp "${REQUIREMENTS_TXT}" "${APP_OPT}/requirements.txt"
-    if [ -f "${BOOTSTRAP_TOOL}" ]; then
-        log "  Copying bootstrap_uv.sh"
-        cp "${BOOTSTRAP_TOOL}" "${APP_OPT}/bootstrap_uv.sh"
-        chmod +x "${APP_OPT}/bootstrap_uv.sh"
-    fi
-else
+fi
+if [ -f "${REPO_ROOT}/packaging/bootstrap_uv.sh" ]; then
+    log "  Copying bootstrap_uv.sh"
+    cp "${REPO_ROOT}/packaging/bootstrap_uv.sh" "${APP_OPT}/bootstrap_uv.sh"
+    chmod +x "${APP_OPT}/bootstrap_uv.sh"
+fi
+if [ -f "${ENV_YML}" ]; then
     log "  Copying environment.yml"
     cp "${ENV_YML}" "${APP_OPT}/environment.yml"
-    if [ -f "${BOOTSTRAP_TOOL}" ]; then
-        log "  Copying bootstrap_micromamba.sh"
-        cp "${BOOTSTRAP_TOOL}" "${APP_OPT}/bootstrap_micromamba.sh"
-        chmod +x "${APP_OPT}/bootstrap_micromamba.sh"
-    fi
+fi
+if [ -f "${REPO_ROOT}/packaging/bootstrap_micromamba.sh" ]; then
+    log "  Copying bootstrap_micromamba.sh"
+    cp "${REPO_ROOT}/packaging/bootstrap_micromamba.sh" "${APP_OPT}/bootstrap_micromamba.sh"
+    chmod +x "${APP_OPT}/bootstrap_micromamba.sh"
+fi
+if [ "$METHOD" != "auto" ]; then
+    echo "${METHOD}" > "${APP_OPT}/.packaging_mode"
 fi
 
 log "  Copying application source"

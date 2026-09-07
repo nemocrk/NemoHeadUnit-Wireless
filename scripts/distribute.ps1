@@ -196,17 +196,41 @@ if ($Local) {
         $HasConda = (Get-Command conda -ErrorAction SilentlyContinue) -ne $null
         $HasPython = (Get-Command python -ErrorAction SilentlyContinue) -ne $null
 
-        if ($Method -eq "micromamba" -or ($Method -eq "auto" -and $HasMicromamba)) {
+        $ExistingEnvType = "none"
+        if (Test-Path "$Dest\env\conda-meta") {
+            $ExistingEnvType = "micromamba"
+        } elseif (Test-Path "$Dest\env\pyvenv.cfg") {
+            $ExistingEnvType = "venv"
+        } elseif (Test-Path "$Dest\env\Scripts\python.exe") {
+            $ExistingEnvType = "venv"
+        }
+
+        $SelectedMethod = $Method
+        if ($SelectedMethod -eq "auto") {
+            if ($ExistingEnvType -eq "venv") {
+                $SelectedMethod = "venv"
+            } elseif ($ExistingEnvType -eq "micromamba") {
+                $SelectedMethod = "micromamba"
+            } elseif ($HasMicromamba) {
+                $SelectedMethod = "micromamba"
+            } elseif ($HasConda) {
+                $SelectedMethod = "conda"
+            } elseif ($HasPython) {
+                $SelectedMethod = "venv"
+            }
+        }
+
+        if ($SelectedMethod -eq "micromamba") {
             Write-Host "  Using Micromamba environment engine." -ForegroundColor Green
             if (Test-Path "$Dest\environment.windows.yml") {
                 micromamba install -y -n NemoHeadUnit-Wireless -f "$Dest\environment.windows.yml"
             }
-        } elseif ($HasConda) {
+        } elseif ($SelectedMethod -eq "conda") {
             Write-Host "  Using Conda environment engine." -ForegroundColor Green
             if (Test-Path "$Dest\environment.windows.yml") {
                 conda env update -n NemoHeadUnit-Wireless -f "$Dest\environment.windows.yml" --prune
             }
-        } elseif ($HasPython) {
+        } elseif ($SelectedMethod -eq "venv") {
             Write-Host "  Using standard Python venv engine." -ForegroundColor Green
             if (-not (Test-Path "$Dest\env")) {
                 python -m venv "$Dest\env"
