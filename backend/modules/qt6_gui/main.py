@@ -43,8 +43,31 @@ except ImportError:
 setup_windows_dll_directories()
 
 import json
+import shutil
+import subprocess
 import threading
 import urllib.request
+
+
+def dismiss_boot_splash() -> None:
+    """
+    Dismiss Plymouth boot splash using --retain-splash.
+    Releases DRM master so EGLFS can acquire KMS while keeping the boot logo
+    and spinner in the scanout buffer until Qt's first frame presentation.
+    """
+    if shutil.which("plymouth"):
+        try:
+            res = subprocess.run(["plymouth", "quit", "--retain-splash"], check=False, timeout=1.0)
+            if res.returncode != 0 and shutil.which("sudo"):
+                subprocess.run(["sudo", "-n", "plymouth", "quit", "--retain-splash"], check=False, timeout=1.0)
+            # Wait for plymouthd to drop DRM master and remove its PID file
+            for _ in range(20):
+                if not Path("/run/plymouth/pid").exists():
+                    break
+                time.sleep(0.05)
+        except Exception:
+            pass
+
 
 try:
     from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, pyqtSlot, QObject, qInstallMessageHandler, QtMsgType
@@ -285,6 +308,9 @@ class Qt6GuiModule(BaseBackendModule):
             self.log.warning("PyQt6 C++ DLL or module unavailable — skipping Qt GUI main window initialization")
             return
 
+        # Release Plymouth boot splash BEFORE QApplication initializes EGLFS / KMS
+        dismiss_boot_splash()
+
         # Create QApplication if not created
         t1 = time.time()
         if not QApplication.instance():
@@ -380,6 +406,7 @@ class Qt6GuiModule(BaseBackendModule):
         self.main_window.focus_toggle_requested.connect(self._on_video_focus_toggled)
         self.main_window.phone_action_requested.connect(self._on_phone_action_requested)
         self.main_window.media_playpause_requested.connect(self._on_media_playpause_requested)
+        self.main_window.media_action_requested.connect(self._on_media_action_requested)
 
         # Hardware Volume Buttons Listener (physical buttons on Linux/Omni10)
         self.vol_listener = HardwareVolumeListener(self.main_window)
@@ -714,8 +741,10 @@ class Qt6GuiModule(BaseBackendModule):
                 position_seconds=pos,
             )
             if self.audio_engine:
-                is_paused = state in (1, 2)  # 1=STOPPED, 2=PAUSED
+                is_paused = state in (1, 3)  # 1=STOPPED, 3=PAUSED (state 2 is PLAYING!)
                 self.audio_engine.set_paused(is_paused)
+            if self.main_window and self.main_window.command_bar:
+                self.main_window.command_bar.update_playback_state(state == 2)
 
     def _on_audio_focus_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload
@@ -958,6 +987,10 @@ class Qt6GuiModule(BaseBackendModule):
     def _on_media_playpause_requested(self):
         self.log.info("Media Play/Pause key pressed")
         asyncio.create_task(self._send_media_key(85))
+
+    def _on_media_action_requested(self, key_code: int):
+        self.log.info(f"Media key action {key_code} requested")
+        asyncio.create_task(self._send_media_key(key_code))
 
     async def _send_media_key(self, key_code: int = 85):
         try:

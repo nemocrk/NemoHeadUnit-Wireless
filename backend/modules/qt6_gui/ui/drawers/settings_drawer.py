@@ -4,6 +4,7 @@ settings_drawer.py — System Settings Slide-Over Drawer with Schema-Aware Dynam
 Dynamic system configuration editor interacting with config_manager via REST / ZMQ APIs.
 """
 
+import copy
 import json
 import urllib.request
 import urllib.parse
@@ -18,6 +19,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QScroller,
+    QScrollerProperties,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -47,6 +49,13 @@ class DragScrollArea(QScrollArea):
         self._last_pos = None
         self._start_pos = None
         self._drag_threshold = 6
+        self.viewport().installEventFilter(self)
+        scroller = QScroller.scroller(self.viewport())
+        props = scroller.scrollerProperties()
+        props.setScrollMetric(QScrollerProperties.ScrollMetric.DragStartDistance, 0.005)
+        props.setScrollMetric(QScrollerProperties.ScrollMetric.MousePressEventDelay, 0.0)
+        scroller.setScrollerProperties(props)
+        QScroller.grabGesture(self.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
 
     def register_child(self, child: QWidget):
         """Install drag filter on interactive child widgets like QPushButton."""
@@ -78,7 +87,10 @@ class DragScrollArea(QScrollArea):
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y() or event.angleDelta().x()
-        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta)
+        if self.verticalScrollBar().maximum() > 0:
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta)
+        else:
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta)
         event.accept()
 
 
@@ -251,7 +263,7 @@ class SettingsDrawerWidget(QWidget):
         self.layout.addLayout(tabs_nav_wrapper)
 
         # Dynamic Settings Form (Scrollable)
-        self.form_scroll = QScrollArea(self)
+        self.form_scroll = DragScrollArea(self)
         self.form_scroll.setWidgetResizable(True)
         self.form_scroll.setStyleSheet("background: transparent; border: none;")
         self.form_container = QWidget()
@@ -454,27 +466,225 @@ class SettingsDrawerWidget(QWidget):
 
         # Active Protocol Channel Descriptors (for channel_manager)
         if "channels" in mod_config and isinstance(mod_config["channels"], list):
-            ch_hdr = QLabel("🔌 Active Protocol Channel Descriptors", self)
-            ch_hdr.setStyleSheet("color: #3fb950; font-weight: 600; font-size: 14px; margin-top: 8px;")
+            self.channels_data = copy.deepcopy(mod_config["channels"])
+            ch_hdr = QLabel(f"🔌 Active Protocol Channel Descriptors ({len(self.channels_data)})", self)
+            ch_hdr.setStyleSheet("color: #3fb950; font-weight: 600; font-size: 14px; margin-top: 10px; margin-bottom: 4px;")
             self.form_layout.addWidget(ch_hdr)
 
-            for ch in mod_config["channels"]:
-                ch_id = ch.get("channel_id", "?")
-                ch_name = ch.get("name", f"Channel {ch_id}")
-                card = QFrame(self)
-                card.setStyleSheet("background-color: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 8px; margin-bottom: 4px;")
-                card_lay = QVBoxLayout(card)
-                card_lay.setContentsMargins(6, 6, 6, 6)
-                
-                t_lbl = QLabel(f"Channel {ch_id}: {ch_name}", card)
-                t_lbl.setStyleSheet("color: #e6edf3; font-weight: 600;")
-                card_lay.addWidget(t_lbl)
-
-                details = json.dumps(ch, indent=2)
-                d_lbl = QLabel(details, card)
-                d_lbl.setStyleSheet("color: #8b949e; font-family: monospace; font-size: 11px;")
-                card_lay.addWidget(d_lbl)
+            for idx, ch in enumerate(self.channels_data):
+                card = self._render_channel_card(ch, idx)
                 self.form_layout.addWidget(card)
+
+    def _render_channel_card(self, ch: dict, index: int) -> QFrame:
+        card = QFrame(self)
+        card.setStyleSheet("""
+            QFrame {
+                background-color: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 6px;
+                margin-bottom: 4px;
+            }
+        """)
+        card_lay = QVBoxLayout(card)
+        card_lay.setContentsMargins(8, 8, 8, 8)
+        card_lay.setSpacing(6)
+
+        ch_id = ch.get("channel_id", index + 1)
+        name, color = self._get_channel_info(ch)
+
+        # Header with channel tag and title
+        hdr_lay = QHBoxLayout()
+        hdr_lay.setContentsMargins(0, 0, 0, 0)
+        ch_tag = QLabel(f"CH {ch_id}", card)
+        ch_tag.setStyleSheet(f"""
+            background-color: {color}22;
+            color: {color};
+            border: 1px solid {color}66;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 11px;
+            font-weight: bold;
+        """)
+        hdr_lay.addWidget(ch_tag)
+
+        t_lbl = QLabel(name, card)
+        t_lbl.setStyleSheet("color: #e6edf3; font-weight: 600; font-size: 13px;")
+        hdr_lay.addWidget(t_lbl)
+        hdr_lay.addStretch(1)
+        card_lay.addLayout(hdr_lay)
+
+        # Content based on channel type
+        if "av_channel" in ch and "VIDEO" in ch.get("av_channel", {}).get("codec", ""):
+            vcfgs = ch.get("av_channel", {}).get("video_configs", [])
+            if not vcfgs:
+                vcfgs.append({})
+                ch["av_channel"]["video_configs"] = vcfgs
+            vcfg = vcfgs[0]
+
+            form = QFormLayout()
+            form.setSpacing(6)
+
+            # Resolution preset
+            res_cb = QComboBox(card)
+            res_cb.setStyleSheet("background-color: #0d1117; color: #e6edf3; border: 1px solid #30363d; padding: 4px; border-radius: 4px;")
+            res_opts = [
+                ("1280x720 (720p)", "VIDEO_1280x720"),
+                ("1920x1080 (1080p)", "VIDEO_1920x1080"),
+                ("800x480 (480p)", "VIDEO_800x480"),
+            ]
+            current_res = vcfg.get("video_resolution", "VIDEO_1280x720")
+            for label, val in res_opts:
+                res_cb.addItem(label, val)
+            idx = res_cb.findData(current_res)
+            if idx >= 0:
+                res_cb.setCurrentIndex(idx)
+
+            def _on_res_changed(i, cfg=vcfg, cb=res_cb):
+                cfg["video_resolution"] = cb.itemData(i)
+            res_cb.currentIndexChanged.connect(_on_res_changed)
+            form.addRow(self._styled_label("Resolution:"), res_cb)
+
+            # FPS
+            fps_cb = QComboBox(card)
+            fps_cb.setStyleSheet("background-color: #0d1117; color: #e6edf3; border: 1px solid #30363d; padding: 4px; border-radius: 4px;")
+            fps_opts = [("30 FPS", "_30"), ("60 FPS", "_60")]
+            current_fps = vcfg.get("video_fps", "_30")
+            for label, val in fps_opts:
+                fps_cb.addItem(label, val)
+            idx = fps_cb.findData(current_fps)
+            if idx >= 0:
+                fps_cb.setCurrentIndex(idx)
+
+            def _on_fps_changed(i, cfg=vcfg, cb=fps_cb):
+                cfg["video_fps"] = cb.itemData(i)
+            fps_cb.currentIndexChanged.connect(_on_fps_changed)
+            form.addRow(self._styled_label("Frame Rate:"), fps_cb)
+
+            # DPI
+            dpi_sb = QSpinBox(card)
+            dpi_sb.setRange(80, 400)
+            dpi_sb.setSingleStep(10)
+            dpi_sb.setValue(int(vcfg.get("dpi", 140)))
+            dpi_sb.setStyleSheet("background-color: #0d1117; color: #e6edf3; border: 1px solid #30363d; padding: 4px; border-radius: 4px;")
+
+            def _on_dpi_changed(v, cfg=vcfg):
+                cfg["dpi"] = v
+            dpi_sb.valueChanged.connect(_on_dpi_changed)
+            form.addRow(self._styled_label("Display DPI:"), dpi_sb)
+
+            card_lay.addLayout(form)
+
+        elif "av_channel" in ch:
+            av = ch.get("av_channel", {})
+            audio_type = av.get("audio_type", "MEDIA")
+            sample_rate = av.get("sample_rate", 48000)
+            channels_cnt = av.get("number_of_channels", 2)
+
+            form = QFormLayout()
+            form.setSpacing(6)
+
+            type_lbl = QLabel(str(audio_type), card)
+            type_lbl.setStyleSheet("color: #e6edf3; font-weight: bold;")
+            form.addRow(self._styled_label("Audio Stream:"), type_lbl)
+
+            sr_lbl = QLabel(f"{sample_rate} Hz (16-bit PCM)", card)
+            sr_lbl.setStyleSheet("color: #8b949e;")
+            form.addRow(self._styled_label("Sample Rate:"), sr_lbl)
+
+            ch_mode = "Stereo (2 ch)" if channels_cnt == 2 else "Mono (1 ch)"
+            mode_lbl = QLabel(ch_mode, card)
+            mode_lbl.setStyleSheet("color: #8b949e;")
+            form.addRow(self._styled_label("Channels:"), mode_lbl)
+
+            card_lay.addLayout(form)
+
+        elif "input_channel" in ch:
+            inp = ch.get("input_channel", {})
+            ts_cfgs = inp.get("touch_screen_configs", [])
+            ts_cfg = ts_cfgs[0] if ts_cfgs else {}
+
+            form = QFormLayout()
+            form.setSpacing(6)
+
+            w = ts_cfg.get("width", 1280)
+            h = ts_cfg.get("height", 720)
+            res_lbl = QLabel(f"{w} × {h} (Touchscreen Digitizer)", card)
+            res_lbl.setStyleSheet("color: #e6edf3;")
+            form.addRow(self._styled_label("Touch Area:"), res_lbl)
+
+            key_cnt = len(inp.get("supported_keycodes", []))
+            key_lbl = QLabel(f"{key_cnt} Media & Navigation Keys Configured", card)
+            key_lbl.setStyleSheet("color: #8b949e;")
+            form.addRow(self._styled_label("Supported Keys:"), key_lbl)
+
+            card_lay.addLayout(form)
+
+        elif "sensor_channel" in ch:
+            sensors = ch.get("sensor_channel", {}).get("sensors", [])
+            s_lay = QHBoxLayout()
+            s_lay.setSpacing(6)
+            for s in sensors:
+                stype = s.get("type", "UNKNOWN") if isinstance(s, dict) else str(s)
+                badge = QLabel(stype, card)
+                badge.setStyleSheet("""
+                    background-color: #21262d;
+                    color: #bc8cff;
+                    border: 1px solid #30363d;
+                    border-radius: 4px;
+                    padding: 2px 6px;
+                    font-size: 11px;
+                """)
+                s_lay.addWidget(badge)
+            s_lay.addStretch(1)
+            card_lay.addLayout(s_lay)
+
+        elif "av_input_channel" in ch:
+            form = QFormLayout()
+            form.setSpacing(6)
+            mic_lbl = QLabel("16000 Hz Mono (Voice Recognition Input)", card)
+            mic_lbl.setStyleSheet("color: #8b949e;")
+            form.addRow(self._styled_label("Format:"), mic_lbl)
+            card_lay.addLayout(form)
+
+        else:
+            keys_info = [f"{k}: {v}" for k, v in ch.items() if k != "channel_id"]
+            info_str = " | ".join(keys_info) if keys_info else "Active channel descriptor"
+            d_lbl = QLabel(info_str, card)
+            d_lbl.setWordWrap(True)
+            d_lbl.setStyleSheet("color: #8b949e; font-size: 12px;")
+            card_lay.addWidget(d_lbl)
+
+        return card
+
+    def _styled_label(self, text: str) -> QLabel:
+        lbl = QLabel(text, self)
+        lbl.setStyleSheet("color: #8b949e; font-size: 12px; font-weight: 500;")
+        return lbl
+
+    def _get_channel_info(self, ch: dict) -> tuple[str, str]:
+        if "input_channel" in ch:
+            return "Touch Screen Input", "#58a6ff"
+        if "sensor_channel" in ch:
+            return "Vehicle Sensors", "#bc8cff"
+        if "av_channel" in ch:
+            av = ch.get("av_channel", {})
+            codec = av.get("codec", "")
+            audio_type = av.get("audio_type", "")
+            if "VIDEO" in codec:
+                return "H.264 Video Stream", "#3fb950"
+            return f"Audio Stream [{audio_type or 'MEDIA'}]", "#f0883e"
+        if "av_input_channel" in ch:
+            return "Microphone Voice Input", "#db61a2"
+        if "bluetooth_channel" in ch:
+            return "Bluetooth Handshake", "#79c0ff"
+        if "wifi_channel" in ch:
+            return "Wi-Fi Projection", "#56d364"
+        if "navigation_channel" in ch:
+            return "Navigation TBT Status", "#e3b341"
+        if "media_info_channel" in ch:
+            return "Media Playback Status", "#f0883e"
+        return f"Channel {ch.get('channel_id', '?')}", "#8b949e"
 
     def _on_save_clicked(self):
         new_config = {}
@@ -487,6 +697,9 @@ class SettingsDrawerWidget(QWidget):
                 new_config[key] = widget.value()
             else:
                 new_config[key] = widget.text()
+
+        if self.active_module == "channel_manager" and hasattr(self, "channels_data") and self.channels_data:
+            new_config["channels"] = self.channels_data
 
         self.lbl_status.setText("Saving settings...")
         self.save_thread = ConfigSaveThread(self.active_module, new_config)

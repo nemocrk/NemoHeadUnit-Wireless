@@ -4,6 +4,7 @@ volume_popover.py — Volume Popover Menu Card Widget with Real-Time Media Serve
 Displays Mute toggle, Volume Down, Volume Percentage level label, and Volume Up buttons.
 """
 
+import time
 import json
 import urllib.request
 from PyQt6.QtCore import QSize, Qt, pyqtSignal, QThread
@@ -75,6 +76,7 @@ class VolumePopoverWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("volume-popover")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet("""
             #volume-popover {
                 background-color: #161b22;
@@ -105,6 +107,8 @@ class VolumePopoverWidget(QWidget):
         self.current_volume = 80
         self.is_muted = False
         self.media_stream = None
+        self._last_user_action_time: float = 0.0
+        self._active_threads: list = []
 
         self.layout = QHBoxLayout(self)
         self.layout.setContentsMargins(12, 6, 12, 6)
@@ -161,11 +165,15 @@ class VolumePopoverWidget(QWidget):
             self.media_stream = None
 
     def _on_media_status_updated(self, data: dict):
+        # Ignore SSE updates while user is actively adjusting volume to prevent rollback oscillation
+        if time.time() - self._last_user_action_time < 1.5:
+            return
         vol = data.get("volume", self.current_volume)
         muted = data.get("muted", self.is_muted)
         self.update_volume(vol, muted)
 
     def _on_vol_click(self, action: str):
+        self._last_user_action_time = time.time()
         if action == "up":
             self.current_volume = min(100, self.current_volume + 5)
         elif action == "down":
@@ -176,9 +184,16 @@ class VolumePopoverWidget(QWidget):
         self.update_volume(self.current_volume, self.is_muted)
         self.vol_action.emit(action)
 
-        self.action_thread = VolumeActionThread(action)
-        self.action_thread.volume_updated.connect(self.update_volume)
-        self.action_thread.start()
+        thread = VolumeActionThread(action)
+        def on_finished(vol, muted):
+            if time.time() - self._last_user_action_time >= 1.2:
+                self.update_volume(vol, muted)
+            if thread in self._active_threads:
+                self._active_threads.remove(thread)
+
+        thread.volume_updated.connect(on_finished)
+        self._active_threads.append(thread)
+        thread.start()
 
     def update_volume(self, level: int, muted: bool):
         self.current_volume = level

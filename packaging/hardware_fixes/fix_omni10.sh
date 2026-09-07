@@ -116,6 +116,51 @@ if [ -f "$GRUB_FILE" ]; then
         GRUB_CHANGED=1
     fi
 
+    # Set GRUB_TIMEOUT=0 and GRUB_TIMEOUT_STYLE=hidden to boot instantly without menu
+    if ! grep -q "^GRUB_TIMEOUT=0" "$GRUB_FILE"; then
+        sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' "$GRUB_FILE"
+        GRUB_CHANGED=1
+    fi
+    if ! grep -q "^GRUB_TIMEOUT_STYLE=hidden" "$GRUB_FILE"; then
+        if grep -q "^GRUB_TIMEOUT_STYLE=" "$GRUB_FILE"; then
+            sed -i 's/^GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=hidden/' "$GRUB_FILE"
+        else
+            echo "GRUB_TIMEOUT_STYLE=hidden" >> "$GRUB_FILE"
+        fi
+        GRUB_CHANGED=1
+    fi
+
+    # Set GRUB_RECORDFAIL_TIMEOUT=0 (prevent 30s delay on failed boots / power loss)
+    if ! grep -q "^GRUB_RECORDFAIL_TIMEOUT=0" "$GRUB_FILE"; then
+        if grep -q "^GRUB_RECORDFAIL_TIMEOUT=" "$GRUB_FILE"; then
+            sed -i 's/^GRUB_RECORDFAIL_TIMEOUT=.*/GRUB_RECORDFAIL_TIMEOUT=0/' "$GRUB_FILE"
+        else
+            echo "GRUB_RECORDFAIL_TIMEOUT=0" >> "$GRUB_FILE"
+        fi
+        GRUB_CHANGED=1
+    fi
+
+    # Ensure quiet splash and suppress VT blinking cursor / console messages
+    for param in "quiet" "splash" "vt.global_cursor_default=0" "rd.systemd.show_status=false" "systemd.show_status=false"; do
+        if ! grep -q "$param" "$GRUB_FILE"; then
+            sed -i "s/^\(GRUB_CMDLINE_LINUX_DEFAULT=\"[^\"]*\)\"/\1 $param\"/" "$GRUB_FILE"
+            sed -i "s/^\(GRUB_CMDLINE_LINUX_DEFAULT='[^']*\)'/\1 $param'/" "$GRUB_FILE"
+            GRUB_CHANGED=1
+        fi
+    done
+
+    # Silence "Loading Linux ..." and "Loading initial ramdisk ..." text output from GRUB 10_linux template
+    if [ -f "/etc/grub.d/10_linux" ]; then
+        if grep -qE "echo.*echo \"\\\$message\"" /etc/grub.d/10_linux; then
+            sed -i 's/^[ \t]*echo[ \t]*\x27\$(echo "\$message"/        # echo \x27\$(echo "\$message"/g' /etc/grub.d/10_linux
+            GRUB_CHANGED=1
+        fi
+    fi
+
+    if [ -f "/boot/grub/grubenv" ] && command -v grub-editenv &>/dev/null; then
+        grub-editenv /boot/grub/grubenv unset recordfail >/dev/null 2>&1 || true
+    fi
+
     if [ $GRUB_CHANGED -eq 1 ]; then
         echo -e "${GREEN}applicato.${NC}"
         echo -n "  [hw-fix] Aggiornamento GRUB... "
@@ -140,6 +185,41 @@ if [ -f "$GRUB_FILE" ]; then
     fi
 else
     echo -e "${YELLOW}WARNING: $GRUB_FILE non trovato — fix saltato.${NC}"
+fi
+
+# ---------------------------------------------------------------------------
+# Fix 2b: Plymouth Boot Splash (ACPI BGRT Theme & Mask Early Termination)
+# ---------------------------------------------------------------------------
+echo -n "  [hw-fix] Plymouth BGRT splash & handoff... "
+PLYMOUTH_CHANGED=0
+if command -v plymouth-set-default-theme &>/dev/null; then
+    current_theme="$(plymouth-set-default-theme 2>/dev/null || echo "")"
+    if [ "$current_theme" != "bgrt" ] && [ -d "/usr/share/plymouth/themes/bgrt" ]; then
+        plymouth-set-default-theme -R bgrt >/dev/null 2>&1 || true
+        PLYMOUTH_CHANGED=1
+    fi
+fi
+if systemctl is-enabled plymouth-quit.service &>/dev/null || [ -f "/usr/lib/systemd/system/plymouth-quit.service" ]; then
+    if ! systemctl is-enabled plymouth-quit.service 2>/dev/null | grep -q "masked"; then
+        systemctl mask plymouth-quit.service plymouth-quit-wait.service >/dev/null 2>&1 || true
+        PLYMOUTH_CHANGED=1
+    fi
+fi
+
+# Allow nemo user to dismiss plymouth cleanly without password
+if [ -d "/etc/sudoers.d" ]; then
+    SUDOERS_FILE="/etc/sudoers.d/nemo-plymouth"
+    if [ ! -f "$SUDOERS_FILE" ] || ! grep -q "/usr/bin/plymouth" "$SUDOERS_FILE"; then
+        echo 'nemo ALL=(ALL) NOPASSWD: /usr/bin/plymouth' > "$SUDOERS_FILE"
+        chmod 0440 "$SUDOERS_FILE"
+        PLYMOUTH_CHANGED=1
+    fi
+fi
+
+if [ $PLYMOUTH_CHANGED -eq 1 ]; then
+    echo -e "${GREEN}configurato (bgrt + mask plymouth-quit + sudoers).${NC}"
+else
+    echo -e "${GREEN}già configurato.${NC}"
 fi
 
 # ---------------------------------------------------------------------------

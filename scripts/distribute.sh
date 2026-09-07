@@ -485,12 +485,16 @@ elif [ "$DEPLOY_STRATEGY" = "deb_package" ]; then
   if [ $IS_LOCAL -eq 1 ]; then
     echo "  Installing ${PKG_NAME} on local system via APT..."
     sudo apt-get update -qq || true
-    sudo apt-get install --reinstall -y "${LATEST_PKG}" || (sudo dpkg -i "${LATEST_PKG}" && sudo apt-get install -f -y)
+    if command -v apt &>/dev/null; then
+      sudo apt install --reinstall -y "${LATEST_PKG}"
+    else
+      sudo dpkg -i "${LATEST_PKG}" || sudo apt-get install -f -y
+    fi
   else
     echo "  Transferring ${PKG_NAME} to remote target (${TARGET}:/tmp/)..."
     ssh "${SSH_OPTS[@]}" "$TARGET" "cat > '/tmp/${PKG_NAME}'" < "${LATEST_PKG}"
     echo "  Installing ${PKG_NAME} on remote target via APT..."
-    ssh "${SSH_OPTS[@]}" "$TARGET" "sudo apt-get update -qq || true; sudo apt-get install --reinstall -y '/tmp/${PKG_NAME}' || (sudo dpkg -i '/tmp/${PKG_NAME}' && sudo apt-get install -f -y); rm -f '/tmp/${PKG_NAME}'"
+    ssh "${SSH_OPTS[@]}" "$TARGET" "sudo apt-get update -qq || true; if command -v apt &>/dev/null; then sudo apt install --reinstall -y '/tmp/${PKG_NAME}'; else sudo dpkg -i '/tmp/${PKG_NAME}' || sudo apt-get install -f -y; fi; rm -f '/tmp/${PKG_NAME}'"
   fi
   echo -e "  ${GREEN}✓ .deb package distribution complete.${NC}\n"
 
@@ -561,15 +565,19 @@ if [ $IS_TARGET_WINDOWS -eq 1 ]; then
 else
   # Linux Post-Install / Hooks
   if [ ${SKIP_HW_FIXES} -eq 0 ]; then
-    echo "  Probing and running hardware adaptation scripts..."
-    if [ $IS_LOCAL -eq 1 ]; then
-      if [ -f /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh ]; then
-        sudo bash /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh || true
-      elif [ -f "${TARGET_DIR}/packaging/hardware_fixes/run_hardware_fixes.sh" ]; then
-        sudo bash "${TARGET_DIR}/packaging/hardware_fixes/run_hardware_fixes.sh" || true
+    if [ "$DEPLOY_STRATEGY" != "deb_package" ] && [ "$DEPLOY_STRATEGY" != "arch_pacman" ]; then
+      echo "  Probing and running hardware adaptation scripts..."
+      if [ $IS_LOCAL -eq 1 ]; then
+        if [ -f /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh ]; then
+          sudo bash /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh || true
+        elif [ -f "${TARGET_DIR}/packaging/hardware_fixes/run_hardware_fixes.sh" ]; then
+          sudo bash "${TARGET_DIR}/packaging/hardware_fixes/run_hardware_fixes.sh" || true
+        fi
+      else
+        ssh "${SSH_OPTS[@]}" "$TARGET" "[ -f /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh ] && sudo bash /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh || true"
       fi
     else
-      ssh "${SSH_OPTS[@]}" "$TARGET" "[ -f /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh ] && sudo bash /opt/nemo-headunit/hardware_fixes/run_hardware_fixes.sh || true"
+      echo "  Hardware adaptation scripts already executed by package postinst."
     fi
   else
     echo "  [SkipHardwareFixes] Bypassing hardware adaptation scripts."

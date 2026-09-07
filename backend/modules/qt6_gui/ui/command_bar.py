@@ -17,16 +17,23 @@ class PhoneStatusPill(QFrame):
     Compact status pill in the command bar showing cellular signal and battery level.
     """
 
+    clicked = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("phone-status-pill")
         self.setFixedHeight(42)
         self.setFixedWidth(108)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet("""
             QFrame#phone-status-pill {
                 background-color: rgba(255, 255, 255, 0.07);
                 border: 1px solid rgba(255, 255, 255, 0.12);
                 border-radius: 21px;
+            }
+            QFrame#phone-status-pill:hover {
+                background-color: rgba(255, 255, 255, 0.15);
+                border-color: rgba(56, 189, 248, 0.4);
             }
         """)
 
@@ -53,11 +60,19 @@ class PhoneStatusPill(QFrame):
             font-weight: 700;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         """)
+        layout.addWidget(self.lbl_battery)
         self._battery: int = -1
         self._signal: int = -1
         self._operator: str = ""
         self._is_roaming: bool = False
         self._is_charging: bool = False
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
 
     def update_status(
         self,
@@ -432,6 +447,7 @@ class CommandBarWidget(QWidget):
     exit_clicked = pyqtSignal()
     menu_clicked = pyqtSignal()
     call_action_triggered = pyqtSignal(str)  # "answer", "hangup", "mute"
+    phone_clicked = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -496,6 +512,7 @@ class CommandBarWidget(QWidget):
 
         # 7. Phone Status Pill (Signal & Battery)
         self.phone_pill = PhoneStatusPill(self)
+        self.phone_pill.clicked.connect(self.phone_clicked.emit)
         self.layout.addWidget(self.phone_pill)
 
         # 8. Interactive In-Call Control Pill (Dynamic Material Icons)
@@ -520,6 +537,15 @@ class CommandBarWidget(QWidget):
             self.status_dot.setObjectName("status-dot-offline")
         self.status_dot.style().unpolish(self.status_dot)
         self.status_dot.style().polish(self.status_dot)
+
+    def update_playback_state(self, is_playing: bool):
+        """Update play/pause toggle button icon and tooltip."""
+        if is_playing:
+            self.btn_playpause.setIcon(make_svg_icon("pause", color="#f0f6fc", size=22))
+            self.btn_playpause.setToolTip("Pause")
+        else:
+            self.btn_playpause.setIcon(make_svg_icon("play", color="#f0f6fc", size=22))
+            self.btn_playpause.setToolTip("Play")
 
     def update_audio_status(self, metrics: dict, video_metrics: Optional[dict] = None):
         """Update audio buffer & A/V sync pill with current app, hardware sink, and video metrics."""

@@ -47,6 +47,7 @@ class MainWindow(QMainWindow):
     focus_toggle_requested = video_focus_toggled
     phone_action_requested = pyqtSignal(str)
     media_playpause_requested = pyqtSignal()
+    media_action_requested = pyqtSignal(int)  # 85=play/pause, 87=next, 88=prev
     fullscreen_change_requested = pyqtSignal(bool)
 
     def __init__(self, parent=None):
@@ -136,6 +137,7 @@ class MainWindow(QMainWindow):
         self.command_bar.volume_clicked.connect(self._toggle_volume_popover)
         self.command_bar.menu_clicked.connect(self.arc_menu.toggle_menu)
         self.command_bar.exit_clicked.connect(self.close_app_requested.emit)
+        self.command_bar.phone_clicked.connect(lambda: self._toggle_drawer(self.phone_drawer))
 
         # Arc Menu drawer toggle signals
         self.arc_menu.phone_clicked.connect(lambda: self._toggle_drawer(self.phone_drawer))
@@ -161,6 +163,7 @@ class MainWindow(QMainWindow):
         self.phone_card.call_requested.connect(self.phone_action_requested.emit)
         self.phone_card.call_action_triggered.connect(self.phone_action_requested.emit)
         self.command_bar.call_action_triggered.connect(self.phone_action_requested.emit)
+        self.media_widget.media_action_requested.connect(self.media_action_requested.emit)
 
         # Clock Home Screen signals
         self.clock_widget.connect_phone_clicked.connect(lambda: self._toggle_drawer(self.bluetooth_drawer))

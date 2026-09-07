@@ -7,21 +7,26 @@ dynamic playing/paused badge, and source indicators directly from Android Auto m
 
 import base64
 from typing import Optional, Any
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPixmap, QImage, QPainter, QPainterPath
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
+
+from .svg_utils import make_svg_icon
 
 
 class MediaCardWidget(QFrame):
     """
     Glassmorphism Now Playing Media Player Card.
     """
+
+    media_action_requested = pyqtSignal(int)  # 85=play/pause, 87=next, 88=prev
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -45,9 +50,9 @@ class MediaCardWidget(QFrame):
         self.badge_label = QLabel("NOW PLAYING", self)
         self.badge_label.setStyleSheet("""
             color: #58a6ff;
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 700;
-            letter-spacing: 1.5px;
+            letter-spacing: 1px;
         """)
         self.header_layout.addWidget(self.badge_label)
         self.header_layout.addStretch()
@@ -92,6 +97,58 @@ class MediaCardWidget(QFrame):
         np_layout.addLayout(text_layout)
         np_layout.addStretch()
         self.main_layout.addWidget(self.content_widget)
+
+        # Playback Controls Row (Prev, Play/Pause, Next)
+        self.controls_widget = QWidget(self)
+        ctrl_layout = QHBoxLayout(self.controls_widget)
+        ctrl_layout.setContentsMargins(0, 6, 0, 2)
+        ctrl_layout.setSpacing(16)
+        ctrl_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        btn_qss = """
+            QPushButton {
+                background-color: rgba(255, 255, 255, 0.08);
+                border: 1px solid rgba(255, 255, 255, 0.14);
+                border-radius: 18px;
+                min-width: 36px;
+                max-width: 36px;
+                min-height: 36px;
+                max-height: 36px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 255, 255, 0.18);
+                border-color: rgba(255, 255, 255, 0.28);
+            }
+            QPushButton:pressed {
+                background-color: rgba(88, 166, 255, 0.3);
+            }
+        """
+
+        self.btn_prev = QPushButton(self.controls_widget)
+        self.btn_prev.setIcon(make_svg_icon("skip_previous", color="#f0f6fc", size=18))
+        self.btn_prev.setIconSize(QSize(18, 18))
+        self.btn_prev.setStyleSheet(btn_qss)
+        self.btn_prev.setToolTip("Previous Track")
+        self.btn_prev.clicked.connect(lambda: self.media_action_requested.emit(88))
+        ctrl_layout.addWidget(self.btn_prev)
+
+        self.btn_playpause = QPushButton(self.controls_widget)
+        self.btn_playpause.setIcon(make_svg_icon("play", color="#f0f6fc", size=20))
+        self.btn_playpause.setIconSize(QSize(20, 20))
+        self.btn_playpause.setStyleSheet(btn_qss)
+        self.btn_playpause.setToolTip("Play / Pause")
+        self.btn_playpause.clicked.connect(lambda: self.media_action_requested.emit(85))
+        ctrl_layout.addWidget(self.btn_playpause)
+
+        self.btn_next = QPushButton(self.controls_widget)
+        self.btn_next.setIcon(make_svg_icon("skip_next", color="#f0f6fc", size=18))
+        self.btn_next.setIconSize(QSize(18, 18))
+        self.btn_next.setStyleSheet(btn_qss)
+        self.btn_next.setToolTip("Next Track")
+        self.btn_next.clicked.connect(lambda: self.media_action_requested.emit(87))
+        ctrl_layout.addWidget(self.btn_next)
+
+        self.main_layout.addWidget(self.controls_widget)
 
     def update_metadata(
         self,
@@ -146,13 +203,19 @@ class MediaCardWidget(QFrame):
         source_tag = f" • {cur_source.upper()}" if cur_source else ""
         if cur_state == 2:  # PLAYING
             self.badge_label.setText(f"NOW PLAYING{source_tag}")
-            self.badge_label.setStyleSheet("color: #3fb950; font-size: 11px; font-weight: 700; letter-spacing: 1.5px;")
+            self.badge_label.setStyleSheet("color: #3fb950; font-size: 10px; font-weight: 700; letter-spacing: 1px;")
+            self.btn_playpause.setIcon(make_svg_icon("pause", color="#f0f6fc", size=20))
+            self.btn_playpause.setToolTip("Pause")
         elif cur_state == 3:  # PAUSED
             self.badge_label.setText(f"PAUSED{source_tag}")
-            self.badge_label.setStyleSheet("color: #d29922; font-size: 11px; font-weight: 700; letter-spacing: 1.5px;")
+            self.badge_label.setStyleSheet("color: #d29922; font-size: 10px; font-weight: 700; letter-spacing: 1px;")
+            self.btn_playpause.setIcon(make_svg_icon("play", color="#f0f6fc", size=20))
+            self.btn_playpause.setToolTip("Play")
         else:
             self.badge_label.setText(f"MEDIA{source_tag}")
-            self.badge_label.setStyleSheet("color: #58a6ff; font-size: 11px; font-weight: 700; letter-spacing: 1.5px;")
+            self.badge_label.setStyleSheet("color: #58a6ff; font-size: 10px; font-weight: 700; letter-spacing: 1px;")
+            self.btn_playpause.setIcon(make_svg_icon("play", color="#f0f6fc", size=20))
+            self.btn_playpause.setToolTip("Play")
 
         # Render Album Art
         if cur_art and "base64," in cur_art:

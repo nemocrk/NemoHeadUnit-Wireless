@@ -60,18 +60,21 @@ class PhoneCardWidget(QFrame):
         header.addStretch()
 
         self.lbl_status_pill = QLabel("DISCONNECTED", self)
+        self.lbl_status_pill.setFixedHeight(22)
+        self.lbl_status_pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_status_pill.setStyleSheet("""
             QLabel {
                 background: rgba(110, 118, 129, 0.2);
                 color: #8b949e;
-                font-size: 11px;
+                font-size: 10px;
                 font-weight: 700;
-                padding: 3px 8px;
+                letter-spacing: 0.5px;
+                padding: 2px 10px;
                 border: 1px solid rgba(110, 118, 129, 0.3);
-                border-radius: 10px;
+                border-radius: 11px;
             }
         """)
-        header.addWidget(self.lbl_status_pill)
+        header.addWidget(self.lbl_status_pill, alignment=Qt.AlignmentFlag.AlignVCenter)
         self.layout.addLayout(header)
 
         # 2. Telemetry Row: Device & Carrier + Signal + Battery
@@ -102,18 +105,43 @@ class PhoneCardWidget(QFrame):
         t_layout.addLayout(v_info)
         t_layout.addStretch()
 
-        # Right indicators: Signal & Battery
+        # Right indicators: Signal & Battery with SVG icons
         v_stats = QVBoxLayout()
-        v_stats.setSpacing(2)
-        self.lbl_signal = QLabel("", telemetry_frame)
-        self.lbl_signal.setStyleSheet("font-size: 12px; font-weight: 600; color: #38bdf8;")
-        self.lbl_signal.hide()
-        v_stats.addWidget(self.lbl_signal)
+        v_stats.setSpacing(4)
+        v_stats.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
 
-        self.lbl_battery = QLabel("", telemetry_frame)
-        self.lbl_battery.setStyleSheet("font-size: 12px; font-weight: 600; color: #3fb950;")
+        # Signal container
+        self.signal_widget = QWidget(telemetry_frame)
+        h_sig = QHBoxLayout(self.signal_widget)
+        h_sig.setContentsMargins(0, 0, 0, 0)
+        h_sig.setSpacing(5)
+        h_sig.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.icon_signal = QLabel(self.signal_widget)
+        self.icon_signal.setPixmap(make_svg_icon("signal", color="#38bdf8", size=14).pixmap(14, 14))
+        self.lbl_signal = QLabel("", self.signal_widget)
+        self.lbl_signal.setStyleSheet("font-size: 11px; font-weight: 700; color: #38bdf8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;")
+        h_sig.addWidget(self.icon_signal)
+        h_sig.addWidget(self.lbl_signal)
+        v_stats.addWidget(self.signal_widget)
+        self.lbl_signal.hide()
+        self.signal_widget.hide()
+
+        # Battery container
+        self.battery_widget = QWidget(telemetry_frame)
+        h_bat = QHBoxLayout(self.battery_widget)
+        h_bat.setContentsMargins(0, 0, 0, 0)
+        h_bat.setSpacing(5)
+        h_bat.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.icon_battery = QLabel(self.battery_widget)
+        self.icon_battery.setPixmap(make_svg_icon("battery", color="#3fb950", size=14).pixmap(14, 14))
+        self.lbl_battery = QLabel("", self.battery_widget)
+        self.lbl_battery.setStyleSheet("font-size: 11px; font-weight: 700; color: #3fb950; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;")
+        h_bat.addWidget(self.icon_battery)
+        h_bat.addWidget(self.lbl_battery)
+        v_stats.addWidget(self.battery_widget)
         self.lbl_battery.hide()
-        v_stats.addWidget(self.lbl_battery)
+        self.battery_widget.hide()
+
         t_layout.addLayout(v_stats)
 
         self.layout.addWidget(telemetry_frame)
@@ -222,29 +250,39 @@ class PhoneCardWidget(QFrame):
 
         if signal_bars >= 0:
             self._signal_bars = max(0, min(5, signal_bars))
-            self.lbl_signal.setText(f"📶 {self._signal_bars}/5")
+            self.lbl_signal.setText(f"{self._signal_bars}/5")
             self.lbl_signal.show()
+            self.signal_widget.show()
         elif is_connected is False:
             self._signal_bars = -1
             self.lbl_signal.hide()
+            self.signal_widget.hide()
         elif self._signal_bars >= 0:
-            self.lbl_signal.setText(f"📶 {self._signal_bars}/5")
+            self.lbl_signal.setText(f"{self._signal_bars}/5")
             self.lbl_signal.show()
+            self.signal_widget.show()
         else:
             self.lbl_signal.hide()
+            self.signal_widget.hide()
 
         if battery_pct >= 0:
             self._battery_pct = max(0, min(100, battery_pct))
-            self.lbl_battery.setText(f"🔋 {self._battery_pct}%")
+            bat_color = "#3fb950" if self._battery_pct > 20 else "#f85149"
+            self.icon_battery.setPixmap(make_svg_icon("battery", color=bat_color, size=14).pixmap(14, 14))
+            self.lbl_battery.setText(f"{self._battery_pct}%")
             self.lbl_battery.show()
+            self.battery_widget.show()
         elif is_connected is False:
             self._battery_pct = -1
             self.lbl_battery.hide()
+            self.battery_widget.hide()
         elif self._battery_pct >= 0:
-            self.lbl_battery.setText(f"🔋 {self._battery_pct}%")
+            self.lbl_battery.setText(f"{self._battery_pct}%")
             self.lbl_battery.show()
+            self.battery_widget.show()
         else:
             self.lbl_battery.hide()
+            self.battery_widget.hide()
 
         if is_connected is not None:
             self._is_connected = is_connected
@@ -254,11 +292,12 @@ class PhoneCardWidget(QFrame):
                     QLabel {
                         background: rgba(35, 134, 54, 0.25);
                         color: #3fb950;
-                        font-size: 11px;
+                        font-size: 10px;
                         font-weight: 700;
-                        padding: 3px 8px;
+                        letter-spacing: 0.5px;
+                        padding: 2px 10px;
                         border: 1px solid rgba(63, 185, 80, 0.4);
-                        border-radius: 10px;
+                        border-radius: 11px;
                     }
                 """)
             else:
@@ -267,11 +306,12 @@ class PhoneCardWidget(QFrame):
                     QLabel {
                         background: rgba(187, 128, 9, 0.25);
                         color: #d29922;
-                        font-size: 11px;
+                        font-size: 10px;
                         font-weight: 700;
-                        padding: 3px 8px;
+                        letter-spacing: 0.5px;
+                        padding: 2px 10px;
                         border: 1px solid rgba(210, 153, 34, 0.4);
-                        border-radius: 10px;
+                        border-radius: 11px;
                     }
                 """)
 

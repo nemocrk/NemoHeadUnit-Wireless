@@ -256,7 +256,13 @@ class DiagnosticsDrawerWidget(QWidget):
                     self.sink_combo.clear()
                     self.sink_combo.addItem("Default Sink", "default")
                     for s in sinks:
-                        self.sink_combo.addItem(s, s)
+                        if isinstance(s, dict):
+                            label = s.get("name") or s.get("id") or "Unknown"
+                            val = s.get("id") or label
+                        else:
+                            label = str(s)
+                            val = str(s)
+                        self.sink_combo.addItem(label, val)
         except Exception as exc:
             self._log(f"Notice: Failed to fetch capabilities: {exc}")
 

@@ -68,6 +68,7 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         self._dbus_error_handlers: dict[str, Any] = {}
         self._adapter_address = ""
         self._disconnected_override_addrs: set[str] = set()
+        self._connecting_devices: set[str] = set()
 
     def set_on_pin_callback(self, on_pin_cb: Callable[[str, str], None]) -> None:
         """Register a persistent global callback for PIN/passkey pairing requests."""
@@ -160,6 +161,7 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
         if interface == "org.bluez.Device1":
             if "Connected" in changed:
                 is_conn = bool(changed["Connected"])
+                self._connecting_devices.discard(mac)
                 log.info(f"🔵 D-Bus Device1 connection state changed: {mac} connected={is_conn}")
                 if is_conn:
                     self._disconnected_override_addrs.discard(mac)
@@ -548,68 +550,86 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
     async def connect_device(self, address: str) -> tuple[bool, str]:
         if not getattr(self, "_initialized", True):
             return False, "Adapter not initialized / shutting down"
+        clean = address.upper().strip()
+        if clean in self._connecting_devices:
+            log.debug(f"Connection to {clean} already in progress — skipping duplicate request")
+            return False, "Connection already in progress"
         import dbus
-        log.info(f"Connecting to {address} on BlueZ")
-        self._disconnected_override_addrs.discard(address)
+        log.info(f"Connecting to {clean} on BlueZ")
+        self._disconnected_override_addrs.discard(clean)
         try:
-            path = self._find_device_path(address)
+            path = self._find_device_path(clean)
             if not path:
-                log.warning(f"Connect device failed: {address} not found")
+                log.warning(f"Connect device failed: {clean} not found")
                 return False, "Device not found"
 
             props = dbus.Interface(self._bus.get_object("org.bluez", path), "org.freedesktop.DBus.Properties")
             is_already_conn = bool(props.Get("org.bluez.Device1", "Connected"))
             if is_already_conn:
-                log.info(f"Device {address} is already connected in BlueZ — skipping redundant Device1.Connect()")
+                log.info(f"Device {clean} is already connected in BlueZ — skipping redundant Device1.Connect()")
                 return True, ""
 
             device = dbus.Interface(self._bus.get_object("org.bluez", path), "org.bluez.Device1")
+            self._connecting_devices.add(clean)
 
             def _on_conn_success():
-                log.info(f"🎉 BlueZ connection to {address} established!")
+                self._connecting_devices.discard(clean)
+                log.info(f"🎉 BlueZ connection to {clean} established!")
 
             def _on_conn_error(err):
+                self._connecting_devices.discard(clean)
                 err_str = str(err)
-                log.info(f"BlueZ Device1.Connect() to {address} notice: {err}")
-                # Fallback: connect HFP/HSP Handsfree profile specifically if full monolithic Connect failed on A2DP
-                if "br-connection-unknown" in err_str or "Failed" in err_str or "Protocol not available" in err_str:
+                log.info(f"BlueZ Device1.Connect() to {clean} notice: {err}")
+                if "br-connection-busy" in err_str:
+                    try:
+                        log.info(f"Clearing busy BlueZ link for {clean} via Device1.Disconnect()...")
+                        device.Disconnect(
+                            reply_handler=lambda: log.debug(f"BlueZ cleared busy link for {clean}"),
+                            error_handler=lambda de: None,
+                        )
+                    except Exception:
+                        pass
+                elif "br-connection-unknown" in err_str or "Failed" in err_str or "Protocol not available" in err_str:
                     try:
                         HFP_AG_UUID = "0000111f-0000-1000-8000-00805f9b34fb"
-                        log.info(f"Attempting profile-specific connection (HFP Handsfree) for {address}...")
+                        log.info(f"Attempting profile-specific connection (HFP Handsfree) for {clean}...")
                         device.ConnectProfile(
                             HFP_AG_UUID,
-                            reply_handler=lambda: log.info(f"🎉 BlueZ HFP profile connection to {address} established!"),
-                            error_handler=lambda pe: log.debug(f"HFP profile connect notice for {address}: {pe}"),
+                            reply_handler=lambda: log.info(f"🎉 BlueZ HFP profile connection to {clean} established!"),
+                            error_handler=lambda pe: log.debug(f"HFP profile connect notice for {clean}: {pe}"),
                             timeout=15,
                         )
                     except Exception as pe:
-                        log.debug(f"Fallback ConnectProfile notice for {address}: {pe}")
+                        log.debug(f"Fallback ConnectProfile notice for {clean}: {pe}")
 
             device.Connect(
                 reply_handler=_on_conn_success,
                 error_handler=_on_conn_error,
                 timeout=30
             )
-            log.info(f"Successfully invoked BlueZ non-blocking Device1.Connect() for {address}")
+            log.info(f"Successfully invoked BlueZ non-blocking Device1.Connect() for {clean}")
             return True, ""
         except Exception as e:
-            log.warning(f"BlueZ Device1.Connect() to {address} failed: {e}")
+            self._connecting_devices.discard(clean)
+            log.warning(f"BlueZ Device1.Connect() to {clean} failed: {e}")
             return False, str(e)
 
 
     async def disconnect_device(self, address: str) -> bool:
         if not getattr(self, "_initialized", True):
             return False
+        clean = address.upper().strip()
+        self._connecting_devices.discard(clean)
         import dbus
-        log.info(f"Disconnecting {address} on BlueZ")
-        self._disconnected_override_addrs.add(address)
+        log.info(f"Disconnecting {clean} on BlueZ")
+        self._disconnected_override_addrs.add(clean)
         try:
-            path = self._find_device_path(address)
+            path = self._find_device_path(clean)
             if not path:
                 return False
             device = dbus.Interface(self._bus.get_object("org.bluez", path), "org.bluez.Device1")
             device.Disconnect()
-            log.info(f"Successfully disconnected device {address} via BlueZ")
+            log.info(f"Successfully disconnected device {clean} via BlueZ")
             return True
         except Exception as e:
             log.warning(f"BlueZ disconnect_device notice for {address}: {e}")

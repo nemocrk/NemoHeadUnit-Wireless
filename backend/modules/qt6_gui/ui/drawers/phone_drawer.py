@@ -2,14 +2,17 @@
 phone_drawer.py — Phone Drawer with Recents, Favorites, Contacts & Dialer Keypad.
 """
 
+from datetime import datetime, date
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScroller,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -17,6 +20,36 @@ from PyQt6.QtWidgets import (
     QFrame,
 )
 from ..svg_utils import make_svg_icon
+
+
+def format_call_timestamp(ts_str: str) -> str:
+    """Convert raw PBAP ISO timestamp (e.g. 20260907T111044) into friendly readable text."""
+    if not ts_str:
+        return ""
+    try:
+        clean = ts_str.replace("-", "").replace(":", "")
+        if "T" in clean:
+            dt = datetime.strptime(clean[:15], "%Y%m%dT%H%M%S")
+        elif len(clean) >= 8:
+            dt = datetime.strptime(clean[:8], "%Y%m%d")
+        else:
+            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+
+        today = date.today()
+        call_date = dt.date()
+        time_part = dt.strftime("%H:%M")
+
+        days_diff = (today - call_date).days
+        if days_diff == 0:
+            return f"Today {time_part}"
+        elif days_diff == 1:
+            return f"Yesterday {time_part}"
+        elif 1 < days_diff < 7:
+            return dt.strftime("%a %H:%M")
+        else:
+            return dt.strftime("%d/%m %H:%M")
+    except Exception:
+        return ts_str
 
 
 class PhoneDrawerWidget(QWidget):
@@ -123,15 +156,31 @@ class PhoneDrawerWidget(QWidget):
             }
         """)
 
+        list_qss = """
+            QListWidget {
+                background: transparent;
+                border: none;
+                color: #c9d1d9;
+                font-size: 13px;
+            }
+            QListWidget::item {
+                padding: 10px 8px;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            }
+            QListWidget::item:selected {
+                background: rgba(56, 189, 248, 0.15);
+                color: #f0f6fc;
+                border-radius: 6px;
+            }
+        """
+
         # Tab 1: Recents
         self.recents_list = QListWidget()
-        self.recents_list.setStyleSheet("background: transparent; border: none; color: #c9d1d9;")
         self.recents_list.itemClicked.connect(self._on_item_clicked)
         self.tabs.addTab(self.recents_list, "Recents")
 
         # Tab 2: Favorites
         self.favorites_list = QListWidget()
-        self.favorites_list.setStyleSheet("background: transparent; border: none; color: #c9d1d9;")
         self.favorites_list.itemClicked.connect(self._on_item_clicked)
         self.tabs.addTab(self.favorites_list, "Favorites")
 
@@ -160,9 +209,14 @@ class PhoneDrawerWidget(QWidget):
         contacts_tab_layout.addWidget(self.search_input)
 
         self.contacts_list = QListWidget()
-        self.contacts_list.setStyleSheet("background: transparent; border: none; color: #c9d1d9;")
         self.contacts_list.itemClicked.connect(self._on_item_clicked)
         contacts_tab_layout.addWidget(self.contacts_list)
+
+        for lst in (self.recents_list, self.favorites_list, self.contacts_list):
+            lst.setStyleSheet(list_qss)
+            lst.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+            lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            QScroller.grabGesture(lst.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
 
         self.contacts_tab = contacts_tab_widget
         self.tabs.addTab(contacts_tab_widget, "Contacts")
@@ -347,8 +401,9 @@ class PhoneDrawerWidget(QWidget):
             name = r.get("name", "Unknown")
             num = r.get("number", "")
             ts = r.get("timestamp", "")
+            pretty_ts = format_call_timestamp(ts)
             kind = r.get("call_type", "CALL").capitalize()
-            item = QListWidgetItem(f"{name} ({num})\n   {ts} • {kind}")
+            item = QListWidgetItem(f"{name} ({num})\n   {pretty_ts} • {kind}")
             item.setData(Qt.ItemDataRole.UserRole, num)
             self.recents_list.addItem(item)
 
