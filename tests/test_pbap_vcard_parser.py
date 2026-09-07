@@ -82,17 +82,15 @@ def test_parse_call_history_stream():
     assert calls[2]["call_type"] == "RECEIVED"
 
 
-def test_bluez_pbap_client_cache_and_synthetic_fallback(tmp_path):
+def test_bluez_pbap_client_cache_and_empty_fallback(tmp_path):
     cache_file = tmp_path / "test_pbap_cache.json"
     client = BlueZPBAPClient(cache_path=str(cache_file))
 
-    # Initial empty cache returns synthetic fallback contacts & recents
+    # Initial empty cache returns empty contacts & recents (no fake/synthetic mocks)
     contacts = client.get_contacts()
-    assert len(contacts) > 0
-    assert any(c["name"] == "Emergency Assistance" or "Assistance" in c["name"] for c in contacts)
-
+    assert contacts == []
     recents = client.get_recents()
-    assert len(recents) > 0
+    assert recents == []
 
     # Save contacts to cache
     custom_contacts = [

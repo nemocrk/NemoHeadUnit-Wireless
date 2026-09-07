@@ -188,6 +188,7 @@ class ConnectivityManagerModule(BaseBackendModule):
         is_roaming: bool = False,
     ) -> None:
         """Callback when Bluetooth Battery, RSSI, operator name, or roaming changes."""
+        hfp_state = self._hfp_client.get_state() if self._hfp_client else {}
         if self._hfp_client:
             self._hfp_client.update_telemetry(
                 battery_pct=battery_pct,
@@ -198,17 +199,23 @@ class ConnectivityManagerModule(BaseBackendModule):
         state = {
             "source": "bluetooth_hfp",
             "device_address": address,
-            "is_in_call": False,
-            "call_state": "IDLE",
+            "is_in_call": hfp_state.get("is_in_call", False),
+            "call_state": hfp_state.get("call_state", "IDLE"),
+            "caller_name": hfp_state.get("caller_name", ""),
+            "caller_number": hfp_state.get("phone_number", ""),
         }
-        if battery_pct >= 0:
-            state["battery_level"] = max(0, min(100, battery_pct))
-        if signal_bars >= 0:
-            state["signal_strength"] = max(0, min(5, signal_bars))
-        if operator_name:
-            state["operator_name"] = operator_name
-        if is_roaming is not None:
-            state["is_roaming"] = bool(is_roaming)
+        eff_carrier = operator_name or hfp_state.get("carrier", "")
+        if eff_carrier:
+            state["operator_name"] = eff_carrier
+        eff_battery = battery_pct if battery_pct >= 0 else hfp_state.get("battery_pct", -1)
+        if eff_battery >= 0:
+            state["battery_level"] = max(0, min(100, eff_battery))
+        eff_signal = signal_bars if signal_bars >= 0 else hfp_state.get("signal_bars", -1)
+        if eff_signal >= 0:
+            state["signal_strength"] = max(0, min(5, eff_signal))
+        eff_roam = is_roaming if is_roaming is not None else hfp_state.get("is_roaming", False)
+        if eff_roam is not None:
+            state["is_roaming"] = bool(eff_roam)
         self.log.info(f"📱 Publishing Bluetooth phone.status telemetry: {state}")
         self.publish("phone.status", state)
 
@@ -224,6 +231,8 @@ class ConnectivityManagerModule(BaseBackendModule):
         if is_connected:
             self.log.info(f"🔵 Inbound/Outbound Bluetooth Connection detected for device {address}")
             self._active_device = address
+            if self._hfp_client:
+                self._hfp_client.bind_device(address)
             self._trigger_device_telemetry(address)
             self.publish("bluetooth_manager.paired.connected", {"device_address": address})
             if hasattr(self, "_loop") and self._loop and self._loop.is_running():
@@ -236,6 +245,8 @@ class ConnectivityManagerModule(BaseBackendModule):
                     pass
         else:
             self.log.info(f"⚪ Bluetooth device {address} disconnected")
+            if self._hfp_client:
+                self._hfp_client.unbind_device()
             self.publish("bluetooth_manager.paired.disconnected", {"device_address": address})
             if self._active_device == address:
                 self._rfcomm_connected = False

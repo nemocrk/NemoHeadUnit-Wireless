@@ -245,20 +245,26 @@ class LinuxPulseAudioAdapter(BaseAudioAdapter):
 
             return {"active": False, "rx_loopback_id": "", "tx_loopback_id": "", "status": "ok"}
 
-        # Activate loopbacks
-        if not bluez_source:
-            sources = await self.get_available_sources()
-            for s in sources:
-                if "bluez" in s.get("id", "").lower():
-                    bluez_source = s["id"]
-                    break
+        # Activate loopbacks (retry up to 3 times to allow PipeWire/WirePlumber to register bluez nodes)
+        for attempt in range(3):
+            if not bluez_source:
+                sources = await self.get_available_sources()
+                for s in sources:
+                    if "bluez" in s.get("id", "").lower():
+                        bluez_source = s["id"]
+                        break
 
-        if not bluez_sink:
-            sinks = await self.get_available_sinks()
-            for s in sinks:
-                if "bluez" in s.get("id", "").lower():
-                    bluez_sink = s["id"]
-                    break
+            if not bluez_sink:
+                sinks = await self.get_available_sinks()
+                for s in sinks:
+                    if "bluez" in s.get("id", "").lower():
+                        bluez_sink = s["id"]
+                        break
+
+            if bluez_source and bluez_sink:
+                break
+            if attempt < 2 and (not bluez_source or not bluez_sink):
+                await asyncio.sleep(0.5)
 
         target_sink = self._target_sink()
         target_source = self._active_source if self._active_source and self._active_source != "default" else "@DEFAULT_SOURCE@"

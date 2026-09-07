@@ -118,20 +118,6 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
             except Exception:
                 pass
 
-            # Detect oFono NetworkRegistration if available on system
-            try:
-                modem_path = dev_path.replace("/org/bluez/", "/")
-                modem_obj = self._bus.get_object("org.ofono", modem_path)
-                net_reg = dbus.Interface(modem_obj, "org.ofono.NetworkRegistration")
-                net_props = net_reg.GetProperties()
-                operator_name = str(net_props.get("Name", ""))
-                is_roaming = (str(net_props.get("Status", "")).lower() == "roaming")
-                strength = int(net_props.get("Strength", -1))
-                if strength >= 0:
-                    signal_bars = max(0, min(5, int(strength / 20)))
-            except Exception:
-                pass
-
             if battery_pct >= 0 or signal_bars >= 0 or operator_name:
                 self._on_battery_cb(mac, battery_pct, signal_bars, operator_name, is_roaming)
         except Exception:

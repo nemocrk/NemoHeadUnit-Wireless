@@ -160,16 +160,27 @@ class PhoneDrawerWidget(QWidget):
         self.contacts_list.itemClicked.connect(self._on_item_clicked)
         contacts_tab_layout.addWidget(self.contacts_list)
 
+        self.contacts_tab = contacts_tab_widget
         self.tabs.addTab(contacts_tab_widget, "Contacts")
 
         # Tab 4: Keypad / Dialer
-        keypad_widget = self._create_keypad()
-        self.tabs.addTab(keypad_widget, "Keypad")
+        self.keypad_tab = self._create_keypad()
+        self.tabs.addTab(self.keypad_tab, "Keypad")
 
         self.layout.addWidget(self.tabs)
 
-        # Load initial data from PBAP cache
+        # Load initial data from PBAP cache and set tab visibility
         self._load_initial_pbap_data()
+        self._update_pbap_tabs_visibility()
+
+    def _update_pbap_tabs_visibility(self):
+        """Hide PBAP tabs (Recents, Favorites, Contacts) when empty/not loaded."""
+        has_pbap = bool(self._all_contacts or self._all_favorites or self._all_recents)
+        self.tabs.setTabVisible(self.tabs.indexOf(self.recents_list), has_pbap)
+        self.tabs.setTabVisible(self.tabs.indexOf(self.favorites_list), has_pbap)
+        self.tabs.setTabVisible(self.tabs.indexOf(self.contacts_tab), has_pbap)
+        if not has_pbap:
+            self.tabs.setCurrentWidget(self.keypad_tab)
 
     def _create_active_call_banner(self) -> QWidget:
         banner = QFrame(self)
@@ -277,6 +288,7 @@ class PhoneDrawerWidget(QWidget):
     def set_contacts(self, contacts: list[dict]):
         self._all_contacts = list(contacts)
         self._filter_contacts(self.search_input.text() if hasattr(self, "search_input") else "")
+        self._update_pbap_tabs_visibility()
 
     def _filter_contacts(self, query: str = ""):
         self.contacts_list.clear()
@@ -313,6 +325,7 @@ class PhoneDrawerWidget(QWidget):
             item = QListWidgetItem("No favorites found.")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.favorites_list.addItem(item)
+        self._update_pbap_tabs_visibility()
 
     def set_recents(self, recents: list[dict]):
         self._all_recents = list(recents)
@@ -330,6 +343,7 @@ class PhoneDrawerWidget(QWidget):
             item = QListWidgetItem("No recent calls.")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.recents_list.addItem(item)
+        self._update_pbap_tabs_visibility()
 
     def set_in_call(self, in_call: bool):
         self.is_in_call = in_call
@@ -378,8 +392,9 @@ class PhoneDrawerWidget(QWidget):
     def _on_item_clicked(self, item: QListWidgetItem):
         number = item.data(Qt.ItemDataRole.UserRole)
         if number:
-            self.call_requested.emit(number)
-            self.call_action_triggered.emit(f"dial:{number}")
+            clean_number = str(number).strip()
+            self.dial_display.setText(clean_number)
+            self.tabs.setCurrentWidget(self.keypad_tab)
 
     def _create_keypad(self) -> QWidget:
         widget = QWidget()
@@ -474,5 +489,6 @@ class PhoneDrawerWidget(QWidget):
     def _trigger_call(self):
         num = self.dial_display.text().strip()
         if num:
+            self.update_call_state(is_in_call=True, call_state="DIALING", caller_number=num)
             self.call_requested.emit(num)
             self.call_action_triggered.emit(f"dial:{num}")

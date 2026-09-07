@@ -262,6 +262,28 @@ def send_backend_phone_request(endpoint: str, payload: Optional[dict] = None) ->
         return {"status": "error", "message": str(e)}
 
 
+def query_pipewire_telephony():
+    """Query org.pipewire.Telephony directly on D-Bus SessionBus."""
+    print(f"\n{CLR_BOLD}{CLR_CYAN}=== Querying org.pipewire.Telephony via D-Bus SessionBus ==={CLR_RESET}")
+    try:
+        import dbus
+        bus = dbus.SessionBus()
+        manager = dbus.Interface(
+            bus.get_object("org.pipewire.Telephony", "/org/pipewire/Telephony"),
+            "org.freedesktop.DBus.ObjectManager"
+        )
+        objects = manager.GetManagedObjects()
+        print(f"Found {len(objects)} telephony object(s):")
+        for path, ifaces in objects.items():
+            print(f"\n{CLR_YELLOW}Path: {path}{CLR_RESET}")
+            for iface_name, props in ifaces.items():
+                print(f"  Interface: {CLR_BOLD}{iface_name}{CLR_RESET}")
+                for k, v in props.items():
+                    print(f"    {k}: {v}")
+    except Exception as e:
+        print(f"{CLR_RED}Failed to query org.pipewire.Telephony on SessionBus: {e}{CLR_RESET}")
+
+
 def query_status():
     """Print current phone state, indicators, and call status."""
     print(f"\n{CLR_BOLD}{CLR_CYAN}=== Querying Phone & HFP Telemetry ==={CLR_RESET}")
@@ -288,6 +310,7 @@ def main():
     parser.add_argument("-l", "--log", type=Path, help="File path to save AT command log")
     parser.add_argument("--raw", action="store_true", help="Print raw btmon RFCOMM lines alongside decoded AT frames")
     parser.add_argument("-s", "--status", action="store_true", help="Query current phone and call status from backend")
+    parser.add_argument("-p", "--pipewire", action="store_true", help="Inspect org.pipewire.Telephony on D-Bus SessionBus")
     parser.add_argument("--dial", type=str, metavar="NUMBER", help="Dial phone number via backend")
     parser.add_argument("--hangup", action="store_true", help="Send hangup / end call action via backend")
     parser.add_argument("--answer", action="store_true", help="Send answer call action via backend")
@@ -295,6 +318,10 @@ def main():
     parser.add_argument("--sync", action="store_true", help="Trigger Bluetooth PBAP phonebook sync")
 
     args = parser.parse_args()
+
+    if args.pipewire:
+        query_pipewire_telephony()
+        return
 
     if args.status:
         query_status()

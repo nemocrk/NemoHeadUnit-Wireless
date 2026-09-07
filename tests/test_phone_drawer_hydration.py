@@ -72,8 +72,33 @@ def test_phone_drawer_keypad_dial_and_dtmf():
 
     drawer._trigger_call()
     assert calls == ["123"]
+    assert not drawer.active_call_banner.isHidden()
+    assert "Calling" in drawer.call_status_label.text()
 
     # When in call: pressing digits emits DTMF
     drawer.set_in_call(True)
     drawer._append_digit("4")
     assert dtmfs == ["4"]
+
+
+def test_phone_drawer_tab_visibility_and_contact_click_copies_to_keypad():
+    app = get_app()
+    drawer = PhoneDrawerWidget()
+
+    # Empty drawer: PBAP tabs must be hidden, only Keypad visible
+    assert drawer.tabs.isTabVisible(drawer.tabs.indexOf(drawer.recents_list)) is False
+    assert drawer.tabs.isTabVisible(drawer.tabs.indexOf(drawer.favorites_list)) is False
+    assert drawer.tabs.isTabVisible(drawer.tabs.indexOf(drawer.contacts_tab)) is False
+    assert drawer.tabs.isTabVisible(drawer.tabs.indexOf(drawer.keypad_tab)) is True
+    assert drawer.tabs.currentWidget() == drawer.keypad_tab
+
+    # Hydrating contacts makes PBAP tabs visible
+    drawer.set_contacts([{"name": "Jane Doe", "primary_phone": "+199988877"}])
+    assert drawer.tabs.isTabVisible(drawer.tabs.indexOf(drawer.contacts_tab)) is True
+
+    # Clicking contact item copies number into keypad dial display and switches to keypad tab
+    assert drawer.contacts_list.count() == 1
+    contact_item = drawer.contacts_list.item(0)
+    drawer._on_item_clicked(contact_item)
+    assert drawer.dial_display.text() == "+199988877"
+    assert drawer.tabs.currentWidget() == drawer.keypad_tab

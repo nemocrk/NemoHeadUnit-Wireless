@@ -14,65 +14,8 @@ from shared.logger import get_logger
 
 log = get_logger("hardware.bluez_pbap")
 
-DEFAULT_SYNTHETIC_CONTACTS = [
-    {
-        "name": "Emergency Assistance",
-        "primary_phone": "112",
-        "favorite": True,
-        "phones": [{"number": "112", "type": "EMERGENCY"}],
-    },
-    {
-        "name": "Roadside Service",
-        "primary_phone": "800-555-0199",
-        "favorite": True,
-        "phones": [{"number": "800-555-0199", "type": "TOLLFREE"}],
-    },
-    {
-        "name": "Alex Miller",
-        "primary_phone": "+39 340 1234567",
-        "favorite": False,
-        "phones": [{"number": "+39 340 1234567", "type": "MOBILE"}],
-    },
-    {
-        "name": "Sarah Connor",
-        "primary_phone": "+39 347 9876543",
-        "favorite": True,
-        "phones": [{"number": "+39 347 9876543", "type": "WORK"}],
-    },
-    {
-        "name": "Customer Support",
-        "primary_phone": "+39 02 89001122",
-        "favorite": False,
-        "phones": [{"number": "+39 02 89001122", "type": "OFFICE"}],
-    },
-]
-
-DEFAULT_SYNTHETIC_RECENTS = [
-    {
-        "name": "Sarah Connor",
-        "number": "+39 347 9876543",
-        "call_type": "RECEIVED",
-        "timestamp": "Today, 18:24",
-    },
-    {
-        "name": "Alex Miller",
-        "number": "+39 340 1234567",
-        "call_type": "DIALED",
-        "timestamp": "Today, 14:15",
-    },
-    {
-        "name": "Unknown Caller",
-        "number": "+39 02 44332211",
-        "call_type": "MISSED",
-        "timestamp": "Yesterday, 19:40",
-    },
-    {
-        "name": "Emergency Assistance",
-        "number": "112",
-        "call_type": "DIALED",
-        "timestamp": "3 Sep, 11:05",
-    },
-]
+DEFAULT_SYNTHETIC_CONTACTS: List[Dict[str, Any]] = []
+DEFAULT_SYNTHETIC_RECENTS: List[Dict[str, Any]] = []
 
 
 def _get_default_cache_path() -> Path:
@@ -375,7 +318,7 @@ class BlueZPBAPClient:
                 _wait_for_transfer(transfer_path, recents_file)
                 if recents_file.exists() and recents_file.stat().st_size > 0:
                     text = recents_file.read_text(encoding="utf-8", errors="replace")
-                    parsed_rec = parse_vcard_history(text)
+                    parsed_rec = parse_call_history_stream(text)
                     if parsed_rec:
                         new_recents = parsed_rec
                         log.info(f"Parsed {len(parsed_rec)} call history entries from OBEX vCard stream")
