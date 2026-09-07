@@ -70,6 +70,10 @@ class BusMonitor:
                 self._waiters.remove(waiter)
             raise TimeoutError(f"Timed out waiting for bus event on topic '{topic}' after {timeout}s")
 
+    def clear_events(self):
+        """Clears captured historical events."""
+        self.events.clear()
+
     def get_events(self, topic: Optional[str] = None) -> List[Dict[str, Any]]:
         if topic is None:
             return [payload for _, payload in self.events]
