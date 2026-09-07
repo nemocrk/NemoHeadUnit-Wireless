@@ -279,9 +279,12 @@ class ProxyModule(BaseBackendModule):
         self.site = web.TCPSite(self.runner, host, port)
         await self.site.start()
 
-        self.port = port
-        self.target_url = f"http://127.0.0.1:{port}"
-        self.log.info(f"Gateway Proxy active — Public HTTP webserver listening on http://{host}:{port}")
+        if self.site._server and self.site._server.sockets:
+            self.port = self.site._server.sockets[0].getsockname()[1]
+        else:
+            self.port = port
+        self.target_url = f"http://127.0.0.1:{self.port}"
+        self.log.info(f"Gateway Proxy active — Public HTTP webserver listening on http://{host}:{self.port}")
 
     async def run(self) -> None:
         while self._running:

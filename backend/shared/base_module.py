@@ -379,6 +379,11 @@ class BaseBackendModule(ABC):
             self.config_client.on_update(self._handle_config_sync)
             self.config_client.subscribe_updates()
             self.config_client.fetch_config()
+            if self.priority > 1:
+                for _ in range(5):
+                    if self.config_client.has_remote_config:
+                        break
+                    await asyncio.sleep(0.05)
 
         # 3. Execute custom module setup
         await self.setup()

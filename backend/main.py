@@ -35,7 +35,7 @@ for path in [str(BASE_DIR), str(repo_root), str(proto_dir)]:
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from shared.logger import get_logger
+from shared.logger import get_logger, add_log_listener, remove_log_listener
 from shared.ipc_utils import get_bus_address
 
 MODULES_DIR = BASE_DIR / "modules"
@@ -96,6 +96,13 @@ def _run_thread_module(script: Path, label: str) -> None:
 
 def _start_module(script: Path, label: str, mode: str, ready_event: threading.Event | None = None) -> ModuleHandle:
     if mode == "multithreading":
+        if ready_event is not None:
+            def _check_ready(entry: dict):
+                msg = entry.get("message", "")
+                if "ZMQ Proxy thread active" in msg or "Module 'bus_broker' is ready" in msg:
+                    ready_event.set()
+                    remove_log_listener(_check_ready)
+            add_log_listener(_check_ready)
         t = threading.Thread(target=_run_thread_module, args=(script, label), daemon=True, name=f"mod_{label}")
         t.start()
         return ModuleHandle(label=label, mode=mode, thread=t)

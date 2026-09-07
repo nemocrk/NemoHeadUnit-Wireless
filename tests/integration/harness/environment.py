@@ -27,6 +27,11 @@ class IntegrationEnvironment:
         self.ipc_dir.mkdir(parents=True, exist_ok=True)
         with open(self.config_file, "w", encoding="utf-8") as f:
             yaml.safe_dump(self.config_data, f)
+        for mod, data in self.config_data.items():
+            if isinstance(data, dict):
+                mod_file = self.config_dir / f"{mod}.yaml"
+                with open(mod_file, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(data, f)
         self.prev_config_dir = os.environ.get("NEMO_CONFIG_DIR")
         self.prev_ipc_dir = os.environ.get("NEMO_IPC_DIR")
         os.environ["NEMO_CONFIG_DIR"] = str(self.config_dir)
