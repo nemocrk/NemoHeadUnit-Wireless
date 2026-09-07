@@ -494,12 +494,12 @@ elif [ "$DEPLOY_STRATEGY" = "arch_pacman" ]; then
 
   if [ $IS_LOCAL -eq 1 ]; then
     echo "  Installing ${PKG_NAME} on local system via Pacman..."
-    sudo pacman -U --noconfirm "${LATEST_PKG}"
+    sudo pacman -U --noconfirm --overwrite '*' "${LATEST_PKG}"
   else
     echo "  Transferring ${PKG_NAME} to remote target (${TARGET}:/tmp/)..."
     ssh "${SSH_OPTS[@]}" "$TARGET" "cat > '/tmp/${PKG_NAME}'" < "${LATEST_PKG}"
     echo "  Installing ${PKG_NAME} on remote target via Pacman..."
-    ssh "${SSH_OPTS[@]}" "$TARGET" "sudo pacman -U --noconfirm '/tmp/${PKG_NAME}' && rm -f '/tmp/${PKG_NAME}'"
+    ssh "${SSH_OPTS[@]}" "$TARGET" "sudo pacman -U --noconfirm --overwrite '*' '/tmp/${PKG_NAME}' && rm -f '/tmp/${PKG_NAME}'"
   fi
   echo -e "  ${GREEN}✓ .pkg.tar.zst package distribution complete.${NC}\n"
 
