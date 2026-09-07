@@ -2,7 +2,7 @@
 phone_drawer.py — Phone Drawer with Recents, Favorites, Contacts & Dialer Keypad.
 """
 
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QTimer
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -54,9 +54,9 @@ class PhoneDrawerWidget(QWidget):
 
         header_layout.addStretch()
 
-        sync_btn = QPushButton(" Sync", self)
-        sync_btn.setIcon(make_svg_icon("sync", color="#8b949e", size=14))
-        sync_btn.setStyleSheet("""
+        self.sync_btn = QPushButton(" Sync", self)
+        self.sync_btn.setIcon(make_svg_icon("sync", color="#8b949e", size=14))
+        self.sync_btn.setStyleSheet("""
             QPushButton {
                 font-size: 13px;
                 color: #8b949e;
@@ -69,10 +69,14 @@ class PhoneDrawerWidget(QWidget):
                 color: #f0f6fc;
                 border-color: #58a6ff;
             }
+            QPushButton:disabled {
+                color: #484f58;
+                border-color: #21262d;
+            }
         """)
-        sync_btn.setToolTip("Sync contacts and recents from connected Bluetooth phone")
-        sync_btn.clicked.connect(self._on_sync_clicked)
-        header_layout.addWidget(sync_btn)
+        self.sync_btn.setToolTip("Sync contacts and recents from connected Bluetooth phone")
+        self.sync_btn.clicked.connect(self._on_sync_clicked)
+        header_layout.addWidget(self.sync_btn)
 
         close_btn = QPushButton("×", self)
         close_btn.setProperty("class", "close-btn")
@@ -270,8 +274,16 @@ class PhoneDrawerWidget(QWidget):
         return banner
 
     def _on_sync_clicked(self):
+        if hasattr(self, "sync_btn"):
+            self.sync_btn.setEnabled(False)
+            self.sync_btn.setText(" Syncing...")
+            QTimer.singleShot(6000, self._reset_sync_button)
         self.sync_requested.emit()
-        self.call_action_triggered.emit("sync")
+
+    def _reset_sync_button(self):
+        if hasattr(self, "sync_btn"):
+            self.sync_btn.setEnabled(True)
+            self.sync_btn.setText(" Sync")
 
     def _load_initial_pbap_data(self):
         try:
@@ -289,6 +301,7 @@ class PhoneDrawerWidget(QWidget):
         self._all_contacts = list(contacts)
         self._filter_contacts(self.search_input.text() if hasattr(self, "search_input") else "")
         self._update_pbap_tabs_visibility()
+        self._reset_sync_button()
 
     def _filter_contacts(self, query: str = ""):
         self.contacts_list.clear()
@@ -344,6 +357,7 @@ class PhoneDrawerWidget(QWidget):
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.recents_list.addItem(item)
         self._update_pbap_tabs_visibility()
+        self._reset_sync_button()
 
     def set_in_call(self, in_call: bool):
         self.is_in_call = in_call

@@ -4,6 +4,8 @@ Replaces notification card with live/synthetic cellular status, quick actions,
 and a dedicated button to open the Phone Drawer.
 """
 
+from typing import Optional
+
 from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtWidgets import (
     QFrame,
@@ -199,23 +201,33 @@ class PhoneCardWidget(QFrame):
         carrier: str = "",
         signal_bars: int = -1,
         battery_pct: int = -1,
-        is_connected: bool = True,
+        is_connected: Optional[bool] = None,
     ):
         if device_name:
             self._device_name = device_name
             self.lbl_device.setText(f"📱 {device_name}")
-        elif not is_connected:
+        elif is_connected is False:
+            self._device_name = ""
             self.lbl_device.setText("📱 No Device Connected")
+        elif self._device_name:
+            self.lbl_device.setText(f"📱 {self._device_name}")
 
         if carrier:
             self._carrier = carrier
             self.lbl_carrier.setText(carrier)
             self.lbl_carrier.show()
-        else:
+        elif is_connected is False:
+            self._carrier = ""
             self.lbl_carrier.hide()
 
         if signal_bars >= 0:
             self._signal_bars = max(0, min(5, signal_bars))
+            self.lbl_signal.setText(f"📶 {self._signal_bars}/5")
+            self.lbl_signal.show()
+        elif is_connected is False:
+            self._signal_bars = -1
+            self.lbl_signal.hide()
+        elif self._signal_bars >= 0:
             self.lbl_signal.setText(f"📶 {self._signal_bars}/5")
             self.lbl_signal.show()
         else:
@@ -225,36 +237,43 @@ class PhoneCardWidget(QFrame):
             self._battery_pct = max(0, min(100, battery_pct))
             self.lbl_battery.setText(f"🔋 {self._battery_pct}%")
             self.lbl_battery.show()
+        elif is_connected is False:
+            self._battery_pct = -1
+            self.lbl_battery.hide()
+        elif self._battery_pct >= 0:
+            self.lbl_battery.setText(f"🔋 {self._battery_pct}%")
+            self.lbl_battery.show()
         else:
             self.lbl_battery.hide()
 
-        self._is_connected = is_connected
-        if is_connected:
-            self.lbl_status_pill.setText("CONNECTED")
-            self.lbl_status_pill.setStyleSheet("""
-                QLabel {
-                    background: rgba(35, 134, 54, 0.25);
-                    color: #3fb950;
-                    font-size: 11px;
-                    font-weight: 700;
-                    padding: 3px 8px;
-                    border: 1px solid rgba(63, 185, 80, 0.4);
-                    border-radius: 10px;
-                }
-            """)
-        else:
-            self.lbl_status_pill.setText("SEARCHING")
-            self.lbl_status_pill.setStyleSheet("""
-                QLabel {
-                    background: rgba(187, 128, 9, 0.25);
-                    color: #d29922;
-                    font-size: 11px;
-                    font-weight: 700;
-                    padding: 3px 8px;
-                    border: 1px solid rgba(210, 153, 34, 0.4);
-                    border-radius: 10px;
-                }
-            """)
+        if is_connected is not None:
+            self._is_connected = is_connected
+            if is_connected:
+                self.lbl_status_pill.setText("CONNECTED")
+                self.lbl_status_pill.setStyleSheet("""
+                    QLabel {
+                        background: rgba(35, 134, 54, 0.25);
+                        color: #3fb950;
+                        font-size: 11px;
+                        font-weight: 700;
+                        padding: 3px 8px;
+                        border: 1px solid rgba(63, 185, 80, 0.4);
+                        border-radius: 10px;
+                    }
+                """)
+            else:
+                self.lbl_status_pill.setText("SEARCHING")
+                self.lbl_status_pill.setStyleSheet("""
+                    QLabel {
+                        background: rgba(187, 128, 9, 0.25);
+                        color: #d29922;
+                        font-size: 11px;
+                        font-weight: 700;
+                        padding: 3px 8px;
+                        border: 1px solid rgba(210, 153, 34, 0.4);
+                        border-radius: 10px;
+                    }
+                """)
 
     def set_quick_contact(self, name: str, number: str):
         if name or number:

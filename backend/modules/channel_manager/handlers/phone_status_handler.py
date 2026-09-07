@@ -58,6 +58,8 @@ class PhoneStatusHandler:
             "contact_photo_b64": "",
             "operator_name": "",
             "is_roaming": False,
+            "device_name": "",
+            "device_address": "",
         }
 
     async def handle_message(self, channel_id: int, message_id: int, body: bytes) -> None:
@@ -85,7 +87,13 @@ class PhoneStatusHandler:
             self.log.info(f"📞 PhoneStatus parsed proto:\n{update}")
 
             if update.HasField("signal_strength"):
-                self.current_state["signal_strength"] = min(5, max(0, update.signal_strength))
+                sig = int(update.signal_strength)
+                if sig > 0:
+                    self.current_state["signal_strength"] = min(5, max(0, sig))
+                elif self.current_state.get("signal_strength", -1) < 0:
+                    # Android Auto wire baseline transmits 0 as placeholder/uninitialized.
+                    # Do not assert 0 bars (no service) if we have no signal telemetry yet.
+                    self.current_state["signal_strength"] = -1
 
             if len(update.calls) > 0:
                 call: PhoneCall = update.calls[0]
@@ -140,17 +148,33 @@ class PhoneStatusHandler:
         if not isinstance(data, dict):
             return
         updated = False
-        if "battery_level" in data and data["battery_level"] is not None and data["battery_level"] >= 0:
-            self.current_state["battery_level"] = max(0, min(100, int(data["battery_level"])))
+        bat = data.get("battery_level")
+        if bat is None or bat < 0:
+            bat = data.get("battery_pct")
+        if bat is not None and bat >= 0:
+            self.current_state["battery_level"] = max(0, min(100, int(bat)))
             updated = True
-        if "signal_strength" in data and data["signal_strength"] is not None and data["signal_strength"] >= 0:
-            self.current_state["signal_strength"] = max(0, min(5, int(data["signal_strength"])))
+
+        sig = data.get("signal_strength")
+        if sig is None or sig < 0:
+            sig = data.get("signal_bars")
+        if sig is not None and sig >= 0:
+            self.current_state["signal_strength"] = max(0, min(5, int(sig)))
             updated = True
-        if "operator_name" in data and data["operator_name"]:
-            self.current_state["operator_name"] = str(data["operator_name"])
+
+        op = data.get("operator_name") or data.get("carrier")
+        if op:
+            self.current_state["operator_name"] = str(op)
             updated = True
+
         if "is_roaming" in data and data["is_roaming"] is not None:
             self.current_state["is_roaming"] = bool(data["is_roaming"])
+            updated = True
+        if "device_name" in data and data["device_name"]:
+            self.current_state["device_name"] = str(data["device_name"])
+            updated = True
+        if "device_address" in data and data["device_address"]:
+            self.current_state["device_address"] = str(data["device_address"])
             updated = True
 
         if updated:
@@ -158,6 +182,8 @@ class PhoneStatusHandler:
                 f"📱 PhoneStatus merged telemetry: battery={self.current_state['battery_level']}%, "
                 f"signal={self.current_state['signal_strength']}/5, operator='{self.current_state['operator_name']}'"
             )
+            # Publish merged state over ZMQ bus so Qt6 GUI receives it
+            self.manager.publish("phone.status", self.current_state)
             await self.manager.broadcast_ws_json({
                 "type": "phone_status",
                 "data": self.current_state,

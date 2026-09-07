@@ -11,6 +11,7 @@ import sys
 import time
 import asyncio
 import logging
+from aiohttp import web
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -129,6 +130,9 @@ class GuiEventBridge(QObject):
     notification_dismiss = pyqtSignal(dict)
     media_tree_updated = pyqtSignal(dict)
     diagnostic_audio_test = pyqtSignal(dict)
+    audio_stream_status = pyqtSignal(dict)
+    bt_device_connected = pyqtSignal(dict)
+    bt_device_disconnected = pyqtSignal(dict)
 
     def __init__(self, module: "Qt6GuiModule", parent=None):
         super().__init__(parent)
@@ -180,7 +184,10 @@ class GuiEventBridge(QObject):
 
     @pyqtSlot(dict)
     def on_phone_status_notify(self, data: dict):
-        self._module._on_phone_status_notify(data)
+        try:
+            self._module._on_phone_status_notify(data)
+        except Exception as exc:
+            self._module.log.error(f"Error in on_phone_status_notify slot: {exc}", exc_info=True)
 
     @pyqtSlot(dict)
     def on_phone_pbap_synced(self, data: dict):
@@ -205,6 +212,18 @@ class GuiEventBridge(QObject):
     @pyqtSlot(dict)
     def on_diagnostic_audio_test(self, data: dict):
         self._module._on_diagnostic_audio_test(data)
+
+    @pyqtSlot(dict)
+    def on_audio_stream_status(self, data: dict):
+        self._module._on_audio_stream_status(data)
+
+    @pyqtSlot(dict)
+    def on_bt_device_connected(self, data: dict):
+        self._module._on_bt_device_connected(data)
+
+    @pyqtSlot(dict)
+    def on_bt_device_disconnected(self, data: dict):
+        self._module._on_bt_device_disconnected(data)
 
 
 class Qt6GuiModule(BaseBackendModule):
@@ -388,17 +407,24 @@ class Qt6GuiModule(BaseBackendModule):
         self.bridge.notification_dismiss.connect(self.bridge.on_notification_dismiss, Qt.ConnectionType.QueuedConnection)
         self.bridge.media_tree_updated.connect(self.bridge.on_media_tree_updated, Qt.ConnectionType.QueuedConnection)
         self.bridge.diagnostic_audio_test.connect(self.bridge.on_diagnostic_audio_test, Qt.ConnectionType.QueuedConnection)
+        self.bridge.audio_stream_status.connect(self.bridge.on_audio_stream_status, Qt.ConnectionType.QueuedConnection)
+        self.bridge.bt_device_connected.connect(self.bridge.on_bt_device_connected, Qt.ConnectionType.QueuedConnection)
+        self.bridge.bt_device_disconnected.connect(self.bridge.on_bt_device_disconnected, Qt.ConnectionType.QueuedConnection)
 
         def _bridge_emit(sig, top_or_pay, pay=None):
-            data = pay if pay is not None else top_or_pay
-            if isinstance(data, dict):
-                sig.emit(data)
+            try:
+                data = pay if pay is not None else top_or_pay
+                if isinstance(data, dict):
+                    sig.emit(data)
+            except Exception as exc:
+                self.log.error(f"Error emitting bridge signal {sig}: {exc}", exc_info=True)
 
         # ZMQ Topic Subscriptions (bridged thread-safely into Qt main thread)
         self.log.info("⏱ [Boot Trace 6a/7] Subscribing to ZMQ topics...")
         self.subscribe("media.video.transport_frame_shm", lambda top, pay=None: _bridge_emit(self.bridge.shm_video_notify, top, pay))
         self.subscribe("media.audio.frame_shm", lambda top, pay=None: _bridge_emit(self.bridge.shm_audio_notify, top, pay))
         self.subscribe("media.audio.channel_configured", lambda top, pay=None: _bridge_emit(self.bridge.audio_channel_configured, top, pay))
+        self.subscribe("media.audio.stream_status", lambda top, pay=None: _bridge_emit(self.bridge.audio_stream_status, top, pay))
         self.subscribe("media.audio.focus", lambda top, pay=None: _bridge_emit(self.bridge.audio_focus_notify, top, pay))
         self.subscribe("media.audio.mic_control", lambda top, pay=None: _bridge_emit(self.bridge.mic_control_notify, top, pay))
         self.subscribe("video.stream_start", self._on_stream_start)
@@ -409,6 +435,8 @@ class Qt6GuiModule(BaseBackendModule):
         self.subscribe("media.playback_status", lambda top, pay=None: _bridge_emit(self.bridge.media_playback_status_notify, top, pay))
         self.subscribe("phone.status", lambda top, pay=None: _bridge_emit(self.bridge.phone_status_notify, top, pay))
         self.subscribe("phone.pbap_synced", lambda top, pay=None: _bridge_emit(self.bridge.phone_pbap_synced, top, pay))
+        self.subscribe("bluetooth_manager.paired.connected", lambda top, pay=None: _bridge_emit(self.bridge.bt_device_connected, top, pay))
+        self.subscribe("bluetooth_manager.paired.disconnected", lambda top, pay=None: _bridge_emit(self.bridge.bt_device_disconnected, top, pay))
         self.subscribe("connectivity.status", lambda top, pay=None: _bridge_emit(self.bridge.connectivity_updated, top, pay))
         self.subscribe("channel.status", lambda top, pay=None: _bridge_emit(self.bridge.channel_status_updated, top, pay))
         self.subscribe("notification.post", lambda top, pay=None: _bridge_emit(self.bridge.notification_post, top, pay))
@@ -440,6 +468,12 @@ class Qt6GuiModule(BaseBackendModule):
         self._audio_telemetry_timer.setInterval(200)
         self._audio_telemetry_timer.timeout.connect(self._update_audio_buffer_status)
         self._audio_telemetry_timer.start()
+
+        # Register status HTTP endpoint for remote diagnostics
+        self.add_http_route("GET", "/status", self.handle_get_status)
+
+        loop = getattr(self, "loop", None) or getattr(self, "_loop", None) or asyncio.get_event_loop()
+        asyncio.run_coroutine_threadsafe(self._hydrate_initial_bt_state(), loop)
 
         self.log.info(f"⏱ [Boot Trace 7/7] Total setup() completed cleanly in {(time.time()-t0)*1000:.1f}ms")
 
@@ -480,6 +514,28 @@ class Qt6GuiModule(BaseBackendModule):
             except Exception:
                 pass
 
+
+    async def handle_get_status(self, request: web.Request) -> web.Response:
+        pill = self.main_window.command_bar.phone_pill if (self.main_window and hasattr(self.main_window, "command_bar")) else None
+        phone_card = self.main_window.phone_card if (self.main_window and hasattr(self.main_window, "phone_card")) else None
+        return web.json_response({
+            "status": "ok",
+            "command_bar": {
+                "battery": pill._battery if pill else None,
+                "signal": pill._signal if pill else None,
+                "battery_text": pill.lbl_battery.text() if pill else None,
+                "tooltip": pill.toolTip() if pill else None,
+            },
+            "phone_card": {
+                "device_name": phone_card._device_name if phone_card else None,
+                "signal_bars": phone_card._signal_bars if phone_card else None,
+                "battery_pct": phone_card._battery_pct if phone_card else None,
+                "signal_text": phone_card.lbl_signal.text() if phone_card else None,
+                "battery_text": phone_card.lbl_battery.text() if phone_card else None,
+                "signal_visible": phone_card.lbl_signal.isVisible() if phone_card else None,
+                "battery_visible": phone_card.lbl_battery.isVisible() if phone_card else None,
+            },
+        })
 
     # ------------------------------------------------------------------
     # Handlers & Callbacks
@@ -561,6 +617,14 @@ class Qt6GuiModule(BaseBackendModule):
                 self.audio_engine.set_output_sink(sink)
             if source is not None:
                 self.audio_engine.set_input_source(source)
+
+    def _on_audio_stream_status(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
+        """Handle audio stream start/stop notifications from channel_manager."""
+        data = payload if payload is not None else topic_or_payload
+        if isinstance(data, dict) and self.audio_engine:
+            channel_id = data.get("channel_id")
+            status = data.get("status", "")
+            self.audio_engine.set_stream_status(status, channel_id=channel_id)
 
     def _on_diagnostic_audio_test(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload
@@ -662,49 +726,57 @@ class Qt6GuiModule(BaseBackendModule):
 
     def _on_phone_status_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload
+        self.log.info(f"📱 Qt6 GUI _on_phone_status_notify: {data}")
         if isinstance(data, dict) and self.main_window:
-            is_in_call = data.get("is_in_call", False)
-            call_state = data.get("call_state", "IDLE")
-            name = data.get("caller_name", "")
-            number = data.get("caller_number", "")
-            duration = data.get("call_duration_seconds", 0)
-            signal = data.get("signal_strength", None)
-            battery = data.get("battery_level", None)
+            signal = data.get("signal_strength")
+            if signal is None or signal < 0:
+                signal = data.get("signal_bars", signal)
+            battery = data.get("battery_level")
+            if battery is None or battery < 0:
+                battery = data.get("battery_pct", battery)
             charging = data.get("is_charging", False)
-
-            operator = data.get("operator_name", "")
+            operator = data.get("operator_name") or data.get("carrier", "")
             roaming = bool(data.get("is_roaming", False))
 
-            # Update command bar signal & battery indicators and in-call control pill
+            is_conn = None
+            device_addr = data.get("device_address", "")
+            device_name = data.get("device_name", "")
+            if "is_connected" in data:
+                is_conn = bool(data["is_connected"])
+            elif device_addr or device_name or data.get("source") == "bluetooth_hfp":
+                is_conn = True
+
+            # Update command bar signal & battery indicators
             self.main_window.command_bar.update_phone_status(
                 signal=signal,
                 battery=battery,
                 is_charging=charging,
                 operator_name=operator,
                 is_roaming=roaming,
-            )
-            self.main_window.command_bar.update_call_state(
-                is_in_call=is_in_call,
-                call_state=call_state,
-                caller_name=name,
-                caller_number=number,
-                duration_seconds=duration,
+                is_connected=is_conn,
             )
 
-            # Update call widget
-            photo_b64 = data.get("contact_photo_b64", "")
-            self.main_window.phone_call_widget.update_call_state(
-                is_in_call=is_in_call,
-                call_state=call_state,
-                caller_name=name,
-                caller_number=number,
-                duration_seconds=duration,
-                contact_photo_b64=photo_b64,
-            )
+            # Update phone dashboard card telemetry
+            if hasattr(self.main_window, "phone_card") and self.main_window.phone_card:
+                self.main_window.phone_card.update_telemetry(
+                    device_name=device_name or device_addr,
+                    carrier=operator,
+                    signal_bars=signal if signal is not None else -1,
+                    battery_pct=battery if battery is not None else -1,
+                    is_connected=is_conn,
+                )
 
-            # Update phone drawer call state
-            if hasattr(self.main_window, "phone_drawer"):
-                self.main_window.phone_drawer.update_call_state(
+            # Only process call state transitions if call-related keys are present.
+            # Routine telemetry packets (battery/signal) must not reset active calls.
+            if "is_in_call" in data or "call_state" in data:
+                is_in_call = data.get("is_in_call", False)
+                call_state = data.get("call_state", "IDLE")
+                name = data.get("caller_name", "")
+                number = data.get("caller_number", "")
+                duration = data.get("call_duration_seconds", 0)
+
+                # Update command bar in-call control pill
+                self.main_window.command_bar.update_call_state(
                     is_in_call=is_in_call,
                     call_state=call_state,
                     caller_name=name,
@@ -712,25 +784,35 @@ class Qt6GuiModule(BaseBackendModule):
                     duration_seconds=duration,
                 )
 
-            # Update phone dashboard card telemetry
-            if hasattr(self.main_window, "phone_card") and self.main_window.phone_card:
-                device_addr = data.get("device_address", "")
-                self.main_window.phone_card.update_telemetry(
-                    device_name=data.get("device_name", device_addr),
-                    carrier=operator,
-                    signal_bars=signal if signal is not None else -1,
-                    battery_pct=battery if battery is not None else -1,
-                    is_connected=bool(device_addr or data.get("source") == "bluetooth_hfp"),
+                # Update call widget
+                photo_b64 = data.get("contact_photo_b64", "")
+                self.main_window.phone_call_widget.update_call_state(
+                    is_in_call=is_in_call,
+                    call_state=call_state,
+                    caller_name=name,
+                    caller_number=number,
+                    duration_seconds=duration,
+                    contact_photo_b64=photo_b64,
                 )
 
-            has_nav = self.main_window.has_active_nav
-            has_media = self.main_window.has_active_media
-            self.main_window.update_dashboard_state(has_nav=has_nav, has_media=has_media, has_call=is_in_call)
-            if is_in_call and call_state in ("RINGING", "INCOMING"):
-                self.main_window.disconnected_screen.show()
-                self.main_window.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-                self.main_window.disconnected_screen.raise_()
-                self.main_window.command_bar.raise_()
+                # Update phone drawer call state
+                if hasattr(self.main_window, "phone_drawer"):
+                    self.main_window.phone_drawer.update_call_state(
+                        is_in_call=is_in_call,
+                        call_state=call_state,
+                        caller_name=name,
+                        caller_number=number,
+                        duration_seconds=duration,
+                    )
+
+                has_nav = self.main_window.has_active_nav
+                has_media = self.main_window.has_active_media
+                self.main_window.update_dashboard_state(has_nav=has_nav, has_media=has_media, has_call=is_in_call)
+                if is_in_call and call_state in ("RINGING", "INCOMING"):
+                    self.main_window.disconnected_screen.show()
+                    self.main_window.disconnected_screen.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+                    self.main_window.disconnected_screen.raise_()
+                    self.main_window.command_bar.raise_()
 
     def _on_phone_pbap_synced(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload
@@ -763,6 +845,46 @@ class Qt6GuiModule(BaseBackendModule):
                     f"Phonebook synced ({len(contacts)} contacts, {len(recents)} recents)",
                     "info"
                 )
+
+    def _on_bt_device_connected(self, data: dict) -> None:
+        addr = data.get("device_address", "")
+        name = data.get("device_name", "") or addr
+        self.log.info(f"📱 Qt6 GUI received BT device connected: {name} ({addr})")
+        if self.main_window and hasattr(self.main_window, "phone_card") and self.main_window.phone_card:
+            self.main_window.phone_card.update_telemetry(
+                device_name=name,
+                is_connected=True,
+            )
+
+    def _on_bt_device_disconnected(self, data: dict) -> None:
+        addr = data.get("device_address", "")
+        self.log.info(f"📱 Qt6 GUI received BT device disconnected: {addr}")
+        if self.main_window and hasattr(self.main_window, "phone_card") and self.main_window.phone_card:
+            self.main_window.phone_card.update_telemetry(
+                device_name="",
+                is_connected=False,
+            )
+
+    async def _hydrate_initial_bt_state(self) -> None:
+        """Query connectivity_manager to populate connected Bluetooth device on startup."""
+        await asyncio.sleep(1.0)
+        try:
+            status_res = await self.call_module("connectivity_manager", "GET", "/status")
+            if status_res and status_res.get("status") == "ok":
+                active_addr = status_res.get("active_device")
+                if active_addr:
+                    paired_res = await self.call_module("connectivity_manager", "GET", "/paired")
+                    name = active_addr
+                    if paired_res and "devices" in paired_res:
+                        for d in paired_res["devices"]:
+                            if d.get("address", "").upper() == active_addr.upper() and d.get("name"):
+                                name = d["name"]
+                                break
+                    self.log.info(f"📱 Initial BT hydration found connected device: {name} ({active_addr})")
+                    if self.main_window and hasattr(self.main_window, "phone_card") and self.main_window.phone_card:
+                        self.main_window.phone_card.update_telemetry(device_name=name, is_connected=True)
+        except Exception as e:
+            self.log.debug(f"Could not hydrate initial BT state: {e}")
 
     def _on_notification_post_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload

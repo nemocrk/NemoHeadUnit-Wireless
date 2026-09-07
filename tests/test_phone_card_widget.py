@@ -42,9 +42,16 @@ def test_phone_card_widget_creation_and_telemetry():
     assert "5/5" in card.lbl_signal.text()
     assert "92%" in card.lbl_battery.text()
 
+    # Routine telemetry update without is_connected argument must preserve device name and CONNECTED state
+    card.update_telemetry(signal_bars=3)
+    assert "iPhone 15" in card.lbl_device.text()
+    assert card.lbl_status_pill.text() == "CONNECTED"
+    assert "3/5" in card.lbl_signal.text()
+
     # Disconnected state
     card.update_telemetry(is_connected=False)
     assert card.lbl_status_pill.text() == "SEARCHING"
+    assert "No Device" in card.lbl_device.text()
 
 
 def test_phone_card_quick_call_and_open_drawer_signals():
@@ -91,3 +98,48 @@ def test_phone_card_main_window_integration():
     # Trigger again to toggle close
     win.phone_card.open_drawer_requested.emit()
     assert win.phone_drawer.isHidden()
+
+
+def test_phone_card_telemetry_cache_preservation():
+    app = get_app()
+    card = PhoneCardWidget()
+
+    card.update_telemetry(device_name="Pixel 7", signal_bars=4, battery_pct=85, is_connected=True)
+    assert "4/5" in card.lbl_signal.text()
+    assert "85%" in card.lbl_battery.text()
+
+    # Inbound partial packet with signal_bars=-1 and battery_pct=-1 must NOT clobber cached values
+    card.update_telemetry(signal_bars=-1, battery_pct=-1)
+    assert "4/5" in card.lbl_signal.text()
+    assert "85%" in card.lbl_battery.text()
+
+    # Explicit disconnect clears values
+    card.update_telemetry(is_connected=False)
+    assert card.lbl_signal.isHidden()
+    assert card.lbl_battery.isHidden()
+
+
+def test_command_bar_phone_status_pill_caching():
+    from backend.modules.qt6_gui.ui.command_bar import CommandBarWidget
+    app = get_app()
+    cmd = CommandBarWidget()
+
+    cmd.update_phone_status(signal=4, battery=75, operator_name="Vodafone IT")
+    assert cmd.phone_pill.lbl_battery.text() == "75%"
+    assert "Signal: 4/5" in cmd.phone_pill.toolTip()
+    assert "Vodafone IT" in cmd.phone_pill.toolTip()
+
+    # Partial update without battery or signal must not reset to --%
+    cmd.update_phone_status(signal=None, battery=None)
+    assert cmd.phone_pill.lbl_battery.text() == "75%"
+    assert "Signal: 4/5" in cmd.phone_pill.toolTip()
+
+    # Update with new battery only
+    cmd.update_phone_status(battery=80)
+    assert cmd.phone_pill.lbl_battery.text() == "80%"
+    assert "Signal: 4/5" in cmd.phone_pill.toolTip()
+
+    # Disconnection resets to --%
+    cmd.update_phone_status(is_connected=False)
+    assert cmd.phone_pill.lbl_battery.text() == "--%"
+    assert "Signal: --" in cmd.phone_pill.toolTip()

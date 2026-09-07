@@ -75,7 +75,12 @@ class BusClient:
                         for sub_topic, cb in list(self._subscriptions.items()):
                             if topic == sub_topic or topic.startswith(sub_topic.rstrip("*")):
                                 cb(topic, payload)
-                except (zmq.ZMQError, json.JSONDecodeError, zmq.Again, Exception):
+                except (zmq.ZMQError, zmq.Again):
+                    if not self._running:
+                        break
+                    continue
+                except Exception as e:
+                    self.log.error(f"Error in bus listener loop: {e}")
                     if not self._running:
                         break
                     continue

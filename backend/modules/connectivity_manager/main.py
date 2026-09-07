@@ -31,6 +31,7 @@ class ConnectivityManagerModule(BaseBackendModule):
         self._audio_adapter = None
         self._hfp_client = None
         self._pbap_client = None
+        self._last_hfp_in_call = None
 
         # State cache
         self._discoverable = True
@@ -168,16 +169,35 @@ class ConnectivityManagerModule(BaseBackendModule):
 
     def _on_hfp_state_changed(self, state: dict[str, Any]) -> None:
         """Callback when BlueZ HFP call state or active call changes."""
+        if self._active_device:
+            state["device_address"] = self._active_device
+            state["is_connected"] = True
+            if self._bt_adapter:
+                dev_name = self._bt_adapter.get_device_name(self._active_device)
+                if dev_name:
+                    state["device_name"] = dev_name
+        bat = state.get("battery_pct", -1)
+        if bat is not None and bat >= 0:
+            state["battery_level"] = bat
+        sig = state.get("signal_bars", -1)
+        if sig is not None and sig >= 0:
+            state["signal_strength"] = sig
+        car = state.get("carrier", "")
+        if car:
+            state["operator_name"] = car
         self.log.info(f"📱 Publishing HFP phone.status: {state}")
         self.publish("phone.status", state)
         if self._audio_adapter:
-            coro = self._audio_adapter.ensure_hfp_loopback(state.get("is_in_call", False))
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(coro)
-            except RuntimeError:
-                if hasattr(self, "_loop") and self._loop and self._loop.is_running():
-                    asyncio.run_coroutine_threadsafe(coro, self._loop)
+            in_call = bool(state.get("is_in_call", False))
+            if in_call != self._last_hfp_in_call:
+                self._last_hfp_in_call = in_call
+                coro = self._audio_adapter.ensure_hfp_loopback(in_call)
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(coro)
+                except RuntimeError:
+                    if hasattr(self, "_loop") and self._loop and self._loop.is_running():
+                        asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def _on_bluetooth_telemetry_changed(
         self,
@@ -196,23 +216,34 @@ class ConnectivityManagerModule(BaseBackendModule):
                 carrier=operator_name,
                 is_roaming=is_roaming,
             )
-        state = {
+        dev_name = self._bt_adapter.get_device_name(address) if self._bt_adapter else address
+        state: dict[str, Any] = {
             "source": "bluetooth_hfp",
             "device_address": address,
-            "is_in_call": hfp_state.get("is_in_call", False),
-            "call_state": hfp_state.get("call_state", "IDLE"),
-            "caller_name": hfp_state.get("caller_name", ""),
-            "caller_number": hfp_state.get("phone_number", ""),
+            "device_name": dev_name or address,
+            "is_connected": True,
         }
+        # Only inject call information if HFP itself reports an active call.
+        # Routine telemetry polling must not emit is_in_call=False / IDLE, which
+        # would clash with active Android Auto / telephony calls.
+        if hfp_state.get("is_in_call"):
+            state["is_in_call"] = True
+            state["call_state"] = hfp_state.get("call_state", "ACTIVE")
+            state["caller_name"] = hfp_state.get("caller_name", "")
+            state["caller_number"] = hfp_state.get("phone_number", "")
+
         eff_carrier = operator_name or hfp_state.get("carrier", "")
         if eff_carrier:
             state["operator_name"] = eff_carrier
+            state["carrier"] = eff_carrier
         eff_battery = battery_pct if battery_pct >= 0 else hfp_state.get("battery_pct", -1)
         if eff_battery >= 0:
             state["battery_level"] = max(0, min(100, eff_battery))
+            state["battery_pct"] = max(0, min(100, eff_battery))
         eff_signal = signal_bars if signal_bars >= 0 else hfp_state.get("signal_bars", -1)
         if eff_signal >= 0:
             state["signal_strength"] = max(0, min(5, eff_signal))
+            state["signal_bars"] = max(0, min(5, eff_signal))
         eff_roam = is_roaming if is_roaming is not None else hfp_state.get("is_roaming", False)
         if eff_roam is not None:
             state["is_roaming"] = bool(eff_roam)
@@ -228,13 +259,20 @@ class ConnectivityManagerModule(BaseBackendModule):
 
     def _on_device_connection_changed(self, address: str, is_connected: bool) -> None:
         """Callback when a Bluetooth device connects or disconnects (inbound or outbound)."""
+        dev_name = self._bt_adapter.get_device_name(address) if self._bt_adapter else address
         if is_connected:
-            self.log.info(f"🔵 Inbound/Outbound Bluetooth Connection detected for device {address}")
+            self.log.info(f"🔵 Inbound/Outbound Bluetooth Connection detected for device {address} ({dev_name})")
             self._active_device = address
             if self._hfp_client:
                 self._hfp_client.bind_device(address)
             self._trigger_device_telemetry(address)
-            self.publish("bluetooth_manager.paired.connected", {"device_address": address})
+            self.publish("bluetooth_manager.paired.connected", {"device_address": address, "device_name": dev_name})
+            self.publish("phone.status", {
+                "source": "bluetooth_hfp",
+                "device_address": address,
+                "device_name": dev_name or address,
+                "is_connected": True,
+            })
             if hasattr(self, "_loop") and self._loop and self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(self._auto_sync_pbap(address), self._loop)
             else:
@@ -244,13 +282,19 @@ class ConnectivityManagerModule(BaseBackendModule):
                 except RuntimeError:
                     pass
         else:
-            self.log.info(f"⚪ Bluetooth device {address} disconnected")
+            self.log.info(f"⚪ Bluetooth device {address} ({dev_name}) disconnected")
             if self._hfp_client:
                 self._hfp_client.unbind_device()
-            self.publish("bluetooth_manager.paired.disconnected", {"device_address": address})
+            self.publish("bluetooth_manager.paired.disconnected", {"device_address": address, "device_name": dev_name})
             if self._active_device == address:
                 self._rfcomm_connected = False
                 self._active_device = None
+            self.publish("phone.status", {
+                "source": "bluetooth_hfp",
+                "device_address": "",
+                "device_name": "",
+                "is_connected": False,
+            })
 
     async def run(self) -> None:
         # Trigger initial autoconnect scan immediately after startup completes
@@ -887,6 +931,22 @@ class ConnectivityManagerModule(BaseBackendModule):
                 self._bt_adapter._check_device_telemetry(dev_path, address)
             except Exception as exc:
                 self.log.debug(f"BlueZ telemetry trigger notice for {address}: {exc}")
+
+        # Check Wi-Fi station signal as link quality fallback if AP is active
+        if self._wifi_adapter and hasattr(self._wifi_adapter, "get_station_rssi"):
+            try:
+                wifi_bars = self._wifi_adapter.get_station_rssi()
+                if wifi_bars is not None and wifi_bars >= 0:
+                    hfp_state = self._hfp_client.get_state() if self._hfp_client else {}
+                    bat = hfp_state.get("battery_pct", -1)
+                    sig = hfp_state.get("signal_bars", -1)
+                    op = hfp_state.get("carrier", "")
+                    roam = hfp_state.get("is_roaming", False)
+                    # If Bluetooth did not report signal, use Wi-Fi link signal
+                    eff_signal = sig if sig >= 0 else wifi_bars
+                    self._on_bluetooth_telemetry_changed(address, bat, eff_signal, op, roam)
+            except Exception as exc:
+                self.log.debug(f"WiFi telemetry trigger notice for {address}: {exc}")
 
     async def _telemetry_poll_loop(self) -> None:
         """Periodic background refresh of Bluetooth battery & RSSI while a device is active."""

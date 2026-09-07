@@ -30,6 +30,8 @@ export class PhoneWidget {
         this.isMicMuted = false;
         this.durationSeconds = 0;
         this.timerInterval = null;
+        this._battery = -1;
+        this._signal = -1;
 
         this._bindEvents();
     }
@@ -70,23 +72,37 @@ export class PhoneWidget {
             caller_name = '',
             caller_number = '',
             call_duration_seconds = 0,
-            signal_strength = null,
-            battery_level = null,
             is_charging = false,
+            is_connected = null,
         } = data;
+
+        const sig = data.signal_strength !== undefined ? data.signal_strength : data.signal_bars;
+        const bat = data.battery_level !== undefined ? data.battery_level : data.battery_pct;
+
+        if (is_connected === false) {
+            this._signal = -1;
+            this._battery = -1;
+        } else {
+            if (sig !== null && sig !== undefined && sig >= 0) {
+                this._signal = sig;
+            }
+            if (bat !== null && bat !== undefined && bat >= 0) {
+                this._battery = bat;
+            }
+        }
 
         // Update Top/Bottom Status Indicators
         if (this.cmdSignal) {
-            if (signal_strength !== null && signal_strength !== undefined && signal_strength >= 0) {
-                this.cmdSignal.title = `Cellular Signal: ${signal_strength}/5`;
+            if (this._signal >= 0) {
+                this.cmdSignal.title = `Cellular Signal: ${this._signal}/5`;
             } else {
                 this.cmdSignal.title = 'Cellular Signal: Unknown';
             }
         }
         if (this.cmdBattery && this.batteryText) {
-            if (battery_level !== null && battery_level !== undefined && battery_level >= 0) {
-                this.batteryText.textContent = `${battery_level}%`;
-                this.cmdBattery.title = `Phone Battery: ${battery_level}% ${is_charging ? '(Charging)' : ''}`;
+            if (this._battery >= 0) {
+                this.batteryText.textContent = `${this._battery}%`;
+                this.cmdBattery.title = `Phone Battery: ${this._battery}% ${is_charging ? '(Charging)' : ''}`;
             } else {
                 this.batteryText.textContent = '--%';
                 this.cmdBattery.title = 'Phone Battery: Unknown';

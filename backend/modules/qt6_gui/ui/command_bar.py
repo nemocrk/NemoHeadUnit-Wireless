@@ -53,21 +53,51 @@ class PhoneStatusPill(QFrame):
             font-weight: 700;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
         """)
-        layout.addWidget(self.lbl_battery)
+        self._battery: int = -1
+        self._signal: int = -1
+        self._operator: str = ""
+        self._is_roaming: bool = False
+        self._is_charging: bool = False
 
-    def update_status(self, signal: Optional[int] = None, battery: Optional[int] = None, is_charging: bool = False, operator_name: str = "", is_roaming: bool = False):
-        op_prefix = f"📶 {operator_name} {'(Roaming) ' if is_roaming else ''}| " if operator_name else ""
-        sig_str = f"Signal: {signal}/5" if signal is not None and signal >= 0 else "Signal: --"
-        bat_str = f"Battery: {battery}% {'(Charging)' if is_charging else ''}" if battery is not None and battery >= 0 else "Battery: --"
-        self.setToolTip(f"{op_prefix}{sig_str} | {bat_str}")
+    def update_status(
+        self,
+        signal: Optional[int] = None,
+        battery: Optional[int] = None,
+        is_charging: bool = False,
+        operator_name: str = "",
+        is_roaming: bool = False,
+    ):
         if battery is not None and battery >= 0:
-            bat = max(0, min(100, battery))
-            bat_color = "#3fb950" if bat > 20 else "#f85149"
+            self._battery = max(0, min(100, battery))
+        if signal is not None and signal >= 0:
+            self._signal = max(0, min(5, signal))
+        if operator_name:
+            self._operator = operator_name
+        self._is_charging = is_charging
+        self._is_roaming = is_roaming
+
+        op_prefix = f"📶 {self._operator} {'(Roaming) ' if self._is_roaming else ''}| " if self._operator else ""
+        sig_str = f"Signal: {self._signal}/5" if self._signal >= 0 else "Signal: --"
+        bat_str = f"Battery: {self._battery}% {'(Charging)' if self._is_charging else ''}" if self._battery >= 0 else "Battery: --"
+        self.setToolTip(f"{op_prefix}{sig_str} | {bat_str}")
+
+        if self._battery >= 0:
+            bat_color = "#3fb950" if self._battery > 20 else "#f85149"
             self.icon_battery.setPixmap(make_svg_icon("battery", color=bat_color, size=16).pixmap(16, 16))
-            self.lbl_battery.setText(f"{bat}%")
+            self.lbl_battery.setText(f"{self._battery}%")
         else:
             self.icon_battery.setPixmap(make_svg_icon("battery", color="#8b949e", size=16).pixmap(16, 16))
             self.lbl_battery.setText("--%")
+
+    def reset(self):
+        self._battery = -1
+        self._signal = -1
+        self._operator = ""
+        self._is_roaming = False
+        self._is_charging = False
+        self.icon_battery.setPixmap(make_svg_icon("battery", color="#8b949e", size=16).pixmap(16, 16))
+        self.lbl_battery.setText("--%")
+        self.setToolTip("Signal: -- | Battery: --")
 
 
 class AudioBufferPill(QFrame):
@@ -133,84 +163,93 @@ class AudioBufferPill(QFrame):
         v_metrics = video_metrics or {}
         v_lag = v_metrics.get("lag_ms", 0)
         v_fps = v_metrics.get("fps", 0.0)
-
-        if not metrics and not v_metrics:
-            self.lbl_status.setText("Media Idle")
-            self.lbl_status.setStyleSheet("color: #8b949e; font-size: 11px; font-weight: 600;")
-            self.icon_audio.setPixmap(make_svg_icon("volume", color="#8b949e", size=15).pixmap(15, 15))
-            self.setToolTip("Media Subsystem Idle")
-            return
+        has_video = (v_fps > 0 or v_lag > 0)
+        fps_str = f"{int(v_fps)}fps " if v_fps > 0 else ""
 
         # Find active streaming channel
         active_ch = None
         if metrics:
-            for ch_id, ch_data in metrics.items():
-                if ch_data.get("is_started") or ch_data.get("total_bytes_in", 0) > 0:
-                    active_ch = ch_data
+            for ch in metrics.values():
+                if ch.get("is_streaming") and not ch.get("app_buffer", {}).get("is_paused"):
+                    active_ch = ch
                     break
-
             if not active_ch:
-                active_ch = next(iter(metrics.values()))
-        else:
-            active_ch = {}
+                for ch in metrics.values():
+                    if ch.get("app_buffer", {}).get("is_paused") or ch.get("app_buffer", {}).get("buffered_bytes", 0) > 0:
+                        active_ch = ch
+                        break
+            if not active_ch:
+                for ch in metrics.values():
+                    if ch.get("is_started"):
+                        active_ch = ch
+                        break
 
-        ch_id = active_ch.get("channel_id", 0)
-        app_buf = active_ch.get("app_buffer", {})
-        sink_buf = active_ch.get("sink_buffer", {})
+        ch_id = active_ch.get("channel_id", 0) if active_ch else 0
+        app_buf = active_ch.get("app_buffer", {}) if active_ch else {}
+        sink_buf = active_ch.get("sink_buffer", {}) if active_ch else {}
 
         app_ms = app_buf.get("buffered_ms", 0)
         app_target_ms = app_buf.get("prebuffer_ms", 150)
         is_buffering = app_buf.get("is_buffering", False)
         underruns = app_buf.get("underruns", 0)
-        a_lag = active_ch.get("lag_ms", 0)
+        a_lag = active_ch.get("lag_ms", 0) if active_ch else 0
 
         sink_ms = sink_buf.get("queued_ms", 0)
         sink_state = sink_buf.get("state", "None")
         sink_err = sink_buf.get("error", "None")
 
-        # Relative A/V Drift (positive = video trailing audio)
-        av_drift = v_lag - a_lag
-
+        is_streaming = active_ch.get("is_streaming", False) if active_ch else False
         is_paused = app_buf.get("is_paused", False)
 
-        # Color-coded health
-        if is_paused:
-            status_color = "#8b949e"  # Gray / Neutral (Paused)
-            state_text = "PAUSED"
+        # Determine pill state and color strictly from actual audio & video status
+        if not is_streaming:
+            status_color = "#8b949e"  # Gray / Neutral for inactive audio
+            if is_paused:
+                state_text = f"{fps_str}V:+{v_lag}ms PAUSED" if has_video else "PAUSED"
+            elif has_video:
+                state_text = f"{fps_str}V:+{v_lag}ms"
+            else:
+                state_text = "Audio Idle"
         elif underruns > 0 and is_buffering:
             status_color = "#f85149"  # Red (Starved / Underrun)
             state_text = f"UNDERRUN ({underruns})"
         elif is_buffering and app_ms < app_target_ms:
             status_color = "#d29922"  # Yellow (Prebuffering)
             state_text = f"BUF {app_ms}/{app_target_ms}ms"
-        elif abs(av_drift) > 100 or v_lag > 250 or a_lag > 250:
-            status_color = "#f85149"  # Red (Significant Lag / Drift)
-            state_text = f"V:+{v_lag}ms A:+{a_lag}ms"
-        elif abs(av_drift) > 40 or v_lag > 100 or a_lag > 100:
-            status_color = "#d29922"  # Yellow (Moderate Lag / Drift)
-            state_text = f"V:+{v_lag}ms A:+{a_lag}ms"
         else:
-            status_color = "#3fb950"  # Green (Healthy Playback & Sync)
-            fps_str = f"{int(v_fps)}fps " if v_fps > 0 else ""
-            state_text = f"{fps_str}V:+{v_lag}ms A:+{a_lag}ms"
+            av_drift = v_lag - a_lag
+            if abs(av_drift) > 100 or v_lag > 250 or a_lag > 250:
+                status_color = "#f85149"  # Red (Significant Lag / Drift)
+                state_text = f"V:+{v_lag}ms A:+{a_lag}ms"
+            elif abs(av_drift) > 40 or v_lag > 100 or a_lag > 100:
+                status_color = "#d29922"  # Yellow (Moderate Lag / Drift)
+                state_text = f"V:+{v_lag}ms A:+{a_lag}ms"
+            else:
+                status_color = "#3fb950"  # Green (Healthy Playback & Sync)
+                state_text = f"{fps_str}V:+{v_lag}ms A:+{a_lag}ms"
 
         self.lbl_status.setText(state_text)
         self.lbl_status.setStyleSheet(f"color: {status_color}; font-size: 11px; font-weight: 700; font-family: monospace;")
         self.icon_audio.setPixmap(make_svg_icon("volume", color=status_color, size=15).pixmap(15, 15))
 
+        audio_stream_state = "ACTIVE (Streaming)" if is_streaming else ("PAUSED" if is_paused else "IDLE / STOPPED")
         tooltip_lines = [
-            f"⏱ Stream Latency & A/V Sync Diagnostics:",
-            f"• Video Stream: +{v_lag}ms lag | {v_fps:.1f} fps",
-            f"• Audio Stream (Ch{ch_id}): +{a_lag}ms lag",
-            f"• A/V Sync Drift: {av_drift:+d}ms ({'In Sync' if abs(av_drift) < 40 else 'Drifting'})",
-            f"• Buffer 1 (App Prebuffer): {app_ms}ms / target {app_target_ms}ms ({app_buf.get('buffered_bytes', 0)}B)",
-            f"  - Buffering State: {'WAITING (Prebuffering)' if is_buffering else 'STREAMING (Active)'}",
-            f"  - Underrun Count: {underruns}",
-            f"• Buffer 2 (QAudioSink): {sink_ms}ms queued / {sink_buf.get('buffer_size', 0)}B total",
-            f"  - Free Space: {sink_buf.get('bytes_free', 0)}B",
-            f"  - Sink State: {sink_state} (Error: {sink_err})",
-            f"• Stream: {active_ch.get('sample_rate', 48000)}Hz {active_ch.get('channel_count', 2)}ch | In: {active_ch.get('total_bytes_in', 0) // 1024}KB",
+            "⏱ Stream Latency & A/V Sync Diagnostics:",
+            f"• Video Stream: +{v_lag}ms lag | {v_fps:.1f} fps" if has_video else "• Video Stream: IDLE",
+            f"• Audio Stream (Ch{ch_id}): {audio_stream_state}" + (f" | +{a_lag}ms lag" if is_streaming else ""),
         ]
+        if is_streaming:
+            av_drift = v_lag - a_lag
+            tooltip_lines.extend([
+                f"• A/V Sync Drift: {av_drift:+d}ms ({'In Sync' if abs(av_drift) < 40 else 'Drifting'})",
+                f"• Buffer 1 (App Prebuffer): {app_ms}ms / target {app_target_ms}ms ({app_buf.get('buffered_bytes', 0)}B)",
+                f"  - Buffering State: {'WAITING (Prebuffering)' if is_buffering else 'STREAMING (Active)'}",
+                f"  - Underrun Count: {underruns}",
+                f"• Buffer 2 (QAudioSink): {sink_ms}ms queued / {sink_buf.get('buffer_size', 0)}B total",
+                f"  - Free Space: {sink_buf.get('bytes_free', 0)}B",
+                f"  - Sink State: {sink_state} (Error: {sink_err})",
+                f"• Stream: {active_ch.get('sample_rate', 48000)}Hz {active_ch.get('channel_count', 2)}ch | In: {active_ch.get('total_bytes_in', 0) // 1024}KB",
+            ])
         tip_text = "\n".join(tooltip_lines)
         self.setToolTip(tip_text)
 
@@ -486,9 +525,12 @@ class CommandBarWidget(QWidget):
         """Update audio buffer & A/V sync pill with current app, hardware sink, and video metrics."""
         self.audio_pill.update_status(metrics, video_metrics=video_metrics)
 
-    def update_phone_status(self, signal: Optional[int] = None, battery: Optional[int] = None, is_charging: bool = False, operator_name: str = "", is_roaming: bool = False):
+    def update_phone_status(self, signal: Optional[int] = None, battery: Optional[int] = None, is_charging: bool = False, operator_name: str = "", is_roaming: bool = False, is_connected: Optional[bool] = None):
         """Update signal bars, battery indicator, and operator tooltip."""
-        self.phone_pill.update_status(signal, battery, is_charging, operator_name, is_roaming)
+        if is_connected is False:
+            self.phone_pill.reset()
+        else:
+            self.phone_pill.update_status(signal, battery, is_charging, operator_name, is_roaming)
 
     def update_call_state(
         self,
