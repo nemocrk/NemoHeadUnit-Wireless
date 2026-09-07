@@ -51,3 +51,32 @@ def test_media_with_timestamp_truncated():
     dec_ts, dec_data = parse_media_with_timestamp(b"\x01\x02\x03")
     assert dec_ts == 0
     assert dec_data == b""
+
+
+def test_channels_from_sdr_invalid_hex():
+    from shared.proto_utils import channels_from_sdr_bytes, channel_config_from_sdr
+    assert channels_from_sdr_bytes("not_valid_hex") == []
+    assert channels_from_sdr_bytes("") == []
+    assert channel_config_from_sdr("not_valid_hex", 1) is None
+
+
+def test_channels_from_sdr_synthetic():
+    from shared.proto_utils import channels_from_sdr_bytes, channel_config_from_sdr
+    from protos.oaa.control.ServiceDiscoveryResponseMessage_pb2 import ServiceDiscoveryResponse
+    from protos.oaa.control.ChannelDescriptorData_pb2 import ChannelDescriptor
+
+    resp = ServiceDiscoveryResponse()
+    ch = resp.channels.add()
+    ch.channel_id = 1
+    ch.sensor_channel.SetInParent()
+
+    sdr_hex = resp.SerializeToString().hex()
+    channels = channels_from_sdr_bytes(sdr_hex)
+    assert len(channels) == 1
+    assert channels[0]["channel_id"] == 1
+    assert "sensor_channel" in channels[0]
+
+    cfg = channel_config_from_sdr(sdr_hex, channel_id=1)
+    assert cfg is not None
+    assert cfg["channel_id"] == 1
+    assert channel_config_from_sdr(sdr_hex, channel_id=99) is None

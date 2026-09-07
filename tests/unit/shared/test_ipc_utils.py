@@ -1,6 +1,8 @@
 import pytest
 from shared.ipc_utils import get_bus_address, PUB_PORT, SUB_PORT
 
+pytestmark = pytest.mark.unit
+
 
 def test_ipc_utils_linux_endpoints(monkeypatch):
     monkeypatch.setattr("shared.ipc_utils.IS_WINDOWS", False)

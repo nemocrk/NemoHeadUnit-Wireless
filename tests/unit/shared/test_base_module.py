@@ -8,7 +8,7 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
-def mock_bus():
+def autouse_mock_bus_client():
     with patch("shared.base_module.BusClient") as mock:
         yield mock
 
