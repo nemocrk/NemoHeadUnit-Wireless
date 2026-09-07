@@ -220,6 +220,7 @@ class DynamicChannelAudioSink(QObject):
         self._is_buffering: bool = True
         self._underrun_count: int = 0
         self._is_paused: bool = False
+        self._is_stopped: bool = True
 
         self._start_signal.connect(self._do_start, Qt.ConnectionType.QueuedConnection)
         self._stop_signal.connect(self._do_stop, Qt.ConnectionType.QueuedConnection)
@@ -248,6 +249,33 @@ class DynamicChannelAudioSink(QObject):
     def is_paused(self) -> bool:
         with self._app_lock:
             return self._is_paused
+
+    @property
+    def is_stopped(self) -> bool:
+        return self._is_stopped
+
+    @property
+    def is_streaming(self) -> bool:
+        if self._is_stopped or self.is_paused:
+            return False
+        if self.last_frame_time <= 0:
+            return False
+        if time.time() - self.last_frame_time > 0.5:
+            with self._app_lock:
+                if len(self._app_buffer) == 0:
+                    return False
+        return True
+
+    def set_stream_status(self, status: str):
+        st = str(status).upper()
+        if st in ("STOPPED", "STOP"):
+            self._is_stopped = True
+            with self._app_lock:
+                self._app_buffer.clear()
+                self._is_buffering = False
+        elif st in ("ACTIVE", "START"):
+            self._is_stopped = False
+            self._underrun_count = 0
 
     def set_paused(self, paused: bool):
         with self._app_lock:
@@ -348,7 +376,8 @@ class DynamicChannelAudioSink(QObject):
             if avail <= 0:
                 if self.audio_sink and self.audio_sink.bytesFree() >= self.audio_sink.bufferSize():
                     self._is_buffering = True
-                    if not self._is_paused:
+                    # Only increment underruns if actively streaming and frames were expected
+                    if not self._is_paused and not self._is_stopped and (time.time() - self.last_frame_time <= 0.5):
                         self._underrun_count += 1
                 return
 
@@ -398,6 +427,10 @@ class DynamicChannelAudioSink(QObject):
             return
 
         now = time.time()
+        if self._is_stopped:
+            self._is_stopped = False
+            self._underrun_count = 0
+
         self.frame_count += 1
         self.total_bytes_in += len(audio_bytes)
 
@@ -601,6 +634,8 @@ class DynamicChannelAudioSink(QObject):
             "sample_rate": self.sample_rate,
             "channel_count": self.channel_count,
             "is_started": self._is_started,
+            "is_streaming": self.is_streaming,
+            "is_stopped": self.is_stopped,
             "frame_count": self.frame_count,
             "total_bytes_in": self.total_bytes_in,
             "total_bytes_out": self.total_bytes_out,
@@ -667,6 +702,15 @@ class QtAudioEngine:
             else:
                 for sink in self.sinks.values():
                     sink.set_paused(paused)
+
+    def set_stream_status(self, status: str, channel_id: Optional[int] = None):
+        """Update stream status (ACTIVE / STOPPED) across channels or specific channel."""
+        with self._sinks_lock:
+            if channel_id is not None and channel_id in self.sinks:
+                self.sinks[channel_id].set_stream_status(status)
+            else:
+                for sink in self.sinks.values():
+                    sink.set_stream_status(status)
 
     def set_input_source(self, source_name: str):
         """Reconfigure target audio input source for microphone capture."""

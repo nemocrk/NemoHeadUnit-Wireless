@@ -114,6 +114,11 @@ class AudioChannelHandler:
                 self.log.info(f"🔊 AudioChannel (ch{channel_id}): Extracted start session_id={start_ind.session}")
             except Exception as exc:
                 self.log.warning(f"AudioChannel (ch{channel_id}): Failed to parse start indication session_id: {exc}")
+        self.manager.publish("media.audio.stream_status", {
+            "channel_id": channel_id,
+            "status": "ACTIVE",
+            "session_id": self.sessions.get(channel_id, 0),
+        })
 
     async def _handle_stop_indication(self, channel_id: int, body: bytes) -> None:
         self.log.info(f"AudioChannel (ch{channel_id}): Received AVChannelStopIndication — audio stream STOPPED")
@@ -127,6 +132,11 @@ class AudioChannelHandler:
             self.unacked_counts[channel_id] = 0
             self.log.debug(f"🔊 AudioChannel (ch{channel_id}): Flushed pending AVMediaAckIndication (ack_count={unacked})")
             await self.manager.send_wire_frame(channel_id, AV_MSG.AV_MEDIA_ACK_INDICATION, ack.SerializeToString(), encrypted=True, log_level='debug')
+        self.manager.publish("media.audio.stream_status", {
+            "channel_id": channel_id,
+            "status": "STOPPED",
+            "session_id": self.sessions.get(channel_id, 0),
+        })
 
     async def _handle_focus_request(self, channel_id: int, body: bytes) -> None:
         focus_type = AudioFocusType.Enum.GAIN
