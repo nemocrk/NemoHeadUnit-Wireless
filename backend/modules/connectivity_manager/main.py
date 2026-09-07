@@ -666,7 +666,7 @@ class ConnectivityManagerModule(BaseBackendModule):
         body = await request.json()
         addr = body.get("device_address") or body.get("address")
         if not addr:
-            return web.json_response({"status": "error", "message": "Missing 'device_address'"}, status=400)
+            return web.json_response({"status": "error", "message": "Missing 'device_address' or 'address' parameter"}, status=400)
         confirm = body.get("confirm", True)
         res = await self._bt_adapter.confirm_pairing(addr, confirm)
         self._pairing_pin = None
@@ -694,7 +694,7 @@ class ConnectivityManagerModule(BaseBackendModule):
         body = await request.json()
         addr = body.get("device_address") or body.get("address")
         if not addr:
-            return web.json_response({"status": "error", "message": "Missing 'device_address'"}, status=400)
+            return web.json_response({"status": "error", "message": "Missing 'device_address' or 'address' parameter"}, status=400)
         res = await self._bt_adapter.confirm_pairing(addr, False)
         self._pairing_pin = None
         self._pairing_device = None

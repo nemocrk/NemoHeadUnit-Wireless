@@ -8,7 +8,12 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture
 def mock_conn_module():
-    with patch("shared.base_module.BusClient"),          patch("modules.connectivity_manager.main.get_bluetooth_adapter") as mock_bt_fac,          patch("modules.connectivity_manager.main.get_wifi_adapter") as mock_wifi_fac,          patch("modules.connectivity_manager.main.get_audio_adapter") as mock_audio_fac,          patch("modules.connectivity_manager.main.BlueZHFClient"),          patch("modules.connectivity_manager.main.BlueZPBAPClient"):
+    with patch("shared.base_module.BusClient"), \
+         patch("modules.connectivity_manager.main.get_bluetooth_adapter") as mock_bt_fac, \
+         patch("modules.connectivity_manager.main.get_wifi_adapter") as mock_wifi_fac, \
+         patch("modules.connectivity_manager.main.get_audio_adapter") as mock_audio_fac, \
+         patch("modules.connectivity_manager.main.BlueZHFClient"), \
+         patch("modules.connectivity_manager.main.BlueZPBAPClient"):
 
         mock_bt = MagicMock()
         mock_bt.setup = AsyncMock()
