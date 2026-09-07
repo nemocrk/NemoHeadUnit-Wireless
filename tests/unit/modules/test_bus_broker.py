@@ -48,24 +48,42 @@ def test_bus_broker_module_events(mock_bus_broker):
 
 
 @pytest.mark.asyncio
+async def test_bus_broker_lifecycle(mock_bus_broker):
+    mock_bus_broker.subscribe = MagicMock()
+    with patch("threading.Thread") as mock_thread_cls:
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+
+        await mock_bus_broker.setup()
+
+        mock_thread_cls.assert_called_once()
+        mock_thread.start.assert_called_once()
+        mock_bus_broker.subscribe.assert_any_call("system.module_ready", mock_bus_broker._on_module_event)
+        mock_bus_broker.subscribe.assert_any_call("system.ready", mock_bus_broker._on_module_event)
+        mock_bus_broker.subscribe.assert_any_call("proxy.register_route", mock_bus_broker._on_module_event)
+
+    await mock_bus_broker.teardown()
+    mock_bus_broker.xsub.close.assert_called_with(linger=0)
+    mock_bus_broker.xpub.close.assert_called_with(linger=0)
+    mock_bus_broker.bus_ctx.term.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_bus_broker_heartbeat_step(mock_bus_broker):
     mock_bus_broker.bus_registry = {
         "test_mod": {"name": "test_mod", "priority": 2}
     }
     mock_bus_broker.publish = MagicMock()
     mock_bus_broker.config["heartbeat_interval"] = 0.1
-
-    # Simulate heartbeat broadcast check
-    now = 1000.0
     mock_bus_broker._last_heartbeat = 0.0
-    with patch("time.time", return_value=now):
-        interval = mock_bus_broker.config.get("heartbeat_interval", 2.0)
-        if now - mock_bus_broker._last_heartbeat >= interval:
-            mock_bus_broker._last_heartbeat = now
-            mock_bus_broker.publish("system.heartbeat", {
-                "timestamp": now,
-                "modules": mock_bus_broker.bus_registry,
-            })
+    mock_bus_broker._running = True
+
+    async def stop_loop(_):
+        mock_bus_broker._running = False
+
+    with patch("time.time", return_value=1000.0), \
+         patch("asyncio.sleep", side_effect=stop_loop):
+        await mock_bus_broker.run()
 
     mock_bus_broker.publish.assert_called_once()
     topic, payload = mock_bus_broker.publish.call_args[0]
