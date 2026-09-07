@@ -80,10 +80,31 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
     def set_on_battery_callback(self, on_bat_cb: Callable[[str, int, int], None]) -> None:
         """Register a callback for battery level (%) and signal strength (bars 0-5) updates."""
         self._on_battery_cb = on_bat_cb
+        if self._initialized and self._bus:
+            self._check_initial_connected_devices()
 
     def get_adapter_address(self) -> str:
         """Get the local BlueZ Bluetooth adapter MAC address."""
         return self._adapter_address
+
+    def get_device_name(self, address: str) -> str:
+        """Get friendly name / alias for a device address via BlueZ ObjectManager."""
+        if not address:
+            return ""
+        clean = address.upper().strip()
+        import dbus
+        try:
+            bus = self._bus if self._bus else dbus.SystemBus()
+            manager = dbus.Interface(bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager")
+            objects = manager.GetManagedObjects()
+            for path, ifaces in objects.items():
+                if "org.bluez.Device1" in ifaces:
+                    props = ifaces["org.bluez.Device1"]
+                    if str(props.get("Address", "")).upper() == clean:
+                        return str(props.get("Alias", props.get("Name", clean)))
+        except Exception as e:
+            log.debug(f"get_device_name({address}) failed: {e}")
+        return clean
 
     @staticmethod
     def _rssi_to_bars(rssi: int) -> int:
@@ -269,6 +290,24 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
 
         # Register Pairing Agent
         self._register_pairing_agent()
+        self._check_initial_connected_devices()
+
+    def _check_initial_connected_devices(self) -> None:
+        if not self._bus:
+            return
+        import dbus
+        try:
+            manager = dbus.Interface(self._bus.get_object("org.bluez", "/"), "org.freedesktop.DBus.ObjectManager")
+            objects = manager.GetManagedObjects()
+            for path, ifaces in objects.items():
+                if "org.bluez.Device1" in ifaces:
+                    dev_props = ifaces["org.bluez.Device1"]
+                    if bool(dev_props.get("Connected", False)):
+                        mac = str(dev_props.get("Address", "")).upper()
+                        log.info(f"🔵 Found already connected BlueZ device at startup: {mac} ({path})")
+                        self._check_device_telemetry(str(path), mac)
+        except Exception as e:
+            log.debug(f"_check_initial_connected_devices notice: {e}")
 
     def _register_pairing_agent(self) -> None:
         import dbus

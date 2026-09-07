@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from shared.logger import get_logger
@@ -155,6 +156,7 @@ class BlueZPBAPClient:
         self._cache_file = Path(cache_path) if cache_path else _get_default_cache_path()
         self._contacts: List[Dict[str, Any]] = []
         self._recents: List[Dict[str, Any]] = []
+        self._sync_lock = threading.Lock()
         self._load_cache()
 
     def _load_cache(self) -> None:
@@ -225,6 +227,21 @@ class BlueZPBAPClient:
             }
 
     def _sync_dbus_obex(self, device_address: str) -> Dict[str, Any]:
+        if not self._sync_lock.acquire(blocking=False):
+            log.info("PBAP sync already in progress, skipping concurrent run")
+            return {
+                "status": "ok",
+                "contacts_count": len(self._contacts),
+                "recents_count": len(self._recents),
+                "cached": True,
+            }
+
+        try:
+            return self._do_sync_dbus_obex(device_address)
+        finally:
+            self._sync_lock.release()
+
+    def _do_sync_dbus_obex(self, device_address: str) -> Dict[str, Any]:
         import dbus
         import tempfile
         import time
@@ -277,6 +294,16 @@ class BlueZPBAPClient:
             recents_file = work_dir / f"pb_{clean_addr}_{pid}_{ts}_recents.vcf"
             empty_filters = dbus.Dictionary({}, signature="sv")
 
+            # Pre-create files with 0666 mode so obexd (running as root or unprivileged)
+            # can write to them, and nemo can read/unlink them without [Errno 13] permission denied.
+            for target_file in (contacts_file, recents_file):
+                try:
+                    target_file.unlink(missing_ok=True)
+                    target_file.touch(mode=0o666)
+                    os.chmod(str(target_file), 0o666)
+                except Exception as perm_err:
+                    log.debug(f"Failed setting permissions on {target_file}: {perm_err}")
+
             def _wait_for_transfer(transfer_path: str, target_file: Path, max_wait: float = 12.0):
                 transfer_obj = bus.get_object("org.bluez.obex", transfer_path)
                 props_iface = dbus.Interface(transfer_obj, "org.freedesktop.DBus.Properties")
@@ -286,10 +313,13 @@ class BlueZPBAPClient:
                         status = str(props_iface.Get("org.bluez.obex.Transfer1", "Status"))
                         if status in ("complete", "error"):
                             break
+                    except dbus.DBusException as de:
+                        # Transfer object was removed from D-Bus on completion
+                        if "UnknownObject" in str(de):
+                            time.sleep(0.1)
+                            break
                     except Exception:
                         pass
-                    if target_file.exists() and target_file.stat().st_size > 0:
-                        break
                     time.sleep(0.2)
 
             # 1. Pull Contacts (pb)

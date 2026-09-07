@@ -252,19 +252,17 @@ class BlueZHFClient:
         if not self._session_bus:
             return
         try:
-            # Subscribe to org.ofono.VoiceCallManager signals emitted by WirePlumber
+            # Subscribe to org.ofono.VoiceCallManager signals emitted by WirePlumber / oFono
             self._session_bus.add_signal_receiver(
                 self._on_dbus_call_added,
                 signal_name="CallAdded",
                 dbus_interface="org.ofono.VoiceCallManager",
-                bus_name="org.pipewire.Telephony",
                 path_keyword="path",
             )
             self._session_bus.add_signal_receiver(
                 self._on_dbus_call_removed,
                 signal_name="CallRemoved",
                 dbus_interface="org.ofono.VoiceCallManager",
-                bus_name="org.pipewire.Telephony",
                 path_keyword="path",
             )
             # Subscribe to ObjectManager to detect gateway addition / removal
@@ -272,15 +270,13 @@ class BlueZHFClient:
                 self._on_dbus_interfaces_added,
                 signal_name="InterfacesAdded",
                 dbus_interface="org.freedesktop.DBus.ObjectManager",
-                bus_name="org.pipewire.Telephony",
             )
             self._session_bus.add_signal_receiver(
                 self._on_dbus_interfaces_removed,
                 signal_name="InterfacesRemoved",
                 dbus_interface="org.freedesktop.DBus.ObjectManager",
-                bus_name="org.pipewire.Telephony",
             )
-            log.info("Subscribed to org.pipewire.Telephony D-Bus signals on SessionBus")
+            log.info("Subscribed to org.pipewire.Telephony / org.ofono D-Bus signals on SessionBus")
         except Exception as e:
             log.debug(f"Could not subscribe to D-Bus signals on SessionBus: {e}")
 
@@ -295,15 +291,20 @@ class BlueZHFClient:
             )
             objects = manager.GetManagedObjects()
             target_path = None
+            first_found_path = None
             for path, ifaces in objects.items():
-                if "org.pipewire.Telephony.AudioGateway1" in ifaces:
-                    addr = str(ifaces["org.pipewire.Telephony.AudioGateway1"].get("Address", "")).upper()
-                    if not self._bound_device_address or addr == self._bound_device_address:
+                if "org.pipewire.Telephony.AudioGateway1" in ifaces or "org.ofono.VoiceCallManager" in ifaces:
+                    if first_found_path is None:
+                        first_found_path = str(path)
+                    gw_iface = ifaces.get("org.pipewire.Telephony.AudioGateway1", {})
+                    addr = str(gw_iface.get("Address", "")).upper()
+                    if self._bound_device_address and addr == self._bound_device_address:
                         target_path = str(path)
                         break
-            if target_path:
-                self._bind_gateway_path(target_path)
-            else:
+            chosen_path = target_path or first_found_path
+            if chosen_path:
+                self._bind_gateway_path(chosen_path)
+            elif objects:
                 self._unbind_gateway()
         except Exception as e:
             log.debug(f"_discover_gateway notice: {e}")
@@ -341,9 +342,10 @@ class BlueZHFClient:
         self._notify()
 
     def _on_dbus_interfaces_added(self, path: Any, interfaces: Dict[str, Any]) -> None:
-        if "org.pipewire.Telephony.AudioGateway1" in interfaces:
-            addr = str(interfaces["org.pipewire.Telephony.AudioGateway1"].get("Address", "")).upper()
-            if not self._bound_device_address or addr == self._bound_device_address:
+        if "org.pipewire.Telephony.AudioGateway1" in interfaces or "org.ofono.VoiceCallManager" in interfaces:
+            gw_iface = interfaces.get("org.pipewire.Telephony.AudioGateway1", {})
+            addr = str(gw_iface.get("Address", "")).upper()
+            if not self._bound_device_address or not addr or addr == self._bound_device_address:
                 self._bind_gateway_path(str(path))
 
     def _on_dbus_interfaces_removed(self, path: Any, interfaces: list) -> None:
@@ -426,15 +428,18 @@ class BlueZHFClient:
         clean_num = number.strip()
         if not clean_num:
             return False
-        self._phone_number = clean_num
-        self._call_state = CallState.DIALING
-        self._muted = False
 
-        # Attempt native WirePlumber D-Bus session call first
-        if self._gateway_proxy is not None:
+        if self._gateway_proxy is None and self._call_manager_proxy is None:
+            self._discover_gateway()
+
+        proxy = self._gateway_proxy or self._call_manager_proxy
+        if proxy is not None:
             try:
-                log.info(f"Invoking AudioGateway1.Dial('{clean_num}') via SessionBus")
-                self._gateway_proxy.Dial(clean_num)
+                log.info(f"Invoking VoiceCallManager / AudioGateway1.Dial('{clean_num}') via SessionBus")
+                proxy.Dial(clean_num)
+                self._phone_number = clean_num
+                self._call_state = CallState.DIALING
+                self._muted = False
                 if self._transport_proxy:
                     try:
                         self._transport_proxy.Activate()
@@ -443,22 +448,26 @@ class BlueZHFClient:
                 self._notify()
                 return True
             except Exception as e:
-                log.warning(f"AudioGateway1.Dial failed ({e}), falling back to AT command dispatch")
+                log.warning(f"VoiceCallManager.Dial failed ({e}), falling back to AT command dispatch")
 
         cmd = format_at_dial(clean_num)
         sent = self.send_at_cmd(cmd)
+        self._phone_number = clean_num
+        self._call_state = CallState.DIALING
+        self._muted = False
         self._notify()
         return sent
 
     def answer(self) -> bool:
-        if self._call_state != CallState.RINGING:
-            log.debug(f"answer called but call_state is {self._call_state}")
-        self._call_state = CallState.ACTIVE
+        if self._gateway_proxy is None and self._call_manager_proxy is None:
+            self._discover_gateway()
 
-        if self._gateway_proxy is not None:
+        proxy = self._gateway_proxy or self._call_manager_proxy
+        if proxy is not None:
             try:
-                log.info("Invoking AudioGateway1.HoldAndAnswer() via SessionBus")
-                self._gateway_proxy.HoldAndAnswer()
+                log.info("Invoking VoiceCallManager / AudioGateway1.HoldAndAnswer() via SessionBus")
+                proxy.HoldAndAnswer()
+                self._call_state = CallState.ACTIVE
                 if self._transport_proxy:
                     try:
                         self._transport_proxy.Activate()
@@ -467,30 +476,38 @@ class BlueZHFClient:
                 self._notify()
                 return True
             except Exception as e:
-                log.warning(f"AudioGateway1.HoldAndAnswer failed ({e}), falling back to AT command dispatch")
+                log.warning(f"VoiceCallManager.HoldAndAnswer failed ({e}), falling back to AT command dispatch")
 
         cmd = format_at_answer()
         sent = self.send_at_cmd(cmd)
+        self._call_state = CallState.ACTIVE
         self._notify()
         return sent
 
     def hangup(self) -> bool:
+        if self._gateway_proxy is None and self._call_manager_proxy is None:
+            self._discover_gateway()
+
+        proxy = self._gateway_proxy or self._call_manager_proxy
+        if proxy is not None:
+            try:
+                log.info("Invoking VoiceCallManager / AudioGateway1.HangupAll() via SessionBus")
+                proxy.HangupAll()
+                self._call_state = CallState.IDLE
+                self._phone_number = ""
+                self._caller_name = ""
+                self._muted = False
+                self._notify()
+                return True
+            except Exception as e:
+                log.warning(f"VoiceCallManager.HangupAll failed ({e}), falling back to AT command dispatch")
+
+        cmd = format_at_hangup()
+        sent = self.send_at_cmd(cmd)
         self._call_state = CallState.IDLE
         self._phone_number = ""
         self._caller_name = ""
         self._muted = False
-
-        if self._gateway_proxy is not None:
-            try:
-                log.info("Invoking AudioGateway1.HangupAll() via SessionBus")
-                self._gateway_proxy.HangupAll()
-                self._notify()
-                return True
-            except Exception as e:
-                log.warning(f"AudioGateway1.HangupAll failed ({e}), falling back to AT command dispatch")
-
-        cmd = format_at_hangup()
-        sent = self.send_at_cmd(cmd)
         self._notify()
         return sent
 
@@ -499,13 +516,17 @@ class BlueZHFClient:
         if not k:
             return False
 
-        if self._gateway_proxy is not None:
+        if self._gateway_proxy is None and self._call_manager_proxy is None:
+            self._discover_gateway()
+
+        proxy = self._gateway_proxy or self._call_manager_proxy
+        if proxy is not None:
             try:
-                log.info(f"Invoking AudioGateway1.SendTones('{k}') via SessionBus")
-                self._gateway_proxy.SendTones(k)
+                log.info(f"Invoking VoiceCallManager / AudioGateway1.SendTones('{k}') via SessionBus")
+                proxy.SendTones(k)
                 return True
             except Exception as e:
-                log.warning(f"AudioGateway1.SendTones failed ({e}), falling back to AT command dispatch")
+                log.warning(f"VoiceCallManager.SendTones failed ({e}), falling back to AT command dispatch")
 
         cmd = format_at_dtmf(k)
         return self.send_at_cmd(cmd)

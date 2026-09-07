@@ -1,4 +1,5 @@
 import abc
+from typing import Optional
 
 class BaseWifiApAdapter(abc.ABC):
     """
@@ -28,6 +29,10 @@ class BaseWifiApAdapter(abc.ABC):
     def get_status(self) -> dict:
         """Return current WiFi AP status dict."""
         return {"active": getattr(self, "_active", False), "ssid": getattr(self, "_ssid", "AndroidAutoAP")}
+
+    def get_station_rssi(self) -> Optional[int]:
+        """Query connected Wi-Fi station signal strength in bars (1-5). Returns None if unavailable."""
+        return None
 
     @abc.abstractmethod
     async def teardown(self) -> None:

@@ -331,6 +331,10 @@ class WindowsBluetoothAdapter(BaseBluetoothAdapter):
         """Get the local Windows Bluetooth adapter MAC address."""
         return self._adapter_address
 
+    def get_device_name(self, address: str) -> str:
+        """Get friendly name for a device address on Windows."""
+        return address
+
     @staticmethod
     def _rssi_to_bars(rssi: int) -> int:
         if rssi >= -60:

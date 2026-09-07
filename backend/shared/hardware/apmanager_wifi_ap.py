@@ -187,6 +187,39 @@ class APManagerWifiApAdapter(BaseWifiApAdapter):
             log.error(f"Error calling APManager.Stop(): {e}")
             return False
 
+    def get_station_rssi(self) -> Optional[int]:
+        """
+        Query connected Wi-Fi station signal strength in dBm and convert to 1-5 bars.
+        Returns None if not connected or unavailable.
+        """
+        if not self._active:
+            return None
+        iface = (self._started_credentials or {}).get("interface", "wlan0")
+        try:
+            import subprocess, re
+            out = subprocess.check_output(
+                ["iw", "dev", iface, "station", "dump"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=1.0,
+            )
+            m = re.search(r"signal:\s*([-\d]+)\s*dBm", out)
+            if m:
+                rssi = int(m.group(1))
+                if rssi >= -60:
+                    return 5
+                elif rssi >= -70:
+                    return 4
+                elif rssi >= -80:
+                    return 3
+                elif rssi >= -90:
+                    return 2
+                else:
+                    return 1
+        except Exception:
+            pass
+        return None
+
     async def teardown(self) -> None:
         await self.stop_ap()
         if self._glib_loop and self._glib_loop.is_running():

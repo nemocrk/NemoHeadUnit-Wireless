@@ -72,6 +72,10 @@ class BaseBluetoothAdapter(abc.ABC):
         """Get the local Bluetooth adapter MAC address."""
         return ""
 
+    def get_device_name(self, address: str) -> str:
+        """Get friendly name / alias for a device address."""
+        return ""
+
 
 
     @abc.abstractmethod
