@@ -226,6 +226,7 @@ class ChannelManagerModule(BaseBackendModule):
             await ws.close(code=aiohttp.WSCloseCode.GOING_AWAY, message="Module shutdown")
         self.ws_clients.clear()
         self.shm.close()
+        await super().teardown()
 
     # ------------------------------------------------------------------
     # SHM & Bus Callbacks

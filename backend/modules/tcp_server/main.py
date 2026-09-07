@@ -532,9 +532,11 @@ class TCPServerModule(BaseBackendModule):
     async def teardown(self) -> None:
         """Module teardown on orchestrator shutdown."""
         self.log.info("Teardown TCPServerModule...")
+        self._running = False
         self._teardown_server()
         if self._server_thread and self._server_thread.is_alive():
-            self._server_thread.join(timeout=2.0)
+            self._server_thread.join(timeout=1.0)
+        await super().teardown()
 
 
 if __name__ == "__main__":

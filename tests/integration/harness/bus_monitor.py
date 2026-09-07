@@ -84,5 +84,8 @@ class BusMonitor:
             except asyncio.CancelledError:
                 pass
         if self.sub_sock:
-            self.sub_sock.close()
-        self.ctx.term()
+            self.sub_sock.close(linger=0)
+        try:
+            self.ctx.destroy(linger=0)
+        except Exception:
+            pass

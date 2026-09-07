@@ -128,9 +128,12 @@ class BusBrokerModule(BaseBackendModule):
         """Close ZMQ proxy sockets cleanly."""
         self.xsub.close(linger=0)
         self.xpub.close(linger=0)
-        self.bus_ctx.term()
         if self.proxy_thread and self.proxy_thread.is_alive():
-            self.proxy_thread.join(timeout=1.0)
+            self.proxy_thread.join(timeout=0.5)
+        try:
+            self.bus_ctx.destroy(linger=0)
+        except Exception:
+            pass
         self.log.info("Bus Broker stopped.")
 
 

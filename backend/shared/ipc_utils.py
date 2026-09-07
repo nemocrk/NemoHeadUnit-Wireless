@@ -27,6 +27,7 @@ def get_bus_address(module_name: str = "system", kind: str = "pub") -> str:
         port = SUB_PORT if kind == "sub" else PUB_PORT
         return f"tcp://127.0.0.1:{port}"
     else:
+        ipc_dir = os.environ.get("NEMO_IPC_DIR", "/tmp")
         # Note: 'sub' kind connects to broker's XSUB endpoint (.pub URI in ZMQ convention)
         endpoint = "pub" if kind == "sub" else "sub"
-        return f"ipc:///tmp/nemobus_v2.{endpoint}"
+        return f"ipc://{ipc_dir}/nemobus_v2.{endpoint}"
