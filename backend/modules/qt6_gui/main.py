@@ -712,6 +712,17 @@ class Qt6GuiModule(BaseBackendModule):
                     duration_seconds=duration,
                 )
 
+            # Update phone dashboard card telemetry
+            if hasattr(self.main_window, "phone_card") and self.main_window.phone_card:
+                device_addr = data.get("device_address", "")
+                self.main_window.phone_card.update_telemetry(
+                    device_name=data.get("device_name", device_addr),
+                    carrier=operator,
+                    signal_bars=signal if signal is not None else -1,
+                    battery_pct=battery if battery is not None else -1,
+                    is_connected=bool(device_addr or data.get("source") == "bluetooth_hfp"),
+                )
+
             has_nav = self.main_window.has_active_nav
             has_media = self.main_window.has_active_media
             self.main_window.update_dashboard_state(has_nav=has_nav, has_media=has_media, has_call=is_in_call)
@@ -731,6 +742,22 @@ class Qt6GuiModule(BaseBackendModule):
                 self.main_window.phone_drawer.set_contacts(contacts)
                 self.main_window.phone_drawer.set_favorites(favorites)
                 self.main_window.phone_drawer.set_recents(recents)
+            if hasattr(self.main_window, "phone_card") and self.main_window.phone_card:
+                if favorites:
+                    fav = favorites[0]
+                    self.main_window.phone_card.set_quick_contact(
+                        fav.get("name", ""), fav.get("primary_phone") or fav.get("number", "")
+                    )
+                elif recents:
+                    rec = recents[0]
+                    self.main_window.phone_card.set_quick_contact(
+                        rec.get("name", ""), rec.get("number", "")
+                    )
+                elif contacts:
+                    c = contacts[0]
+                    self.main_window.phone_card.set_quick_contact(
+                        c.get("name", ""), c.get("primary_phone", "")
+                    )
             if hasattr(self.main_window, "toast_widget"):
                 self.main_window.toast_widget.show_toast(
                     f"Phonebook synced ({len(contacts)} contacts, {len(recents)} recents)",

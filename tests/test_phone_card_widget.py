@@ -21,12 +21,13 @@ def test_phone_card_widget_creation_and_telemetry():
     app = get_app()
     card = PhoneCardWidget()
 
-    # Initial default synthetic state
-    assert "Pixel 7" in card.lbl_device.text()
-    assert "Vodafone 5G" in card.lbl_carrier.text()
-    assert "4/5" in card.lbl_signal.text()
-    assert "85%" in card.lbl_battery.text()
-    assert card.lbl_status_pill.text() == "CONNECTED"
+    # Initial default clean state (no synthetic mocks)
+    assert "No Device" in card.lbl_device.text()
+    assert card.lbl_carrier.isHidden()
+    assert card.lbl_signal.isHidden()
+    assert card.lbl_battery.isHidden()
+    assert card.lbl_status_pill.text() == "DISCONNECTED"
+    assert card.quick_frame.isHidden()
 
     # Update telemetry
     card.update_telemetry(

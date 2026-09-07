@@ -32,13 +32,13 @@ class PhoneCardWidget(QFrame):
         self.setObjectName("phone-telephony-card")
         self.setProperty("class", "dash-card")
 
-        self._device_name = "Pixel 7"
-        self._carrier = "Vodafone 5G"
-        self._signal_bars = 4
-        self._battery_pct = 85
-        self._is_connected = True
-        self._quick_name = "Sarah Connor"
-        self._quick_number = "+39 347 9876543"
+        self._device_name = ""
+        self._carrier = ""
+        self._signal_bars = -1
+        self._battery_pct = -1
+        self._is_connected = False
+        self._quick_name = ""
+        self._quick_number = ""
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(18, 16, 18, 16)
@@ -57,15 +57,15 @@ class PhoneCardWidget(QFrame):
         header.addWidget(self.lbl_title)
         header.addStretch()
 
-        self.lbl_status_pill = QLabel("CONNECTED", self)
+        self.lbl_status_pill = QLabel("DISCONNECTED", self)
         self.lbl_status_pill.setStyleSheet("""
             QLabel {
-                background: rgba(35, 134, 54, 0.25);
-                color: #3fb950;
+                background: rgba(110, 118, 129, 0.2);
+                color: #8b949e;
                 font-size: 11px;
                 font-weight: 700;
                 padding: 3px 8px;
-                border: 1px solid rgba(63, 185, 80, 0.4);
+                border: 1px solid rgba(110, 118, 129, 0.3);
                 border-radius: 10px;
             }
         """)
@@ -89,12 +89,13 @@ class PhoneCardWidget(QFrame):
         # Left info: Device & Carrier
         v_info = QVBoxLayout()
         v_info.setSpacing(2)
-        self.lbl_device = QLabel(f"📱 {self._device_name}", telemetry_frame)
+        self.lbl_device = QLabel("📱 No Device Connected", telemetry_frame)
         self.lbl_device.setStyleSheet("font-size: 13px; font-weight: 600; color: #f0f6fc;")
         v_info.addWidget(self.lbl_device)
 
-        self.lbl_carrier = QLabel(self._carrier, telemetry_frame)
+        self.lbl_carrier = QLabel("", telemetry_frame)
         self.lbl_carrier.setStyleSheet("font-size: 11px; color: #8b949e;")
+        self.lbl_carrier.hide()
         v_info.addWidget(self.lbl_carrier)
         t_layout.addLayout(v_info)
         t_layout.addStretch()
@@ -102,43 +103,45 @@ class PhoneCardWidget(QFrame):
         # Right indicators: Signal & Battery
         v_stats = QVBoxLayout()
         v_stats.setSpacing(2)
-        self.lbl_signal = QLabel(f"📶 {self._signal_bars}/5", telemetry_frame)
+        self.lbl_signal = QLabel("", telemetry_frame)
         self.lbl_signal.setStyleSheet("font-size: 12px; font-weight: 600; color: #38bdf8;")
+        self.lbl_signal.hide()
         v_stats.addWidget(self.lbl_signal)
 
-        self.lbl_battery = QLabel(f"🔋 {self._battery_pct}%", telemetry_frame)
+        self.lbl_battery = QLabel("", telemetry_frame)
         self.lbl_battery.setStyleSheet("font-size: 12px; font-weight: 600; color: #3fb950;")
+        self.lbl_battery.hide()
         v_stats.addWidget(self.lbl_battery)
         t_layout.addLayout(v_stats)
 
         self.layout.addWidget(telemetry_frame)
 
-        # 3. Quick Action Row: Recent / Favorite Dial
-        quick_frame = QFrame(self)
-        quick_frame.setStyleSheet("""
+        # 3. Quick Action Row: Recent / Favorite Dial (hidden until populated)
+        self.quick_frame = QFrame(self)
+        self.quick_frame.setStyleSheet("""
             QFrame {
                 background: rgba(33, 38, 45, 0.5);
                 border: 1px solid rgba(255, 255, 255, 0.05);
                 border-radius: 8px;
             }
         """)
-        q_layout = QHBoxLayout(quick_frame)
+        q_layout = QHBoxLayout(self.quick_frame)
         q_layout.setContentsMargins(10, 8, 10, 8)
         q_layout.setSpacing(10)
 
         v_quick = QVBoxLayout()
         v_quick.setSpacing(2)
-        lbl_q_header = QLabel("QUICK CALL", quick_frame)
+        lbl_q_header = QLabel("QUICK CALL", self.quick_frame)
         lbl_q_header.setStyleSheet("font-size: 10px; font-weight: 700; color: #8b949e; letter-spacing: 0.5px;")
         v_quick.addWidget(lbl_q_header)
 
-        self.lbl_quick_contact = QLabel(f"{self._quick_name} ({self._quick_number})", quick_frame)
+        self.lbl_quick_contact = QLabel("", self.quick_frame)
         self.lbl_quick_contact.setStyleSheet("font-size: 12px; font-weight: 600; color: #c9d1d9;")
         v_quick.addWidget(self.lbl_quick_contact)
         q_layout.addLayout(v_quick)
         q_layout.addStretch()
 
-        self.btn_quick_call = QPushButton(" Call", quick_frame)
+        self.btn_quick_call = QPushButton(" Call", self.quick_frame)
         self.btn_quick_call.setIcon(make_svg_icon("phone", color="#ffffff", size=14))
         self.btn_quick_call.setIconSize(QSize(14, 14))
         self.btn_quick_call.setStyleSheet("""
@@ -156,7 +159,8 @@ class PhoneCardWidget(QFrame):
         self.btn_quick_call.clicked.connect(self._on_quick_call_clicked)
         q_layout.addWidget(self.btn_quick_call)
 
-        self.layout.addWidget(quick_frame)
+        self.quick_frame.hide()
+        self.layout.addWidget(self.quick_frame)
 
         # 4. Open Drawer Button (Prominent Action)
         self.btn_open_drawer = QPushButton("Open Phone Drawer", self)
@@ -200,15 +204,29 @@ class PhoneCardWidget(QFrame):
         if device_name:
             self._device_name = device_name
             self.lbl_device.setText(f"📱 {device_name}")
+        elif not is_connected:
+            self.lbl_device.setText("📱 No Device Connected")
+
         if carrier:
             self._carrier = carrier
             self.lbl_carrier.setText(carrier)
+            self.lbl_carrier.show()
+        else:
+            self.lbl_carrier.hide()
+
         if signal_bars >= 0:
             self._signal_bars = max(0, min(5, signal_bars))
             self.lbl_signal.setText(f"📶 {self._signal_bars}/5")
+            self.lbl_signal.show()
+        else:
+            self.lbl_signal.hide()
+
         if battery_pct >= 0:
             self._battery_pct = max(0, min(100, battery_pct))
             self.lbl_battery.setText(f"🔋 {self._battery_pct}%")
+            self.lbl_battery.show()
+        else:
+            self.lbl_battery.hide()
 
         self._is_connected = is_connected
         if is_connected:
@@ -239,6 +257,10 @@ class PhoneCardWidget(QFrame):
             """)
 
     def set_quick_contact(self, name: str, number: str):
-        self._quick_name = name
-        self._quick_number = number
-        self.lbl_quick_contact.setText(f"{name} ({number})")
+        if name or number:
+            self._quick_name = name or number
+            self._quick_number = number or name
+            self.lbl_quick_contact.setText(f"{self._quick_name} ({self._quick_number})")
+            self.quick_frame.show()
+        else:
+            self.quick_frame.hide()
