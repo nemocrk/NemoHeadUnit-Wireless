@@ -89,7 +89,7 @@ class BaseChannelModule(BaseBackendModule, ABC):
             proto_body=proto_body,
             control=control,
         )
-        await self.publish("aa.frame.send", frame_dict)
+        self.publish("aa.frame.send", frame_dict)
 
     @abstractmethod
     async def on_frame(self, message_id: int, encrypted: bool, payload: bytes) -> None:
