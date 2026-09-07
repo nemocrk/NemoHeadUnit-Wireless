@@ -1,10 +1,6 @@
 import pytest
 from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
 from protos.oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessage
-from protos.oaa.bluetooth.BluetoothChannelMessageIdsEnum_pb2 import BluetoothChannelMessage
-from protos.oaa.input.InputChannelMessageIdsEnum_pb2 import InputChannelMessage
-from protos.oaa.sensor.SensorChannelMessageIdsEnum_pb2 import SensorChannelMessage
-from protos.oaa.wifi.WifiChannelMessageIdsEnum_pb2 import WifiChannelMessage
 from protos.oaa.control.ChannelOpenRequestMessage_pb2 import ChannelOpenRequest
 from protos.oaa.control.PingRequestMessage_pb2 import PingRequest
 from protos.oaa.bluetooth.BluetoothPairingRequestMessage_pb2 import BluetoothPairingRequest
@@ -25,6 +21,10 @@ def test_message_id_to_proto_name():
     assert message_id_to_proto_name(ControlMessage.Enum.CHANNEL_OPEN_REQUEST) == "CHANNEL_OPEN_REQUEST"
     assert message_id_to_proto_name(AVChannelMessage.Enum.SETUP_REQUEST) == "SETUP_REQUEST"
     assert message_id_to_proto_name(999999) == "UnknownMessageId 999999"
+
+    # Explicit channel_id disambiguation when IDs overlap (e.g. ID 1 in Control vs AV)
+    assert message_id_to_proto_name(1, channel_id=0) == "VERSION_REQUEST"
+    assert message_id_to_proto_name(1, channel_id=3) == "AV_MEDIA_INDICATION"
 
 
 def test_proto_name_to_class():

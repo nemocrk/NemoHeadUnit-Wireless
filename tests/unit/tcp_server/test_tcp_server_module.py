@@ -229,3 +229,34 @@ async def test_tcp_server_module_teardown(mock_tcp_server_mod):
     assert mock_tcp_server_mod._server is None
     assert mock_tcp_server_mod._cryptor is None
     assert mock_tcp_server_mod._assembler is None
+
+
+def test_tcp_server_module_handshake_events(mock_tcp_server_mod):
+    mock_tcp_server_mod.on_frame_send = MagicMock()
+    mock_tcp_server_mod.publish = MagicMock()
+
+    with patch("modules.tcp_server.main.AACryptor") as mock_cryptor_cls:
+        mock_cryptor = MagicMock()
+        mock_cryptor_cls.return_value = mock_cryptor
+        mock_cryptor.drive_handshake.return_value = b"\x16\x03\x03client_hello"
+        mock_cryptor.is_active.return_value = False
+
+        # 1. Start TLS
+        mock_tcp_server_mod.on_handshake_start_tls("aa.handshake.start_tls", {})
+        mock_cryptor.init.assert_called_once()
+        mock_tcp_server_mod.on_frame_send.assert_called_once_with("aa.frame.send", {
+            "channel_id": 0,
+            "message_id": ControlMessage.Enum.SSL_HANDSHAKE,
+            "payload_hex": b"\x16\x03\x03client_hello".hex(),
+            "encrypted": False,
+        })
+
+        # 2. Feed input completing handshake
+        mock_cryptor.drive_handshake.return_value = b"\x16\x03\x03client_finished"
+        mock_cryptor.is_active.return_value = True
+
+        mock_tcp_server_mod.on_handshake_feed_input("aa.handshake.feed_input", {
+            "payload_hex": "01020304"
+        })
+        mock_cryptor.write_handshake_input.assert_called_once_with(b"\x01\x02\x03\x04")
+        mock_tcp_server_mod.publish.assert_called_with("tcp.server.tls_handshake_completed", {})

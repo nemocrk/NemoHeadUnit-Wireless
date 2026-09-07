@@ -12,7 +12,7 @@ The mapping is based on the channel descriptor keys defined in the protobufs, wh
 
 def message_id_to_proto_name(message_id: int, channel_id: int = None):
     """Map a message_id to the corresponding protobuf message class."""
-    if channel_id == 0 or (channel_id is None and message_id != 0 and message_id in ControlMessage.Enum.values()):
+    if channel_id == 0 or (channel_id is None and message_id != 0):
         if message_id in ControlMessage.Enum.values():
             return ControlMessage.Enum.Name(message_id)
     if message_id in AVChannelMessage.Enum.values():

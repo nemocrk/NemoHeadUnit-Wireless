@@ -32,7 +32,6 @@ from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
 from modules.tcp_server.aa_cryptor import AACryptor
 from modules.tcp_server.frame_codec import FrameAssembler, encode
 from modules.tcp_server.frame_relay import FrameRelay
-from modules.tcp_server.message_to_proto import frame_data_to_dict
 from modules.tcp_server.server import TCPServer
 from modules.tcp_server.messages_logging_levels import CHANNEL_MESSAGES_DEBUG_LEVELS
 
