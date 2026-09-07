@@ -10,8 +10,11 @@ This is where we define the mapping from channel descriptors (av_type, bluetooth
 The mapping is based on the channel descriptor keys defined in the protobufs, which are designed to be extensible for future channel types and use cases. The current mapping focuses on AV channels, which are the most complex and have the most variation across car models
 """
 
-def message_id_to_proto_name(message_id: int):
+def message_id_to_proto_name(message_id: int, channel_id: int = None):
     """Map a message_id to the corresponding protobuf message class."""
+    if channel_id == 0 or (channel_id is None and message_id != 0 and message_id in ControlMessage.Enum.values()):
+        if message_id in ControlMessage.Enum.values():
+            return ControlMessage.Enum.Name(message_id)
     if message_id in AVChannelMessage.Enum.values():
         return AVChannelMessage.Enum.Name(message_id)
     elif message_id in BluetoothChannelMessage.Enum.values():
@@ -291,7 +294,7 @@ def frame_data_to_dict(frame_data: dict) -> dict:
     message_name = None
     parsed_payload = None
     try:
-        message_name = message_id_to_proto_name(message_id)
+        message_name = message_id_to_proto_name(message_id, channel_id=channel_id)
         proto_class = proto_name_to_class(message_name)
         parsed_message = proto_class()
         if not isinstance(parsed_message, bytes):
