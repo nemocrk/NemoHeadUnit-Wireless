@@ -92,6 +92,7 @@ class ChannelManagerModule(BaseBackendModule):
         # Active video transport name — set by video_decoder module via video.transport_active
         self.active_video_transport: str = "h264"
         self._status_changed_evt = asyncio.Event()
+        self.on_config_updated(self.config)
 
     def set_channel_type_map(self, type_map: dict) -> None:
         """Store dynamic channel_id -> ChannelType mapping from SDR."""

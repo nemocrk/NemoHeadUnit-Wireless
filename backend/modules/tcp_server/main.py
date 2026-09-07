@@ -125,6 +125,7 @@ class TCPServerModule(BaseBackendModule):
 
     async def run(self) -> None:
         """Main module execution loop. Handles optional autostart mode."""
+        self._running = True
         if self.config.get("autostart", True):
             self.log.info("Autostart configured — initializing TCP server listener...")
             self.start_tcp_server()
@@ -168,8 +169,13 @@ class TCPServerModule(BaseBackendModule):
         self.log.info(f"🌐 [TCP Stage 4/5] READY & LISTENING on {server.host}:{server.port} — awaiting phone connection...")
         self.publish("tcp.server.started", {"host": server.host, "port": server.port})
 
-        result = server.accept()
+        result = None
+        while server._running and result is None:
+            result = server.accept(timeout=0.5)
+
         if result is None:
+            if not server._running:
+                return
             self.log.warning("⚠️ [TCP Server State] TCP accept timed out or returned None — shutting down server thread")
             self.publish("tcp.server.error", {"error": "No connection within timeout"})
             self._teardown_server()

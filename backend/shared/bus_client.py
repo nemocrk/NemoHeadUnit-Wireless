@@ -93,11 +93,14 @@ class BusClient:
 
     def stop(self) -> None:
         self._running = False
+        if self._sub_thread and self._sub_thread.is_alive() and threading.current_thread() != self._sub_thread:
+            self._sub_thread.join(timeout=0.5)
         try:
             self._pub.close(linger=0)
             self._sub.close(linger=0)
-            self._context.term()
         except Exception:
             pass
-        if self._sub_thread and self._sub_thread.is_alive() and threading.current_thread() != self._sub_thread:
-            self._sub_thread.join(timeout=0.5)
+        try:
+            self._context.destroy(linger=0)
+        except Exception:
+            pass

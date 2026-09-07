@@ -126,6 +126,7 @@ class BusBrokerModule(BaseBackendModule):
 
     async def teardown(self) -> None:
         """Close ZMQ proxy sockets cleanly."""
+        self._running = False
         self.xsub.close(linger=0)
         self.xpub.close(linger=0)
         if self.proxy_thread and self.proxy_thread.is_alive():
@@ -135,6 +136,7 @@ class BusBrokerModule(BaseBackendModule):
         except Exception:
             pass
         self.log.info("Bus Broker stopped.")
+        await super().teardown()
 
 
 if __name__ == "__main__":
