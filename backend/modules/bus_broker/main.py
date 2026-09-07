@@ -135,6 +135,10 @@ class BusBrokerModule(BaseBackendModule):
             self.bus_ctx.destroy(linger=0)
         except Exception:
             pass
+        try:
+            self.bus_ctx.term()
+        except Exception:
+            pass
         self.log.info("Bus Broker stopped.")
         await super().teardown()
 
