@@ -14,10 +14,15 @@ Features:
   7. Non-blocking Loguru logging.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 import asyncio
+import json
+import os
 import signal
 import sys
+import threading
 from typing import Any, Callable, Optional
 
 import aiohttp
@@ -26,6 +31,14 @@ from aiohttp import web
 from shared.logger import get_logger, add_log_listener, remove_log_listener
 from shared.bus_client import BusClient
 from shared.config_client import ConfigClient
+
+SHARED_MODULE_REGISTRY: dict[str, BaseBackendModule] = {}
+SHARED_REGISTRY_LOCK = threading.RLock()
+
+
+def is_multithreading_mode() -> bool:
+    mode = os.environ.get("NEMO_EXECUTION_MODE", os.environ.get("NEMO_MODE", "multiprocessing")).lower().strip()
+    return mode in ("multithreading", "threading", "thread", "threads")
 
 
 class BaseBackendModule(ABC):
@@ -53,6 +66,10 @@ class BaseBackendModule(ABC):
         self.port: int = 0
         self.target_url: str = ""
 
+        # In-memory route registries for zero-socket multithreading mode
+        self._inmemory_http_routes: dict[tuple[str, str], Callable] = {}
+        self._inmemory_ws_routes: dict[str, Callable] = {}
+
         # Automatically register standard module WebSocket log stream & client log REST routes
         self.add_ws_route("/logs", self._handle_ws_logs)
         self.add_ws_route("/api/logs", self._handle_ws_logs)
@@ -78,7 +95,7 @@ class BaseBackendModule(ABC):
         pass
 
     def add_http_route(self, method: str, path: str, handler: Callable) -> None:
-        """Helper to register HTTP endpoint on internal aiohttp web server."""
+        """Helper to register HTTP endpoint on internal aiohttp web server or in-memory route map."""
         raw_path = path if path.startswith("/") else f"/{path}"
         full_path = raw_path
         rel_path = raw_path
@@ -91,16 +108,22 @@ class BaseBackendModule(ABC):
                 if not rel_path.startswith("/"):
                     rel_path = f"/{rel_path}"
 
-        self.web_app.router.add_route(method.upper(), full_path, handler)
+        m = method.upper()
+        self._inmemory_http_routes[(m, full_path)] = handler
+        self._inmemory_http_routes[(m, raw_path)] = handler
+        if rel_path != full_path and rel_path:
+            self._inmemory_http_routes[(m, rel_path)] = handler
+
+        self.web_app.router.add_route(m, full_path, handler)
         if rel_path != full_path and rel_path:
             try:
-                self.web_app.router.add_route(method.upper(), rel_path, handler)
+                self.web_app.router.add_route(m, rel_path, handler)
             except Exception:
                 pass
-        self.log.info(f"Registered HTTP route: [{method.upper()}] {full_path} (alt: {rel_path})")
+        self.log.info(f"Registered HTTP route: [{m}] {full_path} (alt: {rel_path})")
 
     def add_ws_route(self, path: str, handler: Callable) -> None:
-        """Helper to register WebSocket endpoint on internal aiohttp web server."""
+        """Helper to register WebSocket endpoint on internal aiohttp web server or in-memory route map."""
         raw_path = path if path.startswith("/") else f"/{path}"
         full_path = raw_path
         rel_path = raw_path
@@ -112,6 +135,11 @@ class BaseBackendModule(ABC):
                 rel_path = raw_path[len(self.path_prefix):]
                 if not rel_path.startswith("/"):
                     rel_path = f"/{rel_path}"
+
+        self._inmemory_ws_routes[full_path] = handler
+        self._inmemory_ws_routes[raw_path] = handler
+        if rel_path != full_path and rel_path:
+            self._inmemory_ws_routes[rel_path] = handler
 
         self.web_app.router.add_get(full_path, handler)
         if rel_path != full_path and rel_path:
@@ -253,8 +281,16 @@ class BaseBackendModule(ABC):
     ) -> dict[str, Any]:
         """
         Inter-Module RPC: Calls internal HTTP endpoint of another active backend module.
-        Uses system heartbeat registry to resolve dynamic loopback target URLs.
+        Uses system heartbeat registry to resolve dynamic loopback target URLs,
+        or direct in-memory coroutine dispatch in multithreading mode.
         """
+        if is_multithreading_mode() or (self.module_registry.get(target_module, {}).get("target_url", "").startswith("inmemory://")):
+            with SHARED_REGISTRY_LOCK:
+                target_inst = SHARED_MODULE_REGISTRY.get(target_module)
+            if not target_inst:
+                raise RuntimeError(f"Target module '{target_module}' is not currently available in system registry")
+            return await self._dispatch_inmemory_rpc(target_inst, method, path, data)
+
         mod_info = self.module_registry.get(target_module)
         if not mod_info or not mod_info.get("target_url"):
             raise RuntimeError(f"Target module '{target_module}' is not currently available in system registry")
@@ -276,6 +312,49 @@ class BaseBackendModule(ABC):
         except Exception as e:
             self.log.error(f"Error calling target module '{target_module}' at {target_full}: {e}")
             raise
+
+    async def _dispatch_inmemory_rpc(
+        self,
+        target_inst: BaseBackendModule,
+        method: str,
+        path: str,
+        data: Optional[dict] = None,
+    ) -> dict[str, Any]:
+        raw_path = path if path.startswith("/") else f"/{path}"
+        prefix = target_inst.path_prefix or ""
+        full_path = raw_path if raw_path.startswith(prefix) else f"{prefix.rstrip('/')}/{raw_path.lstrip('/')}"
+        rel_path = raw_path[len(prefix):] if prefix and raw_path.startswith(prefix) else raw_path
+        if not rel_path.startswith("/"):
+            rel_path = f"/{rel_path}"
+
+        m = method.upper()
+        handler = (
+            target_inst._inmemory_http_routes.get((m, full_path))
+            or target_inst._inmemory_http_routes.get((m, rel_path))
+            or target_inst._inmemory_http_routes.get((m, raw_path))
+        )
+
+        if not handler:
+            raise RuntimeError(f"Route [{m}] '{path}' not found in target module '{target_inst.name}'")
+
+        from unittest.mock import AsyncMock, MagicMock
+        req = MagicMock(spec=web.Request)
+        req.method = m
+        req.path = full_path
+        req.match_info = {}
+        req.query = {}
+        req.headers = {"Content-Type": "application/json"}
+        req.json = AsyncMock(return_value=data if data is not None else {})
+        req.app = target_inst.web_app
+
+        resp = await handler(req)
+        if isinstance(resp, web.Response):
+            if resp.body is not None:
+                return json.loads(resp.body.decode("utf-8"))
+            return {}
+        elif isinstance(resp, dict):
+            return resp
+        return {}
 
     @abstractmethod
     async def setup(self) -> None:
@@ -304,6 +383,14 @@ class BaseBackendModule(ABC):
     async def _start_web_server(self) -> None:
         """Starts internal aiohttp server on ephemeral loopback port and advertises route to proxy."""
         if not self.path_prefix:
+            return
+
+        if is_multithreading_mode():
+            self.port = 0
+            self.site = None
+            self.runner = None
+            self.target_url = f"inmemory://{self.name}"
+            self.log.info(f"In-memory route active: {self.target_url} (Route Prefix: '{self.path_prefix}')")
             return
 
         self.runner = web.AppRunner(self.web_app)
@@ -363,7 +450,8 @@ class BaseBackendModule(ABC):
         self.subscribe("system.start", _on_start)
         self.subscribe("system.stop", _on_stop)
 
-        await asyncio.sleep(0.5)
+        if not is_multithreading_mode():
+            await asyncio.sleep(0.5)
 
         if self.name == "bus_broker":
             self._running = True
@@ -391,6 +479,9 @@ class BaseBackendModule(ABC):
         # 4. Start internal web server
         await self._start_web_server()
 
+        with SHARED_REGISTRY_LOCK:
+            SHARED_MODULE_REGISTRY[self.name] = self
+
         self._announce_readiness("ready")
 
         try:
@@ -400,9 +491,16 @@ class BaseBackendModule(ABC):
         finally:
             await self._cleanup()
 
+    async def stop(self) -> None:
+        """Gracefully stop module execution and clean up resources."""
+        self._running = False
+        await self._cleanup()
+
     async def _cleanup(self) -> None:
         self.log.info(f"Teardown module '{self.name}'...")
         self._running = False
+        with SHARED_REGISTRY_LOCK:
+            SHARED_MODULE_REGISTRY.pop(self.name, None)
         try:
             await self.teardown()
         except Exception as e:
