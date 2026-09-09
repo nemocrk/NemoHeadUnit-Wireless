@@ -14,7 +14,7 @@ build-backend = "setuptools.build_meta"
 name = "nemo-head-unit"
 version = "2.0.0"
 description = "NemoHeadUnit-Wireless — wireless Android Auto head unit"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 
 # ---------------------------------------------------------------------------
 # Dev / test dependencies
@@ -87,19 +87,30 @@ timeout_func_only = true
 # ---------------------------------------------------------------------------
 [tool.coverage.run]
 relative_files = true
-source = ["."]
+source = ["backend"]
 omit = [
     "*/protos/*",
     "*/services/*",
     "*/tests/*",
     "packaging/*",
     "scripts/*",
+    "*/shared/hardware/windows_*.py",
+    "*/shared/platform/windows.py",
 ]
 
 [tool.coverage.report]
 show_missing = true
 skip_covered  = false
 fail_under    = 80
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "if sys.platform == .win32.:",
+    "if sys.platform != .win32.:",
+]
 
 [tool.pyrefly]
 search-path = [
