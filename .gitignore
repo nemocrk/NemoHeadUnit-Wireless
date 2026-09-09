@@ -215,3 +215,6 @@ tests/reports/
 
 config/
 graphify-out/
+coverage.json
+scratch/
+scratch_*.py

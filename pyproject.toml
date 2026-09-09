@@ -114,6 +114,29 @@ exclude_lines = [
 
 [tool.pyrefly]
 search-path = [
-  "web-browser-head-unit",
-  "web-browser-head-unit/backend"
+  ".",
+  "backend"
 ]
+
+# ---------------------------------------------------------------------------
+# ruff linter & formatter
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+exclude = [
+    ".git",
+    ".pytest_cache",
+    "protos",
+    "third_party",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
