@@ -438,6 +438,10 @@ class BaseBackendModule(ABC):
         # 1. Subscribe to system lifecycle and heartbeat topics immediately on bus start
         self.subscribe("system.heartbeat", self._handle_heartbeat)
 
+        def _on_readytostart(topic, payload):
+            if not self._running:
+                self._announce_readiness("ready_to_start")
+
         def _on_start(topic, payload):
             if payload.get("priority") == self.priority:
                 self.log.info(f"Received system.start for priority {self.priority}")
@@ -447,6 +451,7 @@ class BaseBackendModule(ABC):
             self.log.info("Received system.stop — triggering teardown...")
             self._running = False
 
+        self.subscribe("system.readytostart", _on_readytostart)
         self.subscribe("system.start", _on_start)
         self.subscribe("system.stop", _on_stop)
 

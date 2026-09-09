@@ -25,21 +25,18 @@ This document provides a exhaustive file-by-file breakdown of the **NemoHeadUnit
 
 ## 2. Shared Core Infrastructure (`shared/`)
 
-### [`shared/bus_client.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/bus_client.py)
-* **Role**: ZeroMQ bus client wrapper and P2P high-throughput IPC engine.
+### [`shared/bus_client.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/bus_client.py) & [`shared/bus_inmemory.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/bus_inmemory.py)
+* **Role**: Universal Event Bus Facade supporting ZeroMQ and In-Memory modes.
 * **How it works**:
-  - Wraps ZMQ `PUB` and `SUB` sockets with configurable High Water Marks (`BUS_HWM=5000`).
-  - Implements separate P2P ZMQ IPC sockets (`ipc:///tmp/nemo_ui_frames.ipc` and `ipc:///tmp/nemo_logs.ipc`) to bypass the main bus for high-bandwidth video frame compositing and live log streams.
-  - Automatically injects telemetry metadata (`_trace`) into JSON payloads on publish and strips it before passing to handlers.
-  - Measures subscriber receive latency, detects packet drops, monitors callback execution duration, and flags sequence gaps or duplicate frames.
+  - `BusClient` acts as a unified facade that transparently instantiates `ZmqBusClient` in multiprocessing mode and `InMemoryBusClient` in multithreading mode.
+  - `bus_inmemory.py` implements thread-safe `InMemoryBusHub` using lock-protected topic queues with prefix matching and copy-on-dispatch, completely eliminating ZMQ sockets and ports in multithreading mode.
 
-### [`shared/shm_helper.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/shm_helper.py)
-* **Role**: POSIX Shared Memory double-buffering engine for offscreen UI rendering.
+### [`shared/media_shm.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/media_shm.py)
+* **Role**: High-throughput video and audio Shared Memory ring buffer engine.
 * **How it works**:
-  - Implements `DoubleSharedBuffer` allocating fixed-size POSIX shared memory segments (`nemo_shm_{name}_buf_0`, `nemo_shm_{name}_buf_1`).
-  - Uses raw `ctypes` pointers wrapped in PyQt `QImage` objects for true zero-copy UI compositing without buffer reallocation on window resize.
-  - Employs lockless swap flags (`swap_buffer` $\leftrightarrow$ `swap_ack`) for frame synchronization.
-  - Monkey-patches Python's `multiprocessing.resource_tracker` to prevent premature unlinking of shared memory segments when subprocesses terminate.
+  - Encapsulates circular media ring buffers with lockless atomic write/read indices and slot headers.
+  - In multiprocessing mode, allocates OS POSIX `/dev/shm` shared memory segments.
+  - In multithreading mode, allocates named in-memory `bytearray` buffers (`InMemoryRingBuffer`) protected by `RLock`, avoiding OS filesystem overhead.
 
 ### [`shared/logger.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/logger.py) & [`shared/bus_trace.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/bus_trace.py)
 * **Role**: Centralized logging and distributed performance tracing framework.

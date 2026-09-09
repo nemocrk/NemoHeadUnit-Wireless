@@ -46,16 +46,35 @@ Priority 1: config_manager
 Priority 2: proxy
        │
        ▼
-Priority 3+: tcp_server, connectivity_manager
+Priority 3+: tcp_server, connectivity_manager, channel_manager
+       │
+       ▼
+Priority 4: media_server
+       │
+       ▼
+Priority 5: qt6_gui, diagnostic
 ```
 
 * **Priority 0 (`bus_broker`)**: Autonomous IPC message router operating on local defaults without external configuration dependencies. Manages heartbeat registry (`system.heartbeat`).
 * **Priority 1 (`config_manager`)**: Central configuration engine storing YAML settings in OS AppData, validating strongly-typed module schemas, and exposing `/api/config`.
-* **Priority 2 (`proxy`)**: Gateway Proxy webserver binding to the primary public port (`8000`) and dynamically routing `/api/<module_prefix>` to internal loopback microservices.
+* **Priority 2 (`proxy`)**: Gateway Proxy webserver binding to the primary public port (`8000`) and dynamically routing `/api/<module_prefix>` to internal microservices.
 * **Priority 3+ (`tcp_server`, `connectivity_manager`, `channel_manager`, `media_server`)**: Functional domain microservices exposing hardware controls, sockets, channel logic, and media transports.
-* **Priority 5 (`qt6_gui`)**: Native Qt6 Frontend Module using Shared Memory (SHM) video/audio rendering and 16kHz microphone capture. On Linux with VAAPI (e.g. Intel Bay Trail), video utilizes zero-CPU GStreamer hardware decode and direct EGL texture rendering (`GlImageSinkDecoder`) via `QOpenGLWidget`, with seamless automatic fallback to RGBA blitting (`GStreamerHwDecoder`) or software decoding (`PyAV`).
+* **Priority 5 (`qt6_gui`, `diagnostic`)**: Native Qt6 Frontend Module using Shared Memory (SHM) video/audio rendering and diagnostic suites.
 
 ---
+
+## Intra-Module Communication Abstraction & Execution Modes
+
+NemoHeadUnit-Wireless provides a unified abstraction layer for intra-module communication across ZeroMQ Pub/Sub, loopback REST, dynamic RPC, WebSockets, SSE, and SHM, selectable via `--mode` or `NEMO_EXECUTION_MODE`:
+
+| Feature | Multiprocessing (`--mode multiprocessing`) | Multithreading (`--mode multithreading`) |
+| :--- | :--- | :--- |
+| **Isolation** | Process-isolated (`subprocess.Popen`) | Thread-isolated (`threading.Thread`) |
+| **Event Bus** | ZeroMQ XPUB/XSUB broker daemon | In-memory pub/sub hub (`InMemoryBusHub`), 0 ZMQ sockets |
+| **Public Gateway** | `proxy` listening on port `8000` | `proxy` listening on port `8000` (single public server) |
+| **Module Webservers** | Ephemeral loopback sockets (`127.0.0.1:0`) | Zero loopback sockets (`inmemory://{name}` direct dispatch) |
+| **Inter-Module RPC** | HTTP `call_module()` via loopback | Direct in-memory coroutine dispatch (`_dispatch_inmemory_rpc`) |
+| **Shared Memory (SHM)** | OS POSIX `/dev/shm` shared memory | Thread-safe in-memory `bytearray` ring buffers |
 
 ## Directory Structure
 
