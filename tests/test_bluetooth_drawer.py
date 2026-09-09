@@ -120,13 +120,13 @@ class TestBluetoothDrawer(unittest.TestCase):
             class FakeStream:
                 def __iter__(self):
                     yield b'data: {"discovering": true}\n'
+                    stream_thread.stop()
                 def __enter__(self):
                     return self
                 def __exit__(self, *args):
                     pass
 
             def fake_urlopen(req, timeout=None):
-                stream_thread.stop()
                 return FakeStream()
 
             mock_urlopen.side_effect = fake_urlopen

@@ -368,6 +368,7 @@ def run(argv: list[str] | None = None):
         nonlocal shutdown_requested, shutdown_reason
         shutdown_reason = f"signal_{signum}"
         shutdown_requested = True
+        raise KeyboardInterrupt
 
     try:
         signal.signal(signal.SIGINT, _signal_handler)

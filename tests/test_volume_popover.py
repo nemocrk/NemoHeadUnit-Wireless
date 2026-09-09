@@ -29,13 +29,13 @@ class TestVolumePopover(unittest.TestCase):
             class FakeStream:
                 def __iter__(self):
                     yield b'data: {"volume": 65, "muted": false}\n'
+                    thread.stop()
                 def __enter__(self):
                     return self
                 def __exit__(self, *args):
                     pass
 
             def fake_urlopen(req, timeout=None):
-                thread.stop()
                 return FakeStream()
 
             mock_urlopen.side_effect = fake_urlopen
