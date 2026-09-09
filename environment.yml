@@ -1,8 +1,14 @@
 # NemoHeadUnit-Wireless — Micromamba Environment Specification
 #
+# Cross-platform (Linux + Windows) unified environment file.
+#
 # Create:   micromamba create -f environment.yml
 # Activate: micromamba activate NemoHeadUnit-Wireless
 # Update:   micromamba update -f environment.yml --prune
+#
+# OS-specific pip packages use PEP 508 markers:
+#   ; sys_platform == 'linux'
+#   ; sys_platform == 'win32'
 
 name: NemoHeadUnit-Wireless
 
@@ -11,34 +17,56 @@ channels:
   - nodefaults
 
 dependencies:
+  # ── Core runtime ──────────────────────────────────────────────
   - python=3.13
   - pyzmq>=26.0
   - msgpack-python>=1.0
   - aiohttp>=3.9.0
   - websockets>=12.0
-  - dbus-python
-  - pygobject
-  - gstreamer>=1.22
-  - gst-plugins-base>=1.22
-  - gst-plugins-good>=1.22
-  - gst-plugins-bad>=1.22
-  - gst-plugins-ugly>=1.22
-  - gst-libav>=1.22
   - pyyaml>=6.0
-  - ffmpeg # HW-accelerated video transcode for mjpeg-ffmpeg transport
-  - pyopengl
   - numpy
+  - ffmpeg          # HW-accelerated video transcode for mjpeg-ffmpeg transport
   - pip
 
+  # ── Linux-only: DBus / GObject / GStreamer ────────────────────
+  - dbus-python      # [linux]
+  - pygobject        # [linux]
+  - gstreamer>=1.22  # [linux]
+  - gst-plugins-base>=1.22  # [linux]
+  - gst-plugins-good>=1.22  # [linux]
+  - gst-plugins-bad>=1.22   # [linux]
+  - gst-plugins-ugly>=1.22  # [linux]
+  - gst-libav>=1.22         # [linux]
+  - pyopengl         # [linux]   (conda build; Windows gets it via pip below)
+
   - pip:
-      - PyQt6>=6.6.0
-      - PySide6>=6.6.0
-      - shiboken6>=6.6.0
+      # ── Shared pip dependencies ──────────────────────────────
       - loguru>=0.7.3
       - protobuf>=4.25
       - grpcio-tools>=1.62
+      - PyQt6>=6.6.0
+      - PySide6>=6.6.0; sys_platform == 'linux'
+      - shiboken6>=6.6.0; sys_platform == 'linux'
       - qasync>=0.27.1
       - av>=10.0.0
 
+      # ── Windows-only pip dependencies ────────────────────────
+      - PyOpenGL; sys_platform == 'win32'
+      - comtypes; sys_platform == 'win32'
+      - pycaw; sys_platform == 'win32'
 
-
+      # WinRT bindings (Windows 10+ Bluetooth / Networking APIs)
+      - winrt-runtime>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Networking>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Networking.Connectivity>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Networking.NetworkOperators>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Networking.Sockets>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Foundation>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Foundation.Collections>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Devices.Enumeration>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Devices.Radios>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Devices.Bluetooth>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Devices.Bluetooth.Rfcomm>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Devices.Bluetooth.Advertisement>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Security.Cryptography>=3.2.1; sys_platform == 'win32'
+      - winrt-Windows.Storage.Streams>=3.2.1; sys_platform == 'win32'
