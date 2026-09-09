@@ -1,0 +1,58 @@
+# NemoHeadUnit-Wireless — Micromamba Environment Specification (Windows)
+#
+# NOTE: conda environment.yml does NOT support platform selectors.
+#       Use environment.yml for Linux, environment.windows.yml for Windows.
+#
+# Create:   micromamba create -f environment.windows.yml
+# Activate: micromamba activate NemoHeadUnit-Wireless
+# Update:   micromamba update -f environment.windows.yml --prune
+
+name: NemoHeadUnit-Wireless
+
+channels:
+  - conda-forge
+  - nodefaults
+
+dependencies:
+  # ── Core runtime ──────────────────────────────────────────────
+  - python=3.13
+  - pyzmq>=26.0
+  - msgpack-python>=1.0
+  - aiohttp>=3.9.0
+  - websockets>=12.0
+  - pyyaml>=6.0
+  - numpy
+  - ffmpeg          # HW-accelerated video transcode for mjpeg-ffmpeg transport
+  - pip
+
+  # ── Windows: Qt6 via conda-forge (ships bundled Qt6 DLLs) ─────
+  - pyqt6>=6.6.0
+
+  - pip:
+      - loguru>=0.7.3
+      - protobuf>=4.25
+      - grpcio-tools>=1.62
+      - PyQt6>=6.6.0
+      - qasync>=0.27.1
+      - av>=10.0.0
+      - PyOpenGL
+
+      # Windows audio / system APIs
+      - comtypes
+      - pycaw
+
+      # WinRT bindings (Windows 10+ Bluetooth / Networking APIs)
+      - winrt-runtime>=3.2.1
+      - winrt-Windows.Networking>=3.2.1
+      - winrt-Windows.Networking.Connectivity>=3.2.1
+      - winrt-Windows.Networking.NetworkOperators>=3.2.1
+      - winrt-Windows.Networking.Sockets>=3.2.1
+      - winrt-Windows.Foundation>=3.2.1
+      - winrt-Windows.Foundation.Collections>=3.2.1
+      - winrt-Windows.Devices.Enumeration>=3.2.1
+      - winrt-Windows.Devices.Radios>=3.2.1
+      - winrt-Windows.Devices.Bluetooth>=3.2.1
+      - winrt-Windows.Devices.Bluetooth.Rfcomm>=3.2.1
+      - winrt-Windows.Devices.Bluetooth.Advertisement>=3.2.1
+      - winrt-Windows.Security.Cryptography>=3.2.1
+      - winrt-Windows.Storage.Streams>=3.2.1
