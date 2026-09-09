@@ -15,7 +15,38 @@ import threading
 import time
 import wave
 from typing import Callable, Dict, Optional
-from PyQt6.QtCore import Qt, QByteArray, QIODevice, QObject, QTimer, pyqtSignal, pyqtSlot, QThread
+try:
+    from PyQt6.QtCore import Qt, QByteArray, QIODevice, QObject, QTimer, pyqtSignal, pyqtSlot, QThread
+    _HAS_QT_CORE = True
+except ImportError as _e:
+    import sys as _sys
+    import logging as _logging
+    _level = "warning" if _sys.platform == "linux" else "debug"
+    getattr(_logging.getLogger("qt6_gui.audio_handler"), _level)(
+        "PyQt6.QtCore unavailable (DLL load failure or missing install): %s — audio engine disabled.", _e
+    )
+    _HAS_QT_CORE = False
+
+    # Subclassable stubs so class bodies don't crash at definition time
+    class _QtStub:
+        def __init__(self, *a, **kw): pass
+        def __init_subclass__(cls, **kw): super().__init_subclass__(**kw)
+
+    class _SignalStub:
+        def __call__(self, *a, **kw): return self
+        def connect(self, *a, **kw): pass
+        def emit(self, *a, **kw): pass
+        def disconnect(self, *a, **kw): pass
+
+    Qt = type("Qt", (), {})()
+    QByteArray = _QtStub
+    QIODevice = _QtStub
+    QObject = _QtStub
+    QTimer = _QtStub
+    QThread = _QtStub
+    def pyqtSignal(*a, **kw): return _SignalStub()
+    def pyqtSlot(*a, **kw): return lambda f: f
+
 from shared.logger import get_logger
 
 
