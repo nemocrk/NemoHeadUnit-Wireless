@@ -268,8 +268,10 @@ class MainWindow(QMainWindow):
             if self.isFullScreen():
                 self.setWindowFlags(Qt.WindowType.Window)
                 self.showNormal()
-            elif not self.isVisible():
+            else:
                 self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _toggle_fullscreen(self):
         self.set_fullscreen(not self.isFullScreen())

@@ -9,14 +9,19 @@ and inter-stream jitter distortion.
 import logging
 import os
 import shutil
-import subprocess
+import sys
 import tempfile
 import threading
 import time
 import wave
 from typing import Callable, Dict, Optional
+
 try:
-    from PyQt6.QtCore import Qt, QByteArray, QIODevice, QObject, QTimer, pyqtSignal, pyqtSlot, QThread
+    from PyQt6.QtCore import Qt, QByteArray, QIODevice, QObject, QTimer, pyqtSignal, pyqtSlot, QThread, QCoreApplication
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except ImportError:
+        QApplication = None
     _HAS_QT_CORE = True
 except ImportError as _e:
     import sys as _sys
@@ -44,6 +49,8 @@ except ImportError as _e:
     QObject = _QtStub
     QTimer = _QtStub
     QThread = _QtStub
+    QCoreApplication = type("QCoreApplication", (), {"instance": lambda: None})
+    QApplication = None
     def pyqtSignal(*a, **kw): return _SignalStub()
     def pyqtSlot(*a, **kw): return lambda f: f
 
@@ -217,7 +224,7 @@ class DynamicChannelAudioSink(QObject):
     """
     Dedicated audio playback pipeline for an individual audio channel.
     Uses PyQt6 QAudioSink in native Push Mode with event-driven buffer pumping
-    (via 10ms QTimer and QIODevice.bytesWritten) and thread-safe jitter pre-buffering.
+    (via 10ms QTimer and thread-safe jitter pre-buffering).
     """
 
     _start_signal = pyqtSignal()
@@ -238,17 +245,22 @@ class DynamicChannelAudioSink(QObject):
 
         self.audio_sink: Optional[QAudioSink] = None
         self.audio_io: Optional[QIODevice] = None
+        self._output_device = None
         self._is_started: bool = False
+        self._is_starting: bool = False
+        self._pump_timer: Optional[QTimer] = None
 
-        # Active pump timer on Qt main thread to guarantee continuous buffer draining
-        self._pump_timer = QTimer(self)
-        self._pump_timer.setInterval(10)
-        self._pump_timer.timeout.connect(self._flush_to_sink)
+        app = (QApplication.instance() if QApplication else None) or QCoreApplication.instance()
+        if app and hasattr(app, "thread"):
+            app_thread = app.thread()
+            if app_thread and self.thread() != app_thread:
+                self.moveToThread(app_thread)
 
         # Thread-safe jitter buffer state
         self._app_buffer = bytearray()
         self._app_lock = threading.Lock()
         self._is_buffering: bool = True
+        self._is_flushing: bool = False
         self._underrun_count: int = 0
         self._is_paused: bool = False
         self._is_stopped: bool = True
@@ -344,23 +356,15 @@ class DynamicChannelAudioSink(QObject):
             fmt.setChannelCount(channel_count)
             fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
 
-            output_device = find_audio_output_device(self.target_device)
-            self.audio_sink = QAudioSink(output_device, fmt, self)
+            self._output_device = find_audio_output_device(self.target_device)
+            dev_desc = self._output_device.description() if self._output_device else "Default"
+            self.audio_sink = QAudioSink(self._output_device, fmt, self)
             self.audio_sink.setVolume(1.0)
-            bps = max(1, sample_rate * channel_count * 2)
-            self.audio_sink.setBufferSize(max(48000, int(bps * 0.25)))
 
-            def _on_state_changed(state):
-                err = self.audio_sink.error() if self.audio_sink else None
-                logger.info(f"🔊 [Audio Ch{self.channel_id}] QAudioSink state: {state} (error={err})")
-                if self.audio_sink and err is not None:
-                    no_err = getattr(QAudio.Error, "NoError", 0) if QAudio else 0
-                    if err != no_err:
-                        self._handle_sink_error(err)
-
-            self.audio_sink.stateChanged.connect(_on_state_changed)
-
-            dev_desc = output_device.description() if output_device else "Default"
+            try:
+                self.audio_sink.stateChanged.connect(self._on_sink_state_changed, Qt.ConnectionType.QueuedConnection)
+            except Exception as exc:
+                logger.debug(f"Audio Channel {self.channel_id} stateChanged connect warning: {exc}")
             logger.info(f"🔊 Audio Channel {self.channel_id}: QAudioSink Push-Mode configured for '{dev_desc}' ({sample_rate}Hz, {channel_count}ch, Int16, buf={self.audio_sink.bufferSize()}B)")
         except Exception as exc:
             logger.warning(f"Failed to configure QAudioSink for channel {self.channel_id}: {exc}")
@@ -392,64 +396,82 @@ class DynamicChannelAudioSink(QObject):
     @pyqtSlot()
     def _flush_to_sink(self):
         """Push available buffered audio directly into QAudioSink io device on Qt main thread."""
-        if self._is_buffering or not self.audio_io or not self.audio_sink:
+        if self._is_flushing or self._is_buffering or not self.audio_io or not self.audio_sink or not self._is_started:
             return
 
-        bytes_free = self.audio_sink.bytesFree()
-        if bytes_free <= 0:
-            return
+        self._is_flushing = True
+        try:
+            frame_size = max(1, self.channel_count * 2)
+            MAX_CHUNK = 4096
 
-        chunk = None
-        frame_size = max(1, self.channel_count * 2)
+            while True:
+                bytes_free = self.audio_sink.bytesFree()
+                if bytes_free < frame_size:
+                    break
 
-        with self._app_lock:
-            avail = len(self._app_buffer)
-            if avail <= 0:
-                if self.audio_sink and self.audio_sink.bytesFree() >= self.audio_sink.bufferSize():
-                    self._is_buffering = True
-                    # Only increment underruns if actively streaming and frames were expected
-                    if not self._is_paused and not self._is_stopped and (time.time() - self.last_frame_time <= 0.5):
-                        self._underrun_count += 1
-                return
+                chunk = None
+                with self._app_lock:
+                    avail = len(self._app_buffer)
+                    if avail < frame_size:
+                        if self.audio_sink and self.audio_sink.bytesFree() >= self.audio_sink.bufferSize():
+                            self._is_buffering = True
+                            if not self._is_paused and not self._is_stopped and (time.time() - self.last_frame_time <= 0.5):
+                                self._underrun_count += 1
+                        break
 
-            to_write = min(bytes_free, avail)
-            to_write = (to_write // frame_size) * frame_size
-            if to_write <= 0:
-                return
+                    to_write = min(bytes_free, avail, MAX_CHUNK)
+                    to_write = (to_write // frame_size) * frame_size
+                    if to_write <= 0:
+                        break
 
-            # Slice without removing yet; unconsumed bytes must stay aligned
-            chunk = bytes(self._app_buffer[:to_write])
+                    chunk = bytes(self._app_buffer[:to_write])
 
-        if chunk:
-            try:
-                written = self.audio_io.write(chunk)
-                if written > 0:
-                    # Drop only fully-written sample-aligned frames
-                    consumed = (written // frame_size) * frame_size
-                    if consumed > 0:
-                        with self._app_lock:
-                            del self._app_buffer[:consumed]
-                        self.total_bytes_out += consumed
-            except Exception as exc:
-                logger.debug(f"Audio Channel {self.channel_id} flush error: {exc}")
+                if not chunk:
+                    break
+
+                try:
+                    written = self.audio_io.write(chunk)
+                    if written > 0:
+                        consumed = (written // frame_size) * frame_size
+                        if consumed > 0:
+                            with self._app_lock:
+                                del self._app_buffer[:consumed]
+                            self.total_bytes_out += consumed
+                        if written < len(chunk):
+                            break
+                    else:
+                        break
+                except Exception as exc:
+                    logger.debug(f"Audio Channel {self.channel_id} flush error: {exc}")
+                    break
+        finally:
+            self._is_flushing = False
 
     @pyqtSlot()
     def _do_start(self):
         """Executed strictly on Main Qt Thread to start QAudioSink in Push Mode."""
-        if self.audio_sink is None or not self._is_started:
-            self._init_playback(self.sample_rate, self.channel_count)
-            if self.audio_sink:
-                self.audio_io = self.audio_sink.start()
-                if self.audio_io:
-                    self.audio_io.bytesWritten.connect(lambda n: self._flush_to_sink())
-                self._is_started = True
-                self._pump_timer.start()
-                logger.info(f"🔊 [Audio Ch{self.channel_id}] Stream ACTIVE — QAudioSink started in Push Mode on '{self.target_device}' ({self.sample_rate}Hz, {self.channel_count}ch)")
-                self._flush_to_sink()
+        self._is_starting = False
+        if self._is_started and self.audio_sink is not None:
+            return
+        self._init_playback(self.sample_rate, self.channel_count)
+        if self.audio_sink:
+            self.audio_io = self.audio_sink.start()
+            if self.audio_io is None:
+                logger.error(f"❌ [Audio Ch{self.channel_id}] QAudioSink.start() returned None!")
+                return
+            self._is_started = True
+            if self._pump_timer is None:
+                self._pump_timer = QTimer(self)
+                self._pump_timer.setInterval(10)
+                self._pump_timer.timeout.connect(self._flush_to_sink)
+            self._pump_timer.start()
+            logger.info(f"🔊 [Audio Ch{self.channel_id}] Stream ACTIVE — QAudioSink started in Push Mode on '{self.target_device}' ({self.sample_rate}Hz, {self.channel_count}ch)")
+            self._flush_to_sink()
 
     def _ensure_started(self):
         """Lazily activate hardware audio sink in Push Mode via thread-safe QueuedConnection signal."""
-        if not self._is_started:
+        if not self._is_started and not self._is_starting:
+            self._is_starting = True
             self._start_signal.emit()
 
     def push_frame(self, audio_bytes: bytes, ts_us: int = 0):
@@ -556,10 +578,12 @@ class DynamicChannelAudioSink(QObject):
                 del self._app_buffer[:dropped]
 
             should_start = False
+            first_start = False
             if self._is_buffering:
                 if len(self._app_buffer) >= prebuffer_bytes:
                     self._is_buffering = False
                     should_start = True
+                    first_start = True
                     logger.info(
                         f"🔊 [Audio Ch{self.channel_id}] Prebuffer FILLED ({len(self._app_buffer)}B / {self.PREBUFFER_MS}ms) "
                         f"— starting push playback"
@@ -569,13 +593,20 @@ class DynamicChannelAudioSink(QObject):
 
         if should_start:
             self._ensure_started()
-            self._push_signal.emit()
+            if not self._is_buffering:
+                self._push_signal.emit()
 
     @pyqtSlot()
     def _do_stop(self):
         """Executed strictly on Main Qt Thread to stop QAudioSink safely."""
-        self._pump_timer.stop()
+        self._is_starting = False
+        if self._pump_timer is not None:
+            self._pump_timer.stop()
         if self.audio_sink:
+            try:
+                self.audio_sink.stateChanged.disconnect()
+            except Exception:
+                pass
             try:
                 self.audio_sink.stop()
             except Exception:
@@ -590,6 +621,19 @@ class DynamicChannelAudioSink(QObject):
     def _close_sink(self):
         """Safely terminate QAudioSink via QueuedConnection."""
         self._stop_signal.emit()
+
+    def _on_sink_state_changed(self, state):
+        """Callback for QAudioSink state changes."""
+        if not self.audio_sink:
+            return
+        try:
+            err = self.audio_sink.error()
+            logger.info(f"🔊 [Audio Ch{self.channel_id}] QAudioSink state: {state} (error={err})")
+            no_err = getattr(QAudio.Error, "NoError", 0) if QAudio else 0
+            if err is not None and err != no_err:
+                self._handle_sink_error(err)
+        except Exception:
+            pass
 
     def _handle_sink_error(self, err):
         """Handle QAudioSink runtime errors (such as USB unplug or I/O failure)."""

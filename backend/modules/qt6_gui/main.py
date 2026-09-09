@@ -389,28 +389,28 @@ class Qt6GuiModule(BaseBackendModule):
                     if not os.environ.get("QT_QPA_PLATFORM") and os.environ.get("DISPLAY"):
                         self.log.info("⏱ [Boot Trace 1.3a] Detected WSL2 environment — defaulting QT_QPA_PLATFORM to 'xcb' to prevent Wayland deadlock")
                         os.environ["QT_QPA_PLATFORM"] = "xcb"
-            if os.environ.get("QT_WIDGETS_RHI") == "0":
-                del os.environ["QT_WIDGETS_RHI"]
-            os.environ.setdefault("LIBVA_DRIVER_NAME", "i965")
-            os.environ.setdefault("QT_MULTIMEDIA_FORCE_GL_TEXTURE_EXTERNAL_OES", "1")
-            try:
-                from PyQt6.QtGui import QSurfaceFormat
-                fmt = QSurfaceFormat()
-                fmt.setDepthBufferSize(24)
-                fmt.setStencilBufferSize(8)
-                fmt.setAlphaBufferSize(0)
-                fmt.setSamples(0)
-                fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
-                fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
-                QSurfaceFormat.setDefaultFormat(fmt)
-            except Exception as exc:
-                self.log.debug(f"QSurfaceFormat setup notice: {exc}")
+                if os.environ.get("QT_WIDGETS_RHI") == "0":
+                    del os.environ["QT_WIDGETS_RHI"]
+                os.environ.setdefault("LIBVA_DRIVER_NAME", "i965")
+                os.environ.setdefault("QT_MULTIMEDIA_FORCE_GL_TEXTURE_EXTERNAL_OES", "1")
+                try:
+                    from PyQt6.QtGui import QSurfaceFormat
+                    fmt = QSurfaceFormat()
+                    fmt.setDepthBufferSize(24)
+                    fmt.setStencilBufferSize(8)
+                    fmt.setAlphaBufferSize(0)
+                    fmt.setSamples(0)
+                    fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
+                    fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+                    QSurfaceFormat.setDefaultFormat(fmt)
+                except Exception as exc:
+                    self.log.debug(f"QSurfaceFormat setup notice: {exc}")
 
-            try:
-                from PyQt6.QtQuick import QQuickWindow, QSGRendererInterface
-                QQuickWindow.setGraphicsApi(QSGRendererInterface.GraphicsApi.OpenGL)
-            except Exception as exc:
-                self.log.debug(f"QQuickWindow OpenGL graphics API notice: {exc}")
+                try:
+                    from PyQt6.QtQuick import QQuickWindow, QSGRendererInterface
+                    QQuickWindow.setGraphicsApi(QSGRendererInterface.GraphicsApi.OpenGL)
+                except Exception as exc:
+                    self.log.debug(f"QQuickWindow OpenGL graphics API notice: {exc}")
 
             # Guard: ensure a display is reachable before calling QApplication
             # Without this, QApplication blocks indefinitely when DISPLAY/WAYLAND_DISPLAY is unset or dead.
@@ -832,11 +832,14 @@ class Qt6GuiModule(BaseBackendModule):
                 media_source=source,
                 position_seconds=pos,
             )
+            # Android Auto MediaPlaybackStatus proto (MediaPlaybackStatusMessage.proto):
+            # 1=STOPPED, 2=PLAYING, 3=PAUSED, 4=ERROR
+            is_playing = (state == 2)
+            is_paused = (state in (1, 3))
             if self.audio_engine:
-                is_paused = state in (1, 3)  # 1=STOPPED, 3=PAUSED (state 2 is PLAYING!)
                 self.audio_engine.set_paused(is_paused)
             if self.main_window and self.main_window.command_bar:
-                self.main_window.command_bar.update_playback_state(state == 2)
+                self.main_window.command_bar.update_playback_state(is_playing)
 
     def _on_audio_focus_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload

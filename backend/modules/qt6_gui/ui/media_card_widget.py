@@ -201,14 +201,19 @@ class MediaCardWidget(QFrame):
         self.album_label.setText(" • ".join(sub_parts))
 
         source_tag = f" • {cur_source.upper()}" if cur_source else ""
-        if cur_state == 2:  # PLAYING
+        if cur_state == 2:  # PLAYING (Android Auto proto: 2 = PLAYING)
             self.badge_label.setText(f"NOW PLAYING{source_tag}")
             self.badge_label.setStyleSheet("color: #3fb950; font-size: 10px; font-weight: 700; letter-spacing: 1px;")
             self.btn_playpause.setIcon(make_svg_icon("pause", color="#f0f6fc", size=20))
             self.btn_playpause.setToolTip("Pause")
-        elif cur_state == 3:  # PAUSED
+        elif cur_state == 3:  # PAUSED (Android Auto proto: 3 = PAUSED)
             self.badge_label.setText(f"PAUSED{source_tag}")
             self.badge_label.setStyleSheet("color: #d29922; font-size: 10px; font-weight: 700; letter-spacing: 1px;")
+            self.btn_playpause.setIcon(make_svg_icon("play", color="#f0f6fc", size=20))
+            self.btn_playpause.setToolTip("Play")
+        elif cur_state == 1:  # STOPPED (Android Auto proto: 1 = STOPPED)
+            self.badge_label.setText(f"STOPPED{source_tag}")
+            self.badge_label.setStyleSheet("color: #8b949e; font-size: 10px; font-weight: 700; letter-spacing: 1px;")
             self.btn_playpause.setIcon(make_svg_icon("play", color="#f0f6fc", size=20))
             self.btn_playpause.setToolTip("Play")
         else:
