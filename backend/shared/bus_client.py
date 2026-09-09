@@ -1,23 +1,28 @@
 """
 Web Browser Head Unit — BusClient
-Cross-platform IPC communication wrapper over per-module ZeroMQ pub/sub sockets.
+Cross-platform IPC communication wrapper over per-module ZeroMQ pub/sub sockets
+or in-memory bus hub (multithreading mode).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import threading
 from typing import Callable
 
 import zmq
 
-from shared.logger import get_logger
+from shared.bus_inmemory import InMemoryBusClient
 from shared.ipc_utils import get_bus_address
+from shared.logger import get_logger
 
 BUS_HWM = 5000
 
 
-class BusClient:
+class ZmqBusClient:
+    """ZeroMQ implementation of BusClient for multiprocessing mode."""
+
     def __init__(self, module_name: str):
         self.module_name = module_name
         self.log = get_logger(module_name)
@@ -46,6 +51,14 @@ class BusClient:
         self._subscriptions[topic] = callback
         self._sub.setsockopt_string(zmq.SUBSCRIBE, topic)
         self.log.info(f"Subscribed module '{self.module_name}' to topic: '{topic}'")
+
+    def unsubscribe(self, topic: str, callback: Callable[[str, dict], None] | None = None) -> None:
+        if topic in self._subscriptions:
+            del self._subscriptions[topic]
+        try:
+            self._sub.setsockopt_string(zmq.UNSUBSCRIBE, topic)
+        except Exception:
+            pass
 
     def publish(self, topic: str, payload: dict) -> None:
         with self._pub_lock:
@@ -104,3 +117,62 @@ class BusClient:
             self._context.destroy(linger=0)
         except Exception:
             pass
+
+
+class BusClient:
+    """
+    Facade for BusClient routing to either InMemoryBusClient or ZmqBusClient
+    based on NEMO_EXECUTION_MODE environment variable.
+    """
+
+    def __init__(self, module_name: str):
+        self.module_name = module_name
+        self.log = get_logger(module_name)
+        mode = os.environ.get("NEMO_EXECUTION_MODE", os.environ.get("NEMO_MODE", "multiprocessing")).lower().strip()
+        if mode in ("multithreading", "threading", "thread", "threads"):
+            self._impl = InMemoryBusClient(module_name)
+        else:
+            self._impl = ZmqBusClient(module_name)
+
+    @property
+    def _subscriptions(self):
+        return self._impl._subscriptions
+
+    @_subscriptions.setter
+    def _subscriptions(self, val):
+        self._impl._subscriptions = val
+
+    @property
+    def _running(self):
+        return self._impl._running
+
+    @_running.setter
+    def _running(self, val: bool):
+        self._impl._running = val
+
+    def subscribe(self, topic: str, callback: Callable[[str, dict], None]) -> None:
+        self._impl.subscribe(topic, callback)
+
+    def unsubscribe(self, topic: str, callback: Callable[[str, dict], None] | None = None) -> None:
+        if hasattr(self._impl, "unsubscribe"):
+            self._impl.unsubscribe(topic, callback)
+
+    def publish(self, topic: str, payload: dict) -> None:
+        self._impl.publish(topic, payload)
+
+    def start(self, blocking: bool = False) -> None:
+        self._impl.start(blocking=blocking)
+
+    def stop(self) -> None:
+        self._impl.stop()
+
+    def __getattr__(self, name: str):
+        return getattr(self._impl, name)
+
+    def __setattr__(self, name: str, value):
+        if name in ("module_name", "log", "_impl"):
+            super().__setattr__(name, value)
+        elif hasattr(self, "_impl") and hasattr(self._impl, name):
+            setattr(self._impl, name, value)
+        else:
+            super().__setattr__(name, value)
