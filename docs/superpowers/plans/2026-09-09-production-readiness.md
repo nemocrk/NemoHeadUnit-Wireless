@@ -35,7 +35,7 @@
 - Consumes: Existing files in root.
 - Produces: Clean root repository layout without dead artifacts or duplicate scripts.
 
-- [ ] **Step 1: Remove obsolete files and directories**
+- [x] **Step 1: Remove obsolete files and directories**
 ```bash
 rm -rf legacy_2026_07/ scratch/ scratch_test_sink.py index.html .codex docs/session_handoff-old.md
 ```
