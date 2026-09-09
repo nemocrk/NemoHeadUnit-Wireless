@@ -99,7 +99,9 @@ class GStreamerHwDecoder:
                     self.is_available = True
                     logger.info(f"🎬 [Qt6 Video HW Decoder] GStreamer pipeline active using {dec_name}")
         except Exception as exc:
-            logger.warning(f"Could not initialize GStreamer HW decoder: {exc}")
+            import sys
+            level = "warning" if sys.platform == "linux" else "debug"
+            getattr(logger, level)("Could not initialize GStreamer HW decoder: %s", exc)
             self.close()
 
     def decode_nal(self, nal_data: bytes, ts_us: int = 0) -> bool:
@@ -234,7 +236,9 @@ class Qml6ZeroCopyDecoder:
             self.is_available = True
             logger.info(f"🎬 [Qml6ZeroCopyDecoder] Pipeline initialized ({dec_desc} -> qml6glsink)")
         except Exception as exc:
-            logger.warning(f"[Qml6ZeroCopyDecoder] Init failed: {exc}")
+            import sys
+            level = "warning" if sys.platform == "linux" else "debug"
+            getattr(logger, level)("[Qml6ZeroCopyDecoder] Init failed: %s", exc)
 
     def attach_viewport(self, viewport) -> None:
         """Wire the qml6glsink element to the VideoViewportWidget."""
