@@ -1,154 +1,109 @@
-# NemoHeadUnit-Wireless: Complete Codebase & File Guide
+# NemoHeadUnit-Wireless: Complete Codebase & Module Guide
 
-This document provides a exhaustive file-by-file breakdown of the **NemoHeadUnit-Wireless** codebase, explaining the role, implementation details, and interaction mechanics of every script, library, service, and module.
+This document provides a comprehensive guide to the **NemoHeadUnit-Wireless** codebase, explaining the role, architecture, and interaction mechanics of every module, shared library, and service.
 
 ---
 
-## 1. Orchestration & IPC Core
+## 1. Orchestration & Core Entry Points
 
 ### [`main.py`](file:///home/nemo/NemoHeadUnit-Wireless/main.py)
-* **Role**: Primary system entry point and lifecycle orchestrator.
-* **How it works**:
-  - Automatically discovers executable modules matching `modules/*/main.py` (excluding folders starting with `_`).
-  - Spawns `bus_broker.py` as an independent subprocess.
-  - Executes a multi-stage priority boot sequence ($P_0, P_1, \dots$): broadcasts `system.readytostart`, collects module priority responses, and emits `system.start` per level while awaiting `system.ready`.
-  - Listens for `system.shutdown` or system signals (`SIGINT`, `SIGTERM`), broadcasts `system.stop`, waits for `channel_manager.stopped`, and force-kills non-responsive processes after a grace period.
-  - Spawns a background thread responding to `system.get_modules` with live process health status.
+* **Role**: Root entry point wrapper.
+* **Mechanism**: Injects repository root into `PYTHONPATH`, parses CLI arguments (`--mode`, `--port`, `--headless`, `--config-dir`), and delegates execution to `backend/main.py`.
 
-### [`bus_broker.py`](file:///home/nemo/NemoHeadUnit-Wireless/bus_broker.py)
-* **Role**: ZeroMQ IPC pub/sub message broker daemon.
-* **How it works**:
-  - Binds `XSUB` socket to `ipc:///tmp/nemobus_v2.sub` and `XPUB` socket to `ipc:///tmp/nemobus_v2.pub`.
-  - Runs a ZeroMQ proxy loop forwarding published messages across all connected modules.
+### [`backend/main.py`](file:///home/nemo/NemoHeadUnit-Wireless/backend/main.py)
+* **Role**: Primary system lifecycle orchestrator and process/thread supervisor.
+* **Mechanism**:
+  - Discovers active backend modules in `backend/modules/*/main.py`.
+  - In Multiprocessing mode (`--mode multiprocessing`), spawns each module as a separate OS subprocess.
+  - In Multithreading mode (`--mode multithreading`), launches each module inside an isolated `threading.Thread`.
+  - Coordinates the 6-wave priority boot sequence ($P_0 \to P_5$), sending `system.start` and collecting `system.ready`.
+  - Supervises process health, restarts crashed critical modules if configured, and executes clean graceful shutdown on `SIGINT`/`SIGTERM`/`system.stop`.
 
 ---
 
-## 2. Shared Core Infrastructure (`shared/`)
+## 2. Backend Modules (`backend/modules/`)
 
-### [`shared/bus_client.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/bus_client.py) & [`shared/bus_inmemory.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/bus_inmemory.py)
-* **Role**: Universal Event Bus Facade supporting ZeroMQ and In-Memory modes.
-* **How it works**:
-  - `BusClient` acts as a unified facade that transparently instantiates `ZmqBusClient` in multiprocessing mode and `InMemoryBusClient` in multithreading mode.
-  - `bus_inmemory.py` implements thread-safe `InMemoryBusHub` using lock-protected topic queues with prefix matching and copy-on-dispatch, completely eliminating ZMQ sockets and ports in multithreading mode.
+### Wave 0: [`backend/modules/bus_broker/`](file:///home/nemo/NemoHeadUnit-Wireless/backend/modules/bus_broker)
+* **Priority**: 0
+* **Role**: Autonomous IPC message router.
+* **Mechanism**: Runs ZeroMQ XPUB/XSUB proxy thread, resolves cross-platform endpoints via `ipc_utils.py`, tracks `system.heartbeat` across all modules, and provides dynamic loopback HTTP target resolution.
 
-### [`shared/media_shm.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/media_shm.py)
-* **Role**: High-throughput video and audio Shared Memory ring buffer engine.
-* **How it works**:
-  - Encapsulates circular media ring buffers with lockless atomic write/read indices and slot headers.
-  - In multiprocessing mode, allocates OS POSIX `/dev/shm` shared memory segments.
-  - In multithreading mode, allocates named in-memory `bytearray` buffers (`InMemoryRingBuffer`) protected by `RLock`, avoiding OS filesystem overhead.
+### Wave 1: [`backend/modules/config_manager/`](file:///home/nemo/NemoHeadUnit-Wireless/backend/modules/config_manager)
+* **Priority**: 1
+* **Role**: Centralized configuration and settings engine.
+* **Mechanism**: Persists YAML configuration in standard OS AppData directories (`~/.config/NemoHeadUnit-Wireless` on Linux, `%APPDATA%\NemoHeadUnit-Wireless` on Windows). Validates module schemas received on startup and exposes a REST API at `/api/config`.
 
-### [`shared/logger.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/logger.py) & [`shared/bus_trace.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/bus_trace.py)
-* **Role**: Centralized logging and distributed performance tracing framework.
-* **How it works**:
-  - `logger.py` provides formatted standard output logging and attaches ZMQ `BusClient` handlers to emit structured `log.entry` messages to the bus.
-  - `bus_trace.py` manages non-blocking telemetry data collection (`BusTracer`), aggregating network metrics and publishing periodic performance summaries to `system.bus_trace`.
+### Wave 2: [`backend/modules/proxy/`](file:///home/nemo/NemoHeadUnit-Wireless/backend/modules/proxy)
+* **Priority**: 2
+* **Role**: Public gateway webserver and reverse proxy.
+* **Mechanism**: Binds to public port `8000`. Serves static files for `frontend/` and reverse-proxies `/api/<module_prefix>` and WebSocket connections dynamically to internal microservices.
 
-### [`shared/config_schema.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/config_schema.py) & [`shared/config_client.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/config_client.py)
-* **Role**: Dynamic configuration validation and runtime subscriber client.
-* **How it works**:
-  - `config_schema.py` defines strongly-typed configuration dataclasses (WiFi, Bluetooth, Audio, Video, UI settings) and exports JSON schema validation logic.
-  - `config_client.py` allows modules to query `config_manager` via ZMQ, subscribe to configuration change events, and trigger dynamic runtime hot-reloads.
+### Wave 3: [`backend/modules/tcp_server/`](file:///home/nemo/NemoHeadUnit-Wireless/backend/modules/tcp_server)
+* **Priority**: 3
+* **Role**: Wireless Android Auto TCP transport socket listener.
+* **Mechanism**: Binds to port `5288`. Manages TLS/SSL socket handshakes with mobile devices, enforces message sequence numbering, and forwards decrypted byte streams to `channel_manager`.
 
-### [`shared/proto_utils.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/proto_utils.py) & [`shared/proto_explorer.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/proto_explorer.py)
-* **Role**: Dynamic Protobuf wire decoder and schema inspector.
-* **How it works**:
-  - `proto_utils.py` parses binary Protobuf wire formats (Varints, Length-delimited, Fixed32/64) directly without requiring pre-compiled `.py` Protobuf schema files.
-  - `proto_explorer.py` provides recursive JSON inspection tools for decoding unknown or dynamic Android Auto protocol payloads.
+### Wave 3: [`backend/modules/connectivity_manager/`](file:///home/nemo/NemoHeadUnit-Wireless/backend/modules/connectivity_manager)
+* **Priority**: 3
+* **Role**: Unified Bluetooth discovery/pairing and WiFi SoftAP lifecycle manager.
+* **Mechanism**: Utilizes the Hardware Abstraction Layer (`backend/shared/hardware/`). Registers Android Auto SDP UUID `0000fcef-0000-1000-8000-00805f9b34fb`, performs RFCOMM security exchange, transfers WiFi AP credentials to the mobile phone, and triggers WiFi hotspot activation.
 
-### [`shared/touch_widgets.py`](file:///home/nemo/NemoHeadUnit-Wireless/shared/touch_widgets.py)
-* **Role**: Remote touch input event propagation widgets.
-* **How it works**:
-  - Captures user touch/mouse inputs on `ui_shell` window surfaces, translates normalized coordinates, and forwards synthetic Qt input events to offscreen widget surfaces over ZMQ/SHM.
+### Wave 3: [`backend/modules/channel_manager/`](file:///home/nemo/NemoHeadUnit-Wireless/backend/modules/channel_manager)
+* **Priority**: 3
+* **Role**: Android Auto logical channel demultiplexer and protocol engine.
+* **Mechanism**: Implements OpenAndroidAuto protocol channels:
+  - **Control Channel**: Version negotiation, ping/pong heartbeats, SSL key renegotiation.
+  - **Video Channel**: H.264 video stream extraction, forwarding NAL packets to `media_server`.
+  - **Audio Channels**: Media audio (AAC/PCM), speech guidance, and system sound demuxing.
+  - **Input Channel**: Injects touchscreen coordinates and keypresses from UI modules to the phone.
+  - **Sensor Channel**: GPS, speed, and night mode sensor feeds.
 
----
+### Wave 4: [`backend/modules/media_server/`](file:///home/nemo/NemoHeadUnit-Wireless/backend/modules/media_server)
+* **Priority**: 4
+* **Role**: High-throughput media decoder and zero-copy frame buffer manager.
+* **Mechanism**: Parses incoming H.264 NAL units, writes decoded video frames directly into OS Shared Memory (`/dev/shm/nemo_video_frame` or Windows memory maps), and streams WebCodecs frames over WebSocket for browser clients.
 
-## 3. AP Manager DBus Service (`services/ap_manager_service/`)
+### Wave 5: [`backend/modules/qt6_gui/`](file:///home/nemo/NemoHeadUnit-Wireless/backend/modules/qt6_gui)
+* **Priority**: 5
+* **Role**: Native Qt6 automotive touch user interface.
+* **Mechanism**:
+  - `ui/video_viewport_gl.py`: Hardware-accelerated `QOpenGLWidget` reading SHM video directly for 60 FPS rendering.
+  - `ui/drawers/`: Animated sliding overlay cards for Settings, Bluetooth, Phone (PBAP contacts), Diagnostics, and Logs.
+  - `media/audio_output_handler.py`: High-fidelity audio playback via `QAudioSink`.
+  - `ui/touch_mapper.py`: Normalizes display touch events and injects them into Android Auto.
 
-### [`services/ap_manager_service/ap_manager_service.py`](file:///home/nemo/NemoHeadUnit-Wireless/services/ap_manager_service/ap_manager_service.py)
-* **Role**: DBus system daemon managing Wi-Fi Access Point creation and dismantling.
-* **How it works**:
-  - Implements DBus service `org.nemo.APManager` on the Linux system bus using `dasbus` / `dbus-python`.
-  - Executes low-level Linux networking commands (`hostapd`, `wpa_supplicant`, `nmcli`, `iw`, `ip`) to spawn 2.4GHz / 5GHz Wi-Fi APs for Android Auto.
-
-### Daemon Security & Service Files:
-* [`org.nemo.APManager.conf`](file:///home/nemo/NemoHeadUnit-Wireless/services/ap_manager_service/org.nemo.APManager.conf): System DBus permission config allowing `root` ownership and unprivileged user method invocation.
-* [`org.nemo.APManager.policy`](file:///home/nemo/NemoHeadUnit-Wireless/services/ap_manager_service/org.nemo.APManager.policy): Polkit policy file declaring authorization privileges for network configuration.
-* [`org.nemo.APManager.service`](file:///home/nemo/NemoHeadUnit-Wireless/services/ap_manager_service/org.nemo.APManager.service) & [`org.nemo.APManager.dbus-service`](file:///home/nemo/NemoHeadUnit-Wireless/services/ap_manager_service/org.nemo.APManager.dbus-service): Systemd and DBus service definition files.
-* [`install.sh`](file:///home/nemo/NemoHeadUnit-Wireless/services/ap_manager_service/install.sh): Installation script deploying policy and unit files to `/etc/dbus-1/system.d/` and systemd directories.
-* [`tests/test_ap_manager_service.py`](file:///home/nemo/NemoHeadUnit-Wireless/services/ap_manager_service/tests/test_ap_manager_service.py): Automated mock unit tests for DBus service method execution.
-
----
-
-## 4. Connectivity & Protocol Stack Modules (`modules/`)
-
-### [`modules/bluetooth_manager/`](file:///home/nemo/NemoHeadUnit-Wireless/modules/bluetooth_manager)
-* **Files**: `main.py`, `bluez_adapter.py`, `discovery.py`, `pairing.py`, `paired_devices.py`
-* **Role**: Manages Bluetooth adapter state and device pairing.
-* **How it works**: Interacts with standard Linux BlueZ DBus interfaces (`org.bluez`) to control adapter power, initiate agent-assisted pairing, record paired phones, and advertise head unit Bluetooth profiles.
-
-### [`modules/rfcomm_handshake/`](file:///home/nemo/NemoHeadUnit-Wireless/modules/rfcomm_handshake)
-* **Files**: `main.py`, `dbus_rfcomm.py`, `handshake.py`, `packet.py`
-* **Role**: Executes Wireless Android Auto Bluetooth RFCOMM negotiation.
-* **How it works**: Listens on Bluetooth RFCOMM channels, parses incoming Android Auto wireless handshake requests (`packet.py`), transmits local Wi-Fi AP credentials over RFCOMM, and triggers Wi-Fi AP startup.
-
-### [`modules/hostapd_helper/`](file:///home/nemo/NemoHeadUnit-Wireless/modules/hostapd_helper)
-* **Files**: `main.py`
-* **Role**: ZMQ-to-DBus bridge for Wi-Fi AP activation.
-* **How it works**: Listens for ZMQ topic `wifi.ap.start` and calls DBus methods on `org.nemo.APManager` service to start or stop `hostapd`.
-
-### [`modules/tcp_server/`](file:///home/nemo/NemoHeadUnit-Wireless/modules/tcp_server)
-* **Files**: `main.py`, `server.py`, `aa_cryptor.py`, `frame_codec.py`, `frame_relay.py`, `message_to_proto.py`
-* **Role**: TCP transport and encryption engine for Android Auto link.
-* **How it works**:
-  - `server.py` opens a TCP socket server for phone connections.
-  - `aa_cryptor.py` performs OpenSSL SSL/TLS handshake and encrypts/decrypts Android Auto wire payloads.
-  - `frame_codec.py` packs and unpacks AA framing headers (channel ID, flags, payload length).
-  - `frame_relay.py` relays demuxed channel frames to ZMQ bus topics (`aa.frame.<channel_id>`).
-
-### [`modules/oaa_control_channel/`](file:///home/nemo/NemoHeadUnit-Wireless/modules/oaa_control_channel)
-* **Files**: `main.py`, `handshake.py`, `serializer.py`, `service_discovery.py`
-* **Role**: Manages Android Auto Control Channel (Channel 0).
-* **How it works**: Negotiates protocol versions, exchanges service discovery responses (declaring supported video resolutions, audio codecs, input capabilities), and manages session lifecycle messages.
-
-### [`modules/channel_manager/`](file:///home/nemo/NemoHeadUnit-Wireless/modules/channel_manager) & [`modules/channel_modules/`](file:///home/nemo/NemoHeadUnit-Wireless/modules/channel_modules)
-* **Role**: Manages individual Android Auto data channels.
-* **How it works**:
-  - `channel_manager/launcher.py` & `registry.py` spawn discrete process modules for each active channel.
-  - `channel_modules/base_channel_module.py`: Abstract base class for channel processes.
-  - Specialized channel modules: `video` (H.264 video decoding dispatch), `audio` (PulseAudio/ALSA media stream), `input` (touch/button telemetry back to phone), `sensor` (GPS/car sensors), `bluetooth`, `wifi`, `av_input`.
+### Wave 5: [`backend/modules/diagnostic/`](file:///home/nemo/NemoHeadUnit-Wireless/backend/modules/diagnostic)
+* **Priority**: 5
+* **Role**: Live telemetry, bus tracing, and system health monitor.
+* **Mechanism**: Collects heartbeat metrics, calculates transport latencies, tracks frame drops, and exposes `/api/diagnostic/health`.
 
 ---
 
-## 5. User Interface & Compositing Subsystem (`modules/`)
+## 3. Shared Libraries (`backend/shared/`)
 
-### [`modules/ui_shell/main.py`](file:///home/nemo/NemoHeadUnit-Wireless/modules/ui_shell/main.py)
-* **Role**: Main window compositor and application container.
-* **How it works**: Initializes PyQt6 main window UI shell, receives shared memory pointers from offscreen widget processes over ZMQ, and paints final composite frames using `DoubleSharedBuffer`.
-
-### Offscreen UI Sub-Modules
-* [`modules/navbar_ui/main.py`](file:///home/nemo/NemoHeadUnit-Wireless/modules/navbar_ui/main.py): Navigation bar UI widget (home, back, app launcher buttons).
-* [`modules/config_ui/`](file:///home/nemo/NemoHeadUnit-Wireless/modules/config_ui) (`main.py`, `field_widgets.py`, `form_builder.py`, `list_editor.py`, `module_tab.py`): Configuration UI overlay for updating system parameters dynamically.
-* [`modules/bluetooth_ui/main.py`](file:///home/nemo/NemoHeadUnit-Wireless/modules/bluetooth_ui/main.py): Bluetooth pairing and device management screen.
-* [`modules/video_ui/main.py`](file:///home/nemo/NemoHeadUnit-Wireless/modules/video_ui/main.py): Video playback viewport surface.
-* [`modules/floating_menu_ui/main.py`](file:///home/nemo/NemoHeadUnit-Wireless/modules/floating_menu_ui/main.py): Floating quick-settings widget.
-* [`modules/log_viewer_ui/main.py`](file:///home/nemo/NemoHeadUnit-Wireless/modules/log_viewer_ui/main.py): Real-time bus log viewer widget.
-* [`modules/audio_manager/main.py`](file:///home/nemo/NemoHeadUnit-Wireless/modules/audio_manager/main.py): Audio focus and volume manager module.
-* [`modules/zmq_trace/main.py`](file:///home/nemo/NemoHeadUnit-Wireless/modules/zmq_trace/main.py): Interactive ZeroMQ performance monitoring widget.
+* [`base_module.py`](file:///home/nemo/NemoHeadUnit-Wireless/backend/shared/base_module.py): Abstract base class `BaseBackendModule` providing lifecycle methods, automatic `ConfigClient` registration, and HTTP/WS route declaration.
+* [`bus_client.py`](file:///home/nemo/NemoHeadUnit-Wireless/backend/shared/bus_client.py): Unified pub/sub facade selecting between `ZmqBusClient` and `InMemoryBusClient`.
+* [`ipc_utils.py`](file:///home/nemo/NemoHeadUnit-Wireless/backend/shared/ipc_utils.py): Cross-platform socket addressing helper (POSIX domain sockets on Linux, TCP loopback on Windows).
+* [`config_client.py`](file:///home/nemo/NemoHeadUnit-Wireless/backend/shared/config_client.py): Dynamic settings synchronization client.
+* [`config_schema.py`](file:///home/nemo/NemoHeadUnit-Wireless/backend/shared/config_schema.py): Strongly-typed schema descriptor fields (`field_string`, `field_int`, `field_bool`, `field_enum`).
+* [`logger.py`](file:///home/nemo/NemoHeadUnit-Wireless/backend/shared/logger.py): Non-blocking Loguru logger with WebSocket log streaming on port 8766.
+* [`nal_utils.py`](file:///home/nemo/NemoHeadUnit-Wireless/backend/shared/nal_utils.py): Binary H.264 NAL parsing and Annex B frame segmentation.
+* [`proto_utils.py`](file:///home/nemo/NemoHeadUnit-Wireless/backend/shared/proto_utils.py): Android Auto frame serialization and timestamp extraction.
+* [`hardware/`](file:///home/nemo/NemoHeadUnit-Wireless/backend/shared/hardware/): Hardware Abstraction Layer with Linux BlueZ/APManager implementations, Windows Winsock/WinRT drivers, and mock adapters.
 
 ---
 
-## 6. Packaging & Hardware Integration (`packaging/`, `packaging_micromamba/`)
+## 4. Frontend Web Shell (`frontend/`)
 
-* [`packaging/build_deb.sh`](file:///home/nemo/NemoHeadUnit-Wireless/packaging/build_deb.sh) / [`packaging_micromamba/build_deb.sh`](file:///home/nemo/NemoHeadUnit-Wireless/packaging_micromamba/build_deb.sh): Builds Debian (`.deb`) installation packages for ARM64/x86_64 target systems.
-* [`postinst`](file:///home/nemo/NemoHeadUnit-Wireless/packaging_micromamba/postinst) & [`prerm`](file:///home/nemo/NemoHeadUnit-Wireless/packaging_micromamba/prerm): Debian package installation hooks registering systemd services, udev rules, and permissions.
-* [`nemo-headunit.sh`](file:///home/nemo/NemoHeadUnit-Wireless/packaging_micromamba/nemo-headunit.sh) & [`nemo-headunit.desktop`](file:///home/nemo/NemoHeadUnit-Wireless/packaging_micromamba/nemo-headunit.desktop): Desktop launcher and shell execution wrapper.
-* [`hardware_fixes/`](file:///home/nemo/NemoHeadUnit-Wireless/packaging_micromamba/hardware_fixes): Hardware-specific quirk scripts (e.g., Omni10 hardware audio/video fixes).
+* [`index.html`](file:///home/nemo/NemoHeadUnit-Wireless/frontend/index.html): Clean HTML5 shell providing full-screen video canvas and 2x2 home dashboard.
+* [`css/style.css`](file:///home/nemo/NemoHeadUnit-Wireless/frontend/css/style.css) & [`css/theme.css`](file:///home/nemo/NemoHeadUnit-Wireless/frontend/css/theme.css): Modern dark automotive UI styling with glassmorphism and animations.
+* [`js/video_renderer.js`](file:///home/nemo/NemoHeadUnit-Wireless/frontend/js/video_renderer.js): Browser-native WebCodecs `VideoDecoder` consuming WebSocket H.264 NAL frames.
+* [`js/audio_player.js`](file:///home/nemo/NemoHeadUnit-Wireless/frontend/js/audio_player.js): Web Audio API streaming player with drift compensation.
 
 ---
 
-## 7. Testing & Verification Suite (`tests/`)
+## 5. System Services & Packaging
 
-* [`tests/unit/`](file:///home/nemo/NemoHeadUnit-Wireless/tests/unit): Comprehensive unit tests covering ZMQ client, bus broker, SHM helper, logger, proto dynamic decoder, and modules.
-* [`tests/integration/`](file:///home/nemo/NemoHeadUnit-Wireless/tests/integration): Integration tests verifying priority boot/shutdown sequences, Bluetooth connection flows, audio focus, and video streaming pipelines under synthetic load.
-* [`tests/fuzz/`](file:///home/nemo/NemoHeadUnit-Wireless/tests/fuzz): Property-based fuzzing tests (`test_aa_wire_format.py`, `test_proto_utils_roundtrip.py`, `test_bus_payload_malformed.py`) validating resilience against corrupt network frames.
+* [`packaging/`](file:///home/nemo/NemoHeadUnit-Wireless/packaging): Debian (`build_deb.sh`) and Arch Linux (`build_arch.sh`) packaging scripts, systemd unit `nemo-kiosk.service`, and desktop shortcuts.
+* [`services/linux/ap_manager_service/`](file:///home/nemo/NemoHeadUnit-Wireless/services/linux/ap_manager_service): Linux D-Bus APManager daemon for managing WiFi SoftAP interfaces without root privileges.
+* [`scripts/distribute.sh`](file:///home/nemo/NemoHeadUnit-Wireless/scripts/distribute.sh) & [`scripts/distribute.ps1`](file:///home/nemo/NemoHeadUnit-Wireless/scripts/distribute.ps1): Cross-platform automated deployment engines for local and remote SSH targets.
