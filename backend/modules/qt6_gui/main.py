@@ -108,11 +108,20 @@ if HAS_PYQT6 and qInstallMessageHandler:
                     f"  Python Stack:\n{stack}"
                 )
             elif msg_type == QtMsgType.QtWarningMsg:
-                logging.warning(f"[QtWarning] {message} ({context.file}:{context.line})")
+                # Known-expected fallback warnings — downgrade to DEBUG
+                _BENIGN_QML_PATTERNS = (
+                    "org.freedesktop.gstreamer.Qt6GLVideoItem",  # gstqml6 not in conda-forge build
+                    "File name case mismatch",                   # QML reload of temp fallback file
+                )
+                if any(p in message for p in _BENIGN_QML_PATTERNS):
+                    logging.debug(f"[QtWarning/expected] {message}")
+                else:
+                    logging.warning(f"[QtWarning] {message} ({context.file}:{context.line})")
             elif msg_type in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
                 logging.error(f"[QtCritical] {message} ({context.file}:{context.line})")
         except Exception:
             pass
+
 
     try:
         qInstallMessageHandler(_qt_diagnostic_message_handler)
