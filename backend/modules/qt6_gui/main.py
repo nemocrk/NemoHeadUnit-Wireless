@@ -69,6 +69,61 @@ def dismiss_boot_splash() -> None:
             pass
 
 
+def _is_display_reachable() -> bool:
+    """Validate if Wayland or X11 display socket can actually be connected to within 200ms."""
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+        return True
+
+    import socket
+    # 1. Test Wayland socket
+    wayland_display = os.environ.get("WAYLAND_DISPLAY")
+    if wayland_display:
+        xdg_dir = os.environ.get("XDG_RUNTIME_DIR", "")
+        candidates = [
+            f"/mnt/wslg/runtime-dir/{wayland_display}",
+            os.path.join(xdg_dir, wayland_display) if xdg_dir else "",
+            f"/run/user/{os.getuid()}/{wayland_display}" if hasattr(os, "getuid") else "",
+        ]
+        for p in candidates:
+            if p and os.path.exists(p):
+                try:
+                    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    s.settimeout(0.2)
+                    s.connect(p)
+                    s.close()
+                    return True
+                except Exception:
+                    pass
+
+    # 2. Test X11 socket
+    disp = os.environ.get("DISPLAY", "")
+    if disp.startswith(":"):
+        disp_num = disp.lstrip(":").split(".")[0]
+        sock_path = f"/tmp/.X11-unix/X{disp_num}"
+        if os.path.exists(sock_path):
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(0.2)
+                s.connect(sock_path)
+                s.close()
+                return True
+            except Exception:
+                pass
+    elif ":" in disp:
+        try:
+            host, port_str = disp.split(":", 1)
+            port = 6000 + int(port_str.split(".")[0])
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.2)
+            s.connect((host, port))
+            s.close()
+            return True
+        except Exception:
+            pass
+
+    return False
+
+
 try:
     from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, pyqtSlot, QObject, qInstallMessageHandler, QtMsgType
     from PyQt6.QtWidgets import QApplication
@@ -317,12 +372,23 @@ class Qt6GuiModule(BaseBackendModule):
             self.log.warning("PyQt6 C++ DLL or module unavailable — skipping Qt GUI main window initialization")
             return
 
-        # Release Plymouth boot splash BEFORE QApplication initializes EGLFS / KMS
+        self.log.info("⏱ [Boot Trace 1.1] Dismissing Plymouth boot splash...")
         dismiss_boot_splash()
+        self.log.info("⏱ [Boot Trace 1.2] Plymouth splash dismissed.")
 
         # Create QApplication if not created
         t1 = time.time()
         if not QApplication.instance():
+            self.log.info("⏱ [Boot Trace 1.3] Configuring QPA / GLib / SurfaceFormat...")
+            # Prevent Qt from competing with BlueZ/GStreamer worker threads for default GLib context
+            if sys.platform == "linux":
+                os.environ.setdefault("QT_NO_GLIB", "1")
+                # On WSL2, Qt6 default Wayland QPA plugin hangs during EGL context creation; default to xcb
+                import platform
+                if "microsoft" in platform.release().lower() or "wsl" in platform.release().lower():
+                    if not os.environ.get("QT_QPA_PLATFORM") and os.environ.get("DISPLAY"):
+                        self.log.info("⏱ [Boot Trace 1.3a] Detected WSL2 environment — defaulting QT_QPA_PLATFORM to 'xcb' to prevent Wayland deadlock")
+                        os.environ["QT_QPA_PLATFORM"] = "xcb"
             if os.environ.get("QT_WIDGETS_RHI") == "0":
                 del os.environ["QT_WIDGETS_RHI"]
             os.environ.setdefault("LIBVA_DRIVER_NAME", "i965")
@@ -346,6 +412,21 @@ class Qt6GuiModule(BaseBackendModule):
             except Exception as exc:
                 self.log.debug(f"QQuickWindow OpenGL graphics API notice: {exc}")
 
+            # Guard: ensure a display is reachable before calling QApplication
+            # Without this, QApplication blocks indefinitely when DISPLAY/WAYLAND_DISPLAY is unset or dead.
+            if sys.platform == "linux":
+                _has_display = _is_display_reachable()
+                self.log.info(f"⏱ [Boot Trace 1.4] Checking display reachability (_has_display={_has_display}, DISPLAY={os.environ.get('DISPLAY')}, WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY')}, QT_QPA_PLATFORM={os.environ.get('QT_QPA_PLATFORM')})...")
+                if not _has_display:
+                    self.log.warning(
+                        "⚠️ [Qt6 GUI] No reachable DISPLAY, WAYLAND_DISPLAY, or offscreen platform — Qt6 GUI cannot start. "
+                        "Run with: DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 python main.py or QT_QPA_PLATFORM=offscreen"
+                    )
+                    return
+
+            self.log.info("⏱ [Boot Trace 1.5] Calling QApplication(sys.argv)...")
+            self.app = QApplication(sys.argv)
+            self.log.info("⏱ [Boot Trace 1.6] QApplication instance created successfully.")
             try:
                 import gi
                 gi.require_version("Gst", "1.0")
@@ -356,7 +437,6 @@ class Qt6GuiModule(BaseBackendModule):
             except Exception as exc:
                 self.log.debug(f"Gst qml6glsink pre-registration notice: {exc}")
 
-            self.app = QApplication(sys.argv)
         else:
             self.app = QApplication.instance()
         self.log.info(f"⏱ [Boot Trace 2/7] QApplication initialized in {(time.time()-t1)*1000:.1f}ms")
@@ -492,6 +572,9 @@ class Qt6GuiModule(BaseBackendModule):
         else:
             self.log.info("⏱ [Boot Trace 6c/7] Calling main_window.show() in windowed mode...")
         self.main_window.set_fullscreen(is_fs)
+        self.main_window.show()
+        self.main_window.raise_()
+        self.main_window.activateWindow()
         self.log.info("⏱ [Boot Trace 6d/7] main_window display initialized!")
 
         if self.app:
