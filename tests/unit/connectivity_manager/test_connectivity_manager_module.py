@@ -143,3 +143,91 @@ async def test_handle_wifi_manual_controls_and_device_filter(mock_conn_module):
     resp_unign = await mock_conn_module.handle_post_unignore_device(req_ignore)
     assert resp_unign.status == 200
     assert "XX:YY:ZZ:11:22:33" not in mock_conn_module.config.get("ignored_devices", [])
+
+
+@pytest.mark.asyncio
+async def test_handle_pair_reject_and_remove(mock_conn_module):
+    """Verify pair reject and remove device endpoints."""
+    # 1. Reject pairing
+    req_rej = MagicMock()
+    req_rej.json = AsyncMock(return_value={"address": "AA:BB:CC:11:22:33"})
+    resp_rej = await mock_conn_module.handle_post_pair_reject(req_rej)
+    assert resp_rej.status == 200
+    mock_conn_module._bt_adapter.confirm_pairing.assert_called_with("AA:BB:CC:11:22:33", False)
+
+    # 2. Remove paired device
+    req_rem = MagicMock()
+    req_rem.json = AsyncMock(return_value={"address": "AA:BB:CC:11:22:33"})
+    resp_rem = await mock_conn_module.handle_post_remove(req_rem)
+    assert resp_rem.status == 200
+    mock_conn_module._bt_adapter.remove_paired_device.assert_called_once_with("AA:BB:CC:11:22:33")
+
+
+@pytest.mark.asyncio
+async def test_handle_hfp_and_pbap_endpoints(mock_conn_module):
+    """Verify HFP phone dialing/actions and PBAP contact retrieval."""
+    mock_hfp = MagicMock()
+    mock_hfp.get_state.return_value = {"in_call": False, "carrier": "TestCarrier"}
+    mock_hfp.dial.return_value = True
+    mock_hfp.answer.return_value = True
+    mock_hfp.hangup.return_value = True
+    mock_hfp.set_mute.return_value = True
+    mock_hfp.send_dtmf.return_value = True
+    mock_conn_module._hfp_client = mock_hfp
+
+    mock_pbap = MagicMock()
+    mock_pbap.get_contacts.return_value = [{"name": "Bob", "number": "555-1234"}]
+    mock_pbap.get_recents.return_value = [{"name": "Bob", "type": "incoming"}]
+    mock_pbap.get_favorites.return_value = [{"name": "Bob"}]
+    mock_pbap.sync = AsyncMock(return_value=True)
+    mock_conn_module._pbap_client = mock_pbap
+
+    # GET /phone/status
+    req = MagicMock()
+    resp_st = await mock_conn_module.handle_get_phone_status(req)
+    assert resp_st.status == 200
+
+    # POST /phone/dial
+    req_dial = MagicMock()
+    req_dial.json = AsyncMock(return_value={"number": "555-1234"})
+    resp_dial = await mock_conn_module.handle_post_phone_dial(req_dial)
+    assert resp_dial.status == 200
+    mock_hfp.dial.assert_called_once_with("555-1234")
+
+    # POST /phone/action (answer, hangup, mute)
+    for act in ("answer", "hangup", "mute", "unmute"):
+        req_act = MagicMock()
+        req_act.json = AsyncMock(return_value={"action": act})
+        resp_act = await mock_conn_module.handle_post_phone_action(req_act)
+        assert resp_act.status == 200
+
+    # POST /phone/dtmf
+    req_dtmf = MagicMock()
+    req_dtmf.json = AsyncMock(return_value={"key": "1"})
+    resp_dtmf = await mock_conn_module.handle_post_phone_dtmf(req_dtmf)
+    assert resp_dtmf.status == 200
+    mock_hfp.send_dtmf.assert_called_once_with("1")
+
+    # PBAP GET contacts, recents, favorites
+    resp_contacts = await mock_conn_module.handle_get_phone_contacts(req)
+    assert resp_contacts.status == 200
+    resp_recents = await mock_conn_module.handle_get_phone_recents(req)
+    assert resp_recents.status == 200
+    resp_favs = await mock_conn_module.handle_get_phone_favorites(req)
+    assert resp_favs.status == 200
+
+    # PBAP POST sync
+    resp_sync = await mock_conn_module.handle_post_phone_sync(req)
+    assert resp_sync.status == 200
+
+
+@pytest.mark.asyncio
+async def test_connectivity_manager_teardown(mock_conn_module):
+    """Verify clean teardown of adapters and tasks."""
+    mock_conn_module._bt_adapter.teardown = AsyncMock()
+    mock_conn_module._wifi_adapter.teardown = AsyncMock()
+    await mock_conn_module.teardown()
+    assert mock_conn_module._running is False
+    mock_conn_module._bt_adapter.teardown.assert_called_once()
+    mock_conn_module._wifi_adapter.teardown.assert_called_once()
+

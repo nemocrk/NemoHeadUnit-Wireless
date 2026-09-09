@@ -73,5 +73,51 @@ class TestMediaSHM(unittest.TestCase):
         wire_client.close()
         down_client.close()
 
+    def test_shm_wrap_around_and_boundaries(self):
+        buf = RingSharedMemoryBuffer("nemo_test_boundary_shm", size=256, create=True)
+
+        # 1. Oversized payload returns -1
+        huge = b"A" * 300
+        self.assertEqual(buf.write_frame(0, 100, huge), -1)
+
+        # 2. Write frame that wraps around buffer
+        frame1 = b"B" * 100
+        off1 = buf.write_frame(0, 100, frame1)
+        self.assertEqual(off1, 0)
+
+        # Next write will exceed remaining space and wrap to 0
+        frame2 = b"C" * 150
+        off2 = buf.write_frame(0, 200, frame2)
+        self.assertEqual(off2, 0)
+
+        st, ts, read_frame2 = buf.read_frame(off2)
+        self.assertEqual(read_frame2, frame2)
+
+        # 3. Bad magic read
+        buf.shm.buf[0:2] = b"XX"
+        self.assertEqual(buf.read_frame(0), (0, 0, b""))
+
+        # 4. Out of bounds offset
+        self.assertEqual(buf.read_frame(9999), (0, 0, b""))
+        self.assertEqual(buf.read_frame(-5), (0, 0, b""))
+
+        buf.close()
+
+    def test_bidirectional_shm_channel_methods(self):
+        shm = BidirectionalMediaSHM(create=True, size=1024*64)
+        down_ch = shm.get_downstream_channel(1)
+        wire_ch = shm.get_wire_channel(2)
+
+        self.assertIsNotNone(down_ch)
+        self.assertIsNotNone(wire_ch)
+
+        # Re-fetching returns cached buffer
+        self.assertIs(shm.get_downstream_channel(1), down_ch)
+        self.assertIs(shm.get_wire_channel(2), wire_ch)
+
+        shm.close()
+
+
 if __name__ == "__main__":
     unittest.main()
+

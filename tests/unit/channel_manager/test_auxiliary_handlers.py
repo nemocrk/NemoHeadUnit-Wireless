@@ -193,3 +193,91 @@ async def test_navigation_handler_turn_event(mock_aux_manager):
         },
     )
     mock_aux_manager._notify_status_changed.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_media_playback_handler(mock_aux_manager):
+    from modules.channel_manager.handlers.media_playback_handler import (
+        MediaPlaybackChannelHandler,
+        MSG_PLAYBACK_METADATA,
+        MSG_PLAYBACK_STATUS,
+    )
+    from protos.oaa.control.ControlMessageIdsEnum_pb2 import ControlMessage
+    from protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse
+    from protos.oaa.media.MediaPlaybackMetadataMessage_pb2 import MediaPlaybackMetadata
+    from protos.oaa.media.MediaPlaybackStatusMessage_pb2 import MediaPlaybackStatus
+
+    handler = MediaPlaybackChannelHandler(mock_aux_manager)
+
+    # 1. CHANNEL_OPEN_REQUEST
+    await handler.handle_frame(7, ControlMessage.Enum.CHANNEL_OPEN_REQUEST, b"")
+    mock_aux_manager.send_wire_frame.assert_called_once()
+    assert mock_aux_manager.send_wire_frame.call_args[0][0] == 7
+    resp = ChannelOpenResponse()
+    resp.ParseFromString(mock_aux_manager.send_wire_frame.call_args[0][2])
+    assert resp.status == Status.OK
+
+    # 2. Metadata (0x8003)
+    meta = MediaPlaybackMetadata()
+    meta.title = "Bohemian Rhapsody"
+    meta.artist = "Queen"
+    meta.album = "A Night at the Opera"
+    await handler.handle_frame(7, MSG_PLAYBACK_METADATA, meta.SerializeToString())
+    assert handler.track_title == "Bohemian Rhapsody"
+    assert handler.artist == "Queen"
+    assert handler.album == "A Night at the Opera"
+    mock_aux_manager.publish.assert_called_with("media.metadata", {
+        "title": "Bohemian Rhapsody",
+        "artist": "Queen",
+        "album": "A Night at the Opera",
+        "has_album_art": False,
+        "album_art": "",
+    })
+
+    # 3. Playback Status (0x8001)
+    status = MediaPlaybackStatus()
+    status.source_app = "Spotify"
+    status.playback_state = 1
+    await handler.handle_frame(7, MSG_PLAYBACK_STATUS, status.SerializeToString())
+    assert handler.media_source == "Spotify"
+    assert handler.playback_state == 1
+
+
+@pytest.mark.asyncio
+async def test_notification_handler(mock_aux_manager):
+    from modules.channel_manager.handlers.notification_handler import (
+        NotificationHandler,
+        MSG_CHANNEL_OPEN_REQUEST,
+        MSG_NOTIFICATION_EVENT,
+        MSG_NOTIFICATION_ACTION,
+    )
+    from protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenResponse
+
+    mock_aux_manager.broadcast_ws_json = AsyncMock()
+    handler = NotificationHandler(mock_aux_manager)
+
+    # 1. Open Request
+    await handler.handle_message(12, MSG_CHANNEL_OPEN_REQUEST, b"")
+    mock_aux_manager.send_wire_frame.assert_called_once()
+    assert mock_aux_manager.send_wire_frame.call_args[0][0] == 12
+    resp = ChannelOpenResponse()
+    resp.ParseFromString(mock_aux_manager.send_wire_frame.call_args[0][2])
+    assert resp.status == Status.OK
+
+    # 2. Notification Event
+    notif_payload = b"WhatsApp\x00John\x00See you soon!"
+    await handler.handle_message(12, MSG_NOTIFICATION_EVENT, notif_payload)
+    assert len(handler.recent_notifications) == 1
+    notif = handler.recent_notifications[0]
+    assert notif["app_name"] == "WhatsApp"
+    assert notif["title"] == "John"
+    assert notif["text"] == "See you soon!"
+    mock_aux_manager.publish.assert_called_with("notification.post", notif)
+    mock_aux_manager.broadcast_ws_json.assert_called_once()
+
+    # 3. Action response
+    await handler.send_action("notif_123", "DISMISS")
+    mock_aux_manager.send_wire_frame.assert_called_with(
+        12, MSG_NOTIFICATION_ACTION, b"DISMISS", encrypted=True
+    )
+

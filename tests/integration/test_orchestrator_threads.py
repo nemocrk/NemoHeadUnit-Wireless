@@ -285,3 +285,42 @@ def test_thread_mode_clean_shutdown_and_thread_join(tmp_path):
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+
+
+def test_thread_mode_qt6_gui_complete_initialization(tmp_path):
+    """Verify qt6_gui completes full initialization through Boot Trace 7/7 in multithreading mode."""
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    backend_main = repo_root / "backend" / "main.py"
+
+    with IntegrationEnvironment(tmp_path) as env:
+        sub_env = os.environ.copy()
+        sub_env["QT_QPA_PLATFORM"] = "offscreen"
+        sub_env["PYTHONUNBUFFERED"] = "1"
+
+        proc = subprocess.Popen(
+            [sys.executable, str(backend_main), "-m", "multithreading"],
+            cwd=str(repo_root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=sub_env,
+            text=True,
+            bufsize=1,
+        )
+
+        try:
+            lines = _wait_for_orchestrator_boot(proc, timeout=15.0)
+
+            # Verify complete qt6_gui boot sequence
+            assert any("[Boot Trace 1/7]" in l for l in lines), "Boot Trace 1/7 not found"
+            assert any("[Boot Trace 2/7]" in l for l in lines), "Boot Trace 2/7 not found — QApplication hung"
+            assert any("[Boot Trace 7/7]" in l for l in lines), "Boot Trace 7/7 not found — setup did not complete"
+            assert any("Boot sequence complete" in l for l in lines), "Orchestrator boot did not complete"
+
+            proc.terminate()
+            proc.wait(timeout=6.0)
+            assert proc.returncode in (0, -signal.SIGTERM, 143)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+

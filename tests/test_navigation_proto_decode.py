@@ -18,7 +18,8 @@ from backend.modules.channel_manager.handlers.navigation_handler import Navigati
 
 import asyncio
 
-def test_navigation_notification_msg_0x8006():
+@pytest.mark.asyncio
+async def test_navigation_notification_msg_0x8006():
     manager = MagicMock()
     manager.publish = MagicMock()
     manager._notify_status_changed = MagicMock()
@@ -31,7 +32,7 @@ def test_navigation_notification_msg_0x8006():
     step.road_info.road_names.append("Oak Street")
 
     body = notif.SerializeToString()
-    asyncio.run(handler.handle_frame(channel_id=5, message_id=0x8006, body=body))
+    await handler.handle_frame(channel_id=5, message_id=0x8006, body=body)
 
     # Verify navigation.turn_event published with correct maneuver and road
     assert manager.publish.called
@@ -43,7 +44,8 @@ def test_navigation_notification_msg_0x8006():
     assert event_payload["maneuver_name"] == "turn-normal-left"
 
 
-def test_navigation_distance_msg_0x8007():
+@pytest.mark.asyncio
+async def test_navigation_distance_msg_0x8007():
     manager = MagicMock()
     manager.publish = MagicMock()
     manager._notify_status_changed = MagicMock()
@@ -53,9 +55,10 @@ def test_navigation_distance_msg_0x8007():
     dist_msg.remaining_distance.remaining_meters = 450
     body = dist_msg.SerializeToString()
 
-    asyncio.run(handler.handle_frame(channel_id=5, message_id=0x8007, body=body))
+    await handler.handle_frame(channel_id=5, message_id=0x8007, body=body)
 
     events = [call.args for call in manager.publish.call_args_list if call.args[0] in ("navigation.distance_event", "navigation.turn_event")]
     assert len(events) >= 1
     event_payload = events[0][1]
     assert event_payload["distance_meters"] == 450.0
+

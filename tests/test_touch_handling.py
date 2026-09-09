@@ -24,7 +24,7 @@ class DummyManager:
         self.sent_frames.append((channel_id, message_id, payload))
 
 
-class TestTouchHandling(unittest.TestCase):
+class TestTouchHandling(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
         if not QApplication.instance():
@@ -97,7 +97,7 @@ class TestTouchHandling(unittest.TestCase):
         self.assertEqual(len(self.emitted_events[-1]["pointers"]), 2)
         self.assertEqual(self.emitted_events[-1]["pointers"][1]["pointer_id"], 1)
 
-    def test_input_handler_encodes_multitouch_protobuf(self):
+    async def test_input_handler_encodes_multitouch_protobuf(self):
         from protos.oaa.input.InputEventIndicationMessage_pb2 import InputEventIndication
         
         manager = DummyManager()
@@ -107,7 +107,7 @@ class TestTouchHandling(unittest.TestCase):
             {"x": 150, "y": 250, "pointer_id": 0},
             {"x": 350, "y": 450, "pointer_id": 1},
         ]
-        asyncio.run(handler.handle_touch_event(action=5, pointers=pointers, action_index=1))
+        await handler.handle_touch_event(action=5, pointers=pointers, action_index=1)
 
         self.assertEqual(len(manager.sent_frames), 1)
         ch_id, msg_id, payload = manager.sent_frames[0]

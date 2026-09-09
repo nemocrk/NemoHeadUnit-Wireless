@@ -35,6 +35,22 @@ def test_call_widget_state_updates():
     assert hasattr(widget, "btn_mute")
     assert not widget.btn_mute.isHidden()
 
+    # Active state
+    widget.update_call_state(True, "ACTIVE", "Alice", "+123", 150)
+    assert widget.lbl_state.text() == "In Call"
+    assert widget.btn_answer.isHidden() is True
+    assert widget.lbl_duration.text() == "02:30"
+
+    # Hold state
+    widget.update_call_state(True, "HOLD", "Alice", "+123", 160)
+    assert widget.lbl_state.text() == "Call on Hold"
+
+    # Ended state
+    widget.update_call_state(False, "IDLE")
+    assert widget.lbl_state.text() == "Call Ended"
+    assert widget.btn_mute.isHidden() is True
+
+
 
 def test_call_widget_action_emits():
     app = get_app()

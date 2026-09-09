@@ -1,5 +1,6 @@
 import unittest
 import os
+from unittest.mock import MagicMock, patch
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from backend.modules.qt6_gui.media.audio_handler import QtAudioEngine, AudioPcmStream, DynamicChannelAudioSink
 
@@ -132,6 +133,281 @@ class TestAudioHandler(unittest.TestCase):
         self.assertEqual(ts, fake_ts)
         self.assertEqual(parsed, bytes(pcm_bytes))
         self.assertEqual(len(parsed), 960)
+
+    def test_find_audio_devices(self):
+        from unittest.mock import MagicMock, patch
+        from backend.modules.qt6_gui.media.audio_handler import find_audio_output_device, find_audio_input_device
+
+        mock_dev1 = MagicMock()
+        mock_dev1.description.return_value = "USB DAC Output"
+        mock_dev1.id.return_value = b"usb_dac_out"
+
+        mock_dev2 = MagicMock()
+        mock_dev2.description.return_value = "USB Microphone Input"
+        mock_dev2.id.return_value = b"usb_mic_in"
+
+        with patch("backend.modules.qt6_gui.media.audio_handler.QMediaDevices") as mock_qmd:
+            mock_qmd.audioOutputs.return_value = [mock_dev1]
+            mock_qmd.defaultAudioOutput.return_value = mock_dev1
+            mock_qmd.audioInputs.return_value = [mock_dev2]
+            mock_qmd.defaultAudioInput.return_value = mock_dev2
+
+            # Match output device
+            self.assertEqual(find_audio_output_device("USB DAC"), mock_dev1)
+            # Default output device
+            self.assertEqual(find_audio_output_device("default"), mock_dev1)
+            # Fallback output device
+            self.assertEqual(find_audio_output_device("Nonexistent"), mock_dev1)
+
+            # Match input device
+            self.assertEqual(find_audio_input_device("USB Mic"), mock_dev2)
+            # Default input device
+            self.assertEqual(find_audio_input_device("default"), mock_dev2)
+            # Fallback input device
+            self.assertEqual(find_audio_input_device("Nonexistent"), mock_dev2)
+
+    def test_audio_pcm_stream_format_and_pause(self):
+        stream = AudioPcmStream(sample_rate=44100, channels=2, prebuffer_ms=100)
+        stream.configure_format(sample_rate=48000, channels=2, prebuffer_ms=150)
+        self.assertEqual(stream._sample_rate, 48000)
+        self.assertTrue(stream._is_buffering)
+
+        # Buffer overflow test
+        stream.write_pcm(b"\x00" * 300000, max_buffer_bytes=100000)
+        self.assertLessEqual(len(stream._buffer), 100000)
+
+        # Pause and resume
+        stream.set_paused(True)
+        self.assertTrue(stream._is_paused)
+        stream.set_paused(False)
+        self.assertFalse(stream._is_paused)
+
+    def test_dynamic_channel_audio_sink_modes_and_pts(self):
+        import time
+        sink = DynamicChannelAudioSink(channel_id=3, sample_rate=48000, channel_count=2)
+        
+        # Test status transitions
+        sink.set_stream_status("STOPPED")
+        self.assertTrue(sink._is_stopped)
+        sink.set_stream_status("START")
+        self.assertFalse(sink._is_stopped)
+
+        # Test pause
+        sink.set_paused(True)
+        self.assertTrue(sink._is_paused)
+        sink.set_paused(False)
+        self.assertFalse(sink._is_paused)
+
+        # Test push frame with timestamp baseline and forward jump
+        t0 = time.time()
+        sink.push_frame(b"\x00\x00" * 480, ts_us=1_000_000)
+        self.assertEqual(sink.last_ts_us, 1_000_000)
+        self.assertEqual(sink.current_lag_ms, 0.0)
+
+        # Push frame with huge PTS jump (> 1.5s)
+        sink.push_frame(b"\x00\x00" * 480, ts_us=10_000_000)
+        self.assertEqual(sink.current_lag_ms, 0.0)
+
+        # Test is_streaming logic
+        sink.last_frame_time = t0
+        self.assertTrue(sink.is_streaming)
+        sink.last_frame_time = t0 - 1.0
+        with sink._app_lock:
+            sink._app_buffer.clear()
+        self.assertFalse(sink.is_streaming)
+
+        sink.close()
+
+    def test_dynamic_channel_audio_sink_aac_decoding(self):
+        import numpy as np
+        sink = DynamicChannelAudioSink(channel_id=2, sample_rate=48000, channel_count=2)
+        sink._is_aac = True
+        mock_decoder = MagicMock()
+        mock_frame = MagicMock()
+        mock_arr = np.zeros(480, dtype=np.int16)
+        mock_frame.to_ndarray.return_value = mock_arr
+        mock_decoder.decode.return_value = [mock_frame]
+        sink.aac_decoder = mock_decoder
+
+        # Test with resampler
+        mock_resampler = MagicMock()
+        mock_resampler.resample.return_value = [mock_frame]
+        sink.resampler = mock_resampler
+
+        sink.push_frame(b"\x01\x02\x03\x04")
+        self.assertGreater(sink.total_bytes_in, 0)
+        
+        # Test direct init aac decoder
+        sink._init_aac_decoder()
+        
+        sink.close()
+
+    def test_dynamic_channel_audio_sink_error_handling(self):
+        sink = DynamicChannelAudioSink(channel_id=1, sample_rate=48000, channel_count=2)
+        sink._handle_sink_error(1)
+        sink.close()
+
+    def test_dynamic_channel_audio_sink_do_start(self):
+        sink = DynamicChannelAudioSink(channel_id=1, sample_rate=48000, channel_count=2)
+        mock_sink = MagicMock()
+        mock_io = MagicMock()
+        mock_sink.start.return_value = mock_io
+
+        with patch("backend.modules.qt6_gui.media.audio_handler.QAudioSink", return_value=mock_sink):
+            sink._do_start()
+            self.assertTrue(sink._is_started)
+            self.assertEqual(sink.audio_sink, mock_sink)
+            self.assertEqual(sink.audio_io, mock_io)
+
+        sink.close()
+
+    def test_dynamic_channel_audio_sink_flush(self):
+        from unittest.mock import MagicMock
+        sink = DynamicChannelAudioSink(channel_id=1, sample_rate=48000, channel_count=2, prebuffer_ms=0)
+        mock_sink = MagicMock()
+        mock_io = MagicMock()
+        mock_sink.bytesFree.return_value = 1000
+        mock_sink.bufferSize.return_value = 4000
+        mock_io.write.return_value = 400
+
+        sink.audio_sink = mock_sink
+        sink.audio_io = mock_io
+        sink._is_buffering = False
+        sink._is_started = True
+
+        with sink._app_lock:
+            sink._app_buffer.extend(b"\x00" * 800)
+
+        sink._flush_to_sink()
+        mock_io.write.assert_called_once()
+        self.assertEqual(sink.total_bytes_out, 400)
+        sink.close()
+
+    def test_dynamic_channel_audio_sink_flush_reentrancy_guard(self):
+        sink = DynamicChannelAudioSink(channel_id=1, sample_rate=48000, channel_count=2, prebuffer_ms=0)
+        mock_sink = MagicMock()
+        mock_io = MagicMock()
+        mock_sink.bytesFree.return_value = 1000
+        mock_sink.bufferSize.return_value = 4000
+
+        # Simulate re-entrant call during write()
+        reentrant_calls = [0]
+        def write_side_effect(data):
+            reentrant_calls[0] += 1
+            if reentrant_calls[0] < 5:
+                sink._flush_to_sink()
+            return len(data)
+
+        mock_io.write.side_effect = write_side_effect
+        sink.audio_sink = mock_sink
+        sink.audio_io = mock_io
+        sink._is_buffering = False
+        sink._is_started = True
+
+        with sink._app_lock:
+            sink._app_buffer.extend(b"\x00" * 800)
+
+        sink._flush_to_sink()
+        self.assertEqual(reentrant_calls[0], 1)
+        sink.close()
+
+    def test_dynamic_channel_audio_sink_flush_chunking(self):
+        sink = DynamicChannelAudioSink(channel_id=1, sample_rate=48000, channel_count=2, prebuffer_ms=0)
+        mock_sink = MagicMock()
+        mock_io = MagicMock()
+        mock_sink.bytesFree.return_value = 20000
+        mock_sink.bufferSize.return_value = 48000
+
+        written_chunks = []
+        def write_side_effect(data):
+            written_chunks.append(len(data))
+            return len(data)
+
+        mock_io.write.side_effect = write_side_effect
+        sink.audio_sink = mock_sink
+        sink.audio_io = mock_io
+        sink._is_buffering = False
+        sink._is_started = True
+
+        # Buffer 10000 bytes (> 4096B chunk limit)
+        with sink._app_lock:
+            sink._app_buffer.extend(b"\x00" * 10000)
+
+        sink._flush_to_sink()
+        # All writes must be <= 4096 bytes
+        self.assertTrue(all(c <= 4096 for c in written_chunks))
+        self.assertEqual(sum(written_chunks), 10000)
+        sink.close()
+
+    def test_qt_audio_engine_multi_channel_and_routes(self):
+        engine = QtAudioEngine()
+        engine.set_output_sink("CustomSink")
+        self.assertEqual(engine.target_output_sink, "CustomSink")
+
+        # Explicit channel codec config
+        engine.configure_channel_codec(1, "MEDIA_CODEC_AUDIO_PCM", sample_rate=44100, channel_count=2)
+        self.assertIn(1, engine.sinks)
+
+        # Channel 5 speech fallback
+        engine.play_pcm_frame(b"\x00\x00" * 160, channel_id=5)
+        self.assertIn(5, engine.sinks)
+        self.assertEqual(engine.sinks[5].sample_rate, 16000)
+
+        # Broadcast paused and stream status
+        engine.set_paused(True)
+        engine.set_stream_status("STOPPED")
+        engine.set_paused(False, channel_id=1)
+        engine.set_stream_status("ACTIVE", channel_id=1)
+
+        # Reconfigure output sink when sinks are active
+        engine.set_output_sink("UpdatedDevice")
+
+        engine.close()
+
+    def test_qt_audio_engine_microphone(self):
+        from unittest.mock import MagicMock, patch
+        engine = QtAudioEngine()
+
+        # Test no input device
+        with patch("backend.modules.qt6_gui.media.audio_handler.find_audio_input_device", return_value=None):
+            self.assertFalse(engine.start_microphone())
+
+        mock_input = MagicMock()
+        mock_input.isNull.return_value = False
+        mock_input.description.return_value = "Test Mic"
+        mock_input.isFormatSupported.return_value = False
+        mock_pref = MagicMock()
+        mock_pref.sampleFormat.return_value = "Int16"
+        mock_pref.sampleRate.return_value = 16000
+        mock_pref.channelCount.return_value = 1
+        mock_input.preferredFormat.return_value = mock_pref
+
+        mock_source = MagicMock()
+        mock_io = MagicMock()
+        mock_source.start.return_value = mock_io
+        mock_io.bytesAvailable.return_value = 1280
+        mock_io.readAll.return_value.data.return_value = b"\x00" * 1280
+
+        captured_chunks = []
+        engine.mic_data_captured.connect(lambda chunk: captured_chunks.append(chunk))
+
+        with patch("backend.modules.qt6_gui.media.audio_handler.find_audio_input_device", return_value=mock_input), \
+             patch("backend.modules.qt6_gui.media.audio_handler.QAudioSource", return_value=mock_source):
+            started = engine.start_microphone()
+            self.assertTrue(started)
+            engine._poll_mic()
+            # 1280 bytes = exactly two 640-byte chunks
+            self.assertEqual(len(captured_chunks), 2)
+            self.assertEqual(len(captured_chunks[0]), 640)
+
+            # Change input source while running
+            engine.set_input_source("NewMic")
+
+            # Stop mic
+            engine.stop_microphone()
+            self.assertIsNone(engine.audio_source)
+
+        engine.close()
 
 
 if __name__ == "__main__":

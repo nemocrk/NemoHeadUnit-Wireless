@@ -260,3 +260,182 @@ def test_tcp_server_module_handshake_events(mock_tcp_server_mod):
         })
         mock_cryptor.write_handshake_input.assert_called_once_with(b"\x01\x02\x03\x04")
         mock_tcp_server_mod.publish.assert_called_with("tcp.server.tls_handshake_completed", {})
+
+
+def test_tcp_server_module_start_when_already_active(mock_tcp_server_mod):
+    with patch("threading.Thread") as mock_thread_cls:
+        mock_tcp_server_mod._server = MagicMock()
+        mock_tcp_server_mod.start_tcp_server()
+        mock_thread_cls.assert_not_called()
+
+
+def test_tcp_server_module_start_launches_thread(mock_tcp_server_mod):
+    with patch("threading.Thread") as mock_thread_cls:
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+        mock_tcp_server_mod._server = None
+        mock_tcp_server_mod._server_starting = False
+
+        mock_tcp_server_mod.start_tcp_server()
+        mock_thread_cls.assert_called_once()
+        mock_thread.start.assert_called_once()
+
+
+def test_tcp_server_module_on_session_closed(mock_tcp_server_mod):
+    mock_tcp_server_mod.publish = MagicMock()
+    mock_tcp_server_mod._teardown_server = MagicMock()
+    mock_tcp_server_mod.start_tcp_server = MagicMock()
+    mock_tcp_server_mod._running = True
+    mock_tcp_server_mod._restart_pending = False
+
+    mock_tcp_server_mod._on_session_closed()
+
+    mock_tcp_server_mod.publish.assert_called_once_with("tcp.session.closed", {})
+    mock_tcp_server_mod._teardown_server.assert_called_once()
+    mock_tcp_server_mod.start_tcp_server.assert_called_once()
+
+
+def test_tcp_server_module_on_session_closed_during_restart_pending(mock_tcp_server_mod):
+    mock_tcp_server_mod.publish = MagicMock()
+    mock_tcp_server_mod._teardown_server = MagicMock()
+    mock_tcp_server_mod._restart_pending = True
+
+    mock_tcp_server_mod._on_session_closed()
+
+    mock_tcp_server_mod.publish.assert_not_called()
+    mock_tcp_server_mod._teardown_server.assert_not_called()
+
+
+def test_tcp_server_module_on_ch0_frame_shutdown_ack(mock_tcp_server_mod):
+    from modules.tcp_server.main import _MSG_SHUTDOWN_RESPONSE
+    mock_tcp_server_mod._restart_pending = True
+    mock_tcp_server_mod._shutdown_ack_event.clear()
+
+    mock_tcp_server_mod.on_ch0_frame("aa.frame.ch0", {"message_id": _MSG_SHUTDOWN_RESPONSE})
+    assert mock_tcp_server_mod._shutdown_ack_event.is_set()
+
+
+def test_tcp_server_module_on_frame_send_malformed(mock_tcp_server_mod):
+    mock_relay = MagicMock()
+    mock_tcp_server_mod._relay = mock_relay
+
+    # Missing message_id / invalid payload
+    mock_tcp_server_mod.on_frame_send("aa.frame.send", {"channel_id": "bad"})
+    mock_relay.send_raw.assert_not_called()
+
+
+def test_tcp_server_module_on_raw_frame_too_short(mock_tcp_server_mod):
+    mock_tcp_server_mod._assembler = MagicMock()
+    # Payload less than 2 bytes
+    mock_tcp_server_mod._assembler.feed.return_value = (0, 0x03, b"1", 1)
+    mock_tcp_server_mod.publish = MagicMock()
+
+    mock_tcp_server_mod._on_raw_frame(0, 0x03, b"1", 1)
+    # Should not publish since payload is too short for 2B message ID
+    mock_tcp_server_mod.publish.assert_not_called()
+
+
+def test_tcp_server_module_on_raw_frame_decrypt_failure_logs_error(mock_tcp_server_mod):
+    mock_cryptor = MagicMock()
+    mock_cryptor.is_active.return_value = True
+    mock_cryptor.decrypt.side_effect = RuntimeError("decryption failed")
+    mock_tcp_server_mod._cryptor = mock_cryptor
+    mock_tcp_server_mod._assembler = MagicMock()
+    # flags with 0x08 (_FLAG_ENCRYPTED)
+    mock_tcp_server_mod._on_raw_frame(channel_id=0, flags=0x0B, payload=b"bad_encrypted_payload", total_size=20)
+    mock_tcp_server_mod._assembler.feed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_tcp_server_module_setup_and_restart(mock_tcp_server_mod):
+    await mock_tcp_server_mod.setup()
+
+    # Test POST restart
+    req = MagicMock()
+    with patch.object(mock_tcp_server_mod, "on_aa_session_restart") as m_restart:
+        resp = await mock_tcp_server_mod.handle_post_restart(req)
+        assert resp.status == 200
+        m_restart.assert_called_once()
+
+    # Test teardown
+    with patch.object(mock_tcp_server_mod, "_teardown_server") as m_td:
+        await mock_tcp_server_mod.teardown()
+        m_td.assert_called_once()
+
+
+def test_tcp_server_module_on_aa_session_restart(mock_tcp_server_mod):
+    # Case 1: _relay is None
+    mock_tcp_server_mod._relay = None
+    mock_tcp_server_mod.on_aa_session_restart("aa.session.restart", {})
+
+    # Case 2: _relay present
+    mock_relay = MagicMock()
+    mock_cryptor = MagicMock()
+    mock_cryptor.is_active.return_value = False
+    mock_assembler = MagicMock()
+
+    mock_tcp_server_mod._relay = mock_relay
+    mock_tcp_server_mod._cryptor = mock_cryptor
+    mock_tcp_server_mod._assembler = mock_assembler
+    mock_tcp_server_mod.publish = MagicMock()
+
+    # Pre-set shutdown ack so test doesn't wait
+    mock_tcp_server_mod._shutdown_ack_event.set()
+
+    mock_tcp_server_mod.on_aa_session_restart("aa.session.restart", {})
+    mock_relay.send_raw.assert_called()
+    mock_cryptor.deinit.assert_called_once()
+    mock_assembler.reset.assert_called_once()
+    mock_tcp_server_mod.publish.assert_called_with("aa.session.restarting", {})
+
+
+def test_tcp_server_module_start_when_active(mock_tcp_server_mod):
+    mock_tcp_server_mod._server = MagicMock()
+    with patch("threading.Thread") as m_thread:
+        mock_tcp_server_mod.start_tcp_server()
+        m_thread.assert_not_called()
+
+
+def test_tcp_server_module_on_sdr_channels(mock_tcp_server_mod):
+    import asyncio
+    asyncio.run(mock_tcp_server_mod.on_sdr_channels({
+        "type_map": {"1": "AV_CHANNEL_TYPE_VIDEO", "3": "AV_CHANNEL_TYPE_AUDIO"}
+    }))
+    assert mock_tcp_server_mod.channel_type_map[1] == "AV_CHANNEL_TYPE_VIDEO"
+    assert mock_tcp_server_mod.channel_type_map[3] == "AV_CHANNEL_TYPE_AUDIO"
+
+
+def test_tcp_server_module_handshake_completed_and_feed_errors(mock_tcp_server_mod):
+    with patch.object(mock_tcp_server_mod, "start_tcp_server") as m_start:
+        mock_tcp_server_mod.on_handshake_completed("aa.handshake.completed", {"device_address": "AA:BB", "phone_ip": "192.168.1.5"})
+        m_start.assert_called_once()
+
+    # Feed input with cryptor None
+    mock_tcp_server_mod._cryptor = None
+    mock_tcp_server_mod.on_handshake_feed_input("aa.handshake.feed_input", {"payload_hex": "1234"})
+
+    # Feed input with malformed hex
+    mock_tcp_server_mod._cryptor = MagicMock()
+    mock_tcp_server_mod.on_handshake_feed_input("aa.handshake.feed_input", {"payload_hex": "not_hex"})
+
+
+def test_tcp_server_module_on_frame_send_exceptions(mock_tcp_server_mod):
+    mock_tcp_server_mod._relay = MagicMock()
+    # Test encode exception
+    with patch("modules.tcp_server.main.encode", side_effect=Exception("Encode failed")):
+        mock_tcp_server_mod.on_frame_send("aa.frame.send", {
+            "channel_id": 0,
+            "message_id": 1,
+            "payload_hex": "00",
+        })
+
+    # Test send_raw exception
+    mock_tcp_server_mod._relay.send_raw.side_effect = Exception("Write failed")
+    mock_tcp_server_mod.on_frame_send("aa.frame.send", {
+        "channel_id": 0,
+        "message_id": 1,
+        "payload_hex": "00",
+    })
+
+
+

@@ -102,3 +102,21 @@ def test_phone_drawer_tab_visibility_and_contact_click_copies_to_keypad():
     drawer._on_item_clicked(contact_item)
     assert drawer.dial_display.text() == "+199988877"
     assert drawer.tabs.currentWidget() == drawer.keypad_tab
+
+    # Digit deletion
+    drawer._backspace_digit()
+    assert drawer.dial_display.text() == "+19998887"
+
+
+    # Sync button
+    sync_emitted = False
+    drawer.sync_requested.connect(lambda: nonlocal_sync())
+    def nonlocal_sync():
+        nonlocal sync_emitted
+        sync_emitted = True
+
+    drawer._on_sync_clicked()
+    assert sync_emitted is True
+    drawer._reset_sync_button()
+    assert drawer.sync_btn.text() == " Sync"
+
