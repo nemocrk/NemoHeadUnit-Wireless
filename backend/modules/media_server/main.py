@@ -58,7 +58,13 @@ def _is_loopback(remote_addr: str) -> bool:
     """Detect whether a client address is loopback (same machine as backend)."""
     if not remote_addr:
         return False
-    host = remote_addr.split(":")[0].strip("[]")
+    if remote_addr.startswith("[") and "]" in remote_addr:
+        host = remote_addr.split("]")[0][1:]
+    elif ":" in remote_addr and not remote_addr.count(":") > 1:
+        # IPv4 with port, e.g. 127.0.0.1:8080
+        host = remote_addr.split(":")[0]
+    else:
+        host = remote_addr.strip("[]")
     try:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:

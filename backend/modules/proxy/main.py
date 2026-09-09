@@ -23,6 +23,7 @@ from shared.base_module import (
     run_module,
     SHARED_MODULE_REGISTRY,
     SHARED_REGISTRY_LOCK,
+    is_multithreading_mode,
 )
 from shared.config_schema import field_int, field_string
 
@@ -72,6 +73,17 @@ class ProxyModule(BaseBackendModule):
         self.subscribe("system.module_ready", self.on_module_ready)
         self.subscribe("system.ready", self.on_module_ready)
         self.subscribe("system.heartbeat", self.on_heartbeat)
+
+        if is_multithreading_mode():
+            with SHARED_REGISTRY_LOCK:
+                for mod_name, mod_inst in SHARED_MODULE_REGISTRY.items():
+                    if mod_name != self.name and mod_inst.path_prefix and mod_inst.target_url:
+                        self.register_route(
+                            mod_inst.path_prefix,
+                            mod_inst.target_url,
+                            name=mod_name,
+                            priority=mod_inst.priority,
+                        )
 
     async def handle_get_modules(self, request: web.Request) -> web.Response:
         """REST API: GET /api/system/modules — Returns active module metadata and log stream endpoints."""

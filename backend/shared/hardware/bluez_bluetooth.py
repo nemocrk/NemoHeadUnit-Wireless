@@ -408,6 +408,7 @@ class BluezBluetoothAdapter(BaseBluetoothAdapter):
                 elif "NotReady" in err_str or "Failed" in err_str:
                     log.warning(f"StartDiscovery failed ({e}), attempting adapter power recovery...")
                     try:
+                        import dbus
                         props = dbus.Interface(self._adapter, "org.freedesktop.DBus.Properties")
                         props.Set("org.bluez.Adapter1", "Powered", dbus.Boolean(True, variant_level=1))
                         time.sleep(0.5)
