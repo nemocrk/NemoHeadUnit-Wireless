@@ -18,7 +18,12 @@ from typing import Any, Dict, Optional
 import aiohttp
 from aiohttp import web
 
-from shared.base_module import BaseBackendModule, run_module
+from shared.base_module import (
+    BaseBackendModule,
+    run_module,
+    SHARED_MODULE_REGISTRY,
+    SHARED_REGISTRY_LOCK,
+)
 from shared.config_schema import field_int, field_string
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent.parent / "frontend"
@@ -158,6 +163,9 @@ class ProxyModule(BaseBackendModule):
         for prefix in sorted(self.routes.keys(), key=len, reverse=True):
             if prefix != "/" and (path == prefix or path.startswith(prefix + "/")):
                 target_base = self.routes[prefix]
+                if target_base.startswith("inmemory://"):
+                    return await self._proxy_inmemory(request, prefix, target_base)
+
                 target_url = f"{target_base}{path}"
                 if request.query_string:
                     target_url += f"?{request.query_string}"
@@ -167,6 +175,69 @@ class ProxyModule(BaseBackendModule):
 
         # Fallback: Serve static assets from frontend/
         return await self._serve_static(request)
+
+    async def _proxy_inmemory(self, request: web.Request, prefix: str, target_base: str) -> web.StreamResponse:
+        target_mod_name = target_base[len("inmemory://"):].strip("/")
+        with SHARED_REGISTRY_LOCK:
+            target_inst = SHARED_MODULE_REGISTRY.get(target_mod_name)
+
+        if not target_inst:
+            return web.Response(
+                status=502,
+                text=f"Bad Gateway: Module '{target_mod_name}' not found in in-memory registry",
+            )
+
+        # Handle WebSocket upgrade
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            rel_path = "/" + request.path[len(prefix):].lstrip("/")
+            handler = (
+                target_inst._inmemory_ws_routes.get(request.path)
+                or target_inst._inmemory_ws_routes.get(rel_path)
+                or target_inst._inmemory_ws_routes.get(request.path[len(prefix):])
+            )
+            if not handler:
+                return web.Response(
+                    status=404,
+                    text=f"WebSocket route '{request.path}' not found in '{target_mod_name}'",
+                )
+            return await handler(request)
+
+        # Handle HTTP / SSE
+        method = request.method.upper()
+        rel_path = "/" + request.path[len(prefix):].lstrip("/")
+        handler = (
+            target_inst._inmemory_http_routes.get((method, request.path))
+            or target_inst._inmemory_http_routes.get((method, rel_path))
+            or target_inst._inmemory_http_routes.get((method, request.path[len(prefix):]))
+        )
+
+        if not handler:
+            # Try resolving via target app router (for dynamic path parameters e.g. /{module})
+            try:
+                match_info = await target_inst.web_app.router.resolve(request)
+                if match_info and match_info.handler and match_info.http_exception is None:
+                    handler = match_info.handler
+                    try:
+                        request._match_info = match_info
+                    except Exception:
+                        pass
+                    if hasattr(request, "match_info") and isinstance(request.match_info, dict) and hasattr(match_info, "items"):
+                        request.match_info.update(match_info)
+            except Exception:
+                pass
+
+        if not handler:
+            return web.Response(
+                status=404,
+                text=f"Route [{method}] '{request.path}' not found in '{target_mod_name}'",
+            )
+
+        try:
+            resp = await handler(request)
+            return resp
+        except Exception as exc:
+            self.log.error(f"In-memory dispatch error for {request.path}: {exc}")
+            return web.Response(status=500, text=f"Internal Error: {exc}")
 
     async def _proxy_http(self, request: web.Request, target_url: str) -> web.StreamResponse:
         if not self.proxy_client_session:
