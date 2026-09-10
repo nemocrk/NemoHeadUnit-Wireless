@@ -204,7 +204,7 @@ class AudioBufferPill(QFrame):
         sink_buf = active_ch.get("sink_buffer", {}) if active_ch else {}
 
         app_ms = app_buf.get("buffered_ms", 0)
-        app_target_ms = app_buf.get("prebuffer_ms", 150)
+        app_target_ms = app_buf.get("prebuffer_ms", 500)
         is_buffering = app_buf.get("is_buffering", False)
         underruns = app_buf.get("underruns", 0)
         a_lag = active_ch.get("lag_ms", 0) if active_ch else 0

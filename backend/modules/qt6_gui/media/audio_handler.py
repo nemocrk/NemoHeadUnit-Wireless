@@ -117,7 +117,7 @@ class AudioPcmStream(QIODevice):
     Accumulates a jitter pre-buffer before releasing audio data to eliminate Active/Idle thrashing.
     """
 
-    def __init__(self, sample_rate: int = 48000, channels: int = 2, prebuffer_ms: int = 150, parent=None):
+    def __init__(self, sample_rate: int = 48000, channels: int = 2, prebuffer_ms: int = 500, parent=None):
         super().__init__(parent)
         self._sample_rate = sample_rate
         self._channels = channels
@@ -133,7 +133,7 @@ class AudioPcmStream(QIODevice):
         self._buffer = bytearray()
         self._lock = threading.RLock()
 
-    def configure_format(self, sample_rate: int, channels: int, prebuffer_ms: int = 150):
+    def configure_format(self, sample_rate: int, channels: int, prebuffer_ms: int = 500):
         with self._lock:
             self._sample_rate = sample_rate
             self._channels = channels
@@ -227,15 +227,15 @@ class AudioPcmStream(QIODevice):
 class DynamicChannelAudioSink(QObject):
     """
     Dedicated audio playback pipeline for an individual audio channel.
-    Uses PyQt6 QAudioSink in native Push Mode with event-driven buffer pumping
-    (via 10ms QTimer and thread-safe jitter pre-buffering).
+    Uses PyQt6 QAudioSink in native event-driven Pull Mode via AudioPcmStream
+    QIODevice and thread-safe jitter pre-buffering.
     """
 
     _start_signal = pyqtSignal()
     _stop_signal = pyqtSignal()
     _push_signal = pyqtSignal()
 
-    PREBUFFER_MS = 150
+    PREBUFFER_MS = 500
 
     def __init__(self, channel_id: int, sample_rate: int = 48000, channel_count: int = 2, target_device: str = "default", prebuffer_ms: Optional[int] = None, parent=None):
         super().__init__(parent)
