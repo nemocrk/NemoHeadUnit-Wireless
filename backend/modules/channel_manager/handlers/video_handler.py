@@ -172,11 +172,11 @@ class VideoChannelHandler:
     async def process_shm_frame(self, message_id: int, offset: int, ts_us: int, payload_len: int) -> None:
         video_ch_id = self.manager.get_channel_id_for_type(ChannelType.VIDEO)
 
-        if self.frame_count % UNACKED_FRAMES_THRESHOLD == 0:
+        if self.frame_count < 10 or self.frame_count % UNACKED_FRAMES_THRESHOLD == 0:
             self.log.debug(
-                f"📹 [Video Stream Flow] Processed video frame {self.frame_count}/{UNACKED_FRAMES_THRESHOLD} "
-                f"(ch{video_ch_id}): msgId=0x{message_id:04x}, payload_len={payload_len}, ts={ts_us} µs "
-                f"-> Publishing to video.raw_nal (transport: {self.manager.active_video_transport or 'h264'})"
+                f"📹 [Flow A: channel_manager] Frame #{self.frame_count} "
+                f"(ch{video_ch_id}): msgId=0x{message_id:04x}, len={payload_len}, ts={ts_us} µs "
+                f"-> publishing media.video.raw_nal_shm (offset={offset})"
             )
 
         # Re-transmit raw H.264 NAL pointer directly to media_server zero-copy

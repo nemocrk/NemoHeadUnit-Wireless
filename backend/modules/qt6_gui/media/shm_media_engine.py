@@ -231,7 +231,12 @@ class Qml6ZeroCopyDecoder:
                 err, dbg = msg.parse_error()
                 logger.error(f"❌ [Qml6ZeroCopyDecoder Gst Error] {err.message} - {dbg}")
 
+            def _on_gst_warning(b, msg):
+                warn, dbg = msg.parse_warning()
+                logger.warning(f"⚠️ [Qml6ZeroCopyDecoder Gst Warning] {warn.message} - {dbg}")
+
             bus.connect("message::error", _on_gst_error)
+            bus.connect("message::warning", _on_gst_warning)
 
             self.is_available = True
             logger.info(f"🎬 [Qml6ZeroCopyDecoder] Pipeline initialized ({dec_desc} -> qml6glsink)")
@@ -259,6 +264,15 @@ class Qml6ZeroCopyDecoder:
 
     def decode_nal(self, nal_data: bytes, ts_us: int = 0) -> bool:
         """Push a NAL unit into appsrc. Starts playback on first frame."""
+        if not hasattr(self, "_push_count"):
+            self._push_count = 0
+        if self._push_count < 10 or self._push_count % 100 == 0:
+            logger.debug(
+                f"📹 [Flow F: Qml6ZeroCopyDecoder] decode_nal #{self._push_count}: len={len(nal_data)}, "
+                f"avail={self.is_available}, appsrc={self._appsrc is not None}, "
+                f"focused={getattr(self, '_is_focused', True)}, bound={self._is_sink_bound}, playing={self._is_playing}"
+            )
+        self._push_count += 1
         if not self.is_available or not self._appsrc or not getattr(self, "_is_focused", True):
             return False
         try:
@@ -388,6 +402,16 @@ class QtSHMMediaEngine:
         """
         Reads video frame at offset from dedicated per-channel SHM and dispatches to on_video_frame callback.
         """
+        if not hasattr(self, "_trace_downstream"):
+            self._trace_downstream = 0
+        if self._trace_downstream < 10 or self._trace_downstream % 100 == 0:
+            logger.debug(
+                f"📹 [Flow E: shm_engine] process_downstream_video #{self._trace_downstream}: "
+                f"offset={offset}, ch={channel_id}, shm={'ok' if self.shm else 'None'}, "
+                f"focused={getattr(self, 'is_video_focused', False)}"
+            )
+        self._trace_downstream += 1
+
         if not self.shm or offset < 0 or not self.is_video_focused:
             return
 
@@ -395,6 +419,8 @@ class QtSHMMediaEngine:
             shm_buf = self.shm.get_downstream_channel(channel_id) if channel_id is not None else self.shm.downstream
             _, ts_low, payload = shm_buf.read_frame(offset)
             if not payload:
+                if self._trace_downstream <= 10:
+                    logger.warning(f"⚠️ [Flow E: shm_engine] Frame read at offset {offset} returned empty payload!")
                 return
 
             # 1. Direct raw RGBA frame header check

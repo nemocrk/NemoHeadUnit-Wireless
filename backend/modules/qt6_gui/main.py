@@ -71,7 +71,7 @@ def dismiss_boot_splash() -> None:
 
 def _is_display_reachable() -> bool:
     """Validate if Wayland or X11 display socket can actually be connected to within 200ms."""
-    if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen" or  os.environ.get("QT_QPA_PLATFORM") == "eglfs":
         return True
 
     import socket
@@ -698,6 +698,14 @@ class Qt6GuiModule(BaseBackendModule):
         data = payload if payload is not None else topic_or_payload
         offset = data.get("shm_offset", -1) if isinstance(data, dict) else -1
         channel_id = data.get("channel_id") if isinstance(data, dict) else None
+        if not hasattr(self, "_trace_video_rx"):
+            self._trace_video_rx = 0
+        if self._trace_video_rx < 10 or self._trace_video_rx % 100 == 0:
+            self.log.debug(
+                f"📹 [Flow D: qt6_gui] Rx transport_frame_shm #{self._trace_video_rx} "
+                f"(offset={offset}, ch={channel_id}) -> shm_engine.process_downstream_video"
+            )
+        self._trace_video_rx += 1
         if offset >= 0 and self.shm_engine:
             self.shm_engine.process_downstream_video(offset, channel_id=channel_id)
 

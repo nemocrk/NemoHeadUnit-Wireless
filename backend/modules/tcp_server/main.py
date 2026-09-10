@@ -297,6 +297,21 @@ class TCPServerModule(BaseBackendModule):
 
             if ch_type_name == "VIDEO":
                 shm_offset = self._shm.transcode_in.write_frame(stream_type, ts_us, media_payload)
+                if not hasattr(self, "_trace_video_tx"):
+                    self._trace_video_tx = 0
+                if self._trace_video_tx < 10 or self._trace_video_tx % 100 == 0:
+                    buf_obj = self._shm.transcode_in
+                    raw_slice = b""
+                    if hasattr(buf_obj, "buf") and buf_obj.buf is not None:
+                        raw_slice = bytes(buf_obj.buf[shm_offset : shm_offset + 16])
+                    elif hasattr(buf_obj, "shm") and buf_obj.shm is not None:
+                        raw_slice = bytes(buf_obj.shm.buf[shm_offset : shm_offset + 16])
+                    self.log.debug(
+                        f"📹 [Flow A0: tcp_server] Video NAL #{self._trace_video_tx} written to transcode_in: "
+                        f"offset={shm_offset}, buf_type={type(buf_obj).__name__}, "
+                        f"id={id(buf_obj)}, header={raw_slice.hex()}"
+                    )
+                self._trace_video_tx += 1
             else:
                 ch_buf_size = 8 * 1024 * 1024
                 shm_buf = self._shm.get_downstream_channel(channel_id, size=ch_buf_size)

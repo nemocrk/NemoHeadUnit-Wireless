@@ -23,15 +23,22 @@ class InMemoryBusHub:
 
     @classmethod
     def default(cls) -> InMemoryBusHub:
+        import sys
         with cls._lock:
-            if cls._instance is None:
-                cls._instance = cls()
-            return cls._instance
+            inst = getattr(sys, "_nemo_inmemory_bus_hub", None)
+            if inst is None:
+                inst = cls()
+                sys._nemo_inmemory_bus_hub = inst
+            cls._instance = inst
+            return inst
 
     @classmethod
     def reset_default(cls) -> None:
+        import sys
         with cls._lock:
             cls._instance = None
+            if hasattr(sys, "_nemo_inmemory_bus_hub"):
+                delattr(sys, "_nemo_inmemory_bus_hub")
 
     def __init__(self):
         self._lock = threading.RLock()

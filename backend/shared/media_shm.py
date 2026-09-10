@@ -143,10 +143,11 @@ class RingSharedMemoryBuffer:
         magic, stream_type, _, length, ts_low = struct.unpack(">2s B B I I", header_bytes)
 
         if magic != b"NM":
-            logger.debug("Invalid SHM frame magic at offset %d", offset)
+            logger.warning("Invalid SHM frame magic %r (hex=%s) at offset %d (buf size=%d)", magic, header_bytes.hex(), offset, self.size)
             return 0, 0, b""
 
         if offset + 12 + length > self.size:
+            logger.warning("SHM frame at offset %d with length %d overflows buffer size %d", offset, length, self.size)
             return 0, 0, b""
 
         payload = bytes(self.shm.buf[offset + 12 : offset + 12 + length])
@@ -167,8 +168,15 @@ class RingSharedMemoryBuffer:
             self.shm = None
 
 
-_INMEMORY_BUFFERS: dict[str, InMemoryRingBuffer] = {}
-_INMEMORY_LOCK = threading.RLock()
+import sys
+
+if not hasattr(sys, "_nemo_inmemory_buffers"):
+    sys._nemo_inmemory_buffers = {}
+_INMEMORY_BUFFERS: dict[str, InMemoryRingBuffer] = sys._nemo_inmemory_buffers
+
+if not hasattr(sys, "_nemo_inmemory_lock"):
+    sys._nemo_inmemory_lock = threading.RLock()
+_INMEMORY_LOCK = sys._nemo_inmemory_lock
 
 
 class InMemoryRingBuffer:
@@ -180,7 +188,7 @@ class InMemoryRingBuffer:
     @classmethod
     def get_or_create(cls, name: str, size: int = DEFAULT_SHM_SIZE, create: bool = False) -> InMemoryRingBuffer:
         with _INMEMORY_LOCK:
-            if name in _INMEMORY_BUFFERS and not create:
+            if name in _INMEMORY_BUFFERS:
                 return _INMEMORY_BUFFERS[name]
             buf = cls(name=name, size=size, create=create)
             _INMEMORY_BUFFERS[name] = buf
@@ -191,15 +199,17 @@ class InMemoryRingBuffer:
         self.size = size
         self.create = create
         with _INMEMORY_LOCK:
-            if name in _INMEMORY_BUFFERS and not create:
+            if name in _INMEMORY_BUFFERS:
                 existing = _INMEMORY_BUFFERS[name]
                 self.buf = existing.buf
                 self.size = existing.size
+                self.write_offset = getattr(existing, "write_offset", 0)
+                self._lock = getattr(existing, "_lock", threading.Lock())
             else:
                 self.buf = bytearray(size)
+                self.write_offset = 0
+                self._lock = threading.Lock()
                 _INMEMORY_BUFFERS[name] = self
-        self.write_offset = 0
-        self._lock = threading.Lock()
 
     def write_frame(self, stream_type: int, timestamp_us: int, payload: bytes) -> int:
         if not payload:
@@ -236,10 +246,11 @@ class InMemoryRingBuffer:
         magic, stream_type, _, length, ts_low = struct.unpack(">2s B B I I", header_bytes)
 
         if magic != b"NM":
-            logger.debug("Invalid in-memory frame magic at offset %d", offset)
+            logger.warning("Invalid in-memory frame magic %r (hex=%s) at offset %d (buf size=%d)", magic, header_bytes.hex(), offset, self.size)
             return 0, 0, b""
 
         if offset + 12 + length > self.size:
+            logger.warning("In-memory frame at offset %d with length %d overflows buffer size %d", offset, length, self.size)
             return 0, 0, b""
 
         payload = bytes(self.buf[offset + 12 : offset + 12 + length])

@@ -635,7 +635,23 @@ class MediaServerModule(BaseBackendModule):
             if offset < 0:
                 return
 
-            _, _, nal_data = self.shm.transcode_in.read_frame(offset)
+            buf_obj = self.shm.transcode_in
+            _, _, nal_data = buf_obj.read_frame(offset)
+            if not hasattr(self, "_trace_nal_rx"):
+                self._trace_nal_rx = 0
+            if self._trace_nal_rx < 10 or self._trace_nal_rx % 100 == 0:
+                raw_slice = b""
+                if hasattr(buf_obj, "buf") and buf_obj.buf is not None:
+                    raw_slice = bytes(buf_obj.buf[offset : offset + 16])
+                elif hasattr(buf_obj, "shm") and buf_obj.shm is not None:
+                    raw_slice = bytes(buf_obj.shm.buf[offset : offset + 16])
+                self.log.debug(
+                    f"📹 [Flow B: media_server] Rx NAL #{self._trace_nal_rx} (offset={offset}, "
+                    f"buf_type={type(buf_obj).__name__}, id={id(buf_obj)}, "
+                    f"raw_header={raw_slice.hex()}, len={len(nal_data) if nal_data else 0}) "
+                    f"-> feeding transport '{self._active_transport_name}'"
+                )
+            self._trace_nal_rx += 1
             if nal_data:
                 await self._transport.feed_nal(nal_data, timestamp_us)
         except Exception as exc:
@@ -724,6 +740,14 @@ class MediaServerModule(BaseBackendModule):
         ch_id = self._video_channel_id if self._video_channel_id is not None else 3
         shm_buf = self.shm.get_downstream_channel(ch_id, size=32 * 1024 * 1024)
         shm_offset = shm_buf.write_frame(4, timestamp_us, frame_bytes)
+        if not hasattr(self, "_trace_frame_tx"):
+            self._trace_frame_tx = 0
+        if self._trace_frame_tx < 10 or self._trace_frame_tx % 100 == 0:
+            self.log.debug(
+                f"📹 [Flow C: media_server] Tx frame #{self._trace_frame_tx} (len={len(frame_bytes)}, "
+                f"shm_offset={shm_offset}) -> publishing media.video.transport_frame_shm"
+            )
+        self._trace_frame_tx += 1
         if shm_offset >= 0:
             self.publish("media.video.transport_frame_shm", {
                 "shm_offset": shm_offset,
