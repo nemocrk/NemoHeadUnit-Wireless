@@ -178,7 +178,7 @@ class PhoneStatusHandler:
             updated = True
 
         if updated:
-            self.log.info(
+            self.log.debug(
                 f"📱 PhoneStatus merged telemetry: battery={self.current_state['battery_level']}%, "
                 f"signal={self.current_state['signal_strength']}/5, operator='{self.current_state['operator_name']}'"
             )

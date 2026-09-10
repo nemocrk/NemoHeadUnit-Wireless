@@ -6,6 +6,7 @@ and dispatches them directly to Qt6 render surfaces and audio sinks.
 """
 
 import os
+import time
 import logging
 import asyncio
 from typing import Callable, Optional, Tuple
@@ -150,6 +151,14 @@ class GStreamerHwDecoder:
         except Exception:
             return self._Gst.FlowReturn.ERROR
 
+    def get_queue_bytes(self) -> int:
+        if self._appsrc:
+            try:
+                return int(self._appsrc.get_property("current-level-bytes"))
+            except Exception:
+                pass
+        return 0
+
     def close(self):
         if self._pipeline:
             try:
@@ -291,6 +300,14 @@ class Qml6ZeroCopyDecoder:
             logger.debug(f"[Qml6ZeroCopyDecoder] decode_nal error: {exc}")
             return False
 
+    def get_queue_bytes(self) -> int:
+        if self._appsrc:
+            try:
+                return int(self._appsrc.get_property("current-level-bytes"))
+            except Exception:
+                pass
+        return 0
+
     def close(self) -> None:
         if self._pipeline:
             try:
@@ -325,6 +342,22 @@ class QtSHMMediaEngine:
         self._last_watchdog_recover_time = 0.0
         self.request_keyframe: Optional[Callable[[], None]] = None
 
+        # Telemetry metrics
+        self.frames_rx_shm = 0
+        self.frames_rendered_total = 0
+        self._last_telemetry_time = 0.0
+        self._last_telemetry_rx = 0
+        self._last_telemetry_rend = 0
+        self._last_stall_warn_time = 0.0
+
+        # Video FPS and PTS lag telemetry (hardware + software decode)
+        self._video_fps: float = 0.0
+        self._video_frame_count: int = 0
+        self._video_fps_timer: float = time.time()
+        self._video_first_sys_time: Optional[float] = None
+        self._video_first_ts_us: Optional[int] = None
+        self._video_lag_ms: float = 0.0
+
         # 1. Initialize best available video decoder
         self._hw_decoder = Qml6ZeroCopyDecoder(on_frame_callback=self._on_hw_decoded_frame)
         if not self._hw_decoder.is_available:
@@ -349,10 +382,47 @@ class QtSHMMediaEngine:
         if hasattr(self._hw_decoder, "set_focused"):
             self._hw_decoder.set_focused(focused)
 
+    def _update_frame_stats(self, ts_us: int) -> None:
+        """Update rolling FPS and phone-PTS vs system-clock lag metrics."""
+        now = time.time()
+        self._video_frame_count += 1
+        elapsed_fps = now - self._video_fps_timer
+        if elapsed_fps >= 1.0:
+            self._video_fps = round(self._video_frame_count / elapsed_fps, 1)
+            self._video_frame_count = 0
+            self._video_fps_timer = now
+
+        if ts_us > 0:
+            if self._video_first_sys_time is None or self._video_first_ts_us is None:
+                self._video_first_sys_time = now
+                self._video_first_ts_us = ts_us
+                self._video_lag_ms = 0.0
+            else:
+                elapsed_sys = now - self._video_first_sys_time
+                elapsed_phone = (ts_us - self._video_first_ts_us) / 1_000_000.0
+                lag = (elapsed_sys - elapsed_phone) * 1000.0
+                if abs(lag) > 3000.0 or elapsed_phone < 0:
+                    self._video_first_sys_time = now
+                    self._video_first_ts_us = ts_us
+                    self._video_lag_ms = 0.0
+                else:
+                    self._video_lag_ms = max(0.0, lag)
+
+    def get_video_metrics(self) -> dict:
+        """Return active video FPS and lag metrics for GUI telemetry and logs."""
+        now = time.time()
+        is_active = (now - self._last_rendered_time) < 2.0 if self._last_rendered_time > 0 else False
+        return {
+            "fps": self._video_fps if is_active else 0.0,
+            "lag_ms": int(self._video_lag_ms) if is_active else 0,
+            "rendered_total": self.frames_rendered_total,
+        }
+
     def _on_hw_decoded_frame(self, rgba_pixels: bytes, width: int, height: int, ts_us: int):
         """Dispatch hardware-decoded RGBA frame directly to Qt6 video viewport."""
-        import time
         self._last_rendered_time = time.time()
+        self.frames_rendered_total += 1
+        self._update_frame_stats(ts_us)
         if self.on_video_frame and self.is_video_focused:
             self.on_video_frame(rgba_pixels, width, height, ts_us)
 
@@ -411,6 +481,7 @@ class QtSHMMediaEngine:
                 f"focused={getattr(self, 'is_video_focused', False)}"
             )
         self._trace_downstream += 1
+        self.frames_rx_shm += 1
 
         if not self.shm or offset < 0 or not self.is_video_focused:
             return
@@ -430,8 +501,9 @@ class QtSHMMediaEngine:
                 if 0 < width <= 4096 and 0 < height <= 4096:
                     expected_len = width * height * 4
                     if len(payload) == 12 + expected_len:
-                        import time
                         self._last_rendered_time = time.time()
+                        self.frames_rendered_total += 1
+                        self._update_frame_stats(ts_low)
                         rgba_pixels = payload[12:]
                         if self.on_video_frame:
                             self.on_video_frame(rgba_pixels, width, height, ts_low)
@@ -439,7 +511,6 @@ class QtSHMMediaEngine:
 
             # 2. Decode raw H.264 NAL units via Hardware VA-API (or PyAV Fallback)
             if payload.startswith(b"\x00\x00\x00\x01") or payload.startswith(b"\x00\x00\x01"):
-                import time
                 now = time.time()
                 self._last_nal_time = now
 
@@ -450,7 +521,12 @@ class QtSHMMediaEngine:
                         self._recover_pipeline()
 
                 if self._hw_decoder and self._hw_decoder.is_available:
-                    self._hw_decoder.decode_nal(payload, ts_low)
+                    ok = self._hw_decoder.decode_nal(payload, ts_low)
+                    if ok:
+                        self._last_rendered_time = now
+                        self.frames_rendered_total += 1
+                        if isinstance(self._hw_decoder, Qml6ZeroCopyDecoder):
+                            self._update_frame_stats(ts_low)
                     if self._hw_decoder.frames_decoded > 0 or self._nal_counter < 30:
                         self._nal_counter += 1
                         return
@@ -461,6 +537,8 @@ class QtSHMMediaEngine:
                         frames = self._codec_ctx.decode(packet)
                         for frame in frames:
                             self._last_rendered_time = time.time()
+                            self.frames_rendered_total += 1
+                            self._update_frame_stats(ts_low)
                             rgba_frame = frame.reformat(format="rgba")
                             rgba_pixels = bytes(rgba_frame.planes[0])
                             w, h = frame.width, frame.height
@@ -479,12 +557,72 @@ class QtSHMMediaEngine:
                     w = rgba_img.width()
                     h = rgba_img.height()
                     ptr = rgba_img.bits()
-                    ptr.setsize(rgba_img.sizeInBytes())
+                    if hasattr(ptr, "setsize"):
+                        ptr.setsize(rgba_img.sizeInBytes())
                     rgba_pixels = bytes(ptr)
+                    self._last_rendered_time = time.time()
+                    self.frames_rendered_total += 1
+                    self._update_frame_stats(ts_low)
                     if self.on_video_frame:
                         self.on_video_frame(rgba_pixels, w, h, ts_low)
         except Exception as exc:
             logger.debug("SHM video processing error at offset %d: %s", offset, exc)
+
+    def check_telemetry(self) -> None:
+        """Periodic 5s video telemetry and stall detector for Qt6 viewport render pipeline."""
+        if self.frames_rx_shm == 0:
+            return
+        import time
+        now = time.time()
+        if self._last_telemetry_time == 0.0:
+            self._last_telemetry_time = now
+            self._last_telemetry_rx = self.frames_rx_shm
+            self._last_telemetry_rend = self.frames_rendered_total
+            return
+
+        elapsed = now - self._last_telemetry_time
+        if elapsed < 5.0:
+            return
+
+        rx_delta = self.frames_rx_shm - self._last_telemetry_rx
+        rend_delta = self.frames_rendered_total - self._last_telemetry_rend
+        self._last_telemetry_time = now
+        self._last_telemetry_rx = self.frames_rx_shm
+        self._last_telemetry_rend = self.frames_rendered_total
+
+        rx_fps = rx_delta / elapsed if elapsed > 0 else 0.0
+        rend_fps = rend_delta / elapsed if elapsed > 0 else 0.0
+
+        last_rx_age = now - self._last_nal_time if self._last_nal_time > 0 else 999.0
+        last_rend_age = now - self._last_rendered_time if self._last_rendered_time > 0 else 999.0
+
+        dec_name = "None"
+        pushed = 0
+        queue_bytes = 0
+        if self._hw_decoder and getattr(self._hw_decoder, "is_available", False):
+            dec_name = type(self._hw_decoder).__name__
+            pushed = getattr(self._hw_decoder, "frames_decoded", 0)
+            if hasattr(self._hw_decoder, "get_queue_bytes"):
+                queue_bytes = self._hw_decoder.get_queue_bytes()
+        elif self._codec_ctx is not None:
+            dec_name = "PyAV_CPU"
+
+        # Stall detection: SHM frames actively arriving (<3.0s), but viewport rendered 0 frames for >=2.5s
+        if last_rx_age < 3.0 and last_rend_age >= 2.5 and self.frames_rx_shm > 0:
+            if (now - self._last_stall_warn_time) >= 3.0:
+                self._last_stall_warn_time = now
+                logger.warning(
+                    f"⚠️ [Video Stall: Qt6 Viewport] Render stall! SHM frames arriving ({self.frames_rx_shm} total, {rx_fps:.1f} fps), "
+                    f"but viewport has rendered 0 frames for {last_rend_age:.1f}s! "
+                    f"(Decoder: {dec_name}, Pushed: {pushed}, AppsrcQueue: {queue_bytes} B)"
+                )
+        elif last_rx_age < 10.0:
+            logger.info(
+                f"🖥️ [Video Telemetry: Qt6 Viewport] Decoder: {dec_name} | "
+                f"SHM Rx: {self.frames_rx_shm} ({rx_fps:.1f} fps) | "
+                f"Pushed: {pushed} | Queue: {queue_bytes} B | "
+                f"Rendered: {self.frames_rendered_total} ({rend_fps:.1f} fps)"
+            )
 
     def process_downstream_audio(self, offset: int, channel_id: Optional[int] = None) -> None:
         """

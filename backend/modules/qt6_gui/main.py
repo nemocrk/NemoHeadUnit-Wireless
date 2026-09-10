@@ -588,6 +588,12 @@ class Qt6GuiModule(BaseBackendModule):
         self._audio_telemetry_timer.timeout.connect(self._update_audio_buffer_status)
         self._audio_telemetry_timer.start()
 
+        # Setup periodic video pipeline telemetry timer (5000ms)
+        self._video_telemetry_timer = QTimer(self.main_window)
+        self._video_telemetry_timer.setInterval(5000)
+        self._video_telemetry_timer.timeout.connect(self._check_video_telemetry)
+        self._video_telemetry_timer.start()
+
         # Register status HTTP endpoint for remote diagnostics
         self.add_http_route("GET", "/status", self.handle_get_status)
 
@@ -858,7 +864,7 @@ class Qt6GuiModule(BaseBackendModule):
 
     def _on_phone_status_notify(self, topic_or_payload: Any, payload: Optional[dict] = None) -> None:
         data = payload if payload is not None else topic_or_payload
-        self.log.info(f"📱 Qt6 GUI _on_phone_status_notify: {data}")
+        self.log.debug(f"📱 Qt6 GUI _on_phone_status_notify: {data}")
         if isinstance(data, dict) and self.main_window:
             signal = data.get("signal_strength")
             if signal is None or signal < 0:
@@ -1173,10 +1179,27 @@ class Qt6GuiModule(BaseBackendModule):
     def _update_audio_buffer_status(self):
         if self.audio_engine and self.main_window and hasattr(self.main_window, "command_bar") and self.main_window.command_bar:
             metrics = self.audio_engine.get_metrics()
-            v_lag = int(self._video_lag_ms)
+            v_lag = 0
+            v_fps = 0.0
+            if hasattr(self, "shm_engine") and self.shm_engine and hasattr(self.shm_engine, "get_video_metrics"):
+                try:
+                    v_metrics = self.shm_engine.get_video_metrics()
+                    if isinstance(v_metrics, dict):
+                        v_lag = int(v_metrics.get("lag_ms", 0))
+                        v_fps = float(v_metrics.get("fps", 0.0))
+                except Exception:
+                    pass
+            if v_fps == 0.0 and v_lag == 0:
+                try:
+                    v_lag = int(self._video_lag_ms)
+                    v_fps = float(self._video_fps)
+                except Exception:
+                    v_lag = 0
+                    v_fps = 0.0
+
             video_metrics = {
                 "lag_ms": v_lag,
-                "fps": self._video_fps,
+                "fps": v_fps,
             }
             self.main_window.command_bar.update_audio_status(metrics, video_metrics=video_metrics)
 
@@ -1186,7 +1209,7 @@ class Qt6GuiModule(BaseBackendModule):
                 self._last_stats_log_time = now
                 # Check active audio channel metrics
                 active_ch = next((c for c in metrics.values() if c.get("is_started") or c.get("total_bytes_in", 0) > 0), None)
-                if active_ch or self._video_fps > 0 or v_lag > 0:
+                if active_ch or v_fps > 0 or v_lag > 0:
                     a_lag = active_ch.get("lag_ms", 0) if active_ch else 0
                     ch_id = active_ch.get("channel_id", 0) if active_ch else 0
                     app_ms = active_ch.get("app_buffer", {}).get("buffered_ms", 0) if active_ch else 0
@@ -1194,10 +1217,17 @@ class Qt6GuiModule(BaseBackendModule):
                     underruns = active_ch.get("app_buffer", {}).get("underruns", 0) if active_ch else 0
                     drift = v_lag - a_lag
                     self.log.info(
-                        f"📊 [A/V Stats] Video: {self._video_fps:.1f} fps (lag +{v_lag}ms) | "
+                        f"📊 [A/V Stats] Video: {v_fps:.1f} fps (lag +{v_lag}ms) | "
                         f"Audio Ch{ch_id}: lag +{a_lag}ms (App: {app_ms}ms, Sink: {sink_ms}ms, Underruns: {underruns}) | "
                         f"A/V Drift: {drift:+d}ms"
                     )
+
+    def _check_video_telemetry(self):
+        if hasattr(self, "shm_engine") and self.shm_engine:
+            try:
+                self.shm_engine.check_telemetry()
+            except Exception as exc:
+                self.log.debug(f"Qt6 GUI video telemetry check error: {exc}")
 
     def _on_mic_data_captured(self, pcm_chunk: bytes):
         if self.shm_engine:

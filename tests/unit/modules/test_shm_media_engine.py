@@ -193,13 +193,17 @@ def test_shm_engine_process_downstream_video_nal_and_jpeg():
         mock_rgba.width.return_value = 100
         mock_rgba.height.return_value = 100
         mock_rgba.sizeInBytes.return_value = 40000
-        mock_rgba.bits.return_value = MagicMock()
+        class MockBits:
+            def setsize(self, size):
+                pass
+            def __bytes__(self):
+                return b"mock_rgba_bytes"
+        mock_rgba.bits.return_value = MockBits()
         mock_qimg.convertToFormat.return_value = mock_rgba
         mock_from_data.return_value = mock_qimg
 
-        with patch("builtins.bytes", return_value=b"mock_rgba_bytes"):
-            engine.process_downstream_video(offset=10, channel_id=3)
-            frame_cb.assert_called_with(b"mock_rgba_bytes", 100, 100, 8888)
+        engine.process_downstream_video(offset=10, channel_id=3)
+        frame_cb.assert_called_with(b"mock_rgba_bytes", 100, 100, 8888)
 
 
 def test_shm_engine_process_downstream_audio():
@@ -238,5 +242,23 @@ def test_shm_engine_write_upstream_mic():
     offset = engine.write_upstream_mic(b"\x12\x34" * 160)
     assert offset == 512
     mock_upstream.write_frame.assert_called_once_with(1, 0, b"\x12\x34" * 160)
+
+
+def test_shm_engine_get_video_metrics():
+    engine = QtSHMMediaEngine()
+    initial_metrics = engine.get_video_metrics()
+    assert initial_metrics["fps"] == 0.0
+    assert initial_metrics["lag_ms"] == 0
+    assert initial_metrics["rendered_total"] == 0
+
+    # Simulate decoded frames with phone PTS
+    engine._last_rendered_time = time.time()
+    engine.frames_rendered_total = 10
+    engine._update_frame_stats(ts_us=1_000_000)
+
+    metrics = engine.get_video_metrics()
+    assert metrics["rendered_total"] == 10
+    assert isinstance(metrics["fps"], float)
+    assert isinstance(metrics["lag_ms"], int)
 
 

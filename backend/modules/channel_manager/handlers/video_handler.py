@@ -32,6 +32,12 @@ class VideoChannelHandler:
         self.frame_count = 0
         self.unacked_frames = 0
         self.session_id = 0
+        self.is_streaming = False
+        self.total_acks_sent = 0
+        self.last_frame_time = 0.0
+        self._last_telemetry_time = 0.0
+        self._last_telemetry_frame_count = 0
+        self._last_stall_warn_time = 0.0
 
         self._handlers: Dict[int, Callable[[int, bytes], None]] = {
             MSG.CHANNEL_OPEN_REQUEST: self._handle_channel_open_request,
@@ -49,6 +55,7 @@ class VideoChannelHandler:
             ack = AVMediaAckIndication()
             ack.session_id = self.session_id
             ack.ack_count = self.unacked_frames
+            self.total_acks_sent += 1
             self.log.info(
                 f"📹 VideoChannel (ch{video_ch_id}): Flushing {self.unacked_frames} pending unacked frames to phone before focus/stop"
             )
@@ -127,7 +134,12 @@ class VideoChannelHandler:
         await self.update_video_focus()
 
     async def _handle_start_indication(self, channel_id: int, body: bytes) -> None:
+        import time
         self.log.info(f"VideoChannel (ch{channel_id}): Received AVChannelStartIndication — video stream ACTIVE")
+        self.is_streaming = True
+        self.last_frame_time = time.time()
+        self._last_telemetry_time = time.time()
+        self._last_telemetry_frame_count = self.frame_count
         if body:
             try:
                 from protos.oaa.av.AVChannelStartIndicationMessage_pb2 import AVChannelStartIndication
@@ -145,6 +157,7 @@ class VideoChannelHandler:
 
     async def _handle_stop_indication(self, channel_id: int, body: bytes) -> None:
         self.log.info(f"VideoChannel (ch{channel_id}): Received AVChannelStopIndication — video stream STOPPED")
+        self.is_streaming = False
         await self._flush_unacked_frames()
         self.manager.publish("video.stream_stop", {
             "session_id": self.session_id,
@@ -170,6 +183,8 @@ class VideoChannelHandler:
 
 
     async def process_shm_frame(self, message_id: int, offset: int, ts_us: int, payload_len: int) -> None:
+        import time
+        self.last_frame_time = time.time()
         video_ch_id = self.manager.get_channel_id_for_type(ChannelType.VIDEO)
 
         if self.frame_count < 10 or self.frame_count % UNACKED_FRAMES_THRESHOLD == 0:
@@ -194,6 +209,7 @@ class VideoChannelHandler:
             ack = AVMediaAckIndication()
             ack.session_id = self.session_id
             ack.ack_count = self.unacked_frames
+            self.total_acks_sent += 1
             self.log.debug(
                 f"📹 VideoChannel (ch{video_ch_id}): Sending batch AVMediaAckIndication "
                 f"(session_id={self.session_id}, ack_count={self.unacked_frames}, total_frames={self.frame_count})"
@@ -204,10 +220,34 @@ class VideoChannelHandler:
             )
             self.unacked_frames = 0
 
+    def check_telemetry(self) -> None:
+        """Periodic 5s video telemetry and stall detector for phone ingest flow."""
+        if not self.is_streaming:
+            return
+        import time
+        now = time.time()
+        elapsed = now - self._last_telemetry_time
+        if elapsed < 5.0:
+            return
 
+        frames_delta = self.frame_count - self._last_telemetry_frame_count
+        fps = frames_delta / elapsed if elapsed > 0 else 0.0
+        self._last_telemetry_time = now
+        self._last_telemetry_frame_count = self.frame_count
 
-
-
+        # Stall detection: stream active but no frames received from phone for >= 2.5s
+        if self.frame_count > 0 and (now - self.last_frame_time) >= 2.5:
+            if (now - self._last_stall_warn_time) >= 3.0:
+                self._last_stall_warn_time = now
+                self.log.warning(
+                    f"⚠️ [Video Stall: Phone/Flow A] No video frame received from phone for {now - self.last_frame_time:.1f}s! "
+                    f"(total_frames={self.frame_count}, unacked={self.unacked_frames}, session_id={self.session_id})"
+                )
+        else:
+            self.log.info(
+                f"📹 [Video Telemetry: Flow A] Active | Rx Phone: {self.frame_count} frames ({fps:.1f} fps) | "
+                f"ACKs: {self.total_acks_sent} (unacked={self.unacked_frames}, session_id={self.session_id})"
+            )
 
     async def _handle_unhandled_message(self, channel_id: int, message_id: int, body: bytes) -> None:
         self.log.warning(f"⚠️ [Unhandled Video Message] VideoChannel (ch{channel_id}) received unknown msgId=0x{message_id:04x} len={len(body)}")

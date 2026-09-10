@@ -220,6 +220,11 @@ class ChannelManagerModule(BaseBackendModule):
     async def run(self) -> None:
         self.log.info("ChannelManager active (SHM zero-copy & unified WebCodecs stream ready)")
         while self._running:
+            if hasattr(self, "video_handler") and self.video_handler:
+                try:
+                    self.video_handler.check_telemetry()
+                except Exception as exc:
+                    self.log.debug(f"Video telemetry check error: {exc}")
             await asyncio.sleep(1.0)
 
     async def teardown(self) -> None:

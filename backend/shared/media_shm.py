@@ -143,7 +143,10 @@ class RingSharedMemoryBuffer:
         magic, stream_type, _, length, ts_low = struct.unpack(">2s B B I I", header_bytes)
 
         if magic != b"NM":
-            logger.warning("Invalid SHM frame magic %r (hex=%s) at offset %d (buf size=%d)", magic, header_bytes.hex(), offset, self.size)
+            logger.warning(
+                f"⚠️ [Video Stall: SHM Overrun] Invalid SHM frame magic {magic!r} (hex={header_bytes.hex()}) "
+                f"at offset {offset} (buf size={self.size}) — ring buffer overwritten by writer before reader consumed!"
+            )
             return 0, 0, b""
 
         if offset + 12 + length > self.size:

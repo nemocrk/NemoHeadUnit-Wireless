@@ -19,7 +19,7 @@ Environment=LIBSEAT_BACKEND=seatd
 EnvironmentFile=-/etc/nemo-headunit/display.conf
 EnvironmentFile=-/etc/nemo-headunit/hardware_quirks.env
 Nice=-10
-ExecStart=/opt/nemo-headunit/bin/nemo-headunit --kiosk-autostart
+ExecStart=/opt/nemo-headunit/bin/nemo-headunit --kiosk-autostart -m thread
 Restart=always
 RestartSec=3
 

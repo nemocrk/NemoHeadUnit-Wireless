@@ -185,7 +185,7 @@ class ConnectivityManagerModule(BaseBackendModule):
         car = state.get("carrier", "")
         if car:
             state["operator_name"] = car
-        self.log.info(f"📱 Publishing HFP phone.status: {state}")
+        self.log.debug(f"📱 Publishing HFP phone.status: {state}")
         self.publish("phone.status", state)
         if self._audio_adapter:
             in_call = bool(state.get("is_in_call", False))

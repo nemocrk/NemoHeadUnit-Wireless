@@ -91,6 +91,14 @@ class MediaServerModule(BaseBackendModule):
         self.ws_clients: set = set()
         self._video_channel_id: Optional[int] = None
         self._status_changed_evt = asyncio.Event()
+        self._trace_nal_rx = 0
+        self._trace_frame_tx = 0
+        self._last_nal_time = 0.0
+        self._last_frame_time = 0.0
+        self._last_telemetry_time = 0.0
+        self._last_telemetry_nal_rx = 0
+        self._last_telemetry_frame_tx = 0
+        self._last_stall_warn_time = 0.0
 
     async def _handle_volume(self, request):
         from aiohttp import web
@@ -341,7 +349,55 @@ class MediaServerModule(BaseBackendModule):
             f"scale='{self.config.get('video_scale', '') or 'native'}'"
         )
         while self._running:
+            try:
+                self._check_video_telemetry()
+            except Exception as exc:
+                self.log.debug(f"MediaServer telemetry check error: {exc}")
             await asyncio.sleep(1.0)
+
+    def _check_video_telemetry(self) -> None:
+        """Periodic 5s video telemetry and stall detector for media_server."""
+        if self._trace_nal_rx == 0:
+            return
+        import time
+        now = time.time()
+        if self._last_telemetry_time == 0.0:
+            self._last_telemetry_time = now
+            self._last_telemetry_nal_rx = self._trace_nal_rx
+            self._last_telemetry_frame_tx = self._trace_frame_tx
+            return
+
+        elapsed = now - self._last_telemetry_time
+        if elapsed < 5.0:
+            return
+
+        nal_delta = self._trace_nal_rx - self._last_telemetry_nal_rx
+        frame_delta = self._trace_frame_tx - self._last_telemetry_frame_tx
+        self._last_telemetry_time = now
+        self._last_telemetry_nal_rx = self._trace_nal_rx
+        self._last_telemetry_frame_tx = self._trace_frame_tx
+
+        nal_fps = nal_delta / elapsed if elapsed > 0 else 0.0
+        frame_fps = frame_delta / elapsed if elapsed > 0 else 0.0
+
+        last_nal_age = now - self._last_nal_time if self._last_nal_time > 0 else 999.0
+        last_frame_age = now - self._last_frame_time if self._last_frame_time > 0 else 999.0
+
+        # Stall detection: NALs actively arriving (<3.0s), but transport output 0 frames for >=2.5s
+        if last_nal_age < 3.0 and last_frame_age >= 2.5:
+            if (now - self._last_stall_warn_time) >= 3.0:
+                self._last_stall_warn_time = now
+                self.log.warning(
+                    f"⚠️ [Video Stall: MediaServer] Decoder stall! Rx NALs arriving ({self._trace_nal_rx} total, {nal_fps:.1f} fps), "
+                    f"but transport '{self._active_transport_name}' produced 0 output frames for {last_frame_age:.1f}s!"
+                )
+        elif last_nal_age < 10.0:
+            self.log.info(
+                f"🎬 [Video Telemetry: MediaServer] Transport: '{self._active_transport_name}' | "
+                f"In: {self._trace_nal_rx} NALs ({nal_fps:.1f} fps) | "
+                f"Out: {self._trace_frame_tx} frames ({frame_fps:.1f} fps) | "
+                f"WS Clients: {len(self.ws_clients)}"
+            )
 
     async def teardown(self) -> None:
         await self._stop_transport()
@@ -652,6 +708,8 @@ class MediaServerModule(BaseBackendModule):
                     f"-> feeding transport '{self._active_transport_name}'"
                 )
             self._trace_nal_rx += 1
+            import time
+            self._last_nal_time = time.time()
             if nal_data:
                 await self._transport.feed_nal(nal_data, timestamp_us)
         except Exception as exc:
@@ -748,6 +806,8 @@ class MediaServerModule(BaseBackendModule):
                 f"shm_offset={shm_offset}) -> publishing media.video.transport_frame_shm"
             )
         self._trace_frame_tx += 1
+        import time
+        self._last_frame_time = time.time()
         if shm_offset >= 0:
             self.publish("media.video.transport_frame_shm", {
                 "shm_offset": shm_offset,
