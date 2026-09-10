@@ -15,6 +15,7 @@
 # Fix 12: PipeWire & WirePlumber autostart + unmuting speakers/headphones
 # Fix 13: Physical volume buttons (Crystal Cove PMIC unmask)
 # Fix 14: Broadcom Bluetooth SCO Audio Routing to HCI UART (HFP voice call fix)
+# Fix 15: Low-latency audio tuning (PipeWire/WirePlumber ALSA rules & RT priority)
 #
 # Deve essere eseguito come root.
 # Idempotente: controlla prima di modificare.
@@ -40,6 +41,7 @@ PKG_CHANGED=0
 DRACUT_CHANGED=0
 BUTTONS_CHANGED=0
 BCM_SCO_CHANGED=0
+AUDIO_TUNING_CHANGED=0
 
 # ---------------------------------------------------------------------------
 # Fix 1: Audio loop
@@ -672,7 +674,7 @@ cat <<'EOF' > "$QUIRKS_DIR/hardware_quirks.env.tmp"
 # HP Omni 10 Hardware-specific Quirks & Tunings for NemoHeadUnit
 LIBVA_DRIVER_NAME="i965"
 QT_SCALE_FACTOR="1.5"
-NEMO_GST_ZERO_COPY_PIPELINE="appsrc name=src is-live=true format=bytes ! h264parse config-interval=-1 ! vah264dec ! vapostproc add-borders=true ! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=YV12,width=1280 ! glupload ! qml6glsink name=qml_sink sync=false"
+NEMO_GST_ZERO_COPY_PIPELINE="appsrc name=src is-live=true format=bytes ! h264parse config-interval=-1 ! vah264dec ! vapostproc ! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=YV12 ! glupload ! qml6glsink name=qml_sink sync=false"
 EOF
 
 if [ ! -f "$QUIRKS_FILE" ] || ! cmp -s "$QUIRKS_DIR/hardware_quirks.env.tmp" "$QUIRKS_FILE"; then
@@ -988,6 +990,95 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Fix 15: Low-Latency Audio Tuning & Real-Time Scheduling Priority
+# ---------------------------------------------------------------------------
+echo -n "  [hw-fix] Low-latency PipeWire/WirePlumber tuning & RT priority... "
+AUDIO_TUNING_CHANGED=0
+
+# 1. Real-Time Scheduling Priority for @audio group
+mkdir -p /etc/security/limits.d
+LIMITS_CONF="/etc/security/limits.d/95-pipewire.conf"
+TEMP_LIMITS=$(mktemp)
+cat <<'EOF' > "$TEMP_LIMITS"
+@audio - rtprio 95
+@audio - nice -19
+@audio - memlock 4194304
+EOF
+
+if [ ! -f "$LIMITS_CONF" ] || ! cmp -s "$TEMP_LIMITS" "$LIMITS_CONF"; then
+    mv "$TEMP_LIMITS" "$LIMITS_CONF"
+    chmod 644 "$LIMITS_CONF"
+    AUDIO_TUNING_CHANGED=1
+else
+    rm -f "$TEMP_LIMITS"
+fi
+
+# 2. WirePlumber ALSA rules for Internal Speaker (disable-tsched) & USB DAC
+mkdir -p /etc/wireplumber/wireplumber.conf.d
+WP_ALSA_CONF="/etc/wireplumber/wireplumber.conf.d/51-audio-tuning.conf"
+TEMP_WP=$(mktemp)
+cat <<'EOF' > "$TEMP_WP"
+monitor.alsa.rules = [
+  # 1. Baytrail internal soundcard: disable tsched (fixes SST DMA bug), fixed buffer & headroom
+  {
+    matches = [
+      {
+        node.name = "~alsa_output.platform-bytcr_rt5640.*"
+      }
+    ]
+    actions = {
+      update-props = {
+        api.alsa.disable-tsched = true
+        api.alsa.period-size = 1024
+        api.alsa.period-num = 4
+        api.alsa.headroom = 1024
+        session.suspend-timeout-seconds = 0
+        audio.rate = 48000
+      }
+    }
+  },
+  # 2. Any USB DAC: headroom & prevent sleep clicks
+  {
+    matches = [
+      {
+        node.name = "~alsa_output.usb-.*"
+      }
+    ]
+    actions = {
+      update-props = {
+        api.alsa.headroom = 1024
+        session.suspend-timeout-seconds = 0
+        audio.rate = 48000
+      }
+    }
+  }
+]
+EOF
+
+if [ ! -f "$WP_ALSA_CONF" ] || ! cmp -s "$TEMP_WP" "$WP_ALSA_CONF"; then
+    mv "$TEMP_WP" "$WP_ALSA_CONF"
+    chmod 644 "$WP_ALSA_CONF"
+    AUDIO_TUNING_CHANGED=1
+else
+    rm -f "$TEMP_WP"
+fi
+
+# 3. Reload WirePlumber for active user sessions if changed
+if [ $AUDIO_TUNING_CHANGED -eq 1 ] && command -v systemctl &>/dev/null; then
+    while IFS=: read -r username _ uid _ _ homedir _; do
+        if [ "${uid}" -ge 1000 ] && [ "${uid}" -lt 60000 ]; then
+            systemctl --user -M "${username}@" restart wireplumber.service >/dev/null 2>&1 || true
+        fi
+    done < <(getent passwd)
+fi
+
+if [ $AUDIO_TUNING_CHANGED -eq 1 ]; then
+    echo -e "${GREEN}applicato (rtprio + ALSA rules per rt5640 e USB DAC).${NC}"
+else
+    echo -e "${GREEN}già configurato.${NC}"
+fi
+
+# ---------------------------------------------------------------------------
 # Riepilogo
 # ---------------------------------------------------------------------------
 echo ""
@@ -1002,8 +1093,9 @@ echo "    - Hardware Quirks generati in ${QUIRKS_FILE} (i965, scale 1.5, DMABuf 
 echo "    - PipeWire & WirePlumber abilitati all'avvio con user lingering attivo."
 echo "    - Pulsanti volume fisico abilitati (PMIC unmask & hp-omni10-buttons.service)."
 echo "    - Broadcom SCO audio routing verso HCI UART abilitato (bcm-sco-routing.service & udev)."
+echo "    - Tuning audio low-latency (RT priority + WirePlumber rules per rt5640 e USB DAC)."
 
-if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ] || [ $FW_CHANGED -eq 1 ] || [ $QUIRKS_CHANGED -eq 1 ] || [ $AUDIO_AUTOSTART_CHANGED -eq 1 ] || [ $BUTTONS_CHANGED -eq 1 ] || [ $BCM_SCO_CHANGED -eq 1 ]; then
+if [ $AUDIO_CHANGED -eq 1 ] || [ $GRUB_CHANGED -eq 1 ] || [ $SERVICES_CHANGED -eq 1 ] || [ $PKG_CHANGED -eq 1 ] || [ $DRACUT_CHANGED -eq 1 ] || [ $MKINIT_CHANGED -eq 1 ] || [ $GPU_CHANGED -eq 1 ] || [ $BT_MAC_CHANGED -eq 1 ] || [ $FW_CHANGED -eq 1 ] || [ $QUIRKS_CHANGED -eq 1 ] || [ $AUDIO_AUTOSTART_CHANGED -eq 1 ] || [ $BUTTONS_CHANGED -eq 1 ] || [ $BCM_SCO_CHANGED -eq 1 ] || [ $AUDIO_TUNING_CHANGED -eq 1 ]; then
     echo -e "  ${GREEN}[hw-fix] HP Omni10: fix applicati. Riavvio necessario.${NC}"
 else
     echo -e "  ${GREEN}[hw-fix] HP Omni10: nessuna modifica necessaria.${NC}"
