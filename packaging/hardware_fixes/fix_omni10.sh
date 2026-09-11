@@ -13,7 +13,7 @@
 # Fix 10: Vendor firmware (Broadcom BT/WiFi, Intel SST DSP)
 # Fix 11: Hardware quirks environment
 # Fix 12: PipeWire & WirePlumber autostart + unmuting speakers/headphones
-# Fix 13: Physical volume buttons (Crystal Cove PMIC unmask)
+# Fix 13: Physical volume buttons (hp_omni_button_fix kernel driver & PMIC crash guard)
 # Fix 14: Broadcom Bluetooth SCO Audio Routing to HCI UART (HFP voice call fix)
 # Fix 15: Low-latency audio tuning (PipeWire/WirePlumber ALSA rules & RT priority)
 #
@@ -26,6 +26,8 @@ if [[ $EUID -ne 0 ]]; then
   echo "Please run as root: sudo bash $0" >&2
   exit 1
 fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -95,11 +97,15 @@ if [ -f "$GRUB_FILE" ]; then
         GRUB_CHANGED=1
     fi
 
-    # Set Windows 2013 (Windows 8.1) ACPI OSI profile for factory HP Omni 10 DSDT device routing
-    if ! grep -q 'acpi_osi="!Windows 2015"' "$GRUB_FILE" || ! grep -q 'acpi_osi="Windows 2013"' "$GRUB_FILE"; then
-        # Convert double-quoted to single-quoted if needed to allow internal quotes safely
-        sed -i "s/^GRUB_CMDLINE_LINUX=\"\(.*\)\"$/GRUB_CMDLINE_LINUX='\1'/" "$GRUB_FILE"
-        sed -i "s/^\(GRUB_CMDLINE_LINUX='[^']*\)'/\1 acpi_osi=\"!Windows 2015\" acpi_osi=\"Windows 2013\"'/" "$GRUB_FILE"
+    # Clean up obsolete acpi_osi overrides if present (not needed with hp_omni_button_fix)
+    if grep -q "acpi_osi=" "$GRUB_FILE"; then
+        sed -i 's/acpi_osi="[^"]*" \?//g' "$GRUB_FILE"
+        GRUB_CHANGED=1
+    fi
+
+    # Remove obsolete early DSDT override (no longer needed with patched soc_button_array driver)
+    if grep -q "dsdt_override" "$GRUB_FILE"; then
+        sed -i '/dsdt_override/d' "$GRUB_FILE"
         GRUB_CHANGED=1
     fi
 
@@ -750,139 +756,97 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Fix 13: Physical Volume Buttons & Crystal Cove PMIC Initialization
+# Fix 13: Physical Volume Buttons & Crystal Cove PMIC Crash Guard (soc_button_array DKMS)
 # ---------------------------------------------------------------------------
-echo -n "  [hw-fix] Physical volume buttons (PMIC unmask & boot service)... "
+echo -n "  [hw-fix] Physical volume buttons (soc_button_array fix)... "
 
-# 1. Ensure i2c-dev and button array modules load at boot
-mkdir -p /etc/modules-load.d
-BUTTON_MODULES_CONF="/etc/modules-load.d/omni10-buttons.conf"
-BUTTON_MODULES_CONTENT="i2c-dev
-soc_button_array"
-
-if [ ! -f "$BUTTON_MODULES_CONF" ] || [ "$(cat "$BUTTON_MODULES_CONF")" != "$BUTTON_MODULES_CONTENT" ]; then
-    echo "$BUTTON_MODULES_CONTENT" > "$BUTTON_MODULES_CONF"
+# 1. Purge legacy workarounds, standalone driver, and obsolete DSDT overrides
+if [ -f "/etc/systemd/system/hp-omni10-buttons.service" ]; then
+    systemctl stop hp-omni10-buttons.service >/dev/null 2>&1 || true
+    systemctl disable hp-omni10-buttons.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/hp-omni10-buttons.service
+    systemctl daemon-reload >/dev/null 2>&1 || true
     BUTTONS_CHANGED=1
 fi
-modprobe i2c-dev >/dev/null 2>&1 || true
-modprobe soc_button_array >/dev/null 2>&1 || true
+rm -f /usr/local/bin/hp-omni10-buttons-init.sh
+rm -f /etc/modules-load.d/omni10-buttons.conf
+rm -f /etc/modprobe.d/omni10-buttons.conf
+rm -f /etc/modules-load.d/hp_omni.conf
+rm -f /boot/dsdt_override.img
+find /lib/modules/ -name "hp_omni_button_fix.ko*" -delete 2>/dev/null || true
 
-# 2. Ensure i2c-tools package is installed
-if ! command -v i2cset &>/dev/null; then
-    if command -v pacman &>/dev/null; then
-        pacman -S --needed --noconfirm i2c-tools >/dev/null 2>&1 || true
-        BUTTONS_CHANGED=1
-    elif command -v apt-get &>/dev/null; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq i2c-tools >/dev/null 2>&1 || true
-        BUTTONS_CHANGED=1
-    fi
+# 2. Deploy patched soc_button_array source to /usr/src/hp-omni-button-fix-1.0
+DRIVER_SRC_DIR="/usr/src/hp-omni-button-fix-1.0"
+mkdir -p "$DRIVER_SRC_DIR"
+
+SUBMODULE_DIR=""
+if [ -d "$SCRIPT_DIR/../../third_party/hp-omni-button-fix" ] && [ -f "$SCRIPT_DIR/../../third_party/hp-omni-button-fix/soc_button_array.c" ]; then
+    SUBMODULE_DIR="$SCRIPT_DIR/../../third_party/hp-omni-button-fix"
+elif [ -d "$SCRIPT_DIR/third_party/hp-omni-button-fix" ] && [ -f "$SCRIPT_DIR/third_party/hp-omni-button-fix/soc_button_array.c" ]; then
+    SUBMODULE_DIR="$SCRIPT_DIR/third_party/hp-omni-button-fix"
 fi
 
-# 3. Enable 5-button array module option if intel_hid is used
-mkdir -p /etc/modprobe.d
-if ! grep -q "options intel_hid enable_5_button_array=1" /etc/modprobe.d/omni10-buttons.conf 2>/dev/null; then
-    echo "options intel_hid enable_5_button_array=1" > /etc/modprobe.d/omni10-buttons.conf
-    BUTTONS_CHANGED=1
-fi
-
-# 4. Generate PMIC initialization script to unmask Crystal Cove side buttons and bind driver
-INIT_SCRIPT="/usr/local/bin/hp-omni10-buttons-init.sh"
-cat <<'EOF' > /tmp/hp-omni10-buttons-init.sh.tmp
-#!/usr/bin/env bash
-# Unmasks Crystal Cove PMIC panel control (reg 0x52 / FCOT) and GPIO 0/1 interrupt lines
-modprobe i2c-dev >/dev/null 2>&1 || true
-
-# Find I2C adapter bus number for INT33FD (Crystal Cove PMIC)
-PMIC_PATH=$(find /sys/bus/i2c/devices/ -name '*INT33FD*' 2>/dev/null | head -n 1)
-BUS=""
-if [ -n "$PMIC_PATH" ]; then
-    PARENT_DEV=$(readlink -f "$PMIC_PATH" 2>/dev/null || true)
-    if [ -n "$PARENT_DEV" ]; then
-        BUS_NAME=$(basename "$(dirname "$PARENT_DEV")")
-        BUS="${BUS_NAME#i2c-}"
-    fi
-fi
-
-if [ -z "$BUS" ] || ! [[ "$BUS" =~ ^[0-9]+$ ]]; then
-    BUS=6
-fi
-
-if command -v i2cset &>/dev/null; then
-    # Register 0x52 (GPIOPANELCTL / FCOT): Set bit 0 to 1 (enables side buttons power/logic)
-    i2cset -y -f "$BUS" 0x6e 0x52 0x01 >/dev/null 2>&1 || true
-    # Register 0x0E (MIRQLVL1): Unmask GPIO level 1 interrupt (bit 5 = 0)
-    i2cset -y -f "$BUS" 0x6e 0x0e 0x5f >/dev/null 2>&1 || true
-    # Register 0x19 (MGPIO0IRQS0): Unmask GPIO 0 & 1 (bits 0,1 = 0)
-    i2cset -y -f "$BUS" 0x6e 0x19 0xfc >/dev/null 2>&1 || true
-fi
-
-exit 0
-EOF
-
-if [ ! -f "$INIT_SCRIPT" ] || ! cmp -s /tmp/hp-omni10-buttons-init.sh.tmp "$INIT_SCRIPT"; then
-    mv /tmp/hp-omni10-buttons-init.sh.tmp "$INIT_SCRIPT"
-    chmod 755 "$INIT_SCRIPT"
-    BUTTONS_CHANGED=1
-else
-    rm -f /tmp/hp-omni10-buttons-init.sh.tmp
-fi
-
-# Run it immediately
-bash "$INIT_SCRIPT" >/dev/null 2>&1 || true
-
-# 5. Udev rule for button array input permissions and tags
-UDEV_BUTTONS_RULE="/etc/udev/rules.d/99-omni10-buttons.rules"
-cat <<'EOF' > /tmp/99-omni10-buttons.rules.tmp
-# Ensure INTCFD9:00 button array events have input permissions and power-switch tag
-SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="gpio-keys", KERNELS=="INTCFD9:00*", MODE="0660", GROUP="input", TAG+="power-switch"
-EOF
-
-if [ ! -f "$UDEV_BUTTONS_RULE" ] || ! cmp -s /tmp/99-omni10-buttons.rules.tmp "$UDEV_BUTTONS_RULE"; then
-    mv /tmp/99-omni10-buttons.rules.tmp "$UDEV_BUTTONS_RULE"
-    chmod 644 "$UDEV_BUTTONS_RULE"
-    udevadm control --reload >/dev/null 2>&1 || true
-    udevadm trigger -s input >/dev/null 2>&1 || true
-    BUTTONS_CHANGED=1
-else
-    rm -f /tmp/99-omni10-buttons.rules.tmp
-fi
-
-# 6. Systemd boot service for early initialization
-SERVICE_FILE="/etc/systemd/system/hp-omni10-buttons.service"
-cat <<'EOF' > /tmp/hp-omni10-buttons.service.tmp
-[Unit]
-Description=HP Omni 10 Physical Buttons & Crystal Cove PMIC Initialization
-After=systemd-modules-load.service
-Before=nemo-headunit.service
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/hp-omni10-buttons-init.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-if [ ! -f "$SERVICE_FILE" ] || ! cmp -s /tmp/hp-omni10-buttons.service.tmp "$SERVICE_FILE"; then
-    mv /tmp/hp-omni10-buttons.service.tmp "$SERVICE_FILE"
-    chmod 644 "$SERVICE_FILE"
-    BUTTONS_CHANGED=1
-else
-    rm -f /tmp/hp-omni10-buttons.service.tmp
-fi
-
-if command -v systemctl &>/dev/null; then
-    if ! systemctl is-enabled hp-omni10-buttons.service &>/dev/null; then
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl enable hp-omni10-buttons.service >/dev/null 2>&1 || true
-        systemctl start hp-omni10-buttons.service >/dev/null 2>&1 || true
+if [ -n "$SUBMODULE_DIR" ]; then
+    if ! cmp -s "$SUBMODULE_DIR/soc_button_array.c" "$DRIVER_SRC_DIR/soc_button_array.c" 2>/dev/null; then
+        cp "$SUBMODULE_DIR/soc_button_array.c" "$DRIVER_SRC_DIR/soc_button_array.c"
         BUTTONS_CHANGED=1
     fi
+    if ! cmp -s "$SUBMODULE_DIR/Makefile" "$DRIVER_SRC_DIR/Makefile" 2>/dev/null; then
+        cp "$SUBMODULE_DIR/Makefile" "$DRIVER_SRC_DIR/Makefile"
+        BUTTONS_CHANGED=1
+    fi
+    if ! cmp -s "$SUBMODULE_DIR/dkms.conf" "$DRIVER_SRC_DIR/dkms.conf" 2>/dev/null; then
+        cp "$SUBMODULE_DIR/dkms.conf" "$DRIVER_SRC_DIR/dkms.conf"
+        BUTTONS_CHANGED=1
+    fi
+else
+    # Fallback: Download latest patched soc_button_array directly from repository
+    RAW_BASE="https://raw.githubusercontent.com/nemocrk/hp-omni-button-fix/feat/soc-button-array-threaded"
+    for f in "soc_button_array.c" "Makefile" "dkms.conf"; do
+        TEMP_F=$(mktemp)
+        if curl -fsSL -o "$TEMP_F" "$RAW_BASE/$f"; then
+            if ! cmp -s "$TEMP_F" "$DRIVER_SRC_DIR/$f" 2>/dev/null; then
+                mv "$TEMP_F" "$DRIVER_SRC_DIR/$f"
+                BUTTONS_CHANGED=1
+            else
+                rm -f "$TEMP_F"
+            fi
+        else
+            rm -f "$TEMP_F"
+        fi
+    done
+fi
+
+# 3. Build and install via DKMS (or fallback kbuild)
+CUR_KVER="$(uname -r)"
+DKMS_KO="/usr/lib/modules/${CUR_KVER}/updates/dkms/soc_button_array.ko.zst"
+
+if [ ! -f "$DKMS_KO" ] || [ $BUTTONS_CHANGED -eq 1 ]; then
+    if command -v dkms &>/dev/null; then
+        dkms add -m hp-omni-button-fix -v 1.0 >/dev/null 2>&1 || true
+        dkms build --force -m hp-omni-button-fix -v 1.0 >/dev/null 2>&1 || true
+        dkms install --force -m hp-omni-button-fix -v 1.0 >/dev/null 2>&1 || true
+    else
+        if [ -d "/lib/modules/${CUR_KVER}/build" ]; then
+            make -C "/lib/modules/${CUR_KVER}/build" M="${DRIVER_SRC_DIR}" modules >/dev/null 2>&1 || true
+            if [ -f "${DRIVER_SRC_DIR}/soc_button_array.ko" ]; then
+                mkdir -p "/lib/modules/${CUR_KVER}/updates/"
+                cp "${DRIVER_SRC_DIR}/soc_button_array.ko" "/lib/modules/${CUR_KVER}/updates/"
+                depmod -a "$CUR_KVER" >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
+    BUTTONS_CHANGED=1
+fi
+
+# 4. Reload soc_button_array if needed
+if [ $BUTTONS_CHANGED -eq 1 ]; then
+    modprobe -r soc_button_array >/dev/null 2>&1 || true
+    modprobe soc_button_array >/dev/null 2>&1 || true
 fi
 
 if [ $BUTTONS_CHANGED -eq 1 ]; then
-    echo -e "${GREEN}applicato (service + PMIC unmask configurati).${NC}"
+    echo -e "${GREEN}applicato (modulo soc_button_array aggiornato via DKMS).${NC}"
 else
     echo -e "${GREEN}già configurato.${NC}"
 fi
@@ -1091,7 +1055,7 @@ echo "    - Bluetooth MAC persistente in ${BT_ADDR_FILE} tramite bluetooth-persi
 echo "    - Firmware Broadcom (BT/WiFi) e Intel SST DSP verificati in /lib/firmware/."
 echo "    - Hardware Quirks generati in ${QUIRKS_FILE} (i965, scale 1.5, DMABuf caps)."
 echo "    - PipeWire & WirePlumber abilitati all'avvio con user lingering attivo."
-echo "    - Pulsanti volume fisico abilitati (PMIC unmask & hp-omni10-buttons.service)."
+echo "    - Pulsanti volume fisico abilitati (modulo kernel soc_button_array DKMS & PMIC crash guard)."
 echo "    - Broadcom SCO audio routing verso HCI UART abilitato (bcm-sco-routing.service & udev)."
 echo "    - Tuning audio low-latency (RT priority + WirePlumber rules per rt5640 e USB DAC)."
 
