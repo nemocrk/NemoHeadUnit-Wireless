@@ -6,10 +6,11 @@ import asyncio
 import sys
 from unittest.mock import MagicMock, patch
 import pytest
+pytest.importorskip("dbus")
 
 from shared.hardware.apmanager_wifi_ap import APManagerWifiApAdapter
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.dbus, pytest.mark.hardware]
 
 
 @pytest.mark.asyncio

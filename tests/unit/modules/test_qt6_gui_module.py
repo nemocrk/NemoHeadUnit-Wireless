@@ -7,6 +7,7 @@ import asyncio
 import sys
 from unittest.mock import MagicMock, patch, AsyncMock
 import pytest
+pytest.importorskip("PyQt6")
 from aiohttp import web
 
 from backend.modules.qt6_gui.main import (
@@ -16,7 +17,7 @@ from backend.modules.qt6_gui.main import (
     HAS_PYQT6,
 )
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.qt]
 
 
 @pytest.fixture

@@ -97,6 +97,7 @@ def test_scan_gstreamer_plugin_paths():
         mock_reg.scan_path.assert_called_once_with("/usr/lib/gstreamer-1.0")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="VA-API is Linux-only")
 def test_get_available_decoders_cli_fallback():
     with patch.dict(sys.modules, {"gi": None}), \
          patch("shutil.which", return_value="/usr/bin/vainfo"):

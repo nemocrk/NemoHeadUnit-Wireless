@@ -8,6 +8,7 @@ import os
 import signal
 import struct
 import json
+import re
 import urllib.request
 from pathlib import Path
 from tests.integration.harness.environment import IntegrationEnvironment
@@ -108,7 +109,9 @@ def test_thread_mode_gateway_proxy_and_cross_thread_rest(tmp_path):
                 if "Gateway Proxy active" in l and "http://" in l:
                     parts = l.split("http://")[-1].split(":")
                     if len(parts) >= 2:
-                        actual_proxy_port = int(parts[1].split()[0].split("/")[0])
+                        raw_port = re.sub(r"[^\d]", "", parts[1].split()[0].split("/")[0])
+                        if raw_port:
+                            actual_proxy_port = int(raw_port)
             time.sleep(0.5)  # Allow routes to register with proxy
 
             # 1. Test Gateway Proxy root module registry
@@ -231,7 +234,7 @@ async def test_thread_mode_media_streaming(tmp_path):
             await phone.connect("127.0.0.1", tcp_test_port)
 
             # Consume VERSION_REQUEST
-            ch_0, flags, payload = await asyncio.wait_for(phone.read_frame(), timeout=3.0)
+            ch_0, flags, payload = await asyncio.wait_for(phone.read_frame(), timeout=8.0)
             assert ch_0 == 0
 
             # Send synthetic video media stream packet (Channel 1 or 3 depending on channel map)

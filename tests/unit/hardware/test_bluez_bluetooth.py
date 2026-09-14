@@ -6,10 +6,11 @@ import asyncio
 import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
+pytest.importorskip("dbus")
 
 from shared.hardware.bluez_bluetooth import BluezBluetoothAdapter, PROFILE_PATH, AA_UUID
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.dbus, pytest.mark.hardware]
 
 
 def test_bluez_rssi_to_bars():

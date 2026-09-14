@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
+pytest.importorskip("dbus")
 
 from shared.hardware.bluez_pbap import (
     BlueZPBAPClient,
@@ -14,7 +15,7 @@ from shared.hardware.bluez_pbap import (
     _get_default_cache_path,
 )
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.dbus, pytest.mark.hardware]
 
 
 def test_parse_vcard_stream_contacts():

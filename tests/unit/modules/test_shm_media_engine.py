@@ -6,6 +6,7 @@ import struct
 import time
 from unittest.mock import MagicMock, patch
 import pytest
+pytest.importorskip("PyQt6")
 
 from backend.modules.qt6_gui.media.shm_media_engine import (
     GStreamerHwDecoder,
@@ -13,7 +14,7 @@ from backend.modules.qt6_gui.media.shm_media_engine import (
     QtSHMMediaEngine,
 )
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.qt]
 
 
 def test_gstreamer_hw_decoder_lifecycle_and_decode():

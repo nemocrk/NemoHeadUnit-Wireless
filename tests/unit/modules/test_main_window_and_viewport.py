@@ -8,6 +8,7 @@ import sys
 import tempfile
 from unittest.mock import MagicMock, patch
 import pytest
+pytest.importorskip("PyQt6")
 from PyQt6.QtCore import Qt, QPointF, QEvent
 from PyQt6.QtGui import QKeyEvent, QMouseEvent
 from PyQt6.QtWidgets import QApplication
