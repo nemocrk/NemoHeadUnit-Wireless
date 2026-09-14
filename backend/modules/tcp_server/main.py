@@ -100,7 +100,7 @@ class TCPServerModule(BaseBackendModule):
     def get_schema(self) -> dict[str, Any]:
         return {
             "host": field_string(default="0.0.0.0"),
-            "port": field_int(default=5288, min=1024, max=65535),
+            "port": field_int(default=5288, min=0, max=65535),
             "autostart": field_bool(default=True),
             "publish_full_frame": field_bool(default=False),
         }

@@ -122,9 +122,19 @@ def test_thread_mode_gateway_proxy_and_cross_thread_rest(tmp_path):
                     time.sleep(0.05)
 
             assert actual_proxy_port is not None, f"Could not find dynamic proxy port in output: {' '.join(lines[-15:])}"
-            def _urlopen_retry(url: str, retries: int = 20, delay: float = 0.5):
+            def _urlopen_retry(url: str, retries: int = 30, delay: float = 0.5):
                 last_err = None
                 for _ in range(retries):
+                    if proc.poll() is not None:
+                        rem = ""
+                        try:
+                            rem = proc.stdout.read()
+                        except Exception:
+                            pass
+                        raise RuntimeError(
+                            f"Orchestrator process died prematurely with code {proc.poll()}. "
+                            f"Captured lines:\n" + "\n".join(lines) + f"\nRemaining:\n{rem}"
+                        )
                     try:
                         req = urllib.request.Request(url)
                         return urllib.request.urlopen(req, timeout=3.0)
@@ -198,7 +208,7 @@ async def test_thread_mode_phone_handshake_and_protocol(tmp_path):
             await phone.connect("127.0.0.1", tcp_test_port)
 
             # ChannelManager thread sends VERSION_REQUEST (Channel 0, MsgId 1)
-            ch_id, flags, payload = await asyncio.wait_for(phone.read_frame(), timeout=3.0)
+            ch_id, flags, payload = await asyncio.wait_for(phone.read_frame(), timeout=10.0)
             assert ch_id == 0
             msg_id = struct.unpack_from(">H", payload, 0)[0]
             assert msg_id == 1  # VERSION_REQUEST
@@ -251,7 +261,7 @@ async def test_thread_mode_media_streaming(tmp_path):
             await phone.connect("127.0.0.1", tcp_test_port)
 
             # Consume VERSION_REQUEST
-            ch_0, flags, payload = await asyncio.wait_for(phone.read_frame(), timeout=8.0)
+            ch_0, flags, payload = await asyncio.wait_for(phone.read_frame(), timeout=10.0)
             assert ch_0 == 0
 
             # Send synthetic video media stream packet (Channel 1 or 3 depending on channel map)

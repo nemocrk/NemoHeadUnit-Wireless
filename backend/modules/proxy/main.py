@@ -48,7 +48,7 @@ class ProxyModule(BaseBackendModule):
 
     def get_schema(self) -> dict[str, Any]:
         return {
-            "public_port": field_int(default=8000, min=1, max=65535),
+            "public_port": field_int(default=8000, min=0, max=65535),
             "host": field_string(default="0.0.0.0"),
         }
 
