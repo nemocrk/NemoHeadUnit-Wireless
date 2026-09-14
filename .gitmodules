@@ -4,3 +4,6 @@
 [submodule "third_party/hp-omni-button-fix"]
 	path = third_party/hp-omni-button-fix
 	url = https://github.com/nemocrk/hp-omni-button-fix.git
+[submodule "third_party/open-headunit"]
+	path = third_party/open-headunit
+	url = https://github.com/andreknieriem/open-headunit.git

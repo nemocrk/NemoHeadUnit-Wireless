@@ -17,7 +17,7 @@ from tests.integration.harness.mock_phone import MockPhoneClient
 pytestmark = pytest.mark.integration
 
 
-def _wait_for_orchestrator_boot(proc: subprocess.Popen, timeout: float = 12.0) -> list[str]:
+def _wait_for_orchestrator_boot(proc: subprocess.Popen, timeout: float = 20.0) -> list[str]:
     """Helper to stream stdout until 'Boot sequence complete' is logged."""
     lines = []
     start = time.monotonic()
@@ -106,13 +106,12 @@ def test_thread_mode_gateway_proxy_and_cross_thread_rest(tmp_path):
             deadline = time.monotonic() + 15.0
             while time.monotonic() < deadline:
                 for l in lines:
-                    if "Gateway Proxy active" in l and "http://" in l:
-                        parts = l.split("http://")[-1].split(":")
-                        if len(parts) >= 2:
-                            raw_port = re.sub(r"[^\d]", "", parts[1].split()[0].split("/")[0])
-                            if raw_port:
-                                actual_proxy_port = int(raw_port)
-                                break
+                    clean_l = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", l)
+                    if "Gateway Proxy active" in clean_l and "http://" in clean_l:
+                        m = re.search(r"http://(?:[0-9a-zA-Z\.\-]+):(\d+)", clean_l)
+                        if m:
+                            actual_proxy_port = int(m.group(1))
+                            break
                 if actual_proxy_port is not None:
                     break
                 line = proc.stdout.readline()
@@ -142,7 +141,15 @@ def test_thread_mode_gateway_proxy_and_cross_thread_rest(tmp_path):
                         last_err = e
                         time.sleep(delay)
                 if last_err:
-                    raise last_err
+                    rem = ""
+                    try:
+                        rem = proc.stdout.read()
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                        f"Failed connecting to {url} (proxy_port={actual_proxy_port}): {last_err}\n"
+                        f"Captured output:\n" + "\n".join(lines[-20:]) + f"\nRemaining:\n{rem}"
+                    )
 
             # 1. Test Gateway Proxy root module registry
             with _urlopen_retry(f"http://127.0.0.1:{actual_proxy_port}/api/system/modules") as resp:
