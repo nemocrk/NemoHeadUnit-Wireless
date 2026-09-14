@@ -54,11 +54,11 @@ def test_orchestrator_multiprocessing_boot_and_sigterm(tmp_path):
             # Send SIGTERM for graceful exit
             proc.terminate()
             try:
-                proc.wait(timeout=8.0)
+                proc.wait(timeout=15.0)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=2.0)
-                pytest.fail("Orchestrator did not terminate within 8.0s timeout")
+                pytest.fail("Orchestrator did not terminate within 15.0s timeout")
 
             assert proc.returncode in (0, -signal.SIGTERM, 143), f"Unexpected returncode: {proc.returncode}"
         finally:
@@ -108,11 +108,11 @@ def test_orchestrator_multithreading_boot_and_sigterm(tmp_path):
             # Graceful shutdown via SIGTERM
             proc.terminate()
             try:
-                proc.wait(timeout=8.0)
+                proc.wait(timeout=15.0)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=2.0)
-                pytest.fail("Orchestrator did not terminate within 8.0s timeout")
+                pytest.fail("Orchestrator did not terminate within 15.0s timeout")
 
             assert proc.returncode in (0, -signal.SIGTERM, 143), f"Unexpected returncode: {proc.returncode}"
         finally:

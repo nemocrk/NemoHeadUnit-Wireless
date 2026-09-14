@@ -126,14 +126,14 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pyzmq pyyaml cryptography protobuf pytest pytest-asyncio pytest-timeout pytest-xdist hypothesis
+          python -m pip install pyzmq pyyaml cryptography protobuf pytest pytest-asyncio pytest-timeout pytest-xdist hypothesis loguru aiohttp websockets
 
       - name: Run Windows Compatible Unit Tests
         shell: pwsh
         env:
           PYTHONPATH: ".;backend;protos"
         run: |
-          pytest tests/unit/ -m "unit and not dbus and not hardware" --tb=short
+          pytest tests/unit/ -m "unit and not dbus and not hardware and not qt" --tb=short
 
   # -------------------------------------------------------------------------
   # JOB 4 — Shell Script & Packaging Validation

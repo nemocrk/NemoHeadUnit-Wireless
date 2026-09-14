@@ -16,7 +16,7 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from backend.modules.qt6_gui.ui.main_window import MainWindow
 from backend.modules.qt6_gui.ui.video_viewport import VideoViewportWidget, FrameImageProvider
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.qt]
 
 
 @pytest.fixture

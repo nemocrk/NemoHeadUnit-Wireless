@@ -18,7 +18,7 @@ from backend.modules.qt6_gui.ui.command_bar import (
 )
 
 
-pytestmark = pytest.mark.unit
+pytestmark = [pytest.mark.unit, pytest.mark.qt]
 
 
 def get_app():
