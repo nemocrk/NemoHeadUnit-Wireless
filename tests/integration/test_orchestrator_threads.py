@@ -81,12 +81,10 @@ def test_thread_mode_gateway_proxy_and_cross_thread_rest(tmp_path):
     """Verify Gateway Proxy and cross-thread REST API dispatch in multithreading mode."""
     repo_root = Path(__file__).resolve().parent.parent.parent
     backend_main = repo_root / "backend" / "main.py"
-    proxy_test_port = 8882
-
     with IntegrationEnvironment(tmp_path) as env:
-        # Configure dedicated proxy port for testing
+        # Configure dynamic proxy port for testing (0 = OS assigns free ephemeral port)
         proxy_cfg = tmp_path / "config" / "proxy.yaml"
-        proxy_cfg.write_text(f"public_port: {proxy_test_port}\nhost: 127.0.0.1\n", encoding="utf-8")
+        proxy_cfg.write_text("public_port: 0\nhost: 127.0.0.1\n", encoding="utf-8")
 
         sub_env = os.environ.copy()
         sub_env["QT_QPA_PLATFORM"] = "offscreen"
@@ -104,14 +102,26 @@ def test_thread_mode_gateway_proxy_and_cross_thread_rest(tmp_path):
 
         try:
             lines = _wait_for_orchestrator_boot(proc, timeout=12.0)
-            actual_proxy_port = proxy_test_port
-            for l in lines:
-                if "Gateway Proxy active" in l and "http://" in l:
-                    parts = l.split("http://")[-1].split(":")
-                    if len(parts) >= 2:
-                        raw_port = re.sub(r"[^\d]", "", parts[1].split()[0].split("/")[0])
-                        if raw_port:
-                            actual_proxy_port = int(raw_port)
+            actual_proxy_port = None
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                for l in lines:
+                    if "Gateway Proxy active" in l and "http://" in l:
+                        parts = l.split("http://")[-1].split(":")
+                        if len(parts) >= 2:
+                            raw_port = re.sub(r"[^\d]", "", parts[1].split()[0].split("/")[0])
+                            if raw_port:
+                                actual_proxy_port = int(raw_port)
+                                break
+                if actual_proxy_port is not None:
+                    break
+                line = proc.stdout.readline()
+                if line:
+                    lines.append(line.strip())
+                else:
+                    time.sleep(0.05)
+
+            assert actual_proxy_port is not None, f"Could not find dynamic proxy port in output: {' '.join(lines[-15:])}"
             def _urlopen_retry(url: str, retries: int = 20, delay: float = 0.5):
                 last_err = None
                 for _ in range(retries):
