@@ -473,7 +473,7 @@ class BaseBackendModule(ABC):
             self.config_client.subscribe_updates()
             self.config_client.fetch_config()
             if self.priority > 1:
-                for _ in range(40):
+                for _ in range(5):
                     if self.config_client.has_remote_config:
                         break
                     await asyncio.sleep(0.05)
