@@ -112,11 +112,20 @@ def test_thread_mode_gateway_proxy_and_cross_thread_rest(tmp_path):
                         raw_port = re.sub(r"[^\d]", "", parts[1].split()[0].split("/")[0])
                         if raw_port:
                             actual_proxy_port = int(raw_port)
-            time.sleep(0.5)  # Allow routes to register with proxy
+            def _urlopen_retry(url: str, retries: int = 20, delay: float = 0.5):
+                last_err = None
+                for _ in range(retries):
+                    try:
+                        req = urllib.request.Request(url)
+                        return urllib.request.urlopen(req, timeout=3.0)
+                    except Exception as e:
+                        last_err = e
+                        time.sleep(delay)
+                if last_err:
+                    raise last_err
 
             # 1. Test Gateway Proxy root module registry
-            req = urllib.request.Request(f"http://127.0.0.1:{actual_proxy_port}/api/system/modules")
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
+            with _urlopen_retry(f"http://127.0.0.1:{actual_proxy_port}/api/system/modules") as resp:
                 assert resp.status == 200
                 data = json.loads(resp.read().decode("utf-8"))
                 assert "modules" in data
@@ -124,16 +133,14 @@ def test_thread_mode_gateway_proxy_and_cross_thread_rest(tmp_path):
                 assert "config_manager" in data["modules"]
 
             # 2. Test cross-thread reverse-proxy to config_manager (/api/config/all)
-            req = urllib.request.Request(f"http://127.0.0.1:{actual_proxy_port}/api/config/all")
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
+            with _urlopen_retry(f"http://127.0.0.1:{actual_proxy_port}/api/config/all") as resp:
                 assert resp.status == 200
                 data = json.loads(resp.read().decode("utf-8"))
                 assert "bus_broker" in data
                 assert "channel_manager" in data
 
             # 3. Test cross-thread reverse-proxy to tcp_server (/api/tcp/status)
-            req = urllib.request.Request(f"http://127.0.0.1:{actual_proxy_port}/api/tcp/status")
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
+            with _urlopen_retry(f"http://127.0.0.1:{actual_proxy_port}/api/tcp/status") as resp:
                 assert resp.status == 200
                 data = json.loads(resp.read().decode("utf-8"))
                 assert "running" in data or "port" in data or "clients" in data
