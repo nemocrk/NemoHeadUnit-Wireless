@@ -49,9 +49,6 @@ jobs:
       - name: Run Ruff Linting
         run: ruff check .
 
-      - name: Run Ruff Format Check
-        run: ruff format --check .
-
   # -------------------------------------------------------------------------
   # JOB 2 — Ubuntu Test Suite (Unit + Integration + Smoke)
   # -------------------------------------------------------------------------

@@ -396,7 +396,7 @@ def test_tcp_server_module_start_when_active(mock_tcp_server_mod):
         m_thread.assert_not_called()
 
 
-def test_tcp_server_module_on_sdr_channels(mock_tcp_server_mod):
+def test_tcp_server_module_on_sdr_channels_sync(mock_tcp_server_mod):
     import asyncio
     asyncio.run(mock_tcp_server_mod.on_sdr_channels({
         "type_map": {"1": "AV_CHANNEL_TYPE_VIDEO", "3": "AV_CHANNEL_TYPE_AUDIO"}

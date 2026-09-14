@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from multiprocessing import shared_memory
 import struct
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 logger = logging.getLogger("media_shm")
 

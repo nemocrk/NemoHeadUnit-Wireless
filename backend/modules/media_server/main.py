@@ -73,7 +73,6 @@ def _is_loopback(remote_addr: str) -> bool:
 
 from shared.hardware.base_audio import get_audio_adapter
 from shared.media_shm import BidirectionalMediaSHM
-from shared.nal_utils import pack_media_frame
 
 class MediaServerModule(BaseBackendModule):
     def __init__(self):

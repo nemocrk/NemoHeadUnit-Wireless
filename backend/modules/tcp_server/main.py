@@ -482,7 +482,7 @@ class TCPServerModule(BaseBackendModule):
 
         acked = self._shutdown_ack_event.wait(timeout=_SHUTDOWN_ACK_TIMEOUT)
         if not acked:
-            self.log.warning(f"on_aa_session_restart: SHUTDOWN_RESPONSE timeout — proceeding")
+            self.log.warning("on_aa_session_restart: SHUTDOWN_RESPONSE timeout — proceeding")
 
         if self._cryptor is not None:
             with self._crypto_lock:

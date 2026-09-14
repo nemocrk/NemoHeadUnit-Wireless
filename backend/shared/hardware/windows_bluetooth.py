@@ -3,7 +3,7 @@ import ctypes
 from ctypes import wintypes
 import socket
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from shared.logger import get_logger
 from .base_bluetooth import BaseBluetoothAdapter

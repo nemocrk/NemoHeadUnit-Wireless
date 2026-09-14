@@ -327,7 +327,7 @@ async def test_base_module_client_log_and_close_window():
 
 
 @pytest.mark.asyncio
-async def test_base_module_async_subscribe():
+async def test_base_module_async_subscribe_delivery():
     mod = DummyModule()
     received = []
 

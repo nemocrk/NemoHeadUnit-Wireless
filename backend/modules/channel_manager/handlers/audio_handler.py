@@ -7,8 +7,10 @@ from protos.oaa.control.ChannelOpenResponseMessage_pb2 import ChannelOpenRespons
 from protos.oaa.av.AVChannelMessageIdsEnum_pb2 import AVChannelMessage
 from protos.oaa.av.AVChannelSetupResponseMessage_pb2 import AVChannelSetupResponse
 from protos.oaa.av.AVChannelSetupStatusEnum_pb2 import AVChannelSetupStatus
+from protos.oaa.audio.AudioFocusRequestMessage_pb2 import AudioFocusRequest
 from protos.oaa.audio.AudioFocusResponseMessage_pb2 import AudioFocusResponse
 from protos.oaa.audio.AudioFocusStateEnum_pb2 import AudioFocusState
+from protos.oaa.audio.AudioFocusTypeEnum_pb2 import AudioFocusType
 from protos.oaa.common.StatusEnum_pb2 import Status
 
 from protos.oaa.av.AVMediaAckIndicationMessage_pb2 import AVMediaAckIndication

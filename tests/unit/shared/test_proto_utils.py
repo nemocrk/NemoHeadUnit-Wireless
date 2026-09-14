@@ -143,7 +143,7 @@ def test_proto_to_dict_and_dict_to_proto():
     assert rebuilt.timestamp == 987654321
 
 
-def test_media_with_timestamp_roundtrip():
+def test_media_with_timestamp_proto_wire_roundtrip():
     from shared.proto_utils import build_media_with_timestamp, parse_media_with_timestamp
     import struct
 

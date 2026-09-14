@@ -3,7 +3,7 @@ import os
 import socket
 import threading
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from shared.logger import get_logger
 from .base_bluetooth import BaseBluetoothAdapter

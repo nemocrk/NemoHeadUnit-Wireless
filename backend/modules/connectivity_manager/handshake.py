@@ -29,6 +29,7 @@ from modules.connectivity_manager.packet import (
     MSG_WIFI_CONNECT_STATUS,
     WPA2_SECURITY_MODE,
     AP_TYPE_DYNAMIC,
+    AP_TYPE_STATIC,
     recv_packet,
     send_packet,
 )

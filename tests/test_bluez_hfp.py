@@ -190,8 +190,6 @@ def test_bluez_hf_client_process_at_line():
 
 
 def test_bluez_hf_client_session_bus_telephony():
-    from unittest.mock import MagicMock
-
     mock_bus = MagicMock()
     mock_gateway = MagicMock()
     mock_call_mgr = MagicMock()
@@ -251,8 +249,6 @@ def test_bluez_hf_client_session_bus_telephony():
 
 
 def test_bluez_hf_client_dbus_signals_lifecycle():
-    from unittest.mock import MagicMock
-
     mock_bus = MagicMock()
     mock_obj_mgr = MagicMock()
     mock_obj_mgr.GetManagedObjects.return_value = {}

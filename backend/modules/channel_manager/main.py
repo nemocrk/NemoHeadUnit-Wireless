@@ -25,10 +25,10 @@ from shared.nal_utils import pack_media_frame, STREAM_TYPE_VIDEO, STREAM_TYPE_AU
 from shared.proto_utils import channels_from_sdr_bytes, parse_media_with_timestamp
 
 try:
+    from modules.channel_manager.service_discovery import classify_channel_descriptor
     from modules.channel_manager.handlers import (
         ControlChannelHandler,
         VideoChannelHandler,
-        AudioChannelHandler,
         AudioChannelHandler,
         AVInputChannelHandler,
         InputChannelHandler,
@@ -41,6 +41,7 @@ try:
         NotificationHandler,
     )
 except ImportError:
+    from service_discovery import classify_channel_descriptor
     from handlers import (
         ControlChannelHandler,
         VideoChannelHandler,

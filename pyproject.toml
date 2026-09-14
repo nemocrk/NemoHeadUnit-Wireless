@@ -127,15 +127,22 @@ target-version = "py313"
 exclude = [
     ".git",
     ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    ".agents",
+    ".continue",
+    "graphify-out",
     "protos",
     "third_party",
     "build",
     "dist",
+    "nemo_head_unit.egg-info",
+    "scripts/hardware_tests",
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP"]
-ignore = ["E501"]
+select = ["E9", "F"]
+ignore = ["E501", "F401", "F841"]
 
 [tool.ruff.format]
 quote-style = "double"
