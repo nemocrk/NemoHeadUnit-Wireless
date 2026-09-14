@@ -1,0 +1,72 @@
+# packaging/system-deps-arch.txt
+#
+# Pacman system dependencies for NemoHeadUnit-Wireless on Arch Linux.
+#
+# Format: one package per line.
+# Lines starting with # are comments.
+# Blank lines are ignored.
+
+# D-Bus & PolicyKit
+dbus
+polkit
+
+# Bluetooth stack (Telephony handled via WirePlumber native backend or AUR ofono)
+bluez
+bluez-utils
+bluez-obex
+
+# WiFi AP stack
+hostapd
+dnsmasq
+iproute2
+iw
+util-linux
+
+# Network Manager
+networkmanager
+
+# Audio backend (PipeWire + PulseAudio emulation & BlueZ SPA codec)
+pipewire
+pipewire-audio
+pipewire-pulse
+wireplumber
+libpulse
+sbc
+
+# FFmpeg
+ffmpeg
+
+# GStreamer runtime and plugins
+gstreamer
+gst-plugins-base
+gst-plugins-good
+gst-plugins-bad
+gst-plugins-ugly
+gst-plugin-va
+gst-plugin-qml6
+gst-libav
+python-gobject
+
+# GLib runtime
+glib2
+
+# OpenGL & EGL runtime
+libglvnd
+mesa
+qt6-declarative
+qt6-wayland
+xcb-util-cursor
+egl-wayland
+
+# System Python deps for GUI EGL isolation
+python-pyqt6
+python-pyzmq
+python-protobuf
+python-pydantic
+python-loguru
+
+# VA-API diagnostic utility
+libva-utils
+
+#decode to check hardware info
+dmidecode

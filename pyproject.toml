@@ -1,0 +1,149 @@
+# ===========================================================================
+# NemoHeadUnit-Wireless — pyproject.toml
+# Rif: docs/TEST_SUITE_ARCHITECTURE.md, docs/project-vision.md
+# ===========================================================================
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ---------------------------------------------------------------------------
+# Project metadata
+# ---------------------------------------------------------------------------
+[project]
+name = "nemo-head-unit"
+version = "2.0.0"
+description = "NemoHeadUnit-Wireless — wireless Android Auto head unit"
+requires-python = ">=3.13"
+
+# ---------------------------------------------------------------------------
+# Dev / test dependencies
+# ---------------------------------------------------------------------------
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.23",
+    "hypothesis>=6.100",
+    "dbus-python>=1.3",
+    "pyyaml>=6.0",
+]
+
+# ---------------------------------------------------------------------------
+# Package discovery
+# Nessun package da installare: il progetto usa PYTHONPATH diretto.
+# Senza questa dichiarazione esplicita setuptools fallisce con
+# "Multiple top-level packages discovered in a flat-layout".
+# ---------------------------------------------------------------------------
+[tool.setuptools]
+packages = []
+
+# ---------------------------------------------------------------------------
+# pytest
+# Rif: docs/TEST_SUITE_ARCHITECTURE.md §5
+# Note: addopts deve essere una stringa unica, non una lista,
+#       per evitare che pytest-xdist riceva ' auto' con spazio iniziale.
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths  = ["tests"]
+pythonpath = [".", "backend", "protos", "third_party/open-android-auto"]
+python_files   = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+markers = [
+    "unit: test isolato, nessun I/O reale (< 1s per test)",
+    "integration: più moduli reali con bus in-process (< 10s per test)",
+    "e2e: flusso end-to-end con stack completo o phone mock",
+    "e2e_smoke: subset e2e veloci (< 30s totali) — run in CI standard",
+    "e2e_full: sessione AA completa, > 60s — run separato nightly/on-demand",
+    "performance: benchmark informativi, non falliscono per soglie",
+    "hardware: richiede hardware fisico (audio, BT, display)",
+    "qt: richiede QApplication offscreen",
+    "dbus: richiede sessione D-Bus di test",
+    "slow: atteso > 10s",
+    "fuzz: property-based con Hypothesis",
+    "asyncio: test asincrono con asyncio",
+]
+
+filterwarnings = [
+    "ignore::DeprecationWarning:zmq.*",
+    "ignore::ResourceWarning",
+]
+
+addopts = "--strict-markers --tb=short -q -n auto"
+
+timeout = 60
+timeout_method = "thread"
+timeout_func_only = true
+
+# ---------------------------------------------------------------------------
+# coverage
+# relative_files = true: i path negli omit sono relativi alla CWD del runner
+# (root del repo), così "protos/*" matcha correttamente.
+# source usa il path relativo alla CWD, non il nome del package installato.
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+relative_files = true
+source = ["backend"]
+omit = [
+    "*/protos/*",
+    "*/services/*",
+    "*/tests/*",
+    "packaging/*",
+    "scripts/*",
+    "*/shared/hardware/windows_*.py",
+    "*/shared/platform/windows.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered  = false
+fail_under    = 60
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "if sys.platform == .win32.:",
+    "if sys.platform != .win32.:",
+]
+
+[tool.pyrefly]
+search-path = [
+  ".",
+  "backend"
+]
+
+# ---------------------------------------------------------------------------
+# ruff linter & formatter
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+exclude = [
+    ".git",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    ".agents",
+    ".continue",
+    "graphify-out",
+    "protos",
+    "third_party",
+    "build",
+    "dist",
+    "nemo_head_unit.egg-info",
+    "scripts/hardware_tests",
+]
+
+[tool.ruff.lint]
+select = ["E9", "F"]
+ignore = ["E501", "F401", "F841"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

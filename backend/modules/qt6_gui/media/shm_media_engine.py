@@ -1,0 +1,687 @@
+"""
+shm_media_engine.py — SHM Media Transport Engine for Qt6 Frontend.
+
+Reads downstream media frames (video RGBA/YUV420 & audio PCM) zero-copy from `nemo_media_shm_down`
+and dispatches them directly to Qt6 render surfaces and audio sinks.
+"""
+
+import os
+import time
+import logging
+import asyncio
+from typing import Callable, Optional, Tuple
+
+try:
+    from shared.media_shm import BidirectionalMediaSHM, RingSharedMemoryBuffer
+except ImportError:
+    from backend.shared.media_shm import BidirectionalMediaSHM, RingSharedMemoryBuffer
+
+
+try:
+    from shared.logger import get_logger
+except ImportError:
+    from backend.shared.logger import get_logger
+
+try:
+    import av
+except ImportError:
+    av = None
+
+
+logger = get_logger("qt6_gui.shm_engine")
+
+# GL availability probe — checked once at module load
+try:
+    from PyQt6.QtOpenGLWidgets import QOpenGLWidget as _probe_ogl  # noqa: F401
+    _HAS_QOPENGL = True
+except ImportError:
+    _HAS_QOPENGL = False
+
+
+try:
+    from shared.hardware.video_decoder import (
+        scan_gstreamer_plugin_paths,
+        get_best_hardware_decoder,
+        build_video_pipeline,
+    )
+except ImportError:
+    from backend.shared.hardware.video_decoder import (
+        scan_gstreamer_plugin_paths,
+        get_best_hardware_decoder,
+        build_video_pipeline,
+    )
+
+
+class GStreamerHwDecoder:
+    """
+    Cross-platform hardware-accelerated H.264 video decoder using GStreamer
+    (NVDEC, VA-API, Direct3D 11, QSV, MediaFoundation, or V4L2) with zero-clock-sync appsink.
+    """
+
+    def __init__(self, on_frame_callback: Callable[[bytes, int, int, int], None]):
+        self.on_frame_callback = on_frame_callback
+        self.is_available = False
+        self.frames_decoded = 0
+        self._pipeline = None
+        self._appsrc = None
+        self._appsink = None
+        self._Gst = None
+
+        try:
+            import gi
+            gi.require_version("Gst", "1.0")
+            gi.require_version("GstApp", "1.0")
+            from gi.repository import Gst
+            Gst.init(None)
+            self._Gst = Gst
+
+            scan_gstreamer_plugin_paths(Gst)
+
+            pipe_str, dec_name = build_video_pipeline(
+                Gst=Gst,
+                mode="appsink",
+                sink_name="sink",
+                src_name="src",
+            )
+
+            if not pipe_str:
+                logger.info("ℹ️ [Qt6 Video HW Decoder] No GStreamer video decoder pipeline available — using PyAV fallback")
+                return
+
+            logger.info(f"🎬 [Qt6 Video HW Decoder] Launching GStreamer pipeline: {pipe_str}")
+            self._pipeline = Gst.parse_launch(pipe_str)
+            self._appsrc = self._pipeline.get_by_name("src")
+            self._appsink = self._pipeline.get_by_name("sink")
+
+            if self._appsrc and self._appsink:
+                self._appsink.connect("new-sample", self._on_new_sample)
+                ret = self._pipeline.set_state(Gst.State.PLAYING)
+                if ret != Gst.StateChangeReturn.FAILURE:
+                    self.is_available = True
+                    logger.info(f"🎬 [Qt6 Video HW Decoder] GStreamer pipeline active using {dec_name}")
+        except Exception as exc:
+            import sys
+            level = "warning" if sys.platform == "linux" else "debug"
+            getattr(logger, level)("Could not initialize GStreamer HW decoder: %s", exc)
+            self.close()
+
+    def decode_nal(self, nal_data: bytes, ts_us: int = 0) -> bool:
+        if not self.is_available or not self._appsrc:
+            return False
+        try:
+            buf = self._Gst.Buffer.new_wrapped(nal_data)
+            if ts_us > 0:
+                buf.pts = ts_us * 1000  # GstClockTime nanoseconds
+            self._appsrc.emit("push-buffer", buf)
+            return True
+        except Exception:
+            return False
+
+    def _on_new_sample(self, sink) -> int:
+        try:
+            sample = sink.emit("pull-sample")
+            if not sample:
+                return self._Gst.FlowReturn.ERROR
+            caps = sample.get_caps()
+            w, h = 1280, 720
+            if caps:
+                structure = caps.get_structure(0)
+                ok_w, sw = structure.get_int("width")
+                ok_h, sh = structure.get_int("height")
+                if ok_w and ok_h:
+                    w, h = sw, sh
+
+            buf = sample.get_buffer()
+            pts_us = int(buf.pts // 1000) if buf and buf.pts != self._Gst.CLOCK_TIME_NONE else 0
+
+            success, map_info = buf.map(self._Gst.MapFlags.READ)
+            if not success:
+                return self._Gst.FlowReturn.ERROR
+            try:
+                rgba_bytes = bytes(map_info.data)
+            finally:
+                buf.unmap(map_info)
+
+            if rgba_bytes and self.on_frame_callback:
+                self.frames_decoded += 1
+                if self.frames_decoded == 1 or self.frames_decoded % 150 == 0:
+                    logger.info(f"🎬 [Qt6 Video HW Decoder] Active GPU decode: Frame #{self.frames_decoded} ({w}x{h} RGBA, 0% CPU)")
+                self.on_frame_callback(rgba_bytes, w, h, pts_us)
+            return self._Gst.FlowReturn.OK
+        except Exception:
+            return self._Gst.FlowReturn.ERROR
+
+    def get_queue_bytes(self) -> int:
+        if self._appsrc:
+            try:
+                return int(self._appsrc.get_property("current-level-bytes"))
+            except Exception:
+                pass
+        return 0
+
+    def close(self):
+        if self._pipeline:
+            try:
+                self._pipeline.set_state(self._Gst.State.NULL)
+            except Exception:
+                pass
+            self._pipeline = None
+            self._appsrc = None
+            self._appsink = None
+        self.is_available = False
+
+
+class Qml6ZeroCopyDecoder:
+    """
+    Zero-CPU H.264 decoder using GStreamer VA-API, DMABuf, and qml6glsink.
+
+    Pipeline:
+      appsrc name=src is-live=true format=bytes
+      ! h264parse config-interval=-1
+      ! vah264dec
+      ! vapostproc add-borders=true
+      ! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=YV12,width=1280,height=800
+      ! glupload
+      ! qml6glsink name=qml_sink sync=false
+    """
+
+    def __init__(self, on_frame_callback: Callable[[bytes, int, int, int], None]):
+        self.on_frame_callback = on_frame_callback
+        self.is_available = False
+        self.frames_decoded = 0
+        self._pipeline = None
+        self._appsrc = None
+        self._sink = None
+        self._viewport = None
+        self._Gst = None
+        self._is_sink_bound = False
+        self._is_playing = False
+        self._try_init_pipeline()
+
+    def _try_init_pipeline(self) -> None:
+        """Build GStreamer zero-copy pipeline using unified video_decoder factory."""
+        try:
+            import gi
+            gi.require_version("Gst", "1.0")
+            gi.require_version("GstGL", "1.0")
+            from gi.repository import Gst
+            Gst.init(None)
+            self._Gst = Gst
+
+            scan_gstreamer_plugin_paths(Gst)
+
+            pipe_str, dec_desc = build_video_pipeline(
+                Gst=Gst,
+                mode="zero_copy",
+                sink_name="qml_sink",
+                src_name="src",
+            )
+
+            if not pipe_str:
+                logger.info(
+                    "ℹ️ [Qml6ZeroCopyDecoder] Zero-copy pipeline not supported or elements missing — falling back to GStreamerHwDecoder"
+                )
+                return
+
+            logger.info(f"🎬 [Qml6ZeroCopyDecoder] Launching GStreamer pipeline: {pipe_str}")
+            self._pipeline = Gst.parse_launch(pipe_str)
+            self._appsrc = self._pipeline.get_by_name("src")
+            self._sink = self._pipeline.get_by_name("qml_sink")
+
+            if not self._appsrc or not self._sink:
+                logger.warning("[Qml6ZeroCopyDecoder] Pipeline element lookup failed")
+                return
+
+            # Monitor GStreamer bus messages for errors
+            bus = self._pipeline.get_bus()
+            bus.add_signal_watch()
+
+            def _on_gst_error(b, msg):
+                err, dbg = msg.parse_error()
+                logger.error(f"❌ [Qml6ZeroCopyDecoder Gst Error] {err.message} - {dbg}")
+
+            def _on_gst_warning(b, msg):
+                warn, dbg = msg.parse_warning()
+                logger.warning(f"⚠️ [Qml6ZeroCopyDecoder Gst Warning] {warn.message} - {dbg}")
+
+            bus.connect("message::error", _on_gst_error)
+            bus.connect("message::warning", _on_gst_warning)
+
+            self.is_available = True
+            logger.info(f"🎬 [Qml6ZeroCopyDecoder] Pipeline initialized ({dec_desc} -> qml6glsink)")
+        except Exception as exc:
+            import sys
+            level = "warning" if sys.platform == "linux" else "debug"
+            getattr(logger, level)("[Qml6ZeroCopyDecoder] Init failed: %s", exc)
+
+    def attach_viewport(self, viewport) -> None:
+        """Wire the qml6glsink element to the VideoViewportWidget."""
+        self._viewport = viewport
+        if hasattr(viewport, "set_sink_bound_callback"):
+            viewport.set_sink_bound_callback(self._on_sink_bound)
+        if self._sink and hasattr(viewport, "attach_gstreamer_sink"):
+            viewport.attach_gstreamer_sink(self._sink)
+
+    def _on_sink_bound(self) -> None:
+        """Invoked when sceneGraphInitialized has successfully bound widget to qml6glsink."""
+        self._is_sink_bound = True
+        logger.info("🎬 [Qml6ZeroCopyDecoder] Sink bound to GstGLQt6VideoItem confirmed — ready for stream")
+
+    def set_focused(self, focused: bool) -> None:
+        """Track whether video is in foreground to drop NALs when suspended."""
+        self._is_focused = focused
+
+    def decode_nal(self, nal_data: bytes, ts_us: int = 0) -> bool:
+        """Push a NAL unit into appsrc. Starts playback on first frame."""
+        if not hasattr(self, "_push_count"):
+            self._push_count = 0
+        if self._push_count < 10 or self._push_count % 100 == 0:
+            logger.debug(
+                f"📹 [Flow F: Qml6ZeroCopyDecoder] decode_nal #{self._push_count}: len={len(nal_data)}, "
+                f"avail={self.is_available}, appsrc={self._appsrc is not None}, "
+                f"focused={getattr(self, '_is_focused', True)}, bound={self._is_sink_bound}, playing={self._is_playing}"
+            )
+        self._push_count += 1
+        if not self.is_available or not self._appsrc or not getattr(self, "_is_focused", True):
+            return False
+        try:
+            if not self._is_playing and self._is_sink_bound and self._pipeline:
+                self._is_playing = True
+                ret = self._pipeline.set_state(self._Gst.State.PLAYING)
+                logger.info(f"🎬 [Qml6ZeroCopyDecoder] First NAL arrived -> pipeline set to PLAYING ({ret})")
+
+            buf = self._Gst.Buffer.new_wrapped(nal_data)
+            if ts_us > 0:
+                buf.pts = ts_us * 1000
+            self._appsrc.emit("push-buffer", buf)
+            self.frames_decoded += 1
+            return True
+        except Exception as exc:
+            logger.debug(f"[Qml6ZeroCopyDecoder] decode_nal error: {exc}")
+            return False
+
+    def get_queue_bytes(self) -> int:
+        if self._appsrc:
+            try:
+                return int(self._appsrc.get_property("current-level-bytes"))
+            except Exception:
+                pass
+        return 0
+
+    def close(self) -> None:
+        if self._pipeline:
+            try:
+                self._pipeline.set_state(self._Gst.State.NULL)
+            except Exception:
+                pass
+            self._pipeline = None
+            self._appsrc = None
+            self._sink = None
+        self.is_available = False
+
+
+class QtSHMMediaEngine:
+    """
+    Shared Memory Media Dispatcher for Qt6 Frontend.
+    """
+
+    def __init__(self):
+        self.shm: Optional[BidirectionalMediaSHM] = None
+        self.on_video_frame: Optional[Callable[[bytes, int, int, int], None]] = None  # payload, width, height, ts_us
+        self.on_audio_frame: Optional[Callable[[bytes, int, int], None]] = None  # payload, channel_id, ts_us
+        self.on_stream_start: Optional[Callable[[], None]] = None
+        self.on_stream_stop: Optional[Callable[[], None]] = None
+        self.is_connected = False
+        self.is_video_focused = True
+        self._codec_ctx = None
+        self._nal_counter = 0
+
+        # Video Watchdog state
+        self._last_nal_time = 0.0
+        self._last_rendered_time = 0.0
+        self._last_watchdog_recover_time = 0.0
+        self.request_keyframe: Optional[Callable[[], None]] = None
+
+        # Telemetry metrics
+        self.frames_rx_shm = 0
+        self.frames_rendered_total = 0
+        self._last_telemetry_time = 0.0
+        self._last_telemetry_rx = 0
+        self._last_telemetry_rend = 0
+        self._last_stall_warn_time = 0.0
+
+        # Video FPS and PTS lag telemetry (hardware + software decode)
+        self._video_fps: float = 0.0
+        self._video_frame_count: int = 0
+        self._video_fps_timer: float = time.time()
+        self._video_first_sys_time: Optional[float] = None
+        self._video_first_ts_us: Optional[int] = None
+        self._video_lag_ms: float = 0.0
+
+        # 1. Initialize best available video decoder
+        self._hw_decoder = Qml6ZeroCopyDecoder(on_frame_callback=self._on_hw_decoded_frame)
+        if not self._hw_decoder.is_available:
+            logger.info(
+                "ℹ️ [SHM Engine] Qml6ZeroCopyDecoder not available — falling back to GStreamerHwDecoder"
+            )
+            self._hw_decoder = GStreamerHwDecoder(self._on_hw_decoded_frame)
+
+        # 2. PyAV CPU fallback decoder
+        if av is not None:
+            try:
+                self._codec_ctx = av.CodecContext.create('h264', 'r')
+                self._codec_ctx.thread_type = 'AUTO'
+                self._codec_ctx.thread_count = 2
+                logger.info("🎬 QtSHMMediaEngine PyAV H.264 CodecContext initialized (2 threads fallback)")
+            except Exception as e:
+                logger.warning("Could not initialize PyAV H.264 CodecContext: %s", e)
+
+    def set_video_focused(self, focused: bool) -> None:
+        """Enable or suspend video decode to conserve CPU/GPU when not in foreground."""
+        self.is_video_focused = focused
+        if hasattr(self._hw_decoder, "set_focused"):
+            self._hw_decoder.set_focused(focused)
+
+    def _update_frame_stats(self, ts_us: int) -> None:
+        """Update rolling FPS and phone-PTS vs system-clock lag metrics."""
+        now = time.time()
+        self._video_frame_count += 1
+        elapsed_fps = now - self._video_fps_timer
+        if elapsed_fps >= 1.0:
+            self._video_fps = round(self._video_frame_count / elapsed_fps, 1)
+            self._video_frame_count = 0
+            self._video_fps_timer = now
+
+        if ts_us > 0:
+            if self._video_first_sys_time is None or self._video_first_ts_us is None:
+                self._video_first_sys_time = now
+                self._video_first_ts_us = ts_us
+                self._video_lag_ms = 0.0
+            else:
+                elapsed_sys = now - self._video_first_sys_time
+                elapsed_phone = (ts_us - self._video_first_ts_us) / 1_000_000.0
+                lag = (elapsed_sys - elapsed_phone) * 1000.0
+                if abs(lag) > 3000.0 or elapsed_phone < 0:
+                    self._video_first_sys_time = now
+                    self._video_first_ts_us = ts_us
+                    self._video_lag_ms = 0.0
+                else:
+                    self._video_lag_ms = max(0.0, lag)
+
+    def get_video_metrics(self) -> dict:
+        """Return active video FPS and lag metrics for GUI telemetry and logs."""
+        now = time.time()
+        is_active = (now - self._last_rendered_time) < 2.0 if self._last_rendered_time > 0 else False
+        return {
+            "fps": self._video_fps if is_active else 0.0,
+            "lag_ms": int(self._video_lag_ms) if is_active else 0,
+            "rendered_total": self.frames_rendered_total,
+        }
+
+    def _on_hw_decoded_frame(self, rgba_pixels: bytes, width: int, height: int, ts_us: int):
+        """Dispatch hardware-decoded RGBA frame directly to Qt6 video viewport."""
+        self._last_rendered_time = time.time()
+        self.frames_rendered_total += 1
+        self._update_frame_stats(ts_us)
+        if self.on_video_frame and self.is_video_focused:
+            self.on_video_frame(rgba_pixels, width, height, ts_us)
+
+    def _recover_pipeline(self) -> None:
+        """Auto-recovery invoked by watchdog when video pipeline stalls on corrupt/missing frames."""
+        logger.warning("⚠️ [Video Watchdog] Video stall detected! Resetting decoder and requesting keyframe...")
+        # If hardware decoder stalled, close it and fall back to PyAV
+        if self._hw_decoder and getattr(self._hw_decoder, "is_available", False):
+            try:
+                self._hw_decoder.close()
+            except Exception:
+                pass
+            self._hw_decoder.is_available = False
+
+        # Reset PyAV decoder context to flush corrupted internal buffers
+        if av is not None:
+            try:
+                self._codec_ctx = av.CodecContext.create('h264', 'r')
+                self._codec_ctx.thread_type = 'AUTO'
+                self._codec_ctx.thread_count = 2
+                logger.info("🎬 [Video Watchdog] PyAV H.264 CodecContext recreated cleanly")
+            except Exception as exc:
+                logger.warning("Could not recreate PyAV CodecContext: %s", exc)
+
+        # Trigger phone keyframe / IDR generation
+        if self.request_keyframe:
+            try:
+                self.request_keyframe()
+            except Exception as exc:
+                logger.debug("Error calling request_keyframe callback: %s", exc)
+
+    def connect_shm(self) -> bool:
+        """Attach to existing shared memory buffers created by media_server/channel_manager."""
+        logger.info("🔍 [SHM Engine Trace] Attempting BidirectionalMediaSHM(create=False)...")
+        try:
+            self.shm = BidirectionalMediaSHM(create=False)
+            self.is_connected = True
+            logger.info("QtSHMMediaEngine successfully attached to BidirectionalMediaSHM buffers")
+            return True
+        except Exception as exc:
+            logger.warning("QtSHMMediaEngine failed to attach to SHM: %s", exc)
+            self.is_connected = False
+            return False
+
+
+    def process_downstream_video(self, offset: int, channel_id: Optional[int] = None) -> None:
+        """
+        Reads video frame at offset from dedicated per-channel SHM and dispatches to on_video_frame callback.
+        """
+        if not hasattr(self, "_trace_downstream"):
+            self._trace_downstream = 0
+        if self._trace_downstream < 10 or self._trace_downstream % 100 == 0:
+            logger.debug(
+                f"📹 [Flow E: shm_engine] process_downstream_video #{self._trace_downstream}: "
+                f"offset={offset}, ch={channel_id}, shm={'ok' if self.shm else 'None'}, "
+                f"focused={getattr(self, 'is_video_focused', False)}"
+            )
+        self._trace_downstream += 1
+        self.frames_rx_shm += 1
+
+        if not self.shm or offset < 0 or not self.is_video_focused:
+            return
+
+        try:
+            shm_buf = self.shm.get_downstream_channel(channel_id) if channel_id is not None else self.shm.downstream
+            _, ts_low, payload = shm_buf.read_frame(offset)
+            if not payload:
+                if self._trace_downstream <= 10:
+                    logger.warning(f"⚠️ [Flow E: shm_engine] Frame read at offset {offset} returned empty payload!")
+                return
+
+            # 1. Direct raw RGBA frame header check
+            if len(payload) >= 12:
+                import struct
+                width, height, _ = struct.unpack(">III", payload[:12])
+                if 0 < width <= 4096 and 0 < height <= 4096:
+                    expected_len = width * height * 4
+                    if len(payload) == 12 + expected_len:
+                        self._last_rendered_time = time.time()
+                        self.frames_rendered_total += 1
+                        self._update_frame_stats(ts_low)
+                        rgba_pixels = payload[12:]
+                        if self.on_video_frame:
+                            self.on_video_frame(rgba_pixels, width, height, ts_low)
+                        return
+
+            # 2. Decode raw H.264 NAL units via Hardware VA-API (or PyAV Fallback)
+            if payload.startswith(b"\x00\x00\x00\x01") or payload.startswith(b"\x00\x00\x01"):
+                now = time.time()
+                self._last_nal_time = now
+
+                # Watchdog check: if frames rendered previously but none in last 2.0s while NALs arrive
+                if self._last_rendered_time > 0 and (now - self._last_rendered_time) >= 2.0:
+                    if (now - self._last_watchdog_recover_time) >= 2.5:
+                        self._last_watchdog_recover_time = now
+                        self._recover_pipeline()
+
+                if self._hw_decoder and self._hw_decoder.is_available:
+                    ok = self._hw_decoder.decode_nal(payload, ts_low)
+                    if ok:
+                        self._last_rendered_time = now
+                        self.frames_rendered_total += 1
+                        if isinstance(self._hw_decoder, Qml6ZeroCopyDecoder):
+                            self._update_frame_stats(ts_low)
+                    if self._hw_decoder.frames_decoded > 0 or self._nal_counter < 30:
+                        self._nal_counter += 1
+                        return
+
+                if self._codec_ctx is not None:
+                    try:
+                        packet = av.Packet(payload)
+                        frames = self._codec_ctx.decode(packet)
+                        for frame in frames:
+                            self._last_rendered_time = time.time()
+                            self.frames_rendered_total += 1
+                            self._update_frame_stats(ts_low)
+                            rgba_frame = frame.reformat(format="rgba")
+                            rgba_pixels = bytes(rgba_frame.planes[0])
+                            w, h = frame.width, frame.height
+                            if self.on_video_frame:
+                                self.on_video_frame(rgba_pixels, w, h, ts_low)
+                    except Exception as e:
+                        logger.debug("PyAV decode error: %s", e)
+                return
+
+            # 3. Fallback check for complete compressed image formats (JPEG / WebP)
+            if (payload.startswith(b"\xff\xd8\xff") and payload.endswith(b"\xff\xd9")) or payload.startswith(b"RIFF"):
+                from PyQt6.QtGui import QImage
+                qimg = QImage.fromData(payload)
+                if not qimg.isNull():
+                    rgba_img = qimg.convertToFormat(QImage.Format.Format_RGBA8888)
+                    w = rgba_img.width()
+                    h = rgba_img.height()
+                    ptr = rgba_img.bits()
+                    if hasattr(ptr, "setsize"):
+                        ptr.setsize(rgba_img.sizeInBytes())
+                    rgba_pixels = bytes(ptr)
+                    self._last_rendered_time = time.time()
+                    self.frames_rendered_total += 1
+                    self._update_frame_stats(ts_low)
+                    if self.on_video_frame:
+                        self.on_video_frame(rgba_pixels, w, h, ts_low)
+        except Exception as exc:
+            logger.debug("SHM video processing error at offset %d: %s", offset, exc)
+
+    def check_telemetry(self) -> None:
+        """Periodic 5s video telemetry and stall detector for Qt6 viewport render pipeline."""
+        if self.frames_rx_shm == 0:
+            return
+        import time
+        now = time.time()
+        if self._last_telemetry_time == 0.0:
+            self._last_telemetry_time = now
+            self._last_telemetry_rx = self.frames_rx_shm
+            self._last_telemetry_rend = self.frames_rendered_total
+            return
+
+        elapsed = now - self._last_telemetry_time
+        if elapsed < 5.0:
+            return
+
+        rx_delta = self.frames_rx_shm - self._last_telemetry_rx
+        rend_delta = self.frames_rendered_total - self._last_telemetry_rend
+        self._last_telemetry_time = now
+        self._last_telemetry_rx = self.frames_rx_shm
+        self._last_telemetry_rend = self.frames_rendered_total
+
+        rx_fps = rx_delta / elapsed if elapsed > 0 else 0.0
+        rend_fps = rend_delta / elapsed if elapsed > 0 else 0.0
+
+        last_rx_age = now - self._last_nal_time if self._last_nal_time > 0 else 999.0
+        last_rend_age = now - self._last_rendered_time if self._last_rendered_time > 0 else 999.0
+
+        dec_name = "None"
+        pushed = 0
+        queue_bytes = 0
+        if self._hw_decoder and getattr(self._hw_decoder, "is_available", False):
+            dec_name = type(self._hw_decoder).__name__
+            pushed = getattr(self._hw_decoder, "frames_decoded", 0)
+            if hasattr(self._hw_decoder, "get_queue_bytes"):
+                queue_bytes = self._hw_decoder.get_queue_bytes()
+        elif self._codec_ctx is not None:
+            dec_name = "PyAV_CPU"
+
+        # Stall detection: SHM frames actively arriving (<3.0s), but viewport rendered 0 frames for >=2.5s
+        if last_rx_age < 3.0 and last_rend_age >= 2.5 and self.frames_rx_shm > 0:
+            if (now - self._last_stall_warn_time) >= 3.0:
+                self._last_stall_warn_time = now
+                logger.warning(
+                    f"⚠️ [Video Stall: Qt6 Viewport] Render stall! SHM frames arriving ({self.frames_rx_shm} total, {rx_fps:.1f} fps), "
+                    f"but viewport has rendered 0 frames for {last_rend_age:.1f}s! "
+                    f"(Decoder: {dec_name}, Pushed: {pushed}, AppsrcQueue: {queue_bytes} B)"
+                )
+        elif last_rx_age < 10.0:
+            logger.info(
+                f"🖥️ [Video Telemetry: Qt6 Viewport] Decoder: {dec_name} | "
+                f"SHM Rx: {self.frames_rx_shm} ({rx_fps:.1f} fps) | "
+                f"Pushed: {pushed} | Queue: {queue_bytes} B | "
+                f"Rendered: {self.frames_rendered_total} ({rend_fps:.1f} fps)"
+            )
+
+    def process_downstream_audio(self, offset: int, channel_id: Optional[int] = None) -> None:
+        """
+        Reads audio frame at offset from dedicated per-channel SHM and dispatches to on_audio_frame callback.
+        """
+        if not self.shm or offset < 0:
+            return
+
+        try:
+            shm_buf = self.shm.get_downstream_channel(channel_id) if channel_id is not None else self.shm.downstream
+            stream_type, ts_low, payload = shm_buf.read_frame(offset)
+            if not payload:
+                return
+
+            effective_channel_id = channel_id if channel_id is not None else stream_type
+            if self.on_audio_frame:
+                self.on_audio_frame(payload, effective_channel_id, ts_low)
+        except Exception as exc:
+            logger.debug("SHM audio processing error at offset %d: %s", offset, exc)
+
+    def process_downstream_frame(self, offset: int) -> None:
+        """Fallback dispatcher for downstream frames when stream type is read from legacy downstream SHM header."""
+        if not self.shm or offset < 0:
+            return
+
+        try:
+            stream_type, ts_low, payload = self.shm.downstream.read_frame(offset)
+            if not payload:
+                return
+            # Treat non-video payloads as audio
+            if self.on_audio_frame:
+                self.on_audio_frame(payload, stream_type, ts_low)
+        except Exception as exc:
+            logger.debug("SHM frame processing error at offset %d: %s", offset, exc)
+
+    def write_upstream_mic(self, pcm_data: bytes) -> int:
+        """
+        Writes 16kHz 16-bit Mono PCM mic frame zero-copy to `nemo_media_shm_up`.
+        Returns SHM offset.
+        """
+        if not self.shm or not pcm_data:
+            return -1
+        try:
+            # stream_type 1 for Speech/Mic audio
+            return self.shm.upstream.write_frame(1, 0, pcm_data)
+        except Exception as exc:
+            logger.warning("Failed to write mic frame to SHM upstream: %s", exc)
+            return -1
+
+    def close(self):
+        if hasattr(self, "_hw_decoder") and self._hw_decoder:
+            try:
+                self._hw_decoder.close()
+            except Exception:
+                pass
+        if self.shm:
+            try:
+                self.shm.close()
+            except Exception:
+                pass
+            self.shm = None
+        self.is_connected = False

@@ -1,57 +1,14 @@
 #!/usr/bin/env bash
 # packaging/build_deb.sh
 #
-# Build a self-contained .deb for NemoHeadUnit-Wireless v2.
+# Build a self-contained .deb for NemoHeadUnit-Wireless.
+# Supports two packaging modes:
+#   1. --method venv (Default): uses system python3 + venv + uv installer.
+#   2. --method micromamba (or --micromamba): uses standalone Micromamba conda environment.
 #
 # Usage:
-#   bash packaging/build_deb.sh [--arch amd64|arm64] [--output-dir /path]
+#   bash packaging/build_deb.sh [--method venv|micromamba] [--arch amd64|arm64] [--output-dir /path]
 #
-# What this script does:
-#   1.  Reads VERSION from repo root
-#   2.  Validates required tools (fpm, dpkg-deb)
-#   3.  Assembles a staging directory (build/stage/) mirroring the
-#       final filesystem layout:
-#         /opt/nemo-headunit/
-#           v2/               ← application source (v2/)
-#           services/         ← ap_manager_service
-#           hardware_fixes/   ← platform-specific fix scripts + registry
-#           bus_broker.py     ← ZMQ bus broker entry point
-#           environment.yml   ← Conda env spec (built on target by postinst)
-#           bin/
-#             nemo-headunit   ← launcher wrapper script
-#         /usr/lib/systemd/system/
-#           org.nemo.APManager.service
-#         /etc/dbus-1/system.d/
-#           org.nemo.APManager.conf
-#         /usr/share/dbus-1/system-services/
-#           org.nemo.APManager.service  (D-Bus activation file)
-#         /usr/share/polkit-1/actions/
-#           org.nemo.apmanager.policy   (lowercase — polkitd 127 case-sensitive)
-#         /etc/polkit-1/rules.d/
-#           org.nemo.bluetooth.rules
-#         /usr/share/applications/
-#           nemo-headunit.desktop
-#   4.  Builds the .deb with FPM
-#   5.  Runs dpkg-deb --info + dpkg-deb --contents to verify the package
-#
-# NOTE: The Conda environment is NOT pre-built into the .deb.
-#       postinst runs 'conda env create' on the target machine so that
-#       all native libs (glibc, ALSA, VA-API …) are compiled for the
-#       actual target OS — avoiding ABI mismatches / segfaults.
-#
-# Requirements (build machine only):
-#   fpm     (gem install fpm)
-#   ruby    (for fpm)
-#   dpkg    (to verify)
-#
-# The resulting .deb declares APT deps from packaging/system-deps.txt.
-# Conda must be available on the TARGET machine (postinst bootstraps it
-# via packaging/bootstrap_conda.sh if not found).
-#
-# Arch note:
-#   --arch arm64 cross-compiles the .deb metadata only.
-#   For true arm64 binaries, run this script ON an arm64 machine.
-
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -71,17 +28,47 @@ step() { echo; echo "${BOLD}>>> $* ${RESET}"; }
 
 ARCH="amd64"
 OUTPUT_DIR="dist"
+METHOD="venv"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --arch)       ARCH="$2";       shift 2 ;;
-        --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
-        *) die "Unknown argument: $1" ;;
+        --method)
+            METHOD="$2"
+            shift 2
+            ;;
+        --venv)
+            METHOD="venv"
+            shift 1
+            ;;
+        --micromamba|--conda)
+            METHOD="micromamba"
+            shift 1
+            ;;
+        --auto)
+            METHOD="auto"
+            shift 1
+            ;;
+        --arch)
+            ARCH="$2"
+            shift 2
+            ;;
+        --output-dir)
+            OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        *)
+            die "Unknown argument: $1"
+            ;;
     esac
 done
 
 [[ "$ARCH" == "amd64" || "$ARCH" == "arm64" ]] \
     || die "--arch must be 'amd64' or 'arm64'"
+
+[[ "$METHOD" == "venv" || "$METHOD" == "micromamba" || "$METHOD" == "auto" ]] \
+    || die "--method must be 'venv', 'micromamba', or 'auto'"
+
+log "Packaging target: ARCH=${ARCH}, METHOD=${METHOD}"
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -96,23 +83,42 @@ OUTPUT_DIR="${REPO_ROOT}/${OUTPUT_DIR}"
 
 VERSION_FILE="${REPO_ROOT}/VERSION"
 ENV_YML="${REPO_ROOT}/environment.yml"
-SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps.txt"
+REQUIREMENTS_TXT="${REPO_ROOT}/packaging/requirements.txt"
+
+if [ "$METHOD" = "micromamba" ]; then
+    SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps.txt"
+else
+    SYS_DEPS_FILE="${REPO_ROOT}/packaging/system-deps-venv.txt"
+fi
+
 POSTINST="${REPO_ROOT}/packaging/postinst"
 PRERM="${REPO_ROOT}/packaging/prerm"
 BT_RULES="${REPO_ROOT}/packaging/org.nemo.bluetooth.rules"
 HW_FIXES_SRC="${REPO_ROOT}/packaging/hardware_fixes"
-BOOTSTRAP_CONDA="${REPO_ROOT}/packaging/bootstrap_conda.sh"
+LAUNCHER_SRC="${REPO_ROOT}/packaging"
 
-SERVICES_SRC="${REPO_ROOT}/services/ap_manager_service"
+SERVICES_SRC="${REPO_ROOT}/services/linux/ap_manager_service"
 
 # ---------------------------------------------------------------------------
-# Step 0 — Read version
+# Step 0 — Read & Increment version
 # ---------------------------------------------------------------------------
-step "Reading version"
+step "Reading & Auto-Incrementing version"
 [[ -f "${VERSION_FILE}" ]] || die "VERSION file not found at ${REPO_ROOT}/VERSION"
-VERSION="$(tr -d '[:space:]' < "${VERSION_FILE}")"
-[[ -n "${VERSION}" ]] || die "VERSION file is empty"
-log "Version: ${VERSION}"
+RAW_VERSION="$(tr -d '[:space:]' < "${VERSION_FILE}")"
+[[ -n "${RAW_VERSION}" ]] || die "VERSION file is empty"
+
+# Auto-increment patch/revision number (e.g. 0.2.4 -> 0.2.5)
+if [[ "${RAW_VERSION}" =~ ^([0-9]+\.[0-9]+\.)([0-9]+)$ ]]; then
+  BASE_VERSION="${BASH_REMATCH[1]}"
+  PATCH_REV="${BASH_REMATCH[2]}"
+  NEW_PATCH_REV=$((PATCH_REV + 1))
+  VERSION="${BASE_VERSION}${NEW_PATCH_REV}"
+  echo "${VERSION}" > "${VERSION_FILE}"
+  log "Auto-incremented version: ${RAW_VERSION} -> ${VERSION}"
+else
+  VERSION="${RAW_VERSION}"
+  log "Version: ${VERSION}"
+fi
 
 PACKAGE_NAME="nemo-headunit"
 DEB_FILENAME="${PACKAGE_NAME}_${VERSION}_${ARCH}.deb"
@@ -129,8 +135,12 @@ for tool in fpm dpkg-deb; do
     log "  ${tool}: $(command -v "${tool}")"
 done
 
-[[ -f "${ENV_YML}" ]] || die "environment.yml not found at ${REPO_ROOT}/environment.yml"
-log "  environment.yml: found"
+if [ -f "${REQUIREMENTS_TXT}" ]; then
+    log "  requirements.txt: found"
+fi
+if [ -f "${ENV_YML}" ]; then
+    log "  environment.yml: found"
+fi
 
 # ---------------------------------------------------------------------------
 # Step 2 — Clean previous build
@@ -143,34 +153,48 @@ log "Build dir: ${BUILD_DIR}"
 # ---------------------------------------------------------------------------
 # Step 3 — Assemble staging directory
 # ---------------------------------------------------------------------------
-step "Assembling staging directory"
+step "Assembling staging directory (${METHOD} mode)"
 
 APP_OPT="${STAGE_DIR}/opt/nemo-headunit"
 mkdir -p "${APP_OPT}"
 
-log "  Copying environment.yml (Conda env will be built on target)"
-cp "${ENV_YML}" "${APP_OPT}/environment.yml"
+# Stage both venv and micromamba environment descriptors so postinst can preserve existing runtime
+if [ -f "${REQUIREMENTS_TXT}" ]; then
+    log "  Copying requirements.txt"
+    cp "${REQUIREMENTS_TXT}" "${APP_OPT}/requirements.txt"
+fi
+if [ -f "${REPO_ROOT}/packaging/bootstrap_uv.sh" ]; then
+    log "  Copying bootstrap_uv.sh"
+    cp "${REPO_ROOT}/packaging/bootstrap_uv.sh" "${APP_OPT}/bootstrap_uv.sh"
+    chmod +x "${APP_OPT}/bootstrap_uv.sh"
+fi
+if [ -f "${ENV_YML}" ]; then
+    log "  Copying environment.yml"
+    cp "${ENV_YML}" "${APP_OPT}/environment.yml"
+fi
+if [ -f "${REPO_ROOT}/packaging/bootstrap_micromamba.sh" ]; then
+    log "  Copying bootstrap_micromamba.sh"
+    cp "${REPO_ROOT}/packaging/bootstrap_micromamba.sh" "${APP_OPT}/bootstrap_micromamba.sh"
+    chmod +x "${APP_OPT}/bootstrap_micromamba.sh"
+fi
+if [ "$METHOD" != "auto" ]; then
+    echo "${METHOD}" > "${APP_OPT}/.packaging_mode"
+fi
 
-log "  Copying v2/ source"
-cp -a "${REPO_ROOT}/v2" "${APP_OPT}/v2"
+log "  Copying application source"
+cp "${REPO_ROOT}/main.py"      "${APP_OPT}/main.py"
+cp -a "${REPO_ROOT}/backend"   "${APP_OPT}/backend"
+cp -a "${REPO_ROOT}/frontend"  "${APP_OPT}/frontend"
+cp -a "${REPO_ROOT}/scripts"   "${APP_OPT}/scripts"
+cp -a "${REPO_ROOT}/protos"   "${APP_OPT}/protos"
 
 log "  Copying services/"
-mkdir -p "${APP_OPT}/services"
-cp -a "${SERVICES_SRC}" "${APP_OPT}/services/ap_manager_service"
-
-log "  Copying bus_broker.py"
-cp "${REPO_ROOT}/bus_broker.py" "${APP_OPT}/bus_broker.py"
+cp -a "${REPO_ROOT}/services" "${APP_OPT}/services"
 
 log "  Copying hardware_fixes/"
 cp -a "${HW_FIXES_SRC}" "${APP_OPT}/hardware_fixes"
 chmod +x "${APP_OPT}/hardware_fixes/run_hardware_fixes.sh"
 find "${APP_OPT}/hardware_fixes" -name 'fix_*.sh' -exec chmod +x {} \;
-
-if [ -f "${BOOTSTRAP_CONDA}" ]; then
-    log "  Copying bootstrap_conda.sh"
-    cp "${BOOTSTRAP_CONDA}" "${APP_OPT}/bootstrap_conda.sh"
-    chmod +x "${APP_OPT}/bootstrap_conda.sh"
-fi
 
 # —— /opt/nemo-headunit/bin/ (launcher wrapper) ——
 mkdir -p "${APP_OPT}/bin"
@@ -180,10 +204,10 @@ chmod 755 "${APP_OPT}/bin/nemo-headunit"
 
 # Prune bytecode / tests
 log "  Pruning bytecode and test files"
-find "${APP_OPT}/v2" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
-find "${APP_OPT}/v2" -name '*.pyc' -delete 2>/dev/null || true
-find "${APP_OPT}/v2" -name '*.pyo' -delete 2>/dev/null || true
-rm -rf "${APP_OPT}/v2/tests" 2>/dev/null || true
+find "${APP_OPT}" -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+find "${APP_OPT}" -name '*.pyc' -delete 2>/dev/null || true
+find "${APP_OPT}" -name '*.pyo' -delete 2>/dev/null || true
+rm -rf "${APP_OPT}/tests" 2>/dev/null || true
 
 # —— /usr/lib/systemd/system/ ——
 SYSTEMD_STAGE="${STAGE_DIR}/usr/lib/systemd/system"
@@ -191,19 +215,26 @@ mkdir -p "${SYSTEMD_STAGE}"
 log "  Copying systemd unit"
 cp "${SERVICES_SRC}/org.nemo.APManager.service" "${SYSTEMD_STAGE}/"
 sed -i \
-    "s|ExecStart=.*ap_manager_service.py|ExecStart=/opt/nemo-headunit/env/bin/python /opt/nemo-headunit/services/ap_manager_service/ap_manager_service.py|" \
+    "s|ExecStart=.*ap_manager_service.py|ExecStart=/opt/nemo-headunit/env/bin/python /opt/nemo-headunit/services/linux/ap_manager_service/ap_manager_service.py|" \
     "${SYSTEMD_STAGE}/org.nemo.APManager.service"
+if [ -f "${REPO_ROOT}/packaging/systemd/bluez-obex.service" ]; then
+    cp "${REPO_ROOT}/packaging/systemd/bluez-obex.service" "${SYSTEMD_STAGE}/"
+fi
 
 # —— /etc/dbus-1/system.d/ ——
 DBUS_STAGE="${STAGE_DIR}/etc/dbus-1/system.d"
 mkdir -p "${DBUS_STAGE}"
-log "  Copying D-Bus policy"
+log "  Copying D-Bus policies"
 cp "${SERVICES_SRC}/org.nemo.APManager.conf" "${DBUS_STAGE}/"
+cp "${REPO_ROOT}/packaging/org.nemo.bluez.conf" "${DBUS_STAGE}/"
+
+# —— /etc/wireplumber/wireplumber.conf.d/ ——
+WIREPLUMBER_STAGE="${STAGE_DIR}/etc/wireplumber/wireplumber.conf.d"
+mkdir -p "${WIREPLUMBER_STAGE}"
+log "  Copying WirePlumber configuration"
+cp "${REPO_ROOT}/packaging/50-bluez.conf" "${WIREPLUMBER_STAGE}/"
 
 # —— /usr/share/dbus-1/system-services/ ——
-# This activation file tells the bus daemon that org.nemo.APManager is a
-# legitimate root-owned service.  Without it, polkitd rejects
-# CheckAuthorization calls from the service with AccessDenied.
 DBUS_SERVICES_STAGE="${STAGE_DIR}/usr/share/dbus-1/system-services"
 mkdir -p "${DBUS_SERVICES_STAGE}"
 log "  Copying D-Bus activation file"
@@ -213,12 +244,9 @@ cp "${SERVICES_SRC}/org.nemo.APManager.dbus-service" \
 # —— /usr/share/polkit-1/actions/ ——
 POLKIT_STAGE="${STAGE_DIR}/usr/share/polkit-1/actions"
 mkdir -p "${POLKIT_STAGE}"
-log "  Copying PolicyKit policy (installed as lowercase filename for polkitd 127)"
-# polkitd 127 is case-sensitive on filenames: the filename prefix must match
-# the action ID prefix exactly.  Action IDs use 'org.nemo.apmanager.*' so
-# the file must be named org.nemo.apmanager.policy (all lowercase).
+log "  Copying PolicyKit policy"
 cp "${SERVICES_SRC}/org.nemo.APManager.policy" \
-   "${POLKIT_STAGE}/org.nemo.apmanager.policy"
+    "${POLKIT_STAGE}/org.nemo.apmanager.policy"
 
 # —— /etc/polkit-1/rules.d/ ——
 POLKIT_RULES_STAGE="${STAGE_DIR}/etc/polkit-1/rules.d"
@@ -226,11 +254,16 @@ mkdir -p "${POLKIT_RULES_STAGE}"
 log "  Copying polkit JS rules"
 cp "${BT_RULES}" "${POLKIT_RULES_STAGE}/"
 
-# —— /usr/share/applications/ (.desktop entry) ——
+# —— /usr/share/applications/ (.desktop entry & icon) ——
 APPS_STAGE="${STAGE_DIR}/usr/share/applications"
 mkdir -p "${APPS_STAGE}"
 log "  Copying .desktop entry"
 cp "${REPO_ROOT}/packaging/nemo-headunit.desktop" "${APPS_STAGE}/"
+
+PIXMAPS_STAGE="${STAGE_DIR}/usr/share/pixmaps"
+mkdir -p "${PIXMAPS_STAGE}"
+log "  Copying application icon"
+cp "${REPO_ROOT}/packaging/assets/nemo-headunit.png" "${PIXMAPS_STAGE}/nemo-headunit.png"
 
 # ---------------------------------------------------------------------------
 # Step 4 — Build --depends list
@@ -256,46 +289,37 @@ fpm \
     --name        "${PACKAGE_NAME}" \
     --version     "${VERSION}" \
     --architecture "${ARCH}" \
-    --description "NemoHeadUnit-Wireless v2 — Android Auto wireless head unit" \
+    --description "NemoHeadUnit-Wireless — Android Auto wireless head unit (${METHOD})" \
     --url         "https://github.com/nemocrk/NemoHeadUnit-Wireless" \
     --maintainer  "nemocrk <nemocrk@users.noreply.github.com>" \
     --license     "GPL-2.0-only" \
     --after-install  "${POSTINST}" \
     --before-remove  "${PRERM}" \
+    --deb-recommends "falkon | chromium-browser | chromium | google-chrome | surf, i965-va-driver | intel-media-va-driver | nvidia-va-driver | mesa-va-drivers" \
     --deb-no-default-config-files \
-    --package     "${OUTPUT_DIR}/${DEB_FILENAME}" \
-    --chdir       "${STAGE_DIR}" \
     "${DEPENDS_ARGS[@]}" \
+    -C "${STAGE_DIR}" \
+    -p "${OUTPUT_DIR}/${DEB_FILENAME}" \
     .
 
-log "Package written to: ${OUTPUT_DIR}/${DEB_FILENAME}"
+log "DEB package created: ${OUTPUT_DIR}/${DEB_FILENAME}"
 
 # ---------------------------------------------------------------------------
-# Step 6 — Verify
+# Step 6 — Verify package
 # ---------------------------------------------------------------------------
-step "Verifying package"
+step "Verifying package with dpkg-deb"
 
-echo
-echo "--- dpkg-deb --info ---"
+log "Package info:"
 dpkg-deb --info "${OUTPUT_DIR}/${DEB_FILENAME}"
 
 echo
-echo "--- dpkg-deb --contents (first 40 lines) ---"
-# Usa una subshell con set +o pipefail per evitare il "Broken pipe"
-# che dpkg-deb emette quando head chiude la pipe prima della fine.
-{ dpkg-deb --contents "${OUTPUT_DIR}/${DEB_FILENAME}" || true; } | head -n 40
+log "Package size:"
+ls -lh "${OUTPUT_DIR}/${DEB_FILENAME}"
 
-# ---------------------------------------------------------------------------
-# Done
-# ---------------------------------------------------------------------------
 echo
-log "✔  Build successful: ${OUTPUT_DIR}/${DEB_FILENAME}"
-echo
+log "Build successful!"
+log "Output: ${OUTPUT_DIR}/${DEB_FILENAME}"
 log "Install on target:"
 log "  sudo apt install --fix-broken ./${DEB_FILENAME}"
-log "  # or:"
+log "  # or: "
 log "  sudo dpkg -i ./${DEB_FILENAME} && sudo apt-get install -f"
-log ""
-log "NOTE: postinst creerà il Conda env su /opt/nemo-headunit/env (~3-5 min)."
-log "      Assicurati che la macchina target abbia accesso a internet."
-echo

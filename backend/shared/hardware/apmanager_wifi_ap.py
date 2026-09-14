@@ -1,0 +1,227 @@
+import asyncio
+import os
+import threading
+from typing import Optional
+
+from shared.logger import get_logger
+from .base_wifi_ap import BaseWifiApAdapter  # Wait, let's import it from .base_wifi_ap
+
+log = get_logger("hardware.apmanager_wifi_ap")
+
+_DBUS_BUS_NAME    = "org.nemo.APManager"
+_DBUS_OBJECT_PATH = "/org/nemo/APManager"
+_DBUS_INTERFACE   = "org.nemo.APManager"
+
+class APManagerWifiApAdapter(BaseWifiApAdapter):
+    def __init__(self):
+        self._bus = None
+        self._proxy = None
+        self._glib_loop = None
+        self._glib_thread = None
+        self._running = False
+        self._active = False
+        self._started_credentials = None
+        self._ready_event = asyncio.Event()
+        self._loop = None
+
+    async def setup(self) -> None:
+        import dbus
+        import dbus.mainloop.glib
+
+        if not os.environ.get("DBUS_SYSTEM_BUS_ADDRESS", "").strip():
+            os.environ["DBUS_SYSTEM_BUS_ADDRESS"] = "unix:path=/run/dbus/system_bus_socket"
+
+        self._loop = asyncio.get_running_loop()
+
+        try:
+            dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+            self._bus = dbus.SystemBus()
+            self._proxy = dbus.Interface(
+                self._bus.get_object(_DBUS_BUS_NAME, _DBUS_OBJECT_PATH, introspect=False),
+                _DBUS_INTERFACE
+            )
+
+            # Start GLib Loop for receiving DBus signals (APStarted, APStopped, etc.)
+            from gi.repository import GLib
+            if self._glib_loop is None:
+                self._glib_loop = GLib.MainLoop()
+                self._glib_thread = threading.Thread(target=self._glib_loop.run, daemon=True, name="apmanager-glib")
+                self._glib_thread.start()
+
+            # Subscribe to signals
+            self._bus.add_signal_receiver(
+                self._on_ap_started,
+                signal_name="APStarted",
+                dbus_interface=_DBUS_INTERFACE
+            )
+            self._bus.add_signal_receiver(
+                self._on_ap_failed,
+                signal_name="APFailed",
+                dbus_interface=_DBUS_INTERFACE
+            )
+
+            log.info("Linux APManager D-Bus client initialized successfully")
+            
+            # Check if AP is already running on startup
+            try:
+                success, creds = self._fetch_running_status({})
+                if success:
+                    log.info(f"Linux APManager active AP detected on startup: SSID='{creds.get('ssid')}'")
+            except Exception as e:
+                log.debug(f"Initial APManager status check notice: {e}")
+        except Exception as e:
+            log.error(f"Failed to connect to org.nemo.APManager: {e}")
+            raise e
+
+    def _on_ap_started(self, config_dict: dict) -> None:
+        log.info(f"📶 [WiFi Stage 2/5] APStarted signal received from D-Bus: {config_dict}")
+        self._active = True
+        # Convert DBus types to standard Python types
+        self._started_credentials = {
+            "ssid": str(config_dict.get("ssid", "AndroidAutoAP")),
+            "key": str(config_dict.get("key", "")),
+            "bssid": str(config_dict.get("bssid", "")),
+            "interface": str(config_dict.get("interface", "wlan0")),
+            "gateway_ip": str(config_dict.get("gateway_ip", "10.0.0.1")),
+            "security_mode": int(config_dict.get("security_mode", 8)),
+            "ap_type": int(config_dict.get("ap_type", 1)),
+            "mode": str(config_dict.get("mode", "ap")),
+        }
+        # If key was omitted from signal, retrieve via Status()
+        if not self._started_credentials.get("key"):
+            try:
+                _, creds = self._fetch_running_status({})
+                if creds.get("key"):
+                    self._started_credentials["key"] = creds["key"]
+            except Exception:
+                pass
+        # Run thread-safe event setting in loop
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._ready_event.set)
+
+    def _on_ap_failed(self, error: str) -> None:
+        log.error(f"❌ [WiFi Stage 2/5] APFailed signal received from D-Bus: {error}")
+        self._active = False
+        self._started_credentials = None
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._ready_event.set)
+
+    async def start_ap(self, config: dict) -> tuple[bool, dict]:
+        import dbus
+        self._ready_event.clear()
+        self._started_credentials = None
+
+        ssid = config.get("ssid", "AndroidAutoAP")
+        log.info(f"📶 [WiFi Stage 2/5] Initiating Linux WiFi AP launch via APManager D-Bus (SSID='{ssid}'). Config: {config}")
+        dbus_config = dbus.Dictionary(
+            {
+                k: dbus.Boolean(v) if isinstance(v, bool) else (dbus.Int32(v) if isinstance(v, int) else dbus.String(str(v)))
+                for k, v in config.items()
+            },
+            signature="sv",
+        )
+
+        try:
+            success, msg = self._proxy.Start(dbus_config, dbus_interface=_DBUS_INTERFACE, signature="a{sv}")
+            if not success:
+                log.error(f"APManager Start method failed: {msg}")
+                if "AlreadyRunning" in str(msg):
+                    return self._fetch_running_status(config)
+                return False, {}
+
+            # Wait for the async APStarted D-Bus signal
+            try:
+                await asyncio.wait_for(self._ready_event.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                log.warning("Timeout waiting for APStarted D-Bus signal — checking Status()")
+                return self._fetch_running_status(config)
+
+            if self._started_credentials:
+                self._active = True
+                log.info(f"📶 [WiFi Stage 2/5] Linux WiFi AP active via APManager successfully! Credentials: SSID='{self._started_credentials.get('ssid')}', BSSID='{self._started_credentials.get('bssid')}', Gateway='{self._started_credentials.get('gateway_ip')}'")
+                return True, self._started_credentials
+            return self._fetch_running_status(config)
+        except Exception as e:
+            if "AlreadyRunning" in str(e):
+                log.info("APManager AP is already running — retrieving active status credentials...")
+                return self._fetch_running_status(config)
+            log.error(f"Error calling APManager.Start(): {e}")
+            return False, {}
+
+    def _fetch_running_status(self, config: dict) -> tuple[bool, dict]:
+        try:
+            state, ssid, bssid, gateway_ip, key, dhcp_clients = self._proxy.Status(
+                dbus_interface=_DBUS_INTERFACE, signature=""
+            )
+            is_active = bool(state == 1 or state == "running" or state == "active")
+            creds = {
+                "ssid": str(ssid),
+                "key": str(key),
+                "bssid": str(bssid),
+                "interface": str(config.get("interface", "wlan0")),
+                "gateway_ip": str(gateway_ip),
+                "security_mode": 8,
+                "ap_type": 2 if ("join" in str(state) or not str(key).startswith("gen_")) else 1,
+                "mode": "join" if ("join" in str(state)) else "ap",
+            }
+            if is_active or ssid:
+                self._active = True
+                self._started_credentials = creds
+                log.info(f"📶 [WiFi Stage 2/5] Linux WiFi AP active! Credentials: SSID='{ssid}', BSSID='{bssid}', Gateway='{gateway_ip}'")
+                return True, creds
+            else:
+                self._active = False
+                return False, {}
+        except Exception as err:
+            log.error(f"Failed to query APManager.Status(): {err}")
+            return False, {}
+
+    async def stop_ap(self) -> bool:
+        self._active = False
+        self._started_credentials = None
+        log.info("Stopping Linux WiFi AP...")
+        try:
+            success, msg = self._proxy.Stop(dbus_interface=_DBUS_INTERFACE)
+            return bool(success)
+        except Exception as e:
+            log.error(f"Error calling APManager.Stop(): {e}")
+            return False
+
+    def get_station_rssi(self) -> Optional[int]:
+        """
+        Query connected Wi-Fi station signal strength in dBm and convert to 1-5 bars.
+        Returns None if not connected or unavailable.
+        """
+        if not self._active:
+            return None
+        iface = (self._started_credentials or {}).get("interface", "wlan0")
+        try:
+            import subprocess, re
+            out = subprocess.check_output(
+                ["iw", "dev", iface, "station", "dump"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=1.0,
+            )
+            m = re.search(r"signal:\s*([-\d]+)\s*dBm", out)
+            if m:
+                rssi = int(m.group(1))
+                if rssi >= -60:
+                    return 5
+                elif rssi >= -70:
+                    return 4
+                elif rssi >= -80:
+                    return 3
+                elif rssi >= -90:
+                    return 2
+                else:
+                    return 1
+        except Exception:
+            pass
+        return None
+
+    async def teardown(self) -> None:
+        await self.stop_ap()
+        if self._glib_loop and self._glib_loop.is_running():
+            self._glib_loop.quit()
+

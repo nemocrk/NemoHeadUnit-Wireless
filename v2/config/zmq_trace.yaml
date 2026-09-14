@@ -1,9 +1,0 @@
-blacklist_prefixes: ''
-console_enabled: true
-enabled: true
-jsonl_enabled: true
-jsonl_path: /tmp/nemobus_trace.jsonl
-max_samples_per_key: 2000
-publish_summary_on_bus: false
-report_interval_sec: 1.0
-top_n: 12

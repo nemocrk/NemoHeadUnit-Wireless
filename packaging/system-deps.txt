@@ -32,6 +32,8 @@ polkitd
 # ────────────────────────────────────────────────────────────────────────
 bluez
 bluez-tools
+bluez-obexd
+ofono
 
 # ────────────────────────────────────────────────────────────────────────
 # WiFi AP stack
@@ -59,6 +61,13 @@ network-manager
 pulseaudio-utils
 
 # ────────────────────────────────────────────────────────────────────────
+# FFmpeg
+# ffmpeg — HW-accelerated video decode/transcode for mjpeg-ffmpeg transport.
+#          Also provides avformat/avcodec for optional fallback paths.
+# ────────────────────────────────────────────────────────────────────────
+ffmpeg
+
+# ────────────────────────────────────────────────────────────────────────
 # GStreamer system plugins
 # These are NOT in the Conda env (no conda-forge packaging for vaapi/v4l2).
 # Loaded at runtime via Gst.Registry.scan_path() from the system plugin dir.
@@ -70,11 +79,24 @@ pulseaudio-utils
 # gstreamer1.0-vaapi         — vaapih264dec (HW accelerated, optional)
 # gstreamer1.0-libav         — avdec_h264 SW fallback
 # ────────────────────────────────────────────────────────────────────────
+# surf kiosk browser (No WebCodecs H.264 support)
+surf
+
+gstreamer1.0-tools
 gstreamer1.0-plugins-base
 gstreamer1.0-plugins-good
 gstreamer1.0-plugins-bad
+gstreamer1.0-plugins-ugly
 gstreamer1.0-vaapi
+gstreamer1.0-gl
+gstreamer1.0-qt6
 gstreamer1.0-libav
+gir1.2-gstreamer-1.0
+gir1.2-gst-plugins-base-1.0
+
+# Qt6 QML / Quick modules
+qml6-module-qtquick
+qml6-module-qtquick-controls
 
 # ────────────────────────────────────────────────────────────────────────
 # GLib runtime — required by dbus-python + GObject bindings inside Conda
@@ -83,11 +105,19 @@ gstreamer1.0-libav
 libglib2.0-0
 
 # ────────────────────────────────────────────────────────────────────────
-# Qt6 runtime libraries
-# PyQt6 ships its own Qt6 libs inside the Conda env, but the system
-# libEGL / libGL are needed for the OpenGL widget (_NV12GLWidget).
+# OpenGL & EGL runtime libraries
 # ────────────────────────────────────────────────────────────────────────
 libgl1
 libegl1
 
-i965-va-driver vainfo
+vainfo
+# ────────────────────────────────────────────────────────────────────────
+# KMS / Direct DRM & EGLFS libraries (labwc optional fallback)
+# ────────────────────────────────────────────────────────────────────────
+libwayland-client0
+libwayland-egl1
+libwayland-cursor0
+libxkbcommon0
+seatd
+
+dmidecode

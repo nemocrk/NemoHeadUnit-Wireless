@@ -1,0 +1,18 @@
+[Unit]
+Description=Bluetooth OBEX Service (System Bus)
+Documentation=man:obexd(8)
+After=bluetooth.service
+Wants=bluetooth.service
+Before=nemo-headunit.service
+
+[Service]
+Type=dbus
+BusName=org.bluez.obex
+UMask=0022
+ExecStartPre=/bin/sh -c '/bin/mkdir -p /var/lib/obex && /bin/chmod 777 /var/lib/obex'
+ExecStart=/usr/lib/bluetooth/obexd -s -a -r /var/lib/obex
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

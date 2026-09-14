@@ -2,6 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
+.superpowers/
 
 # C extensions
 *.so
@@ -209,3 +210,11 @@ __marimo__/
 #logs
 deploy.*
 tests/reports/
+
+.agents/
+
+config/
+graphify-out/
+coverage.json
+scratch/
+scratch_*.py

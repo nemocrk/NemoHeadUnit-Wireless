@@ -1,0 +1,44 @@
+# NemoHeadUnit-Wireless — Python Requirements for UV / Venv Packaging
+#
+# Generated for distribution via system Python + venv with system-site-packages enabled.
+# System packages (GStreamer bindings, PyGObject, D-Bus) are provided via APT / Pacman.
+#
+# Install with:
+#   uv pip install --system-site-packages -r requirements.txt
+
+# Core Networking & Messaging
+pyzmq>=26.0
+msgpack>=1.0.0
+aiohttp>=3.9.0
+websockets>=12.0
+pyyaml>=6.0
+numpy>=1.24.0
+
+# GUI & Media
+PyQt6>=6.6.0
+PyOpenGL>=3.1.6
+qasync>=0.27.1
+av>=10.0.0
+
+# Logging & Protobuf / RPC
+loguru>=0.7.3
+protobuf>=4.25.0
+grpcio-tools>=1.62.0
+
+# Windows Subsystem Bindings
+comtypes>=1.4.0; sys_platform == 'win32'
+pycaw>=20240210; sys_platform == 'win32'
+winrt-runtime>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Networking>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Networking.Connectivity>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Networking.NetworkOperators>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Networking.Sockets>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Foundation>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Foundation.Collections>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Devices.Enumeration>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Devices.Radios>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Devices.Bluetooth>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Devices.Bluetooth.Rfcomm>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Devices.Bluetooth.Advertisement>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Security.Cryptography>=3.2.1; sys_platform == 'win32'
+winrt-Windows.Storage.Streams>=3.2.1; sys_platform == 'win32'

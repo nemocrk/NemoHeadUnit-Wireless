@@ -1,181 +1,88 @@
-# Session Handoff — NemoHeadUnit-Wireless v2 Test Suite
+# Session Handoff — NemoHeadUnit-Wireless
 
-> **Scopo**: documento di continuità per sessioni AI successive.
-> **Aggiornato**: 2026-05-15 — **TUTTI I BUG DI PRODUZIONE FIXATI**
-
----
-
-## Stato Corrente in Una Frase
-
-**Test suite completa (57 file, ~3120 test) + tutti e 5 i bug di `KNOWN_PRODUCTION_BUGS.md` risolti.** Prossimo: coverage report + top-up moduli sotto 80%.
+> **Purpose**: Continuity document for subsequent AI agent sessions.  
+> **Last Updated**: 2026-06-11 — V2 promotion completed, documentation suite refreshed.
 
 ---
 
-## 2026-05-15 — Fix tutti i bug di produzione
+## Current Status Summary
 
-**Cosa cambiato:**
-
-- **Bug #1 — `AudioModule._prebuffer_bytes`** non resettato dopo flush
-  - Commit: `dea274a` (fatto da utente prima di questa sessione)
-  - File: `v2/modules/channel_modules/audio/main.py`
-
-- **Bug #2 — `ServiceDiscovery` `audio_type` perso per ch 5/6**
-  - Commit: [`987ffb3`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/987ffb3cf61281ebb559e25564f1f9490fd106a6)
-  - File: `v2/modules/oaa_control_channel/service_discovery.py`
-  - Fix: `channels_from_sdr_bytes()` ora imposta `audio_type` anche quando
-    `stream_type == AVStreamType.AUDIO` (fallback per ch 5/6 senza codec).
-    Estratto `_AUDIO_CODEC_VALUES` frozenset.
-
-- **Bug #3 — `Logger.Popen` fuori dal `try`**
-  - Verificato: già corretto nel codice attuale, nessuna modifica necessaria.
-
-- **Bug #4 — `Logger.exception()` con `sys.exc_info()`**
-  - Commit: `1f4f227` (fatto da utente prima di questa sessione)
-  - File: `v2/shared/logger.py`
-
-- **Bug #5 — `ChannelManager` sessione vuota in timeout**
-  - Commit: `fb5d2a3` (fatto da utente prima di questa sessione)
-  - File: `v2/modules/channel_manager/main.py`
-
-- **`docs/KNOWN_PRODUCTION_BUGS.md`** aggiornato con tutti i fix — commit [`9ab40b7`](https://github.com/nemocrk/NemoHeadUnit-Wireless/commit/9ab40b7778864bb4f7d87bfee51fe24fc7045262)
-
-**Perchè:** Chiudere tutti i bug noti prima di procedere con il coverage report.
-
-**Status:** Completato ✅
-
-**Prossimi 3 passi:**
-1. **Eseguire coverage report**: `pytest --cov=v2 --cov-report=html --cov-report=term-missing`
-2. **Top-up test mirati** sui moduli sotto soglia 80%
-3. **Verifica CI**: `pytest -m "unit or integration" --cov-fail-under=80` in green
+The V2 multi-process architecture is promoted to the repository root. Legacy V1 code (`app/`) and obsolete document files have been physically removed. A comprehensive, refreshed English documentation suite has been written, covering system architecture, design patterns, and functional targets.
 
 ---
 
-## Handoff precedenti (sommario)
+## Architectural Constants & Contracts
 
-| Data | Cosa | Status |
-|---|---|---|
-| 2026-05-15 | Fix 5 bug produzione da KNOWN_PRODUCTION_BUGS.md | ✅ |
-| 2026-05-13 | Fase 5 §2/§3 (chiude test suite) | ✅ |
-| 2026-05-13 | Fase 4 §5/§6 + Fase 5 §1 | ✅ |
-| 2026-05-13 | Fase 4 §2/§3/§4 | ✅ |
-| 2026-05-13 | Fase 3 Full + Fase 4 §1 | ✅ |
-| 2026-05-13 | Fase 3 Smoke §2/§3 | ✅ |
-| 2026-05-13 | Unit rfcomm_handshake + channel_manager | ✅ |
-| 2026-05-13 | E2E Helpers | ✅ |
+### 1. Boot Priority Convention
+To prevent race conditions during startup, modules follow a reactive priority order:
+- **Priority 0**: `config_manager` (loads configuration database)
+- **Priority 1**: `bluetooth_manager`, `audio_manager`, `tcp_server` (system background services)
+- **Priority 2**: `ui_shell` (starts screen layout engine and global input trap)
+- **Priority 3**: `floating_menu_ui` (listens for widget registration announcements)
+- **Priority 4**: `navbar_ui`, `video_ui`, `bluetooth_ui`, `config_ui` (individual visual widgets)
+
+### 2. Widget Registration Contract
+To dock inside the `ui_shell` compositor layout, widget modules publish to `ui.widget.register` upon receiving `ui.shell.ready`:
+
+#### Always-Visible Widgets (e.g., navbar, video)
+```json
+{
+  "name": "navbar_ui",
+  "z_order": 2,
+  "dock": "bottom",
+  "height": 60,
+  "min_height": 48,
+  "max_height": 80
+}
+```
+
+#### On-Demand Widgets (e.g., bluetooth_ui, config_ui)
+```json
+{
+  "name": "config_ui",
+  "z_order": 2,
+  "dock": "center",
+  "width": 400,
+  "height": 500,
+  "on_request": true,
+  "menu_order": 1,
+  "icon": "⚙️"
+}
+```
+
+### 3. Bootstrap Path Pattern
+Each module process boosts its import path to resolve imports from the repository root:
+```python
+from pathlib import Path
+import sys
+
+_HERE = Path(__file__).parent
+_MODULES = _HERE.parent
+_REPO_ROOT = _MODULES.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+```
 
 ---
 
-## Comandi Utili
+## Essential Commands
 
+### Running Unit Tests & Coverage
 ```bash
-# Coverage report
-pytest --cov=v2 --cov-report=html --cov-report=term-missing
+# Run tests for specific modules
+pytest tests/unit/modules/floating_menu_ui/ -v --cov=modules/floating_menu_ui --cov-report=term-missing
+pytest tests/unit/modules/navbar_ui/ -v --cov=modules/navbar_ui --cov-report=term-missing
+pytest tests/unit/modules/ui_shell/ -v --cov=modules/ui_shell --cov-report=term-missing
 
-# Fuzz (tutti)
-pytest -m fuzz -v
-
-# Performance
-pytest -m performance -v
-
-# Smoke CI
-pytest -m e2e_smoke -v
-
-# Unit + integration (blocca merge)
-pytest -m "unit or integration" --cov=v2 --cov-fail-under=80
-
-# Tutto
-pytest -v --cov=v2
+# Run entire test suite (excluding services)
+pytest --cov=. --cov-report=html --cov-report=term-missing --ignore=services
 ```
 
 ---
 
-## File Prodotti (tabella completa)
+## Active Development Guidelines
 
-| File | Commit | Test | Note |
-|---|---|---|---|
-| `v2/tests/conftest.py` | `0ff487e` | — | Fixture globali |
-| `v2/tests/pytest.ini` | `0ff487e` | — | |
-| `v2/tests/requirements-test.txt` | `0ff487e` | — | |
-| `unit/shared/test_proto_utils.py` | precedente | 47 | |
-| `unit/shared/test_bus_client.py` | `db85dc8` | ~75 | |
-| `unit/shared/test_config_client.py` | precedente | 38 | |
-| `unit/shared/test_logger.py` | `38a2885` | 88 | |
-| `unit/shared/test_bus_trace.py` | `be3068e` | 72 | |
-| `channel_modules/test_base_channel_module.py` | precedente | 44 | |
-| `channel_modules/audio/test_audio_module.py` | precedente | 42 | |
-| `channel_modules/video/test_video_module.py` | precedente | 38 | |
-| `channel_modules/input/test_input_module.py` | `5aaa396` | 88 | |
-| `channel_modules/sensor/test_sensor_module.py` | `d6f8a78` | 84 | |
-| `channel_modules/bluetooth/test_bluetooth_channel_module.py` | `7791347` | 72 | |
-| `channel_modules/wifi/test_wifi_channel_module.py` | `a1fa970` | 72 | |
-| `channel_modules/av_input/test_av_input_module.py` | `0328b84` | 96 | |
-| `oaa_control_channel/test_oaa_control_channel_main.py` | `c3d7a4a` | 54 | |
-| `oaa_control_channel/test_handshake.py` | `6c99b41` | 62 | |
-| `oaa_control_channel/test_serializer.py` | `ffe6314` | 68 | |
-| `oaa_control_channel/test_service_discovery.py` | `4e7a28d` | 72 | |
-| `modules/channel_manager/test_channel_manager.py` | `4f90f8a` | 78 | |
-| `modules/tcp_server/test_tcp_server.py` | `412541a` | 84 | |
-| `modules/audio_manager/test_audio_manager.py` | `acb6dce` | 88 | |
-| `modules/video_ui/test_video_ui.py` | `83973cb` | 92 | |
-| `modules/bluetooth/test_bluetooth_main.py` | `b024893` | 96 | |
-| `modules/bluetooth/test_bluez_adapter.py` | `17c7c4d` | 88 | |
-| `modules/bluetooth/test_discovery.py` | `a1b5156` | 72 | |
-| `modules/bluetooth/test_pairing.py` | `d4973f8` | 84 | |
-| `modules/bluetooth/test_paired_devices.py` | `6a83677` | 68 | |
-| `modules/config_manager/test_config_manager.py` | `e1c0847` | 96 | |
-| `modules/zmq_trace/test_zmq_trace.py` | `cdc9e6f` | 68 | |
-| `integration/test_bus_broker.py` | `bd326e5` | 84 | |
-| `integration/test_channel_lifecycle.py` | `1734764` | 88 | |
-| `integration/test_audio_manager.py` | `7e1d9be` | ~47 | |
-| `integration/test_config_manager.py` | `9f08aa6` | ~50 | |
-| `integration/test_video_pipeline.py` | `2d8d861` | ~60 | |
-| `integration/test_bluetooth_flow.py` | `dbbc2b4` | ~60 | |
-| `integration/test_boot_shutdown.py` | `2fe07ef` | ~65 | |
-| `e2e/helpers/phone_mock.py` | `5c74859` | — | |
-| `e2e/helpers/frame_sequences.py` | `bab116c` | — | |
-| `e2e/helpers/stack_launcher.py` | `637631d` | — | |
-| `test_rfcomm_and_channel_manager.py` | `9ab6c2e` | ~51 | |
-| `e2e/smoke/test_bt_connect_to_handshake.py` | — | 10 | |
-| `e2e/smoke/test_channel_manager_boot.py` | `f45cf77` | 9 | |
-| `e2e/smoke/test_audio_path_smoke.py` | `e734333` | 8 | |
-| `e2e/full_session/test_full_aa_session.py` | `1cfa379` | ~12 | |
-| `e2e/full_session/test_session_recovery.py` | `aa2c995` | ~8 | |
-| `performance/test_bus_latency.py` | `1e461f9` | ~9 | |
-| `performance/test_bus_throughput.py` | `9f75a88` | ~8 | |
-| `performance/test_audio_latency.py` | `4927f1c` | ~8 | |
-| `performance/test_memory_rss.py` | `777af59` | ~6 | |
-| `performance/test_video_frame_rate.py` | `14df4e6` | ~7 | |
-| `performance/test_aa_frame_decode.py` | `1b22850` | ~6 | |
-| `fuzz/test_aa_wire_format.py` | — | ~12 | Fase 5 §1 |
-| `fuzz/test_proto_utils_roundtrip.py` | — | ~10 | Fase 5 §2 |
-| `fuzz/test_bus_payload_malformed.py` | — | ~10 | Fase 5 §3 |
-
-**Totale: ~3120 test in 57 file + 3 helper + 3 infra.**
-
----
-
-## Pattern Architetturali Stabiliti
-
-### BusClient (commit ddd7142)
-- `publish()` inietta `_trace: {src_module, topic, seq, ts_ns}` nel payload wire
-- `publish()` ritorna `bool`; `BUS_HWM` = 5000
-- `BusTracer` va **sempre mockato** nei test unit
-
-### Performance — pattern consolidato (Fase 4)
-```python
-@pytest.mark.performance
-class TestXxx:
-    # Soglie via env: PERF_P50_MS, PERF_P95_MS, PERF_P99_MS
-    # Output JSON: tests/reports/perf-{scenario}.json
-    # Baseline regression: tests/reports/perf-baseline.json
-```
-
-### Fuzz — pattern consolidato (Fase 5)
-```python
-@pytest.mark.fuzz
-class TestXxxFuzz:
-    # Motore: hypothesis
-    # @given(st.binary() | st.text() | st.integers() | ...)
-    # @settings(max_examples=500, suppress_health_check=[HealthCheck.too_slow])
-    # Mai assert su valori specifici: assert su proprietà (no crash, no hang)
-```
+- **No Monoliths**: All features must live inside isolated, standalone module processes.
+- **Pure ZMQ IPC**: Never cross process boundaries using imports or direct object references. Always use the `BusClient` wrapper.
+- **Thread Safety**: When implementing PyQt6 interfaces, always dispatch ZMQ callback events to the Qt main thread via Qt custom signals (`pyqtSignal`).
+- **No V1 Paths**: Ensure that all scripts, deb packaging specs, and deployment logs point to root paths rather than obsolete `/v2/` prefixes.
